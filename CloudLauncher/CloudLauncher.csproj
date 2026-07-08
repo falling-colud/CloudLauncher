@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <ItemGroup>
+      <ProjectReference Include="..\CloudLauncher.Shared\CloudLauncher.Shared.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="CmlLib.Core" Version="4.0.6" />
+      <PackageReference Include="CmlLib.Core.Auth.Microsoft" Version="3.3.1" />
+      <PackageReference Include="CmlLib.Core.Auth.Microsoft.UI.Wpf" Version="2.0.2" />
+      <PackageReference Include="CmlLib.Core.Installer.Forge" Version="1.1.1" />
+      <PackageReference Include="CmlLib.Core.Installer.NeoForge" Version="4.0.1" />
+      <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+      <PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.8" />
+      <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4022.49" />
+      <PackageReference Include="XboxAuthNet.Game" Version="1.4.1" />
+    </ItemGroup>
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <TargetFramework>net10.0-windows</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <UseWPF>true</UseWPF>
+        <!-- Launcher version. Bump this before publishing an update; publish-update.ps1
+             reads it and the in-app updater compares against it. -->
+        <Version>1.0.1</Version>
+    </PropertyGroup>
+
+</Project>

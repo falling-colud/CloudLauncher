@@ -1,0 +1,16 @@
+<UserControl x:Class="CloudLauncher.Views.KeybindRow"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent">
+    <DockPanel LastChildFill="False">
+        <TextBlock x:Name="LabelText" DockPanel.Dock="Left" Width="120"
+                   VerticalAlignment="Center"
+                   Foreground="{StaticResource TextSecondaryBrush}"/>
+        <Button x:Name="KeyButton" DockPanel.Dock="Left" Click="OnKeyButtonClick"
+                Padding="12,6" MinHeight="32"
+                ToolTip="Click then press a key to rebind"
+                HorizontalContentAlignment="Center">
+            <TextBlock x:Name="KeyDisplay" Text="—" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+        </Button>
+    </DockPanel>
+</UserControl>

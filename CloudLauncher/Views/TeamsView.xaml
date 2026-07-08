@@ -1,0 +1,100 @@
+<Page x:Class="CloudLauncher.Views.TeamsView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="Teams"
+      Background="{StaticResource Surface0Brush}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="18">
+            <TextBlock Style="{StaticResource H1}" Text="Teams"/>
+            <TextBlock Style="{StaticResource Muted}"
+                       Text="Create teams to share instances with multiple people at once."
+                       Margin="0,2,0,16"/>
+
+            <!-- Create -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="Create a team" Margin="0,0,0,8"/>
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" Content="Create" Style="{StaticResource AccentButton}"
+                                Click="OnCreateTeam"/>
+                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                Click="OnRefresh" ToolTip="Refresh"/>
+                        <TextBox x:Name="NewTeamBox" Margin="0,0,8,0" KeyDown="OnNewTeamKeyDown"/>
+                    </DockPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Teams list -->
+            <TextBlock Style="{StaticResource H3}" Text="Your teams" Margin="0,0,0,8"/>
+            <Border Background="{StaticResource Surface1Brush}"
+                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="8" Padding="6" MinHeight="140">
+                <Grid>
+                    <ListBox x:Name="TeamsList" SelectionChanged="OnTeamSelected"
+                             Background="Transparent" BorderThickness="0">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <DockPanel>
+                                    <Border DockPanel.Dock="Right" Style="{StaticResource Pill}">
+                                        <TextBlock Text="{Binding MemberCountLabel}" Style="{StaticResource PillText}"/>
+                                    </Border>
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding OwnerLabel}" Style="{StaticResource Caption}"/>
+                                    </StackPanel>
+                                </DockPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock x:Name="TeamsEmptyLabel" Visibility="Collapsed"
+                               Style="{StaticResource Muted}"
+                               Text="You're not on any teams yet — create one above."
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Grid>
+            </Border>
+
+            <!-- Members -->
+            <TextBlock x:Name="DetailHeader" Style="{StaticResource H3}" Margin="0,18,0,8"
+                       Text="Select a team to manage members"/>
+
+            <DockPanel Margin="0,0,0,8">
+                <Button DockPanel.Dock="Right" Style="{StaticResource DangerButton}"
+                        x:Name="DeleteTeamButton" Content="Delete team" Click="OnDeleteTeam"/>
+                <Button DockPanel.Dock="Right" x:Name="AddMemberButton"
+                        Content="Add" Click="OnAddMember" Style="{StaticResource AccentButton}"/>
+                <TextBox x:Name="NewMemberBox" Margin="0,0,8,0"
+                         ToolTip="Username to add" KeyDown="OnNewMemberKeyDown"/>
+            </DockPanel>
+
+            <Border Background="{StaticResource Surface1Brush}"
+                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="8" Padding="6" MinHeight="100">
+                <ListBox x:Name="MembersList" Background="Transparent" BorderThickness="0">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Content="Remove"
+                                        Style="{StaticResource DangerButton}"
+                                        Padding="8,3" MinWidth="0" MinHeight="0" FontSize="11"
+                                        Click="OnRemoveMember"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Border Width="28" Height="28" CornerRadius="14"
+                                            Background="{StaticResource AccentSoftBrush}"
+                                            VerticalAlignment="Center" Margin="0,0,10,0">
+                                        <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}"
+                                                   FontSize="12" Foreground="{StaticResource AccentBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <TextBlock Text="{Binding Username}" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Border>
+
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource ErrorText}" Margin="0,12,0,0"/>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

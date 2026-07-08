@@ -1,0 +1,33 @@
+<Window x:Class="CloudLauncher.Views.PackPickerDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Choose an instance" Height="420" Width="460"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="{StaticResource Surface1Brush}"
+        Foreground="{StaticResource TextPrimaryBrush}">
+    <DockPanel Margin="22">
+        <TextBlock x:Name="TitleLabel" DockPanel.Dock="Top" Style="{StaticResource H2}"
+                   Text="Apply defaults to…" Margin="0,0,0,8"/>
+        <TextBlock x:Name="DescriptionLabel" DockPanel.Dock="Top" Style="{StaticResource Muted}"
+                   Text="Pick an instance - the options.txt inside its game folder will be merged with the launcher defaults."
+                   TextWrapping="Wrap" Margin="0,0,0,16"/>
+
+        <DockPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+            <Button x:Name="ApplyButton" DockPanel.Dock="Right" Content="Apply" Style="{StaticResource AccentButton}"
+                    Click="OnApply" IsDefault="True"/>
+            <Button DockPanel.Dock="Right" Content="Cancel" Click="OnCancel" IsCancel="True"/>
+        </DockPanel>
+
+        <ListBox x:Name="PackList">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <DockPanel Margin="6">
+                        <TextBlock DockPanel.Dock="Right" Text="{Binding VersionLabel}"
+                                   Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                    </DockPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </DockPanel>
+</Window>

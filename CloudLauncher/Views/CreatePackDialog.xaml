@@ -1,0 +1,73 @@
+<Window x:Class="CloudLauncher.Views.CreatePackDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Create instance" Height="620" Width="560"
+        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Background="{StaticResource Surface1Brush}"
+        Foreground="{StaticResource TextPrimaryBrush}">
+    <Grid Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Style="{StaticResource H2}" Text="Create a new instance" Margin="0,0,0,16"/>
+
+        <StackPanel Grid.Row="1">
+            <Label Content="Instance name"/>
+            <TextBox x:Name="NameBox" Margin="0,0,0,12"/>
+        </StackPanel>
+
+        <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12">
+            <StackPanel>
+                <RadioButton x:Name="PlayableRadio" GroupName="Kind" IsChecked="True" Checked="OnKindChanged">
+                    <StackPanel>
+                        <TextBlock Text="Playable instance" FontWeight="SemiBold"/>
+                        <TextBlock Text="Pick a Minecraft version + (optional) mod loader."
+                                   Style="{StaticResource Caption}"/>
+                    </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="EmptyRadio" GroupName="Kind" Checked="OnKindChanged" Margin="0,8,0,0">
+                    <StackPanel>
+                        <TextBlock Text="Empty instance" FontWeight="SemiBold"/>
+                        <TextBlock Text="Just a shared folder. Can't launch Minecraft."
+                                   Style="{StaticResource Caption}"/>
+                    </StackPanel>
+                </RadioButton>
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="3" x:Name="PlayablePanel" Style="{StaticResource Card}" IsEnabled="True" Margin="0,0,0,12">
+            <StackPanel>
+                <DockPanel Margin="0,0,0,8">
+                    <Label Content="Minecraft version" Width="140"/>
+                    <ComboBox x:Name="McVersionBox" SelectionChanged="OnMcChanged"/>
+                </DockPanel>
+                <DockPanel Margin="0,0,0,8">
+                    <Label Content="Loader" Width="140"/>
+                    <ComboBox x:Name="LoaderBox" SelectionChanged="OnLoaderChanged">
+                        <ComboBoxItem Content="None (Vanilla)" Tag="None" IsSelected="True"/>
+                        <ComboBoxItem Content="Fabric" Tag="Fabric"/>
+                        <ComboBoxItem Content="Forge" Tag="Forge"/>
+                        <ComboBoxItem Content="NeoForge" Tag="NeoForge"/>
+                    </ComboBox>
+                </DockPanel>
+                <DockPanel x:Name="LoaderVersionRow">
+                    <Label Content="Loader version" Width="140"/>
+                    <ComboBox x:Name="LoaderVersionBox"/>
+                </DockPanel>
+            </StackPanel>
+        </Border>
+
+        <TextBlock Grid.Row="4" x:Name="StatusLabel" Style="{StaticResource ErrorText}"/>
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Cancel" Click="OnCancel" IsCancel="True"/>
+            <Button Content="Create" Style="{StaticResource AccentButton}" Click="OnCreate" IsDefault="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

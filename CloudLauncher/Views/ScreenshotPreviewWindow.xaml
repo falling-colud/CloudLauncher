@@ -1,0 +1,101 @@
+<Window x:Class="CloudLauncher.Views.ScreenshotPreviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Screenshot"
+        Width="980" Height="680"
+        MinWidth="560" MinHeight="420"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Foreground="{StaticResource TextPrimaryBrush}"
+        Loaded="OnLoaded"
+        PreviewKeyDown="OnPreviewKeyDown">
+    <Grid x:Name="Backdrop"
+          Background="#B8000000"
+          Opacity="0"
+          MouseLeftButtonUp="OnBackdropMouseLeftButtonUp">
+        <Border x:Name="PreviewCard"
+                Width="900"
+                MaxWidth="1120"
+                MaxHeight="760"
+                Margin="28"
+                Padding="16"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Background="{StaticResource Surface1Brush}"
+                BorderBrush="{StaticResource BorderStrongBrush}"
+                BorderThickness="1"
+                CornerRadius="12"
+                Opacity="0"
+                RenderTransformOrigin="0.5,0.5"
+                MouseLeftButtonUp="OnPreviewCardMouseLeftButtonUp">
+            <Border.RenderTransform>
+                <ScaleTransform x:Name="PreviewScale" ScaleX="0.96" ScaleY="0.96"/>
+            </Border.RenderTransform>
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="28" ShadowDepth="0" Opacity="0.55" Color="#FF000000"/>
+            </Border.Effect>
+
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <DockPanel Grid.Row="0" Margin="0,0,0,12" LastChildFill="True">
+                    <Button DockPanel.Dock="Right"
+                            Content="Close"
+                            MinWidth="78"
+                            Padding="14,7"
+                            Click="OnCloseClicked"/>
+                    <StackPanel Margin="0,0,14,0">
+                        <TextBlock x:Name="TitleText"
+                                   Style="{StaticResource H2}"
+                                   Text="Screenshot"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="Press Esc or click outside the image to close."
+                                   Style="{StaticResource Caption}"
+                                   Margin="0,3,0,0"/>
+                    </StackPanel>
+                </DockPanel>
+
+                <Border Grid.Row="1"
+                        Background="{StaticResource Surface0Brush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        ClipToBounds="True">
+                    <Grid>
+                        <Image x:Name="PreviewImage"
+                               Stretch="Uniform"
+                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                        <TextBlock x:Name="ImageStatusText"
+                                   Style="{StaticResource Muted}"
+                                   Text=""
+                                   TextWrapping="Wrap"
+                                   TextAlignment="Center"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   MaxWidth="520"/>
+                    </Grid>
+                </Border>
+
+                <DockPanel Grid.Row="2" Margin="0,12,0,0" LastChildFill="True">
+                    <Button DockPanel.Dock="Right"
+                            Content="Open in browser"
+                            Margin="12,0,0,0"
+                            Padding="14,7"
+                            Click="OnOpenInBrowserClicked"/>
+                    <TextBlock x:Name="UrlText"
+                               Style="{StaticResource Caption}"
+                               VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"/>
+                </DockPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

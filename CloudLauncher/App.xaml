@@ -1,0 +1,39 @@
+<Application x:Class="CloudLauncher.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:CloudLauncher"
+             xmlns:anim="clr-namespace:CloudLauncher.Animations"
+             StartupUri="MainWindow.xaml">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/Palette.xaml"/>
+                <ResourceDictionary Source="Themes/Controls.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
+            <!--  Dialog window default: dark surface, native chrome  -->
+            <Style TargetType="Window">
+                <Setter Property="anim:Animate.WindowFadeIn" Value="True"/>
+                <Setter Property="Background" Value="{StaticResource Surface1Brush}"/>
+                <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+                <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+                <Setter Property="FontSize" Value="13"/>
+                <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+                <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+            </Style>
+
+            <!--  Page background within the navigator frame  -->
+            <Style TargetType="Page">
+                <Setter Property="Background" Value="{StaticResource Surface0Brush}"/>
+                <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+                <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+            </Style>
+
+            <Style TargetType="UserControl">
+                <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+                <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+                <Setter Property="FontSize"   Value="13"/>
+            </Style>
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

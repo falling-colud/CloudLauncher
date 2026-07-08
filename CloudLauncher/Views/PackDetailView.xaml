@@ -1,0 +1,799 @@
+<Page x:Class="CloudLauncher.Views.PackDetailView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="clr-namespace:CloudLauncher.Views"
+      Title="Instance"
+      Background="{StaticResource Surface0Brush}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ════════════ HERO ════════════ -->
+        <Border Grid.Row="0" Panel.ZIndex="1" Style="{StaticResource ElevatedCard}"
+                Margin="24,18,24,16" Padding="24">
+            <DockPanel LastChildFill="True">
+                <Border Width="72" Height="72" DockPanel.Dock="Left" Margin="0,0,18,0"
+                        Background="{StaticResource Surface2Brush}"
+                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="12" ClipToBounds="True" VerticalAlignment="Top">
+                    <Grid>
+                        <TextBlock x:Name="HeroIconFallback" Style="{StaticResource H1}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <Image x:Name="HeroIconImage" Stretch="UniformToFill"/>
+                        <!-- Owner-only: left-click to pick a custom cover, right-click to change/remove. -->
+                        <Button x:Name="HeroIconEditButton" Click="OnChangeImage"
+                                Visibility="Collapsed" Cursor="Hand" ToolTip="Change image"
+                                Background="Transparent" BorderThickness="0" Padding="0">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="HoverScrim" Background="#A6000000" Opacity="0">
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsMouseOver, RelativeSource={RelativeSource AncestorType=Button}}" Value="True">
+                                                        <DataTrigger.EnterActions>
+                                                            <BeginStoryboard>
+                                                                <Storyboard>
+                                                                    <DoubleAnimation Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.12"/>
+                                                                </Storyboard>
+                                                            </BeginStoryboard>
+                                                        </DataTrigger.EnterActions>
+                                                        <DataTrigger.ExitActions>
+                                                            <BeginStoryboard>
+                                                                <Storyboard>
+                                                                    <DoubleAnimation Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.12"/>
+                                                                </Storyboard>
+                                                            </BeginStoryboard>
+                                                        </DataTrigger.ExitActions>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
+                                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}"
+                                                       FontSize="18" Foreground="White" HorizontalAlignment="Center"/>
+                                            <TextBlock Text="Change" FontSize="10" Foreground="White"
+                                                       HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                        </StackPanel>
+                                    </Border>
+                                </ControlTemplate>
+                            </Button.Template>
+                            <Button.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="Change image…" Click="OnChangeImage"/>
+                                    <MenuItem x:Name="RemoveImageMenuItem" Header="Remove image" Click="OnRemoveImage"/>
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
+                    </Grid>
+                </Border>
+                <StackPanel>
+                <DockPanel Margin="0,0,0,6">
+                    <ItemsControl x:Name="HeroTags" DockPanel.Dock="Right" VerticalAlignment="Center">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Style="{StaticResource Pill}" Background="{Binding Background}"
+                                        Margin="0,0,8,0">
+                                    <TextBlock Text="{Binding Text}" Style="{StaticResource PillText}"
+                                               Foreground="{Binding Foreground}"/>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    <Button x:Name="RenameInstanceButton"
+                            DockPanel.Dock="Right"
+                            Style="{StaticResource IconButton}"
+                            Click="OnRenameInstance"
+                            Content="&#xE70F;"
+                            FontFamily="{StaticResource IconFont}"
+                            FontSize="13"
+                            ToolTip="Rename instance"
+                            Visibility="Collapsed"
+                            Margin="8,0,0,0"/>
+                    <TextBlock x:Name="PackNameLabel" Style="{StaticResource H1}"
+                               TextTrimming="CharacterEllipsis"/>
+                </DockPanel>
+                <TextBlock x:Name="PackVersionLabel" Style="{StaticResource Body}"
+                           Foreground="{StaticResource AccentBrush}" FontWeight="SemiBold"/>
+                <TextBlock x:Name="PackMetaLabel" Style="{StaticResource Muted}" Margin="0,4,0,0"/>
+                <TextBlock x:Name="PackStatsLabel" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+                <TextBlock x:Name="PackSummaryLabel" Style="{StaticResource Body}"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           Margin="0,12,0,0" TextWrapping="NoWrap"
+                           TextTrimming="CharacterEllipsis"/>
+                <!-- Progress strip — visible during downloads, install or launch -->
+                <Grid x:Name="ProgressArea" Margin="0,18,0,0" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid Grid.Row="0" Margin="0,0,0,6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="ProgressLabel" Text="Working…"
+                                   Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"
+                                   TextTrimming="CharacterEllipsis" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="ProgressPercent" Grid.Column="1"
+                                   Text="" Foreground="{StaticResource AccentBrush}"
+                                   FontWeight="SemiBold" FontSize="12"/>
+                    </Grid>
+                    <ProgressBar x:Name="DetailProgressBar" Grid.Row="1"
+                                 Style="{StaticResource DetailProgressBar}"
+                                 Maximum="100" Value="0"/>
+                    <Grid x:Name="CurrentProgressHeader" Grid.Row="2" Margin="0,8,0,6"
+                          Visibility="Collapsed">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="CurrentProgressLabel"
+                                   Foreground="{StaticResource TextTertiaryBrush}" FontSize="11"
+                                   TextTrimming="CharacterEllipsis" Margin="0,0,12,0"/>
+                        <TextBlock x:Name="CurrentProgressPercent" Grid.Column="1"
+                                   Text="" Foreground="{StaticResource TextSecondaryBrush}"
+                                   FontWeight="SemiBold" FontSize="11"/>
+                    </Grid>
+                    <ProgressBar x:Name="DetailCurrentProgressBar" Grid.Row="3"
+                                 Height="4" Maximum="100" Value="0"
+                                 Visibility="Collapsed"/>
+                </Grid>
+
+                <!-- Action row -->
+                <WrapPanel Margin="0,20,0,0">
+                    <Button x:Name="LaunchButton" Style="{StaticResource PlayButton}" Click="OnLaunch"
+                            MinWidth="160" Margin="0,0,10,10">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock x:Name="LaunchButtonIcon" Text="&#xE768;"
+                                       FontFamily="{StaticResource IconFont}" FontSize="14"
+                                       Margin="0,0,10,0" VerticalAlignment="Center"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                            <TextBlock x:Name="LaunchButtonText" Text="Play"
+                                       VerticalAlignment="Center" FontWeight="SemiBold" FontSize="15"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="UpdateButton" Click="OnDownload"
+                            ToolTip="Download the latest version from the server"
+                            Visibility="Collapsed" Margin="0,0,10,10">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE777;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                       Margin="0,0,8,0" VerticalAlignment="Center"
+                                       Foreground="{StaticResource AccentBrush}"/>
+                            <TextBlock Text="Update available" VerticalAlignment="Center"
+                                       FontWeight="SemiBold"
+                                       Foreground="{StaticResource AccentBrush}"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="StartServerButton" Click="OnStartServer"
+                            ToolTip="Start a local server using this instance" Margin="0,0,0,10">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE968;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                       Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock Text="Start server" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </WrapPanel>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- ════════════ TABS ════════════ -->
+        <TabControl x:Name="DetailTabs" Grid.Row="1" Margin="24,0,24,0" Padding="0,12,0,0"
+                    Background="Transparent" BorderThickness="0"
+                    SelectionChanged="OnDetailTabChanged">
+            <TabControl.Resources>
+                <Style TargetType="TabItem" BasedOn="{StaticResource {x:Type TabItem}}">
+                    <Setter Property="Padding" Value="20,7"/>
+                </Style>
+            </TabControl.Resources>
+
+            <!-- OVERVIEW -->
+            <TabItem Header="Overview">
+                <Grid Margin="2,0,2,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <StackPanel x:Name="OverviewSummarySection" Grid.Row="0">
+                            <DockPanel Margin="0,0,0,8">
+                                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                    <TextBlock x:Name="OverviewSaveStatusLabel"
+                                               Style="{StaticResource Caption}"
+                                               VerticalAlignment="Center"
+                                               Margin="0,0,12,0"/>
+                                    <TextBlock x:Name="OverviewSummaryCountLabel"
+                                               Style="{StaticResource Caption}"
+                                               VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <TextBlock Text="Summary" Style="{StaticResource H3}"
+                                           FontSize="16"
+                                           FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextSecondaryBrush}"/>
+                            </DockPanel>
+                            <TextBox x:Name="OverviewSummaryBox"
+                                     MaxLength="2048"
+                                     MaxHeight="96"
+                                     AcceptsReturn="True"
+                                     TextWrapping="Wrap"
+                                     VerticalScrollBarVisibility="Auto"
+                                     Background="Transparent"
+                                     BorderThickness="0"
+                                     Padding="0"
+                                     FontSize="16"
+                                     FontWeight="SemiBold"
+                                     Margin="0,0,0,12"
+                                     TextChanged="OnOverviewSummaryChanged"
+                                     LostFocus="OnOverviewSummaryLostFocus">
+                                <TextBox.Style>
+                                    <Style TargetType="TextBox">
+                                        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+                                        <Setter Property="CaretBrush" Value="{StaticResource AccentBrush}"/>
+                                        <Setter Property="SelectionBrush" Value="{StaticResource AccentSoftBrush}"/>
+                                        <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+                                        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="TextBox">
+                                                    <ScrollViewer x:Name="PART_ContentHost"
+                                                                  Background="Transparent"
+                                                                  Focusable="False"/>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </TextBox.Style>
+                            </TextBox>
+                        </StackPanel>
+
+                        <Border x:Name="OverviewSummaryDivider"
+                                Grid.Row="1"
+                                Height="1"
+                                Background="{StaticResource BorderBrush}"/>
+
+                        <Grid Grid.Row="2" Margin="0,12,0,0">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+
+                            <DockPanel x:Name="OverviewDescriptionHeader" Grid.Row="0" Margin="0,0,0,12">
+                                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                    <Button x:Name="ImportDescriptionButton"
+                                            Style="{StaticResource IconButton}" Click="OnImportDescription"
+                                            Content="&#xE8E5;" FontFamily="{StaticResource IconFont}" FontSize="14"
+                                            ToolTip="Import description from a file (Markdown or HTML, including commands)"/>
+                                    <Button x:Name="ExportDescriptionButton"
+                                            Style="{StaticResource IconButton}" Click="OnExportDescription"
+                                            Content="&#xE74E;" FontFamily="{StaticResource IconFont}" FontSize="14"
+                                            ToolTip="Export description to a file (Markdown, including commands)"/>
+                                </StackPanel>
+                                <TextBlock Text="Description" Style="{StaticResource H3}"
+                                           FontSize="16"
+                                           FontWeight="SemiBold"
+                                           VerticalAlignment="Center"
+                                           Foreground="{StaticResource TextSecondaryBrush}"/>
+                            </DockPanel>
+
+                            <Border Grid.Row="1"
+                                    CornerRadius="12"
+                                    ClipToBounds="True"
+                                    BorderBrush="{StaticResource BorderBrush}"
+                                    BorderThickness="1">
+                                <Border x:Name="OverviewDescriptionHost"
+                                        ClipToBounds="True"
+                                        Background="{StaticResource Surface0Brush}"
+                                        Visibility="Visible">
+                                    <WebBrowser x:Name="OverviewDescriptionBrowser"/>
+                                </Border>
+                            </Border>
+                        </Grid>
+                    </Grid>
+
+                    <DockPanel Grid.Row="1" Margin="0,12,0,8">
+                        <TextBlock x:Name="OverviewCharacterCountLabel" DockPanel.Dock="Right"
+                                   Style="{StaticResource Caption}" HorizontalAlignment="Right"/>
+                    </DockPanel>
+                </Grid>
+            </TabItem>
+
+            <!-- MODS -->
+            <TabItem Header="Mods">
+                <local:ModListView x:Name="ModListCtrl"/>
+            </TabItem>
+
+            <!-- RESOURCES -->
+            <TabItem Header="Resources">
+                <local:ResourcePackListView x:Name="ResourcePackListCtrl"/>
+            </TabItem>
+
+            <!-- SCREENSHOTS -->
+            <TabItem Header="Screenshots">
+                <Grid Margin="0,0,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <Border Grid.Row="0" Style="{StaticResource Card}" Padding="14,10" Margin="0,0,0,12">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <Button Click="OnOpenPackScreenshotsFolder" Margin="0,0,8,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}"
+                                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Open folder" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                                <Button Click="OnRefreshPackScreenshots" Style="{StaticResource IconButton}"
+                                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                        ToolTip="Refresh screenshots"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,14,0">
+                                <TextBlock Text="Screenshots" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="PackScreenshotCountLabel" Style="{StaticResource Caption}"
+                                           Text="Minecraft screenshots from this instance."/>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+
+                    <Grid Grid.Row="1">
+                        <TextBlock x:Name="PackScreenshotsEmptyText" Style="{StaticResource Muted}"
+                                   Text="No screenshots yet. Press F2 in Minecraft to capture one."
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   TextWrapping="Wrap" TextAlignment="Center"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="PackScreenshotList">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Width="230" Margin="0,0,12,12" Style="{StaticResource Card}" Padding="8"
+                                                Cursor="Hand" ToolTip="Open screenshot"
+                                                MouseLeftButtonUp="OnOpenPackScreenshot">
+                                            <StackPanel>
+                                                <Border Height="124" Background="{StaticResource Surface0Brush}"
+                                                        BorderBrush="{StaticResource BorderBrush}"
+                                                        BorderThickness="1" CornerRadius="6" ClipToBounds="True">
+                                                    <Image Source="{Binding ImageUrl}" Stretch="UniformToFill"/>
+                                                </Border>
+                                                <TextBlock Text="{Binding Title}" Style="{StaticResource Caption}"
+                                                           FontWeight="SemiBold" Margin="0,6,0,0"
+                                                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
+                                                           Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- WORLDS -->
+            <TabItem x:Name="WorldsTab" Header="Worlds">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="0,0,0,0">
+                        <DockPanel Margin="0,0,0,12">
+                            <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" MaxWidth="640"
+                                       HorizontalAlignment="Left"
+                                       Text="Saves inside this instance's game/saves folder. Use the compatibility editor to let other instances launch them."/>
+                        </DockPanel>
+                        <ItemsControl x:Name="WorldsList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Style="{StaticResource Card}" Padding="16,12" Margin="0,0,0,8">
+                                        <DockPanel>
+                                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
+                                                        VerticalAlignment="Center">
+                                                <Button Style="{StaticResource IconButton}"
+                                                        Content="&#xE8A7;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                        ToolTip="Open save folder"
+                                                        Tag="{Binding Source.FolderPath}" Click="OnWorldOpenFolder"/>
+                                                <Button Content="Compatibility…" Padding="14,6"
+                                                        Margin="8,0,0,0"
+                                                        Tag="{Binding Source.Key}" Click="OnWorldEditCompatibility"/>
+                                            </StackPanel>
+                                            <StackPanel>
+                                                <DockPanel>
+                                                    <Border DockPanel.Dock="Right" Style="{StaticResource Pill}" Margin="10,0,0,0">
+                                                        <TextBlock Text="{Binding CompatibilityLabel}" Style="{StaticResource PillText}"/>
+                                                    </Border>
+                                                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"
+                                                               Foreground="{StaticResource TextPrimaryBrush}"/>
+                                                </DockPanel>
+                                                <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}" Margin="0,4,0,0"/>
+                                            </StackPanel>
+                                        </DockPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                        <TextBlock x:Name="WorldsEmptyLabel" Style="{StaticResource Caption}"
+                                   Text="No saves yet. Launch the instance and create a world."
+                                   HorizontalAlignment="Center" Margin="0,24,0,12"
+                                   Visibility="Collapsed"/>
+                        <TextBlock x:Name="WorldCountLabel" Style="{StaticResource Caption}"
+                                   HorizontalAlignment="Right" Margin="0,4,0,0"/>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- FILES (owner only) -->
+            <TabItem x:Name="FilesTab" Header="Files">
+                <DockPanel Margin="0,0,0,0">
+                    <TextBlock x:Name="PackRootHint" DockPanel.Dock="Top" Style="{StaticResource Caption}"
+                               Margin="2,0,0,10" FontFamily="{StaticResource MonoFont}"
+                               TextTrimming="CharacterEllipsis"/>
+
+                    <!-- Bottom action bar: Rules + Apply rules on the left, Upload on the right -->
+                    <Border DockPanel.Dock="Bottom" Style="{StaticResource Card}" Padding="14,10" Margin="0,14,0,0">
+                        <DockPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <Button Click="OnEditRules" ToolTip="Configure auto-routing rules"
+                                        Margin="0,0,8,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE8E1;" FontFamily="{StaticResource IconFont}"
+                                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Rules…" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                                <Button x:Name="ApplyRulesButton" Content="Apply rules" Click="OnApplyRules"
+                                        ToolTip="Move files matching rules"/>
+                            </StackPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button Click="OnRefreshFiles" Style="{StaticResource IconButton}"
+                                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                        ToolTip="Refresh file lists" Margin="0,0,6,0"/>
+                                <Button x:Name="UploadButton" Style="{StaticResource AccentButton}"
+                                        Click="OnUpload">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE898;" FontFamily="{StaticResource IconFont}"
+                                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Upload to server" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Main grid: game on left, shared on right -->
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- GAME card -->
+                        <Border Grid.Column="0"
+                                Style="{StaticResource Card}" Padding="0">
+                            <DockPanel>
+                                <Border DockPanel.Dock="Top"
+                                        Background="{StaticResource Surface3Brush}"
+                                        BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                                        Padding="14,10" CornerRadius="10,10,0,0">
+                                    <DockPanel>
+                                        <Border DockPanel.Dock="Left" Width="28" Height="28"
+                                                Background="{StaticResource AccentSoftBrush}"
+                                                CornerRadius="6" Margin="0,0,12,0">
+                                            <TextBlock Text="&#xE7C3;" FontFamily="{StaticResource IconFont}"
+                                                       FontSize="14" Foreground="{StaticResource AccentBrush}"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <Button x:Name="OpenServerButton" DockPanel.Dock="Right"
+                                                Style="{StaticResource IconButton}"
+                                                Click="OnOpenServerOverride"
+                                                ToolTip="Open server-override folder in Explorer"
+                                                Padding="5,4">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}"
+                                                           FontSize="12" VerticalAlignment="Center"/>
+                                                <TextBlock Text="S" FontSize="10" FontWeight="Bold"
+                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                           VerticalAlignment="Center" Margin="1,0,0,0"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <Button x:Name="OpenLocalButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                Content="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                Click="OnOpenGame" ToolTip="Open game folder in Explorer"/>
+                                        <StackPanel VerticalAlignment="Center">
+                                            <TextBlock Text="Game" FontWeight="SemiBold" FontSize="13"/>
+                                            <TextBlock Text="Live instance files"
+                                                       Style="{StaticResource Caption}"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                                <local:FolderView x:Name="GameView" Margin="6">
+                                    <local:FolderView.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Copy to shared"   Click="OnMoveGameToShared"/>
+                                            <Separator/>
+                                            <MenuItem Header="Add rule: → shared"  Click="OnQuickRuleShared"/>
+                                            <MenuItem Header="Add rule: ignored"   Click="OnQuickRuleIgnored"/>
+                                            <MenuItem Header="Add rule for parent folder" Click="OnQuickRuleFolder"/>
+                                            <Separator/>
+                                            <MenuItem Header="Reveal in Explorer" Click="OnRevealGame"/>
+                                        </ContextMenu>
+                                    </local:FolderView.ContextMenu>
+                                </local:FolderView>
+                            </DockPanel>
+                        </Border>
+
+                        <!-- SHARED card -->
+                        <Border Grid.Column="2"
+                                Style="{StaticResource Card}" Padding="0">
+                            <DockPanel>
+                                <Border DockPanel.Dock="Top"
+                                        Background="{StaticResource Surface3Brush}"
+                                        BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                                        Padding="14,10" CornerRadius="10,10,0,0">
+                                    <DockPanel>
+                                        <Border DockPanel.Dock="Left" Width="28" Height="28"
+                                                Background="{StaticResource AccentSoftBrush}"
+                                                CornerRadius="6" Margin="0,0,12,0">
+                                            <TextBlock Text="&#xE753;" FontFamily="{StaticResource IconFont}"
+                                                       FontSize="14" Foreground="{StaticResource AccentBrush}"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+                                        <Button x:Name="OpenSharedButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                Content="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                Click="OnOpenShared" ToolTip="Open shared folder in Explorer"/>
+                                        <StackPanel VerticalAlignment="Center">
+                                            <TextBlock Text="Shared" FontWeight="SemiBold" FontSize="13"/>
+                                            <TextBlock Text="Synced with the server"
+                                                       Style="{StaticResource Caption}"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                                <local:FolderView x:Name="SharedView" Margin="6">
+                                    <local:FolderView.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Remove from shared" Click="OnMoveSharedToGame"/>
+                                            <Separator/>
+                                            <MenuItem Header="Reveal in Explorer" Click="OnRevealShared"/>
+                                        </ContextMenu>
+                                    </local:FolderView.ContextMenu>
+                                </local:FolderView>
+                            </DockPanel>
+                        </Border>
+                    </Grid>
+                </DockPanel>
+            </TabItem>
+
+            <!-- OPTIONS -->
+            <TabItem x:Name="OptionsTab" Header="Options">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="0,0,0,0" MaxWidth="640" HorizontalAlignment="Left">
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14" Padding="22,18">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="Memory" Margin="0,0,0,4"/>
+                                <TextBlock Style="{StaticResource Muted}"
+                                           Text="Maximum RAM allocated to Minecraft when launching this instance."
+                                           TextWrapping="Wrap" Margin="0,0,0,16"/>
+                                <DockPanel>
+                                    <TextBlock x:Name="RamValueLabel" DockPanel.Dock="Right"
+                                               Text="4096 MB" MinWidth="96" TextAlignment="Right"
+                                               VerticalAlignment="Center" FontWeight="SemiBold"
+                                               Foreground="{StaticResource AccentBrush}"/>
+                                    <Slider x:Name="RamSlider" Minimum="1024" Maximum="32768"
+                                            TickFrequency="512" IsSnapToTickEnabled="True"
+                                            Value="4096" ValueChanged="OnRamChanged"
+                                            LostMouseCapture="OnRamCommit" KeyUp="OnRamKeyUp"
+                                            VerticalAlignment="Center" Margin="0,0,16,0"/>
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14" Padding="22,18">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="Auto-update" Margin="0,0,0,4"/>
+                                <TextBlock Style="{StaticResource Muted}"
+                                           Text="Pull the latest shared files from the server every time before you launch."
+                                           TextWrapping="Wrap" Margin="0,0,0,14"/>
+                                <CheckBox x:Name="AutoUpdateBox"
+                                          Content="Auto-update before launch"
+                                          Click="OnAutoUpdateToggled"/>
+                            </StackPanel>
+                        </Border>
+
+                        <StackPanel x:Name="SharingOptionsPanel">
+                            <Border Style="{StaticResource Card}" Margin="0,0,0,14" Padding="22,18">
+                                <StackPanel>
+                                    <TextBlock Style="{StaticResource H3}" Text="Who can see this instance" Margin="0,0,0,4"/>
+                                    <TextBlock Style="{StaticResource Muted}"
+                                               Text="Private hides it from everyone but you. Team shows it to your teammates. Public makes it visible to everyone on the server."
+                                               TextWrapping="Wrap" Margin="0,0,0,16"/>
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Left" Text="Visibility" Width="120"
+                                                   VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                        <ComboBox x:Name="VisibilityBox" Width="220"
+                                                  SelectionChanged="OnVisibilityChanged"
+                                                  HorizontalAlignment="Left">
+                                            <ComboBoxItem Content="Private"/>
+                                            <ComboBoxItem Content="Team"/>
+                                            <ComboBoxItem Content="Public"/>
+                                        </ComboBox>
+                                    </DockPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource Card}" Margin="0,0,0,14" Padding="22,18">
+                                <StackPanel>
+                                    <TextBlock Style="{StaticResource H3}" Text="Server hosting" Margin="0,0,0,4"/>
+                                    <TextBlock Style="{StaticResource Muted}"
+                                               Text="When hosted, the launcher syncs the shared folder between you and your collaborators."
+                                               TextWrapping="Wrap" Margin="0,0,0,16"/>
+                                    <CheckBox x:Name="IsSharedBox"
+                                              Content="Host this instance on the server"
+                                              Click="OnIsSharedToggled"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Style="{StaticResource Card}" Margin="0,0,0,14" Padding="22,18">
+                                <StackPanel>
+                                    <TextBlock Style="{StaticResource H3}" Text="Collaborators" Margin="0,0,0,4"/>
+                                    <TextBlock Style="{StaticResource Muted}"
+                                               Text="Grant individual users or whole teams permission to view, download, or upload files."
+                                               TextWrapping="Wrap" Margin="0,0,0,16"/>
+                                    <Button Content="Manage collaborators…" Click="OnEditPermissions"
+                                            HorizontalAlignment="Left" Style="{StaticResource AccentButton}"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14" Padding="22,18">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="Minecraft window" Margin="0,0,0,4"/>
+                                <TextBlock Style="{StaticResource Muted}"
+                                           Text="Override launcher defaults for this instance's custom Minecraft window."
+                                           TextWrapping="Wrap" Margin="0,0,0,16"/>
+                                <DockPanel Margin="0,0,0,10">
+                                    <TextBlock DockPanel.Dock="Left" Text="Launcher chrome" Width="150"
+                                               VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                    <ComboBox x:Name="PackPageCollapsedBox" Width="250"
+                                              SelectionChanged="OnPackPageCollapsedChanged">
+                                        <ComboBoxItem Content="Use launcher default"/>
+                                        <ComboBoxItem Content="Start visible"/>
+                                        <ComboBoxItem Content="Start hidden"/>
+                                    </ComboBox>
+                                </DockPanel>
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Left" Text="Borderless fullscreen" Width="150"
+                                               VerticalAlignment="Center" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                    <ComboBox x:Name="BorderlessFullscreenBox" Width="250"
+                                              SelectionChanged="OnBorderlessFullscreenChanged">
+                                        <ComboBoxItem Content="Use launcher default"/>
+                                        <ComboBoxItem Content="Start windowed"/>
+                                        <ComboBoxItem Content="Start fullscreen"/>
+                                    </ComboBox>
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="AutoApplyRow" Style="{StaticResource Card}" Padding="22,18">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="Auto-apply rules" Margin="0,0,0,4"/>
+                                <TextBlock Style="{StaticResource Muted}"
+                                           Text="Re-run file routing rules every 30 seconds while this instance is open."
+                                           TextWrapping="Wrap" Margin="0,0,0,14"/>
+                                <DockPanel>
+                                    <CheckBox x:Name="AutoApplyBox"
+                                              Content="Run file rules every 30s"
+                                              Checked="OnAutoApplyToggled"
+                                              Unchecked="OnAutoApplyToggled"/>
+                                    <TextBlock x:Name="AutoApplyLabel" DockPanel.Dock="Right"
+                                               Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                               MinWidth="160" TextAlignment="Right"/>
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- LOGS — Minecraft logs inside game/logs/ + the sync log -->
+            <TabItem Header="Logs">
+                <DockPanel Margin="0,0,0,0">
+                    <Border DockPanel.Dock="Top" Style="{StaticResource Card}" Padding="14,10" Margin="0,0,0,12">
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Left" Text="Logs" VerticalAlignment="Center"
+                                       FontWeight="SemiBold"/>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                <Button Click="OnOpenLogsFolder" Margin="0,0,8,0">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}"
+                                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Open folder" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                                <Button Click="OnRefreshLogs" Style="{StaticResource IconButton}"
+                                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                        ToolTip="Refresh logs"/>
+                            </StackPanel>
+                            <TextBlock x:Name="LogsCountLabel" Style="{StaticResource Caption}"
+                                       VerticalAlignment="Center" Margin="14,0,0,0"/>
+                        </DockPanel>
+                    </Border>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="260"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Border Grid.Column="0" Style="{StaticResource Card}" Padding="0" Margin="0,0,12,0">
+                            <ListBox x:Name="LogsList" SelectionChanged="OnLogsSelected"
+                                     Background="Transparent" BorderThickness="0">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <DockPanel Margin="2,4">
+                                            <Border DockPanel.Dock="Left" Width="22" Height="22"
+                                                    Background="{Binding IconBackground}"
+                                                    CornerRadius="4" Margin="0,0,8,0">
+                                                <TextBlock Text="{Binding IconGlyph}" FontFamily="{StaticResource IconFont}"
+                                                           FontSize="11" Foreground="{Binding IconForeground}"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="12"/>
+                                                <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"/>
+                                            </StackPanel>
+                                        </DockPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </Border>
+
+                        <Border Grid.Column="1" Background="{StaticResource Surface0Brush}"
+                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                CornerRadius="8" Padding="4">
+                            <TextBox x:Name="LogContent" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                                     Background="Transparent" BorderThickness="0"
+                                     FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                     Foreground="{StaticResource TextSecondaryBrush}"
+                                     VerticalScrollBarVisibility="Auto"
+                                     HorizontalScrollBarVisibility="Auto"/>
+                        </Border>
+                    </Grid>
+                </DockPanel>
+            </TabItem>
+        </TabControl>
+
+        <!-- Hidden log buffer — content is exposed via the Logs tab. -->
+        <TextBox x:Name="LogBox" Visibility="Collapsed" IsReadOnly="True"
+                 AcceptsReturn="True" TextChanged="OnLogBoxTextChanged"/>
+
+        <!-- Bottom status bar -->
+        <Border Grid.Row="2" Background="{StaticResource Surface1Brush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0"
+                Padding="24,8" Margin="0,12,0,0">
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
+                       Foreground="{StaticResource TextSecondaryBrush}"
+                       TextWrapping="Wrap"/>
+        </Border>
+    </Grid>
+</Page>

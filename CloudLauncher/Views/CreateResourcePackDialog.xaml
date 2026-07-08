@@ -1,0 +1,53 @@
+<Window x:Class="CloudLauncher.Views.CreateResourcePackDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Create resource pack" Width="520" Height="480"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource Surface0Brush}"
+        Foreground="{StaticResource TextPrimaryBrush}">
+    <Grid Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,16">
+            <TextBlock Style="{StaticResource H2}" Text="Create a resource pack"/>
+            <TextBlock Style="{StaticResource Muted}"
+                       Text="Set up the project shell — you can upload zip versions after it is created."/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1">
+            <TextBlock Style="{StaticResource Caption}" Text="Name" Margin="0,0,0,4"/>
+            <TextBox x:Name="NameBox" Margin="0,0,0,12"
+                     TextChanged="OnFormTextChanged"/>
+
+            <TextBlock Style="{StaticResource Caption}" Text="Summary" Margin="0,0,0,4"/>
+            <TextBox x:Name="SummaryBox" Margin="0,0,0,12"
+                     ToolTip="One-line description"
+                     TextChanged="OnFormTextChanged"/>
+
+            <TextBlock Style="{StaticResource Caption}" Text="Visibility" Margin="0,0,0,4"/>
+            <ComboBox x:Name="VisibilityBox" Margin="0,0,0,12"
+                      SelectionChanged="OnFormSelectionChanged">
+                <ComboBoxItem Content="Private" IsSelected="True"/>
+                <ComboBoxItem Content="Team"/>
+                <ComboBoxItem Content="Public"/>
+            </ComboBox>
+
+            <TextBlock Style="{StaticResource Caption}" Text="Initial MC version" Margin="0,0,0,4"/>
+            <ComboBox x:Name="McVersionBox" Margin="0,0,0,12"
+                      ToolTip="Pick the Minecraft version this resource pack supports"
+                      SelectionChanged="OnFormSelectionChanged"/>
+
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,14,0,0"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancel" Click="OnCancel" Margin="0,0,8,0" Padding="14,5"/>
+            <Button x:Name="CreateButton" Content="Create" Style="{StaticResource AccentButton}"
+                    Click="OnCreate" Padding="14,5" IsEnabled="False" IsDefault="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

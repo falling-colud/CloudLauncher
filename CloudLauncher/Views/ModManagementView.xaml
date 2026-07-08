@@ -1,0 +1,315 @@
+<Page x:Class="CloudLauncher.Views.ModManagementView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="clr-namespace:CloudLauncher.Views"
+      xmlns:anim="clr-namespace:CloudLauncher.Animations"
+      Background="{StaticResource Surface0Brush}">
+    <Page.Resources>
+        <local:PriorityToBrushConverter x:Key="PriorityBrush"/>
+        <local:PriorityToVisibilityConverter x:Key="PriorityVis"/>
+        <local:BoolToVisibilityConverter x:Key="BoolVis"/>
+        <local:NotEmptyToVisibilityConverter x:Key="NotEmptyVis"/>
+        <local:ModSideLabelConverter x:Key="SideLabel"/>
+
+        <!-- Reusable enable/disable switch (matches the Mod view toggle) -->
+        <Style x:Key="ModToggleSwitch" TargetType="ToggleButton">
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Track" Width="36" Height="20" CornerRadius="10"
+                                Background="{StaticResource Surface3Brush}"
+                                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+                            <Ellipse x:Name="Thumb" Width="14" Height="14" Fill="White"
+                                     HorizontalAlignment="Left" Margin="3,0,0,0"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Track" Property="Background" Value="{StaticResource AccentBrush}"/>
+                                <Setter TargetName="Track" Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                <Setter TargetName="Thumb" Property="HorizontalAlignment" Value="Right"/>
+                                <Setter TargetName="Thumb" Property="Margin" Value="0,0,3,0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Page.Resources>
+
+    <DockPanel Margin="20">
+        <!-- Header -->
+        <Grid DockPanel.Dock="Top" Margin="0,0,0,12">
+            <StackPanel>
+                <TextBlock Text="Mod Management" Style="{StaticResource H2}"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock x:Name="PackNameLabel" Style="{StaticResource Muted}"/>
+                    <TextBlock x:Name="ModCountLabel" Style="{StaticResource Muted}"/>
+                </StackPanel>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                <Button x:Name="HeaderRefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;"
+                        FontFamily="{StaticResource IconFont}" FontSize="14" Margin="0,0,10,0"
+                        Click="OnRefresh" ToolTip="Re-scan for new or changed mods in the folder"/>
+                <Button x:Name="LaunchButton" Content="Launch" Style="{StaticResource AccentButton}"
+                        Margin="0,0,12,0" Click="OnLaunch" ToolTip="Launch this pack"/>
+                <Button x:Name="ToolsButton" Content="Tools ▾" Style="{StaticResource SubtleButton}"
+                        Margin="0,0,8,0" Click="OnSideTools"
+                        ToolTip="Side routing, extras, and server/client export"/>
+                <Button x:Name="RunTestButton" Content="Run as Test" Style="{StaticResource SubtleButton}"
+                        Click="OnRunTest"
+                        ToolTip="Launch with only test-marked mods and their dependencies"/>
+            </StackPanel>
+        </Grid>
+
+        <TabControl x:Name="Tabs" SelectionChanged="OnTabChanged">
+            <!-- ───────────────────────── LIST VIEW ───────────────────────── -->
+            <TabItem Header="List view">
+                <DockPanel Margin="0,12,0,0">
+                    <Grid DockPanel.Dock="Top" Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.Column="0" HorizontalAlignment="Left" Width="300" MinHeight="34"
+                                Background="{StaticResource Surface1Brush}" BorderBrush="{StaticResource BorderBrush}"
+                                BorderThickness="1" CornerRadius="6">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="{StaticResource IconFont}"
+                                           FontSize="13" Foreground="{StaticResource TextSecondaryBrush}"
+                                           VerticalAlignment="Center" Margin="11,0,8,0"/>
+                                <Grid Grid.Column="1">
+                                    <TextBlock x:Name="SearchPlaceholder" Text="Search mods…"
+                                               Foreground="{StaticResource TextTertiaryBrush}"
+                                               VerticalAlignment="Center" Margin="0,0,10,0" IsHitTestVisible="False"/>
+                                    <TextBox x:Name="SearchBox" Background="Transparent" BorderThickness="0"
+                                             VerticalAlignment="Center" Margin="0,0,10,0" TextChanged="OnSearchChanged"
+                                             GotKeyboardFocus="OnSearchFocusChanged" LostKeyboardFocus="OnSearchFocusChanged"
+                                             ToolTip="Filter by name, version or source">
+                                        <TextBox.Template>
+                                            <ControlTemplate TargetType="TextBox">
+                                                <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+                                            </ControlTemplate>
+                                        </TextBox.Template>
+                                    </TextBox>
+                                </Grid>
+                            </Grid>
+                        </Border>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal">
+                            <TextBlock Text="Sort" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                            <ComboBox x:Name="SortBox" Width="160" SelectionChanged="OnSortChanged">
+                                <ComboBoxItem Content="Priority" IsSelected="True"/>
+                                <ComboBoxItem Content="Name"/>
+                                <ComboBoxItem Content="Add date"/>
+                                <ComboBoxItem Content="Update date"/>
+                                <ComboBoxItem Content="Status"/>
+                            </ComboBox>
+                            <Button x:Name="SortDirButton" Style="{StaticResource IconButton}" Content="&#xE70D;"
+                                    FontFamily="{StaticResource IconFont}" FontSize="12" Margin="6,0,0,0"
+                                    ToolTip="Reverse sort direction" Click="OnToggleSortDir"/>
+                            <CheckBox x:Name="HideDisabled" Content="Hide disabled" Margin="14,0,0,0"
+                                      VerticalAlignment="Center" Click="OnFilterToggle"/>
+                            <CheckBox x:Name="OnlyUpdates" Content="Only updates" Margin="12,0,0,0"
+                                      VerticalAlignment="Center" Click="OnFilterToggle"/>
+                            <Button Style="{StaticResource IconButton}" Content="&#xE72C;" FontFamily="{StaticResource IconFont}"
+                                    FontSize="13" Margin="12,0,0,0" ToolTip="Refresh" Click="OnRefresh"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <Border x:Name="SelectionBar" DockPanel.Dock="Top" Visibility="Collapsed" Margin="0,0,0,10"
+                            Background="{StaticResource Surface2Brush}" BorderBrush="{StaticResource AccentBrush}"
+                            BorderThickness="1" CornerRadius="6" Padding="12,7">
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="Clear" Style="{StaticResource SubtleButton}"
+                                    Padding="12,3" MinHeight="0" Click="OnClearSelection"/>
+                            <Button DockPanel.Dock="Right" Content="Select all" Style="{StaticResource SubtleButton}"
+                                    Padding="12,3" MinHeight="0" Margin="0,0,8,0" Click="OnSelectAll"/>
+                            <TextBlock x:Name="SelectionLabel" VerticalAlignment="Center"
+                                       Foreground="{StaticResource TextPrimaryBrush}"/>
+                        </DockPanel>
+                    </Border>
+
+                    <!-- Fixed-height status / launch-log strip: shows at most 3 lines, so streaming game
+                         output never grows this area or resizes the mod list above it. -->
+                    <Border DockPanel.Dock="Bottom" Height="50" Margin="2,10,0,0" ClipToBounds="True">
+                        <TextBlock x:Name="ListStatus" Style="{StaticResource Caption}"
+                                   Foreground="{StaticResource TextSecondaryBrush}"
+                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Top"/>
+                    </Border>
+
+                    <Border Background="{StaticResource Surface1Brush}" BorderBrush="{StaticResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="8">
+                        <ItemsControl x:Name="ModItems" Padding="8"
+                                      VirtualizingPanel.IsVirtualizing="True"
+                                      VirtualizingPanel.VirtualizationMode="Recycling"
+                                      VirtualizingPanel.ScrollUnit="Pixel"
+                                      ScrollViewer.CanContentScroll="True"
+                                      ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                <ItemsControl.Template>
+                                    <ControlTemplate TargetType="ItemsControl">
+                                        <Border Background="{TemplateBinding Background}"
+                                                Padding="{TemplateBinding Padding}">
+                                            <ScrollViewer CanContentScroll="True" Focusable="False"
+                                                          VerticalScrollBarVisibility="Auto">
+                                                <ItemsPresenter/>
+                                            </ScrollViewer>
+                                        </Border>
+                                    </ControlTemplate>
+                                </ItemsControl.Template>
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <VirtualizingStackPanel/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Margin="2,2,2,8" CornerRadius="8"
+                                                MouseRightButtonUp="OnCardRightClick"
+                                                ToolTipService.InitialShowDelay="350">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Background" Value="{StaticResource Surface2Brush}"/>
+                                                    <Setter Property="BorderBrush" Value="{StaticResource BorderBrush}"/>
+                                                    <Setter Property="BorderThickness" Value="1"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <Border.ToolTip>
+                                                <ToolTip MaxWidth="440">
+                                                    <TextBlock Text="{Binding TooltipText}" TextWrapping="Wrap"/>
+                                                </ToolTip>
+                                            </Border.ToolTip>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="5"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+
+                                                <!-- priority strip -->
+                                                <Border Grid.Column="0" CornerRadius="8,0,0,8"
+                                                        Background="{Binding Priority, Converter={StaticResource PriorityBrush}}"
+                                                        Visibility="{Binding Priority, Converter={StaticResource PriorityVis}}"/>
+
+                                                <!-- selection checkbox -->
+                                                <CheckBox Grid.Column="1" IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                          VerticalAlignment="Center" Margin="10,0,0,0"
+                                                          Click="OnSelectToggle" ToolTip="Select for bulk right-click actions"/>
+
+                                                <!-- icon -->
+                                                <Border Grid.Column="2" Width="36" Height="36" Margin="12,10,12,10" CornerRadius="7"
+                                                        Background="{StaticResource Surface3Brush}"
+                                                        BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                                                        ClipToBounds="True">
+                                                    <Grid>
+                                                        <TextBlock Text="{Binding Initial}" FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource TextSecondaryBrush}"
+                                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                        <Image Source="{Binding IconUrl}" Stretch="UniformToFill"/>
+                                                    </Grid>
+                                                </Border>
+
+                                                <!-- info -->
+                                                <StackPanel Grid.Column="3" VerticalAlignment="Center" Margin="0,8,8,8">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="14"
+                                                                   Foreground="{StaticResource TextPrimaryBrush}"
+                                                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                                        <Border Style="{StaticResource Pill}" Margin="8,0,0,0"
+                                                                Visibility="{Binding IsLibrary, Converter={StaticResource BoolVis}}">
+                                                            <TextBlock Text="LIB" Style="{StaticResource PillText}"/>
+                                                        </Border>
+                                                        <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                                Visibility="{Binding IsTesting, Converter={StaticResource BoolVis}}">
+                                                            <TextBlock Text="TEST" Style="{StaticResource PillText}"/>
+                                                        </Border>
+                                                        <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                                Visibility="{Binding IsSideRestricted, Converter={StaticResource BoolVis}}">
+                                                            <TextBlock Text="{Binding Side, Converter={StaticResource SideLabel}}"
+                                                                       Style="{StaticResource PillText}"/>
+                                                        </Border>
+                                                        <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                                Visibility="{Binding IsExtra, Converter={StaticResource BoolVis}}">
+                                                            <TextBlock Text="EXTRA" Style="{StaticResource PillText}"/>
+                                                        </Border>
+                                                    </StackPanel>
+                                                    <TextBlock Text="{Binding MetaLine}" Style="{StaticResource Caption}"
+                                                               Foreground="{StaticResource TextSecondaryBrush}" Margin="0,3,0,0"/>
+                                                    <TextBlock Text="{Binding CategoriesLabel}" Style="{StaticResource Caption}"
+                                                               Foreground="{StaticResource TextTertiaryBrush}" Margin="0,1,0,0"
+                                                               Visibility="{Binding CategoriesLabel, Converter={StaticResource NotEmptyVis}}"/>
+                                                </StackPanel>
+
+                                                <!-- actions -->
+                                                <StackPanel Grid.Column="4" Orientation="Horizontal"
+                                                            VerticalAlignment="Center" Margin="0,0,10,0">
+                                                    <Button Content="Update" Click="OnUpdateClick" Padding="10,4" FontSize="11"
+                                                            MinHeight="0" Margin="0,0,8,0"
+                                                            Visibility="{Binding HasUpdate, Converter={StaticResource BoolVis}}"/>
+                                                    <ToggleButton IsChecked="{Binding Enabled, Mode=OneWay}" Click="OnToggleEnabled"
+                                                                  Style="{StaticResource ModToggleSwitch}"
+                                                                  Width="36" Height="20" VerticalAlignment="Center"
+                                                                  ToolTip="Enable or disable"/>
+                                                    <Button Style="{StaticResource IconButton}" Content="&#xE712;"
+                                                            FontFamily="{StaticResource IconFont}" FontSize="14" Margin="8,0,0,0"
+                                                            Click="OnOptions" ToolTip="Options"/>
+                                                </StackPanel>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                    </Border>
+                </DockPanel>
+            </TabItem>
+
+            <!-- ───────────────────────── GRAPH VIEW ───────────────────────── -->
+            <TabItem Header="Graph view">
+                <Grid x:Name="GraphHost" Margin="0,12,0,0"/>
+            </TabItem>
+
+            <!-- ───────────────────────── MOD BROWSING ───────────────────────── -->
+            <TabItem Header="Mod browsing">
+                <Frame x:Name="BrowseFrame" NavigationUIVisibility="Hidden" Margin="0,12,0,0"/>
+            </TabItem>
+
+            <!-- ───────────────────────── ADVANCED ───────────────────────── -->
+            <TabItem Header="Advanced">
+                <ScrollViewer Margin="0,12,0,0" VerticalScrollBarVisibility="Auto">
+                    <StackPanel MaxWidth="600" HorizontalAlignment="Left" Margin="2">
+                        <TextBlock Text="Dependencies" Style="{StaticResource H3}" Margin="0,0,0,8"/>
+                        <CheckBox x:Name="AdvAutoDeps" Margin="0,4" Click="OnAdvChanged"
+                                  Content="Auto-enable required dependencies when enabling a mod"/>
+                        <CheckBox x:Name="AdvCascadeDependents" Margin="0,4" Click="OnAdvChanged"
+                                  Content="Disabling a mod also disables mods that depend on it"/>
+                        <CheckBox x:Name="AdvCascadeLibraries" Margin="0,4" Click="OnAdvChanged"
+                                  Content="Clean up orphaned library mods when disabling"/>
+
+                        <TextBlock Text="Updates" Style="{StaticResource H3}" Margin="0,16,0,8"/>
+                        <CheckBox x:Name="AdvWarnUpdate" Margin="0,4" Click="OnAdvChanged"
+                                  Content="Warn before updating update-incompatible mods"/>
+
+                        <TextBlock Text="Graph" Style="{StaticResource H3}" Margin="0,16,0,8"/>
+                        <CheckBox x:Name="AdvShowLines" Margin="0,4" Click="OnAdvChanged"
+                                  Content="Show dependency lines in the graph by default"/>
+
+                        <TextBlock Style="{StaticResource Caption}" Foreground="{StaticResource TextTertiaryBrush}"
+                                   Margin="0,16,0,0" TextWrapping="Wrap"
+                                   Text="These settings are saved to the modpack and shared with collaborators."/>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+    </DockPanel>
+</Page>

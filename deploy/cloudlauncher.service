@@ -1,0 +1,22 @@
+[Unit]
+Description=CloudLauncher API
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/everything/cloud/cloudlauncher/server
+EnvironmentFile=/home/opc/everything/cloud/cloudlauncher/cloudlauncher.env
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
+ExecStart=/home/opc/everything/cloud/cloudlauncher/server/CloudLauncher.Server
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/opc/everything/cloud/cloudlauncher/logs/server.log
+StandardError=append:/home/opc/everything/cloud/cloudlauncher/logs/server.err.log
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

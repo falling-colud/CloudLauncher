@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+artifacts/
+.verify-build/
+publish/
+publish-deploy/
+_build_check/
+
+# IDE
+.idea/
+*.user
+*.suo
+.vs/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Local secrets / environment
+*.local.json
+appsettings.*.local.json

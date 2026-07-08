@@ -1,0 +1,74 @@
+<Window x:Class="CloudLauncher.Views.PackRulesDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:CloudLauncher.Views"
+        Title="File rules" Height="580" Width="720"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource Surface1Brush}"
+        Foreground="{StaticResource TextPrimaryBrush}">
+    <Grid Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock Style="{StaticResource H2}" Text="File rules"/>
+            <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,4,0,0">
+                The most specific rule wins — a deeper pattern like
+                <Run FontFamily="{StaticResource MonoFont}">mods/1.12.2/</Run> overrides
+                <Run FontFamily="{StaticResource MonoFont}">mods/</Run> whatever the order; ties are broken top-to-bottom.
+                Patterns support exact paths
+                (<Run FontFamily="{StaticResource MonoFont}">options.txt</Run>),
+                folder prefixes (<Run FontFamily="{StaticResource MonoFont}">mods/</Run>),
+                and globs (<Run FontFamily="{StaticResource MonoFont}">config/*.json</Run>,
+                <Run FontFamily="{StaticResource MonoFont}">saves/**</Run>).
+            </TextBlock>
+        </StackPanel>
+
+        <Border Grid.Row="1" Style="{StaticResource Card}" Padding="0">
+            <DataGrid x:Name="RulesGrid"
+                      AutoGenerateColumns="False" CanUserAddRows="False"
+                      HeadersVisibility="Column" RowHeaderWidth="0"
+                      SelectionMode="Single" SelectionUnit="FullRow"
+                      BorderThickness="0" Background="Transparent">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="Pattern" Width="*"
+                                        Binding="{Binding Pattern, UpdateSourceTrigger=PropertyChanged}"/>
+                    <DataGridComboBoxColumn Header="Action" Width="130"
+                                            SelectedValueBinding="{Binding Action, UpdateSourceTrigger=PropertyChanged}"
+                                            ItemsSource="{x:Static local:PackRulesDialog.ActionValues}"/>
+                    <DataGridTemplateColumn Width="80">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Button Content="Delete" Style="{StaticResource DangerButton}"
+                                        Padding="6,2" MinWidth="0" MinHeight="0" FontSize="11"
+                                        Click="OnDeleteRule"/>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                </DataGrid.Columns>
+            </DataGrid>
+        </Border>
+
+        <Border Grid.Row="2" Margin="0,12,0,0" Padding="0,12,0,0"
+                BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="0,1,0,0">
+            <DockPanel>
+                <TextBlock Text="Add rule:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <ComboBox x:Name="NewActionBox" Width="140" DockPanel.Dock="Right" Margin="8,0,0,0"/>
+                <Button Content="Add" Style="{StaticResource AccentButton}"
+                        DockPanel.Dock="Right" Click="OnAddRule" Margin="8,0,0,0"/>
+                <TextBox x:Name="NewPatternBox"
+                         ToolTip="e.g. mods/ or options.txt or config/*.json"/>
+            </DockPanel>
+        </Border>
+
+        <DockPanel Grid.Row="3" Margin="0,12,0,0">
+            <Button DockPanel.Dock="Right" Content="Close" Click="OnClose" IsCancel="True"/>
+            <Button DockPanel.Dock="Right" Content="Reset to defaults" Click="OnResetDefaults"/>
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+        </DockPanel>
+    </Grid>
+</Window>

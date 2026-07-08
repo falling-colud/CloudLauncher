@@ -1,0 +1,49 @@
+<UserControl x:Class="CloudLauncher.Views.ModGraphView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent">
+    <DockPanel>
+        <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Cluster by" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="ClusterBox" Width="150" SelectionChanged="OnClusterChanged">
+                    <ComboBoxItem Content="Categories" IsSelected="True"/>
+                    <ComboBoxItem Content="Dependencies"/>
+                    <ComboBoxItem Content="Custom layout"/>
+                </ComboBox>
+                <CheckBox x:Name="ShowLines" Content="Dependency lines" IsChecked="True"
+                          Margin="16,0,0,0" VerticalAlignment="Center" Click="OnToggleLines"/>
+                <TextBlock x:Name="HintLabel" Style="{StaticResource Caption}" Foreground="{StaticResource TextTertiaryBrush}"
+                           VerticalAlignment="Center" Margin="16,0,0,0"
+                           Text="Scroll to zoom · drag background to pan"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <TextBlock x:Name="GraphStatus" Style="{StaticResource Caption}"
+                           Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE71F;" FontFamily="{StaticResource IconFont}"
+                        FontSize="13" ToolTip="Zoom out" Click="OnZoomOut"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE8A3;" FontFamily="{StaticResource IconFont}"
+                        FontSize="13" ToolTip="Zoom in" Click="OnZoomIn"/>
+                <Button Style="{StaticResource SubtleButton}" Content="Fit" Padding="12,6" Margin="6,0,0,0"
+                        ToolTip="Fit graph to view" Click="OnFit"/>
+            </StackPanel>
+        </Grid>
+
+        <Border x:Name="Viewport" ClipToBounds="True" Background="{StaticResource Surface1Brush}"
+                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" CornerRadius="8"
+                MouseWheel="OnViewportWheel"
+                MouseLeftButtonDown="OnViewportMouseDown"
+                MouseMove="OnViewportMouseMove"
+                MouseLeftButtonUp="OnViewportMouseUp">
+            <Canvas x:Name="GraphCanvas" Background="Transparent" RenderTransformOrigin="0,0"
+                    HorizontalAlignment="Left" VerticalAlignment="Top">
+                <Canvas.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform x:Name="ZoomT" ScaleX="1" ScaleY="1"/>
+                        <TranslateTransform x:Name="PanT" X="0" Y="0"/>
+                    </TransformGroup>
+                </Canvas.RenderTransform>
+            </Canvas>
+        </Border>
+    </DockPanel>
+</UserControl>

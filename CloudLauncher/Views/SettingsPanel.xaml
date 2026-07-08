@@ -1,0 +1,201 @@
+<Page x:Class="CloudLauncher.Views.SettingsPanel"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="clr-namespace:CloudLauncher.Views"
+      Title="Settings"
+      Background="{StaticResource Surface0Brush}">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="22,18,22,28">
+
+            <TextBlock Style="{StaticResource H2}" Text="Settings"/>
+
+            <!-- Default RAM -->
+            <Border Style="{StaticResource Card}" Margin="0,18,0,16" Padding="22,18">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="Default memory" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource Muted}"
+                               Text="Maximum RAM allocated to new instances. You can override this per-instance on the instance's Options tab."
+                               TextWrapping="Wrap" Margin="0,0,0,18"/>
+                    <DockPanel>
+                        <TextBlock x:Name="RamValueLabel" DockPanel.Dock="Right"
+                                   Text="4096 MB" MinWidth="96" TextAlignment="Right"
+                                   VerticalAlignment="Center" FontWeight="SemiBold"
+                                   Foreground="{StaticResource AccentBrush}"/>
+                        <Slider x:Name="RamSlider" Minimum="1024" Maximum="32768"
+                                TickFrequency="512" IsSnapToTickEnabled="True"
+                                Value="4096" ValueChanged="OnRamChanged"
+                                VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    </DockPanel>
+                    <TextBlock x:Name="RamHint" Style="{StaticResource Caption}"
+                               Margin="0,16,0,0"
+                               Text="Recommended: 4–8 GB for modded play. Changes save automatically."/>
+                </StackPanel>
+            </Border>
+
+            <!-- Minecraft defaults link -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+                <DockPanel>
+                    <Border DockPanel.Dock="Left" Width="40" Height="40" CornerRadius="10"
+                            Background="{StaticResource AccentSoftBrush}" VerticalAlignment="Center"
+                            Margin="0,0,16,0">
+                        <TextBlock Text="&#xE7C3;" FontFamily="{StaticResource IconFont}" FontSize="18"
+                                   Foreground="{StaticResource AccentBrush}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <Button DockPanel.Dock="Right" Content="Edit defaults…"
+                            Style="{StaticResource AccentButton}" Click="OnOpenMcDefaults"
+                            VerticalAlignment="Center"/>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Style="{StaticResource H3}" Text="Minecraft defaults"/>
+                        <TextBlock Style="{StaticResource Muted}"
+                                   Text="FOV, render distance, brightness, volumes, keybindings — applied to new instances."
+                                   TextWrapping="Wrap" Margin="0,4,16,0"/>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- Layout preferences -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="Layout" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource Muted}"
+                               Text="Choose how secondary pages (Settings, Worlds, instance details...) open."
+                               TextWrapping="Wrap" Margin="0,0,0,14"/>
+                    <CheckBox x:Name="UseSidePanelBox"
+                              Content="Open pages on the right (next to the instance list)"
+                              Click="OnUseSidePanelToggled"/>
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="26,4,0,0"
+                               Text="When off, pages cover the main content. Use the back arrow to return."/>
+                </StackPanel>
+            </Border>
+
+            <!-- Display scale -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="Display scale" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource Muted}"
+                               Text="Zoom the whole launcher, and separately make mod entries in the list and browse views larger or smaller."
+                               TextWrapping="Wrap" Margin="0,0,0,16"/>
+
+                    <DockPanel Margin="0,0,0,4">
+                        <TextBlock DockPanel.Dock="Left" Text="Launcher" Width="150"
+                                   Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="LauncherScaleLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
+                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{StaticResource AccentBrush}"/>
+                        <Slider x:Name="LauncherScaleSlider" Minimum="0.7" Maximum="1.6"
+                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                ValueChanged="OnLauncherScaleChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    </DockPanel>
+
+                    <DockPanel Margin="0,8,0,0">
+                        <TextBlock DockPanel.Dock="Left" Text="Mods (list / browse)" Width="150"
+                                   Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="ModScaleLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
+                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{StaticResource AccentBrush}"/>
+                        <Slider x:Name="ModScaleSlider" Minimum="0.7" Maximum="1.6"
+                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                ValueChanged="OnModScaleChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    </DockPanel>
+
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,14,0,0" TextWrapping="Wrap"
+                               Text="100% is the default. Changes save and apply automatically; the mod size stacks on top of the launcher scale."/>
+                </StackPanel>
+            </Border>
+
+            <!-- Minecraft game window -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="Minecraft game window" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource Muted}"
+                               Text="Launcher-started Minecraft instances open in a custom window with a bottom play-time bar and a right instance panel."
+                               TextWrapping="Wrap" Margin="0,0,0,14"/>
+                    <CheckBox x:Name="UseCustomGameWindowBox"
+                              Content="Launch the game in CloudLauncher's custom window"
+                              Click="OnUseCustomGameWindowToggled"/>
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="26,4,0,14"
+                               Text="When off, Minecraft opens in its own native window and the options below don't apply."/>
+                    <StackPanel x:Name="CustomGameWindowOptions">
+                        <local:KeybindRow x:Name="MinecraftWindowKey" Label="Collapse shortcut" Margin="0,0,0,8"
+                                          BoundChanged="OnMinecraftWindowKeyChanged"/>
+                        <local:KeybindRow x:Name="MinecraftWindowFullscreenKey" Label="Fullscreen shortcut" Margin="0,0,0,12"
+                                          BoundChanged="OnMinecraftWindowFullscreenKeyChanged"/>
+                        <CheckBox x:Name="MinecraftWindowPackPageCollapsedBox"
+                                  Content="Start with launcher chrome hidden"
+                                  Click="OnMinecraftWindowPackPageCollapsedToggled"/>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="26,4,0,10"
+                                   Text="Opens with the title bar, instance page, and play-time bar collapsed — same result as pressing the collapse shortcut once. Press it again to bring chrome back."/>
+                        <CheckBox x:Name="MinecraftWindowBorderlessFullscreenBox"
+                                  Content="Open borderless fullscreen by default"
+                                  Click="OnMinecraftWindowBorderlessFullscreenToggled"/>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="26,4,0,12"
+                                   Text="Instances can override this default on their Options tab."/>
+                        <TextBlock x:Name="MinecraftWindowKeyHint" Style="{StaticResource Caption}"
+                                   TextWrapping="Wrap"
+                                   Text="Keyboard shortcuts are saved when selected and registered while the game wrapper is open."/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Storage paths -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="Storage" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource Muted}"
+                               Text="Where instances and the Minecraft runtime are stored on this machine."
+                               TextWrapping="Wrap" Margin="0,0,0,16"/>
+
+                    <DockPanel Margin="0,0,0,10">
+                        <TextBlock DockPanel.Dock="Left" Text="Instances folder" Width="120"
+                                   Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                        <Button DockPanel.Dock="Right" Content="Open" Click="OnOpenPacksFolder"/>
+                        <TextBlock x:Name="PacksFolderLabel" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" FontFamily="{StaticResource MonoFont}"
+                                   FontSize="11" Foreground="{StaticResource TextPrimaryBrush}"
+                                   Margin="0,0,16,0"/>
+                    </DockPanel>
+
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Left" Text="Runtime" Width="120"
+                                   Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                        <Button DockPanel.Dock="Right" Content="Open" Click="OnOpenRuntimeFolder"/>
+                        <TextBlock x:Name="RuntimeFolderLabel" VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" FontFamily="{StaticResource MonoFont}"
+                                   FontSize="11" Foreground="{StaticResource TextPrimaryBrush}"
+                                   Margin="0,0,16,0"/>
+                    </DockPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Updates -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+                <StackPanel>
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" x:Name="CheckUpdateButton" Content="Check for updates"
+                                Style="{StaticResource AccentButton}" Click="OnCheckForUpdates"
+                                VerticalAlignment="Center"/>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource H3}" Text="Launcher updates"/>
+                            <TextBlock x:Name="VersionLabel" Style="{StaticResource Muted}"
+                                       TextWrapping="Wrap" Margin="0,4,16,0"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <TextBlock x:Name="UpdateStatusLabel" Style="{StaticResource Caption}"
+                               TextWrapping="Wrap" Margin="0,12,0,0"
+                               Foreground="{StaticResource TextSecondaryBrush}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- About -->
+            <Border Style="{StaticResource Card}" Padding="22,18">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="About" Margin="0,0,0,6"/>
+                    <TextBlock Style="{StaticResource Muted}"
+                               Text="CloudLauncher - Minecraft launcher with shared instances, team sync, and built-in mod browsing."/>
+                </StackPanel>
+            </Border>
+
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,16,0,0"
+                       Foreground="{StaticResource TextSecondaryBrush}"/>
+        </StackPanel>
+    </ScrollViewer>
+</Page>
