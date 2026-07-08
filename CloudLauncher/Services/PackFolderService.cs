@@ -32,8 +32,11 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
 
     // ── folder resolution ────────────────────────────────────────────────────
 
-    // In-memory cache: packId → absolute pack root path
-    private readonly Dictionary<Guid, string> _rootCache = new();
+    // In-memory cache: packId → absolute pack root path.
+    // ConcurrentDictionary because PackRoot() is called from the UI thread and from Task.Run
+    // workers (mod inventory scans, manifest hashing, sync) — a plain Dictionary can corrupt
+    // or throw under concurrent writes.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> _rootCache = new();
 
     /// <summary>
     /// Returns the pack root directory.

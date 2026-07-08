@@ -99,8 +99,10 @@ public partial class ModListView : UserControl
         if (jars.Count == 0) { StatusLabel.Text = "No mod files found in any mods/ folder."; return; }
 
         var cache = App.State.ModFingerprints;
-        var pathToSha = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var pathToCurseForgeFingerprint = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        // ConcurrentDictionary: these are written from the Parallel.ForEach below, and plain
+        // Dictionary writes from multiple threads can corrupt it (hang / IndexOutOfRangeException).
+        var pathToSha = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var pathToCurseForgeFingerprint = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         var toHash = new List<string>();
 
         foreach (var (path, _, _) in jars)
@@ -209,8 +211,8 @@ public partial class ModListView : UserControl
 
     private void PopulateRows(
         IReadOnlyList<(string path, string folder, bool isEnabled)> jars,
-        Dictionary<string, string> pathToSha,
-        Dictionary<string, long> pathToCurseForgeFingerprint,
+        IReadOnlyDictionary<string, string> pathToSha,
+        IReadOnlyDictionary<string, long> pathToCurseForgeFingerprint,
         Dictionary<string, (ModSummary mod, ModVersion version)> modrinthMatches,
         Dictionary<long, (ModSummary mod, ModVersion version)> curseForgeMatches,
         ModFingerprintCache cache)

@@ -55,7 +55,11 @@ public sealed class AppSettings
     public ResourcePackSortMode ResourcePackSortMode { get; set; } = ResourcePackSortMode.Modified;
 
     /// <summary>Local usage stats for ordering and display. These are intentionally per-device.</summary>
-    public Dictionary<Guid, PackUsageStats> PackUsage { get; set; } = new();
+    // ConcurrentDictionary: mutated from background threads (play time recorded on the process-exit
+    // callback) while Save() may be serializing on another thread. A plain Dictionary would throw
+    // "collection was modified" mid-serialize; ConcurrentDictionary enumerates safely. JSON shape
+    // is unchanged (still a { guid: stats } object).
+    public System.Collections.Concurrent.ConcurrentDictionary<Guid, PackUsageStats> PackUsage { get; set; } = new();
 
     public bool GetAutoApplyRulesFor(Guid packId) =>
         PackAutoApplyRules.TryGetValue(packId, out var v) ? v : true;
@@ -138,8 +142,9 @@ public sealed class AppSettings
     /// <summary>User-defined resource pack folders. Key = folder name; value = list of resource pack keys.</summary>
     public Dictionary<string, List<string>> ResourcePackFolders { get; set; } = new();
 
-    /// <summary>Per-pack last-known shared manifest version (for update detection).</summary>
-    public Dictionary<Guid, long> PackSyncedVersion { get; set; } = new();
+    /// <summary>Per-pack last-known shared manifest version (for update detection).
+    /// ConcurrentDictionary: written from background sync tasks while Save() may serialize.</summary>
+    public System.Collections.Concurrent.ConcurrentDictionary<Guid, long> PackSyncedVersion { get; set; } = new();
 
     /// <summary>Default Minecraft options applied as a template for new packs.</summary>
     public McDefaults McDefaults { get; set; } = new();
@@ -327,7 +332,18 @@ public sealed class AppSettings
         // and preferences. Write to a temp file in the same directory, then atomically rename.
         lock (SaveLock)
         {
-            var json = JsonSerializer.Serialize(this, JsonOpts);
+            // Other mutable collections in this graph may be structurally modified on the UI or a
+            // background thread while we serialize, which makes JsonSerializer throw
+            // "collection was modified". Retry a couple of times so a transient race doesn't
+            // escape into a process-exit handler (crash) or skip persisting tokens/preferences.
+            string? json = null;
+            for (var attempt = 0; attempt < 3 && json is null; attempt++)
+            {
+                try { json = JsonSerializer.Serialize(this, JsonOpts); }
+                catch (InvalidOperationException) when (attempt < 2) { /* concurrent mutation — retry */ }
+            }
+            if (json is null) return; // gave up rather than crash; a later Save() will persist state
+
             var tmp = SettingsPath + ".tmp";
             File.WriteAllText(tmp, json);
             File.Move(tmp, SettingsPath, overwrite: true);

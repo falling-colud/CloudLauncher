@@ -19,6 +19,10 @@ public sealed class ApiClient
 {
     private readonly HttpClient _http;
     private readonly AppSettings _settings;
+    // Serializes token refresh so N concurrent API calls near expiry don't each POST auth/refresh
+    // with the same (rotated-on-use) refresh token — which made all but one refresh fail and
+    // force a spurious "session expired" logout during the parallel calls fired at startup.
+    private readonly SemaphoreSlim _refreshLock = new(1, 1);
     private static readonly System.Text.Json.JsonSerializerOptions JsonOpts = new(System.Text.Json.JsonSerializerDefaults.Web);
 
     // Raised on the calling thread when the refresh token itself has expired.
@@ -67,42 +71,56 @@ public sealed class ApiClient
     private async Task EnsureTokenAsync(CancellationToken ct)
     {
         if (string.IsNullOrEmpty(_settings.AccessToken)) return; // not logged in — let the request fail naturally
+        if (!IsNearExpiry()) return; // token is fresh — nothing to do (fast path, no lock)
 
-        var expiresAt = _settings.AccessTokenExpiresAt;
-        var nearExpiry = expiresAt is null || expiresAt.Value <= DateTimeOffset.UtcNow.AddMinutes(2);
-        if (!nearExpiry) return; // token is fresh — nothing to do
-
-        if (string.IsNullOrEmpty(_settings.RefreshToken))
-        {
-            ClearTokens();
-            SessionExpired?.Invoke();
-            throw new SessionExpiredException();
-        }
-
+        await _refreshLock.WaitAsync(ct);
         try
         {
-            // Call refresh endpoint directly — bypass EnsureTokenAsync to avoid recursion
-            var resp = await _http.PostAsJsonAsync("auth/refresh",
-                new RefreshRequest(_settings.RefreshToken), JsonOpts, ct);
+            // Re-check under the lock: a concurrent caller may have already refreshed (or cleared)
+            // the token while we waited, in which case there is nothing for us to do.
+            if (string.IsNullOrEmpty(_settings.AccessToken)) return;
+            if (!IsNearExpiry()) return;
 
-            if (!resp.IsSuccessStatusCode)
+            if (string.IsNullOrEmpty(_settings.RefreshToken))
             {
                 ClearTokens();
                 SessionExpired?.Invoke();
                 throw new SessionExpiredException();
             }
 
-            var tokens = await resp.Content.ReadFromJsonAsync<TokenResponse>(JsonOpts, ct)
-                ?? throw new SessionExpiredException();
-            SetTokens(tokens);
+            try
+            {
+                // Call refresh endpoint directly — bypass EnsureTokenAsync to avoid recursion
+                var resp = await _http.PostAsJsonAsync("auth/refresh",
+                    new RefreshRequest(_settings.RefreshToken), JsonOpts, ct);
+
+                if (!resp.IsSuccessStatusCode)
+                {
+                    ClearTokens();
+                    SessionExpired?.Invoke();
+                    throw new SessionExpiredException();
+                }
+
+                var tokens = await resp.Content.ReadFromJsonAsync<TokenResponse>(JsonOpts, ct)
+                    ?? throw new SessionExpiredException();
+                SetTokens(tokens);
+            }
+            catch (SessionExpiredException) { throw; }
+            catch (OperationCanceledException) { throw; }
+            catch
+            {
+                ClearTokens();
+                SessionExpired?.Invoke();
+                throw new SessionExpiredException();
+            }
         }
-        catch (SessionExpiredException) { throw; }
-        catch
-        {
-            ClearTokens();
-            SessionExpired?.Invoke();
-            throw new SessionExpiredException();
-        }
+        finally { _refreshLock.Release(); }
+    }
+
+    private bool IsNearExpiry()
+    {
+        var expiresAt = _settings.AccessTokenExpiresAt;
+        return expiresAt is null || expiresAt.Value <= DateTimeOffset.UtcNow.AddMinutes(2);
     }
 
     // ── auth ────────────────────────────────────────────────────────────────
