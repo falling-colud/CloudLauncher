@@ -125,9 +125,11 @@ public sealed class MinecraftAccountService
     /// <summary>Add an offline account with the given username. Becomes current.</summary>
     public StoredMinecraftAccount AddOffline(string username)
     {
-        if (string.IsNullOrWhiteSpace(username) || username.Length < 3 || username.Length > 16)
+        // Trim first, then validate the trimmed value — otherwise "  ab " passes the length check
+        // and a too-short name gets stored.
+        username = username?.Trim() ?? "";
+        if (username.Length < 3 || username.Length > 16)
             throw new ArgumentException("Offline username must be 3 – 16 characters");
-        username = username.Trim();
 
         var existing = _accounts.FirstOrDefault(a =>
             a.Kind == MinecraftAccountKind.Offline &&

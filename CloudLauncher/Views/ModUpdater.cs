@@ -30,7 +30,14 @@ public static class ModUpdater
         file = await EnsureDownloadableAsync(version, file);
         if (string.IsNullOrWhiteSpace(file.DownloadUrl)) return false;
 
-        var dest = Path.Combine(Path.GetDirectoryName(mod.FilePath)!, file.Filename);
+        // Preserve the mod's enabled/disabled state: a disabled mod lives as "<name>.jar.disabled".
+        // Writing the update as a plain ".jar" (and deleting the old ".disabled") silently
+        // re-enabled it — nasty during a bulk "Update all".
+        // Path.GetFileName strips any directory components a hostile store response might smuggle
+        // into the filename (defense-in-depth so it can't escape the mods folder).
+        var safeName = Path.GetFileName(file.Filename);
+        var fileName = mod.Enabled ? safeName : safeName + ".disabled";
+        var dest = Path.Combine(Path.GetDirectoryName(mod.FilePath)!, fileName);
         await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, dest);
         if (!string.Equals(mod.FilePath, dest, StringComparison.OrdinalIgnoreCase) && File.Exists(mod.FilePath))
             File.Delete(mod.FilePath);

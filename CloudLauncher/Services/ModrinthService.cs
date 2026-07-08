@@ -252,19 +252,37 @@ public sealed class ModrinthService
         string url, string destPath, IProgress<(long done, long total)>? progress = null, CancellationToken ct = default)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
-        using var resp = await _downloads.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-        resp.EnsureSuccessStatusCode();
-        var total = resp.Content.Headers.ContentLength ?? -1;
-        await using var src = await resp.Content.ReadAsStreamAsync(ct);
-        await using var dst = File.Create(destPath);
-        var buf = new byte[81920];
-        long done = 0;
-        int read;
-        while ((read = await src.ReadAsync(buf, ct)) > 0)
+        // Download to a temp file, then atomically rename over destPath. Writing straight to
+        // destPath (as before) meant an interrupted download left a truncated jar at the final
+        // path — which the game then fails to load, and which "skip if exists" logic treats as a
+        // complete file forever. Also verify the byte count against Content-Length.
+        var part = destPath + ".part";
+        try
         {
-            await dst.WriteAsync(buf.AsMemory(0, read), ct);
-            done += read;
-            if (total > 0) progress?.Report((done, total));
+            using var resp = await _downloads.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+            resp.EnsureSuccessStatusCode();
+            var total = resp.Content.Headers.ContentLength ?? -1;
+            await using (var src = await resp.Content.ReadAsStreamAsync(ct))
+            await using (var dst = File.Create(part))
+            {
+                var buf = new byte[81920];
+                long done = 0;
+                int read;
+                while ((read = await src.ReadAsync(buf, ct)) > 0)
+                {
+                    await dst.WriteAsync(buf.AsMemory(0, read), ct);
+                    done += read;
+                    if (total > 0) progress?.Report((done, total));
+                }
+                if (total > 0 && done != total)
+                    throw new IOException($"Incomplete download: received {done} of {total} bytes from {url}");
+            }
+            File.Move(part, destPath, overwrite: true);
+        }
+        catch
+        {
+            try { if (File.Exists(part)) File.Delete(part); } catch { /* best effort */ }
+            throw;
         }
     }
 

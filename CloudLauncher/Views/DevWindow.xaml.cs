@@ -226,7 +226,8 @@ public partial class DevWindow : Window
             long? quotaBytes = null;
             if (!string.IsNullOrWhiteSpace(row.QuotaMb))
             {
-                if (!double.TryParse(row.QuotaMb, out var mb) || mb < 0)
+                if (!double.TryParse(row.QuotaMb, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var mb) || mb < 0)
                 { QuotaStatusLabel.Text = "Quota must be a positive number (MB) or empty for unlimited."; return; }
                 quotaBytes = (long)(mb * 1024 * 1024);
             }
@@ -247,7 +248,7 @@ public sealed class QuotaRow(UserQuotaInfo info) : INotifyPropertyChanged
 
     private long   _usedBytes  = info.UsedBytes;
     private long?  _quotaBytes = info.QuotaBytes;
-    private string _quotaMb    = info.QuotaBytes is null ? "" : ((double)info.QuotaBytes.Value / (1024 * 1024)).ToString("F0");
+    private string _quotaMb    = info.QuotaBytes is null ? "" : ((double)info.QuotaBytes.Value / (1024 * 1024)).ToString("F0", System.Globalization.CultureInfo.InvariantCulture);
 
     public string UsedLabel    => FormatBytes(_usedBytes);
     public string PercentLabel =>
@@ -270,7 +271,7 @@ public sealed class QuotaRow(UserQuotaInfo info) : INotifyPropertyChanged
     {
         _usedBytes  = updated.UsedBytes;
         _quotaBytes = updated.QuotaBytes;
-        _quotaMb    = updated.QuotaBytes is null ? "" : ((double)updated.QuotaBytes.Value / (1024 * 1024)).ToString("F0");
+        _quotaMb    = updated.QuotaBytes is null ? "" : ((double)updated.QuotaBytes.Value / (1024 * 1024)).ToString("F0", System.Globalization.CultureInfo.InvariantCulture);
         OnPropertyChanged(nameof(UsedLabel));
         OnPropertyChanged(nameof(PercentLabel));
         OnPropertyChanged(nameof(QuotaColor));

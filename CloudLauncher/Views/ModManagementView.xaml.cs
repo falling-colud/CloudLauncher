@@ -808,7 +808,11 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             file = await EnsureDownloadableAsync(mod.LatestVersion, file);
             if (string.IsNullOrWhiteSpace(file.DownloadUrl)) { ListStatus.Text = "No downloadable file."; return; }
 
-            var dest = Path.Combine(Path.GetDirectoryName(mod.FilePath)!, file.Filename);
+            // Keep a disabled mod disabled after update, and strip any path components from the
+            // store-supplied filename (see ModUpdater.InstallVersionAsync).
+            var safeName = Path.GetFileName(file.Filename);
+            var fileName = mod.Enabled ? safeName : safeName + ".disabled";
+            var dest = Path.Combine(Path.GetDirectoryName(mod.FilePath)!, fileName);
             await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, dest);
             if (!string.Equals(mod.FilePath, dest, StringComparison.OrdinalIgnoreCase) && File.Exists(mod.FilePath))
                 File.Delete(mod.FilePath);
