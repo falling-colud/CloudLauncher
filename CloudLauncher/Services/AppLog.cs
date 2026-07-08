@@ -1,29 +1,38 @@
-using System.Text;
 using System.Windows;
 using System.Windows.Threading;
 
 namespace CloudLauncher.Services;
 
 /// <summary>
-/// In-memory, app-wide log capture. Every call adds a timestamped line to a buffer
-/// and fires <see cref="MessageAppended"/> on the UI thread. The Logs tab subscribes
+/// In-memory, app-wide log capture. Every call adds a timestamped line to a bounded
+/// buffer and fires <see cref="MessageAppended"/> on the UI thread. The Logs tab subscribes
 /// so users can see what the launcher is doing while it tries to start the game.
 /// </summary>
 public static class AppLog
 {
-    private static readonly StringBuilder _buffer = new();
+    /// <summary>Keep only the most recent N lines. Minecraft (esp. modded) streams its entire
+    /// stdout/stderr through here during a session, so an unbounded buffer grew for the whole
+    /// process lifetime — a primary cause of the launcher's RAM growth. A ring of lines bounds
+    /// it to a few MB while still giving a useful scrollback.</summary>
+    private const int MaxLines = 5000;
+
+    private static readonly Queue<string> _lines = new();
     private static readonly object _lock = new();
 
     /// <summary>Fired after a line is appended. Carries the formatted line (with timestamp).</summary>
     public static event Action<string>? MessageAppended;
 
-    /// <summary>Snapshot of every line captured so far, joined by newlines.</summary>
-    public static string Buffer { get { lock (_lock) return _buffer.ToString(); } }
+    /// <summary>Snapshot of the retained lines, joined by newlines.</summary>
+    public static string Buffer { get { lock (_lock) return string.Join(Environment.NewLine, _lines); } }
 
     public static void Log(string message)
     {
         var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
-        lock (_lock) _buffer.AppendLine(line);
+        lock (_lock)
+        {
+            _lines.Enqueue(line);
+            while (_lines.Count > MaxLines) _lines.Dequeue();
+        }
         var app = Application.Current;
         if (app is null) return;
         if (app.Dispatcher.CheckAccess()) MessageAppended?.Invoke(line);

@@ -20,7 +20,7 @@ namespace CloudLauncher.Views;
 /// <see cref="RichDescriptionHelper"/> still backs the description editor, which leans on
 /// IE-specific contenteditable behaviour.
 /// </summary>
-public sealed class RichDescriptionView : UserControl
+public sealed class RichDescriptionView : UserControl, IDisposable
 {
     // A per-user writable folder is required; the default (next to the exe) is read-only
     // once the launcher is installed under Program Files.
@@ -28,27 +28,30 @@ public sealed class RichDescriptionView : UserControl
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "CloudLauncher", "WebView2");
 
-    private readonly WebView2 _web = new();
+    // Created on Loaded and disposed on Unloaded. WebView2 owns a native browser host, so leaving
+    // one live per browse page (which the navigation journal used to retain forever) was a real
+    // memory leak. Disposing on unload + recreating on load releases it deterministically while
+    // still surviving back-stack navigation (the page reloads and we re-render _lastHtml).
+    private WebView2? _web;
     private bool _initStarted;
     private bool _ready;
     private bool _loadingOwnContent;
     private string? _pendingHtml;
+    private string? _lastHtml;
     private RichDescriptionOptions? _options;
+    private bool _disposed;
 
     public RichDescriptionView()
     {
         // Paint the document background underneath so there's no white flash before the
         // first frame renders (matches the body colour in WrapHtmlDocument).
-        _web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x0B, 0x0D, 0x11);
         Background = new SolidColorBrush(Color.FromRgb(0x0B, 0x0D, 0x11));
-        Content = _web;
-
-        _web.NavigationStarting += OnNavigationStarting;
-        _web.CoreWebView2InitializationCompleted += OnCoreInitialized;
 
         // Show a blank document until the first real Show() so the panel isn't an empty void.
         _pendingHtml = PackText.WrapHtmlDocument("<p><em>No description.</em></p>", legacyIe: false);
-        Loaded += (_, _) => EnsureWebViewInitialized();
+        _lastHtml = _pendingHtml;
+        Loaded += (_, _) => { EnsureWebView(); EnsureWebViewInitialized(); };
+        Unloaded += (_, _) => TeardownWebView();
     }
 
     /// <summary>Render a description (HTML or markdown) into the view.</summary>
@@ -56,8 +59,6 @@ public sealed class RichDescriptionView : UserControl
     {
         _options = options;
         var runnable = options?.EnableCommandRun == true;
-
-        DumpDescriptionForDebug(content); // TEMP diagnostic — remove once spoiler markup is confirmed
 
         string html;
         if (string.IsNullOrWhiteSpace(content))
@@ -70,46 +71,70 @@ public sealed class RichDescriptionView : UserControl
             html = PackText.WrapHtmlDocument(body, runnableCommands: runnable, legacyIe: false);
         }
 
-        if (_ready)
+        _lastHtml = html;
+        if (_ready && _web is not null)
             NavigateOwn(html);
         else
         {
             _pendingHtml = html;
+            EnsureWebView();
             EnsureWebViewInitialized();
         }
     }
 
-    // TEMP diagnostic: capture the raw description HTML so the real spoiler markup can be
-    // inspected. Remove once the spoiler/image handling is confirmed.
-    private static void DumpDescriptionForDebug(string? content)
+    /// <summary>Create the WebView2 (idempotent). Recreates it after an unload/dispose cycle and
+    /// re-queues the last-shown HTML so back-navigation restores the same content.</summary>
+    private void EnsureWebView()
     {
-        try
-        {
-            if (string.IsNullOrWhiteSpace(content) || content.Length < 24) return;
-            var path = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "CloudLauncher", "last-description.html");
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(path, content);
-        }
-        catch { /* diagnostic only */ }
+        if (_disposed || _web is not null) return;
+        _web = new WebView2 { DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x0B, 0x0D, 0x11) };
+        _web.NavigationStarting += OnNavigationStarting;
+        _web.CoreWebView2InitializationCompleted += OnCoreInitialized;
+        Content = _web;
+        _ready = false;
+        _initStarted = false;
+        _pendingHtml = _lastHtml;
+    }
+
+    private void TeardownWebView()
+    {
+        if (_web is null) return;
+        _web.NavigationStarting -= OnNavigationStarting;
+        _web.CoreWebView2InitializationCompleted -= OnCoreInitialized;
+        if (_web.CoreWebView2 is not null)
+            _web.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
+        Content = null;
+        _web.Dispose();
+        _web = null;
+        _ready = false;
+        _initStarted = false;
+    }
+
+    /// <summary>Permanently release the browser host (call from host teardown). After this the
+    /// control will not recreate its WebView2.</summary>
+    public void Dispose()
+    {
+        _disposed = true;
+        TeardownWebView();
     }
 
     private void NavigateOwn(string html)
     {
+        if (_web is null) return;
         _loadingOwnContent = true;
         _web.NavigateToString(html);
     }
 
     private async void EnsureWebViewInitialized()
     {
-        if (_initStarted) return;
+        if (_initStarted || _web is null) return;
         _initStarted = true;
         try
         {
             Directory.CreateDirectory(UserDataFolder);
             var env = await CoreWebView2Environment.CreateAsync(null, UserDataFolder, null);
-            await _web.EnsureCoreWebView2Async(env);
+            if (_web is not null)
+                await _web.EnsureCoreWebView2Async(env);
         }
         catch (Exception ex)
         {
@@ -121,6 +146,7 @@ public sealed class RichDescriptionView : UserControl
 
     private void OnCoreInitialized(object? sender, CoreWebView2InitializationCompletedEventArgs e)
     {
+        if (_web is null) return;
         if (!e.IsSuccess || _web.CoreWebView2 is null)
         {
             if (e.InitializationException is { } ex)

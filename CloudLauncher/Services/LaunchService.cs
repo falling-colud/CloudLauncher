@@ -185,13 +185,15 @@ public sealed class LaunchService(
         };
 
         Process process;
+        System.Timers.Timer? flushTimer = null;
         try
         {
             process = await launcher.InstallAndBuildProcessAsync(versionId, args);
-            ConfigureProcessLogging(process, gameDir, Report);
+            flushTimer = ConfigureProcessLogging(process, gameDir, Report);
         }
         catch (Exception ex)
         {
+            flushTimer?.Dispose();
             AppLog.LogError("install", ex);
             ProgressHub.Clear(pack.Id);
             throw;
@@ -214,6 +216,10 @@ public sealed class LaunchService(
         }
         catch (Exception ex)
         {
+            // The game never started, so the Exited handler that normally disposes the flush
+            // timer will not fire — dispose it here to avoid leaking the timer + log-sink chain.
+            flushTimer?.Stop();
+            flushTimer?.Dispose();
             AppLog.LogError("process.Start", ex);
             ProgressHub.Clear(pack.Id);
             throw;
@@ -665,7 +671,10 @@ public sealed class LaunchService(
         return path;
     }
 
-    private static void ConfigureProcessLogging(Process process, string gameDir, Action<string> report)
+    /// <summary>Wires stdout/stderr batching for the process and returns the flush timer so the
+    /// caller can dispose it if the process never starts (otherwise the 150 ms timer — and the
+    /// buffer/report/view chain it pins — leaks forever, since only the Exited handler stops it).</summary>
+    private static System.Timers.Timer ConfigureProcessLogging(Process process, string gameDir, Action<string> report)
     {
         var psi = process.StartInfo;
         psi.WorkingDirectory = gameDir;
@@ -708,6 +717,7 @@ public sealed class LaunchService(
             try { report($"Minecraft exited with code {process.ExitCode}."); }
             catch { report("Minecraft exited."); }
         };
+        return flushTimer;
     }
 
     private static void FlushLogBuffer(

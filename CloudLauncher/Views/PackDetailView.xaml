@@ -771,7 +771,7 @@
                         <Border Grid.Column="1" Background="{StaticResource Surface0Brush}"
                                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
                                 CornerRadius="8" Padding="4">
-                            <TextBox x:Name="LogContent" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                            <TextBox x:Name="LogContent" IsReadOnly="True" IsUndoEnabled="False" AcceptsReturn="True" TextWrapping="NoWrap"
                                      Background="Transparent" BorderThickness="0"
                                      FontFamily="{StaticResource MonoFont}" FontSize="11"
                                      Foreground="{StaticResource TextSecondaryBrush}"
@@ -784,7 +784,7 @@
         </TabControl>
 
         <!-- Hidden log buffer — content is exposed via the Logs tab. -->
-        <TextBox x:Name="LogBox" Visibility="Collapsed" IsReadOnly="True"
+        <TextBox x:Name="LogBox" Visibility="Collapsed" IsReadOnly="True" IsUndoEnabled="False"
                  AcceptsReturn="True" TextChanged="OnLogBoxTextChanged"/>
 
         <!-- Bottom status bar -->

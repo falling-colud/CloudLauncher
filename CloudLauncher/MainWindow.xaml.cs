@@ -52,6 +52,19 @@ public partial class MainWindow : Window, IDialogHost
         Closed += OnClosed;
         SizeChanged   += (_, _) => LayoutSidePanel();
         StateChanged  += (_, _) => UpdateMaximizeIcon();
+        // A standalone Frame keeps a navigation journal, and object-content journal entries are
+        // keep-alive: every page ever shown (each PackDetailView, browser, settings panel, with
+        // its WebView2/WebBrowser hosts and collections) would be rooted for the app's lifetime.
+        // We manage our own back-stack (_sideStack) and never use Frame.GoBack, so drain the
+        // journal after each navigation to let discarded pages be collected.
+        MainFrame.Navigated += DrainFrameJournal;
+        SideFrame.Navigated += DrainFrameJournal;
+    }
+
+    private static void DrainFrameJournal(object sender, System.Windows.Navigation.NavigationEventArgs e)
+    {
+        if (sender is Frame f)
+            while (f.RemoveBackEntry() != null) { }
     }
 
     // ── lifecycle ────────────────────────────────────────────────────────────

@@ -84,12 +84,18 @@ public partial class PackDetailView : Page
         {
             _autoApplyTimer.Stop();
             _overviewSaveTimer.Stop();
-            if (_pack is not null && _isOwner)
-                await SaveOverviewDescriptionAsync();
+            // Unsubscribe FIRST, before any awaitable/throwable work. Otherwise a throw in the
+            // save below would skip unsubscription and leak this whole view (its visual tree,
+            // WebView2/WebBrowser hosts, and the static AppLog handler) for the process lifetime.
             ProgressHub.ProgressChanged -= OnHeroProgressChanged;
             ProgressHub.ProgressCleared -= OnHeroProgressCleared;
             App.State.Instances.StateChanged -= OnInstanceStateChanged;
             App.State.ModpackDownload.PackAdded -= OnPackDownloadUpdated;
+            // The Logs tab wires this static event when "Launcher log" is selected; if the panel
+            // closes on that row it was never removed, rooting the view forever.
+            AppLog.MessageAppended -= OnLauncherLogAppended;
+            if (_pack is not null && _isOwner)
+                await SaveOverviewDescriptionAsync();
         };
     }
 
@@ -550,8 +556,24 @@ public partial class PackDetailView : Page
     private void OnLauncherLogAppended(string line)
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(() => OnLauncherLogAppended(line)); return; }
-        LogContent.AppendText(line + Environment.NewLine);
+        AppendCapped(LogContent, line + Environment.NewLine);
         LogContent.ScrollToEnd();
+    }
+
+    /// <summary>Max chars kept in the in-memory log TextBoxes. WPF TextBox layout/append cost grows
+    /// with content and Minecraft streams its whole session through these, so cap the retained text
+    /// to keep appends bounded and stop the progressive lag. Matches the on-disk log-viewer cap.</summary>
+    private const int MaxLogChars = 200_000;
+
+    /// <summary>Append text to a log TextBox, trimming the oldest content once it exceeds the cap.
+    /// Drops a chunk at a time so we don't re-trim on every single append.</summary>
+    private static void AppendCapped(TextBox box, string text)
+    {
+        box.AppendText(text);
+        if (box.Text.Length <= MaxLogChars) return;
+        var kept = box.Text[^(MaxLogChars * 9 / 10)..];
+        box.Text = "[…older lines trimmed…]" + Environment.NewLine + kept;
+        box.CaretIndex = box.Text.Length;
     }
 
     private async void RefreshWorlds()
@@ -1865,7 +1887,7 @@ public partial class PackDetailView : Page
     {
         if (_pack is null) return;
         LogBox.Text = "";
-        var progress = new Progress<string>(line => LogBox.AppendText(line + Environment.NewLine));
+        var progress = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
         try
         {
             UploadButton.IsEnabled = false;
@@ -1926,7 +1948,7 @@ public partial class PackDetailView : Page
     {
         if (_pack is null) return;
         LogBox.Text = "";
-        var progress = new Progress<string>(line => LogBox.AppendText(line + Environment.NewLine));
+        var progress = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
         try
         {
             UploadButton.IsEnabled = false;
@@ -1973,7 +1995,7 @@ public partial class PackDetailView : Page
             return;
         }
         LogBox.Text = "";
-        IProgress<string> log = new Progress<string>(line => LogBox.AppendText(line + Environment.NewLine));
+        IProgress<string> log = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
         MinecraftLaunchHandle? launch = null;
         try
         {
@@ -2045,7 +2067,7 @@ public partial class PackDetailView : Page
     {
         if (_pack is null) return;
         LogBox.Text = "";
-        var log = new Progress<string>(line => LogBox.AppendText(line + Environment.NewLine));
+        var log = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
         StartServerButton.IsEnabled = false;
         try
         {
