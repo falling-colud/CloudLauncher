@@ -45,16 +45,12 @@ public class ProxyController(IHttpClientFactory http, AppDbContext db) : Control
 
         if (HttpMethods.IsPost(Request.Method))
         {
-            // Buffer the request body so we can hand it to HttpClient.
-            using var ms = new MemoryStream();
-            await Request.Body.CopyToAsync(ms, ct);
-            ms.Position = 0;
-            var content = new ByteArrayContent(ms.ToArray());
+            // Stream the request body straight through to the upstream instead of buffering the
+            // whole thing into memory first (a cheap memory-pressure lever at the 200 MB cap).
+            var content = new StreamContent(Request.Body);
             var ct2 = Request.ContentType;
-            if (!string.IsNullOrEmpty(ct2))
-                content.Headers.TryAddWithoutValidation("Content-Type", ct2);
-            else
-                content.Headers.TryAddWithoutValidation("Content-Type", "application/json");
+            content.Headers.TryAddWithoutValidation(
+                "Content-Type", string.IsNullOrEmpty(ct2) ? "application/json" : ct2);
             req.Content = content;
         }
 

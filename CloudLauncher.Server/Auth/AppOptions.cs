@@ -4,6 +4,12 @@ public sealed class AppOptions
 {
     /// <summary>Public URL of this server (used in email links and Google OAuth redirect).</summary>
     public string PublicBaseUrl { get; set; } = "http://localhost:5000";
+
+    /// <summary>Username granted admin during first-run bootstrap — but ONLY while no admin
+    /// account exists yet. Once any admin exists this setting is inert, so it is not a standing
+    /// privilege-escalation backdoor. Override with App:BootstrapAdminUsername; set empty to
+    /// disable bootstrap entirely (seed the first admin out-of-band instead).</summary>
+    public string BootstrapAdminUsername { get; set; } = "colud";
 }
 
 public sealed class GoogleAuthOptions

@@ -7,7 +7,9 @@ using CloudLauncher.Shared;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.EntityFrameworkCore;
 
 namespace CloudLauncher.Server.Controllers;
 
@@ -21,6 +23,7 @@ public class AuthController(
     AppOptions appOptions) : ControllerBase
 {
     [HttpPost("register")]
+    [EnableRateLimiting(RateLimitPolicies.Auth)]
     public async Task<ActionResult> Register([FromBody] RegisterRequest req, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Username) || req.Username.Length < 3 || req.Username.Length > 32)
@@ -30,7 +33,7 @@ public class AuthController(
         if (string.IsNullOrWhiteSpace(req.Email) || !req.Email.Contains('@'))
             return BadRequest(new { error = "A valid email address is required" });
 
-        var isAdmin = string.Equals(req.Username, "colud", StringComparison.OrdinalIgnoreCase);
+        var isAdmin = await ShouldBootstrapAdminAsync(req.Username);
         var user = new AppUser
         {
             UserName = req.Username.Trim(),
@@ -53,6 +56,7 @@ public class AuthController(
     }
 
     [HttpPost("login")]
+    [EnableRateLimiting(RateLimitPolicies.Auth)]
     public async Task<ActionResult<TokenResponse>> Login([FromBody] LoginRequest req, CancellationToken ct)
     {
         var user = await users.FindByNameAsync(req.Username);
@@ -62,7 +66,10 @@ public class AuthController(
         if (!user.EmailConfirmed)
             return Unauthorized(new { error = "Please verify your email before signing in." });
 
-        if (string.Equals(user.UserName, "colud", StringComparison.OrdinalIgnoreCase) && !user.IsAdmin)
+        // First-run bootstrap only: promote the configured bootstrap user if (and only if) the
+        // system still has no admin. Once an admin exists this is inert — it is not a standing
+        // backdoor by which anyone registering the bootstrap name could later gain admin.
+        if (!user.IsAdmin && await ShouldBootstrapAdminAsync(user.UserName ?? ""))
         {
             user.IsAdmin = true;
             await users.UpdateAsync(user);
@@ -72,6 +79,7 @@ public class AuthController(
     }
 
     [HttpPost("resend-verification")]
+    [EnableRateLimiting(RateLimitPolicies.Auth)]
     public async Task<IActionResult> ResendVerification([FromBody] ResendVerificationRequest req, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(req.Email))
@@ -95,7 +103,12 @@ public class AuthController(
         if (user is null)
             return Content(HtmlPage("Invalid link", "This confirmation link is not valid."), "text/html");
 
-        var decoded = Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(code));
+        string decoded;
+        try { decoded = Encoding.UTF8.GetString(WebEncoders.Base64UrlDecode(code)); }
+        catch (FormatException)
+        {
+            return Content(HtmlPage("Invalid link", "This confirmation link is not valid."), "text/html");
+        }
         var result = await users.ConfirmEmailAsync(user, decoded);
         if (!result.Succeeded)
             return Content(HtmlPage("Invalid link", "This confirmation link is expired or invalid."), "text/html");
@@ -162,6 +175,17 @@ public class AuthController(
         var user = await users.FindByIdAsync(id.ToString());
         if (user is null) return Unauthorized();
         return Ok(new UserSummary(id, user.UserName ?? "", user.EmailConfirmed));
+    }
+
+    /// <summary>True only when <paramref name="username"/> matches the configured bootstrap admin
+    /// AND no admin account exists yet. This makes admin bootstrap a one-time, first-run event
+    /// rather than a permanent "register this username to become admin" escalation path.</summary>
+    private async Task<bool> ShouldBootstrapAdminAsync(string username)
+    {
+        var bootstrap = appOptions.BootstrapAdminUsername;
+        if (string.IsNullOrWhiteSpace(bootstrap)) return false;
+        if (!string.Equals(username?.Trim(), bootstrap, StringComparison.OrdinalIgnoreCase)) return false;
+        return !await users.Users.AnyAsync(u => u.IsAdmin);
     }
 
     private string BuildConfirmLink(Guid userId, string token)

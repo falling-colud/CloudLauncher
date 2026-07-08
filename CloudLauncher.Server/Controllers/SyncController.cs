@@ -48,15 +48,22 @@ public class SyncController(
     }
 
     [HttpPut("blob/{hash}")]
-    [DisableRequestSizeLimit]
     public async Task<IActionResult> UploadBlob(Guid packId, string hash, CancellationToken ct)
     {
-        var (_, perms, err) = await LoadAsync(packId, PackPermissions.UploadShared, ct);
+        var (pack, perms, err) = await LoadAsync(packId, PackPermissions.UploadShared, ct);
         if (err is not null) return err;
 
         var expected = hash.ToLowerInvariant();
         if (expected.Length != 64 || !expected.All(Uri.IsHexDigit))
             return BadRequest(new { error = "Hash must be 64 lowercase hex chars" });
+
+        // Reject an owner who is already at/over quota BEFORE streaming anything to disk.
+        // Without this gate (and previously with [DisableRequestSizeLimit]) an authenticated
+        // user could PUT unlimited/arbitrarily-large blobs — never calling commit — and exhaust
+        // the server disk shared with Postgres. The 200 MB Kestrel cap now bounds each request.
+        var owner = await users.FindByIdAsync(pack!.OwnerId.ToString());
+        if (owner is not null && !await StorageUsage.WouldFitAsync(db, owner, 0, ct))
+            return BadRequest(new { error = "Storage quota exceeded." });
 
         var actual = await blobs.StoreAsync(Request.Body, ct);
         if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
@@ -76,7 +83,19 @@ public class SyncController(
             return Conflict(new { error = "Manifest version mismatch", currentVersion = pack.ManifestVersion });
         if (ValidateEntries(req.Entries) is { } entryErr) return entryErr;
 
-        // Quota check: new total for this pack = sum of incoming entries.
+        // Verify every referenced blob exists and measure its REAL on-disk size. Never trust
+        // the client-supplied ManifestEntry.Size: it feeds the quota check and stored usage, so
+        // a client could otherwise under-report sizes and store far beyond its quota.
+        var sizes = new Dictionary<string, long>();
+        foreach (var e in req.Entries)
+        {
+            var h = e.Hash.ToLowerInvariant();
+            if (!blobs.Exists(h))
+                return BadRequest(new { error = $"Blob missing: {e.Hash}" });
+            sizes[h] = blobs.SizeOf(h);
+        }
+
+        // Quota check: new total for this pack = sum of incoming entries (server-measured sizes).
         var owner = await users.FindByIdAsync(pack.OwnerId.ToString());
         if (owner is not null && owner.StorageQuotaBytes is not null)
         {
@@ -84,7 +103,7 @@ public class SyncController(
             var otherUsed = await db.PackManifestEntries
                 .Where(e => e.Pack.OwnerId == pack.OwnerId && e.PackId != packId && e.Pack.IsShared)
                 .SumAsync(e => e.Size, ct);
-            var newPackSize = req.Entries.Sum(e => e.Size);
+            var newPackSize = req.Entries.Sum(e => sizes[e.Hash.ToLowerInvariant()]);
             if (otherUsed + newPackSize > owner.StorageQuotaBytes.Value)
             {
                 var quotaMb = owner.StorageQuotaBytes.Value / (1024 * 1024);
@@ -93,22 +112,17 @@ public class SyncController(
             }
         }
 
-        foreach (var e in req.Entries)
-        {
-            if (!blobs.Exists(e.Hash))
-                return BadRequest(new { error = $"Blob missing: {e.Hash}" });
-        }
-
         var existing = await db.PackManifestEntries.Where(x => x.PackId == packId).ToListAsync(ct);
         db.PackManifestEntries.RemoveRange(existing);
         foreach (var e in req.Entries)
         {
+            var h = e.Hash.ToLowerInvariant();
             db.PackManifestEntries.Add(new PackManifestEntry
             {
                 PackId = packId,
                 RelativePath = e.RelativePath,
-                Hash = e.Hash.ToLowerInvariant(),
-                Size = e.Size
+                Hash = h,
+                Size = sizes[h]
             });
         }
         pack.ManifestVersion += 1;
@@ -126,9 +140,13 @@ public class SyncController(
         var safe = hash.ToLowerInvariant();
         if (safe.Length != 64 || !safe.All(Uri.IsHexDigit))
             return BadRequest(new { error = "Hash must be 64 lowercase hex chars" });
-        if (!blobs.Exists(safe)) return NotFound();
 
-        await Task.Yield();
+        // Only serve blobs that belong to THIS pack's committed manifest. Blobs live in one
+        // global content-addressed store, so without this scoping a user with Download on any
+        // single pack could read any blob in the system by hash (cross-pack, cross-user).
+        var belongs = await db.PackManifestEntries.AnyAsync(e => e.PackId == packId && e.Hash == safe, ct);
+        if (!belongs || !blobs.Exists(safe)) return NotFound();
+
         return File(blobs.OpenRead(safe), "application/octet-stream", enableRangeProcessing: true);
     }
 
@@ -154,10 +172,16 @@ public class SyncController(
     {
         if (string.IsNullOrWhiteSpace(rel)) return false;
         if (rel.Length > 1024) return false;
-        if (Path.IsPathRooted(rel)) return false;
+        // Manifests always use '/' as the separator (the client normalises with Replace('\\','/')).
+        // A backslash reaching here is therefore hostile: on the Windows clients that consume these
+        // paths a leading '\' or "\\server\share" is rooted/UNC, but Path.IsPathRooted misses that
+        // on the Linux server, so screen backslashes and colons explicitly and independently of OS.
+        if (rel.Contains('\\')) return false;
         if (rel.Contains(':')) return false; // drive letter / NTFS alternate data stream
-        foreach (var segment in rel.Split('/', '\\'))
-            if (segment == "..") return false;
+        if (rel[0] == '/') return false;     // absolute
+        if (Path.IsPathRooted(rel)) return false;
+        foreach (var segment in rel.Split('/'))
+            if (segment is "" or "." or "..") return false; // empty (e.g. "a//b"), current, or parent
         return true;
     }
 

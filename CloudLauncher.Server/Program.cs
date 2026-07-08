@@ -1,10 +1,13 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Text;
+using System.Threading.RateLimiting;
+using CloudLauncher.Server;
 using CloudLauncher.Server.Auth;
 using CloudLauncher.Server.Data;
 using CloudLauncher.Server.Storage;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 
@@ -100,6 +103,25 @@ builder.Services
     });
 
 builder.Services.AddAuthorization();
+
+// Rate limiting for the password/email auth endpoints. There is no account lockout, so this is
+// the primary defense against online password brute-force, credential stuffing and mail-bombing.
+// Keyed by client IP; refresh/token endpoints are intentionally NOT limited (they burst legitimately
+// at client startup and aren't password-guessable).
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy(RateLimitPolicies.Auth, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 10,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
+});
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
@@ -117,6 +139,7 @@ using (var scope = app.Services.CreateScope())
     db.Database.Migrate();
 }
 
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
