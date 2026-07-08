@@ -20,7 +20,7 @@ namespace CloudLauncher.Views;
 /// <see cref="RichDescriptionHelper"/> still backs the description editor, which leans on
 /// IE-specific contenteditable behaviour.
 /// </summary>
-public sealed class RichDescriptionView : UserControl, IDisposable
+public sealed class RichDescriptionView : UserControl, IDisposable, CloudLauncher.Animations.IAirspaceHost
 {
     // A per-user writable folder is required; the default (next to the exe) is read-only
     // once the launcher is installed under Program Files.
@@ -40,6 +40,11 @@ public sealed class RichDescriptionView : UserControl, IDisposable
     private string? _lastHtml;
     private RichDescriptionOptions? _options;
     private bool _disposed;
+    // The native surface is shown only when its content has rendered AND a transition isn't
+    // suppressing it. This keeps it from "teleporting" mid-slide and avoids a flash of blank/old
+    // content on (re)creation. See IAirspaceHost.
+    private bool _hasRendered;
+    private bool _airspaceSuppressed;
 
     public RichDescriptionView()
     {
@@ -89,17 +94,21 @@ public sealed class RichDescriptionView : UserControl, IDisposable
         if (_disposed || _web is not null) return;
         _web = new WebView2 { DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x0B, 0x0D, 0x11) };
         _web.NavigationStarting += OnNavigationStarting;
+        _web.NavigationCompleted += OnNavigationCompleted;
         _web.CoreWebView2InitializationCompleted += OnCoreInitialized;
         Content = _web;
         _ready = false;
         _initStarted = false;
+        _hasRendered = false;
         _pendingHtml = _lastHtml;
+        UpdateSurfaceVisibility(); // start hidden until content renders
     }
 
     private void TeardownWebView()
     {
         if (_web is null) return;
         _web.NavigationStarting -= OnNavigationStarting;
+        _web.NavigationCompleted -= OnNavigationCompleted;
         _web.CoreWebView2InitializationCompleted -= OnCoreInitialized;
         if (_web.CoreWebView2 is not null)
             _web.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
@@ -108,6 +117,7 @@ public sealed class RichDescriptionView : UserControl, IDisposable
         _web = null;
         _ready = false;
         _initStarted = false;
+        _hasRendered = false;
     }
 
     /// <summary>Permanently release the browser host (call from host teardown). After this the
@@ -116,6 +126,29 @@ public sealed class RichDescriptionView : UserControl, IDisposable
     {
         _disposed = true;
         TeardownWebView();
+    }
+
+    // IAirspaceHost: the WebView2 is a native surface WPF can't slide, so the transition code asks
+    // us to hide it during an animation. The control keeps its own dark background, so the panel
+    // still slides as a solid block and the rendered description reappears in place, not teleporting.
+    void CloudLauncher.Animations.IAirspaceHost.SetAirspaceContentVisible(bool visible)
+    {
+        _airspaceSuppressed = !visible;
+        UpdateSurfaceVisibility();
+    }
+
+    private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+    {
+        _hasRendered = true;
+        UpdateSurfaceVisibility();
+    }
+
+    /// <summary>Show the native surface only once its content has rendered and no transition is
+    /// suppressing it; otherwise keep it hidden (the control's dark background shows through).</summary>
+    private void UpdateSurfaceVisibility()
+    {
+        if (_web is null) return;
+        _web.Visibility = _hasRendered && !_airspaceSuppressed ? Visibility.Visible : Visibility.Hidden;
     }
 
     private void NavigateOwn(string html)

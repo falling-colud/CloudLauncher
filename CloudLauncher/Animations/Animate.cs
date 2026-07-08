@@ -270,8 +270,13 @@ public static class Animate
         fe.RenderTransform = tt;
         fe.Opacity = 0;
 
+        // Native airspace surfaces (WebView2/WebBrowser) can't be moved by a RenderTransform, so
+        // they'd stay put and teleport to the final spot at the end. Hide them for the duration and
+        // restore them when the fade completes; the WPF panel behind slides as a solid block.
+        var restoreAirspace = SuppressAirspace(fe);
+
         var fade = new DoubleAnimation(0, 1, dur) { EasingFunction = EaseOut };
-        fade.Completed += (_, __) => { fe.BeginAnimation(UIElement.OpacityProperty, null); fe.Opacity = 1; };
+        fade.Completed += (_, __) => { fe.BeginAnimation(UIElement.OpacityProperty, null); fe.Opacity = 1; restoreAirspace(); };
         fe.BeginAnimation(UIElement.OpacityProperty, fade);
 
         if (fromX != 0)
@@ -286,6 +291,47 @@ public static class Animate
             ay.Completed += (_, __) => { tt.BeginAnimation(TranslateTransform.YProperty, null); tt.Y = 0; };
             tt.BeginAnimation(TranslateTransform.YProperty, ay);
         }
+    }
+
+    /// <summary>
+    /// Hides every native airspace surface under <paramref name="root"/> (WebView2 hosts that
+    /// implement <see cref="IAirspaceHost"/>, plus any legacy <see cref="System.Windows.Interop.HwndHost"/>
+    /// such as the WPF WebBrowser) for the duration of a transition, and returns an action that
+    /// restores exactly what it hid. These surfaces ignore WPF transforms, so without this they
+    /// visibly teleport into place when a slide animation ends.
+    /// </summary>
+    private static Action SuppressAirspace(DependencyObject root)
+    {
+        var restore = new List<Action>();
+
+        void Walk(DependencyObject d)
+        {
+            int n = VisualTreeHelper.GetChildrenCount(d);
+            for (int i = 0; i < n; i++)
+            {
+                var child = VisualTreeHelper.GetChild(d, i);
+                switch (child)
+                {
+                    case IAirspaceHost airspace:
+                        // Suppress unconditionally (and let the host re-reveal when ready): the
+                        // surface may not exist yet at slide start and get created mid-transition,
+                        // so gating on current visibility would miss exactly that teleport case.
+                        airspace.SetAirspaceContentVisible(false);
+                        restore.Add(() => airspace.SetAirspaceContentVisible(true));
+                        continue; // its native surface is handled — no need to descend
+                    case System.Windows.Interop.HwndHost { Visibility: Visibility.Visible } host:
+                        host.Visibility = Visibility.Hidden;
+                        restore.Add(() => host.Visibility = Visibility.Visible);
+                        continue;
+                    default:
+                        Walk(child);
+                        break;
+                }
+            }
+        }
+
+        Walk(root);
+        return () => { foreach (var r in restore) r(); };
     }
 
     // ─────────────────────────────────────────────────────────────────────────
