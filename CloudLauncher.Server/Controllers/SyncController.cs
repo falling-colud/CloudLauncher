@@ -162,9 +162,16 @@ public class SyncController(
     {
         if (entries.Count > MaxManifestEntries)
             return BadRequest(new { error = $"Too many manifest entries (max {MaxManifestEntries})." });
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var e in entries)
+        {
             if (!IsSafeRelativePath(e.RelativePath))
                 return BadRequest(new { error = $"Manifest contains an unsafe file path: '{e.RelativePath}'" });
+            // Reject paths that collide case-insensitively: they are legal on the Linux server but
+            // a duplicate key on a Windows subscriber, where they crash sync for everyone.
+            if (!seen.Add(e.RelativePath))
+                return BadRequest(new { error = $"Manifest contains a duplicate (case-insensitive) path: '{e.RelativePath}'" });
+        }
         return null;
     }
 

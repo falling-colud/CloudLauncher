@@ -12,6 +12,12 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
     private PackAssetService? _assets;
     public void SetPackAssets(PackAssetService assets) => _assets = assets;
 
+    // Set via setter (not ctor) because ModMetadataService already depends on this service —
+    // a ctor dependency would be a cycle. Used to drop the cached mods.json after a sync pulls a
+    // collaborator's newer copy, so their flags aren't shadowed by our stale in-memory doc.
+    private ModMetadataService? _modMetadata;
+    public void SetModMetadata(ModMetadataService metadata) => _modMetadata = metadata;
+
     /// <summary>Resolves <paramref name="relative"/> under <paramref name="gameDir"/> and
     /// guarantees the result stays inside the pack's game directory. Manifest relative paths
     /// originate from whoever uploaded the shared pack and are untrusted; without this guard a
@@ -450,7 +456,9 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         foreach (var hash in missingSet)
         {
             ct.ThrowIfCancellationRequested();
-            var rel = byHash[hash];
+            // Skip (don't crash) if the server asks for a blob we have no local path for — a
+            // malformed/mismatched response otherwise threw KeyNotFoundException and aborted sync.
+            if (!byHash.TryGetValue(hash, out var rel)) continue;
             var abs = Path.Combine(gameDir, rel.Replace('/', Path.DirectorySeparatorChar));
             i++;
             Report($"Uploading {i}/{missingSet.Count}: {rel}");
@@ -481,16 +489,21 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         // Compare against currently present game/ files
         var serverPaths = new HashSet<string>(manifest.Entries.Select(e => e.RelativePath), StringComparer.OrdinalIgnoreCase);
         var localByPath = await Task.Run(() =>
-            manifest.Entries.ToDictionary(
-                e => e.RelativePath,
-                e =>
-                {
-                    var abs = SafeResolve(gameDir, e.RelativePath);
-                    if (!File.Exists(abs)) return (string?)null;
-                    using var fs = File.OpenRead(abs);
-                    return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
-                },
-                StringComparer.OrdinalIgnoreCase), ct);
+        {
+            // Build manually (not ToDictionary) so two manifest entries differing only in case —
+            // legal on the Linux server, a duplicate key on Windows — don't throw ArgumentException
+            // and permanently break sync for every Windows subscriber.
+            var map = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var e in manifest.Entries)
+            {
+                if (map.ContainsKey(e.RelativePath)) continue;
+                var abs = SafeResolve(gameDir, e.RelativePath);
+                if (!File.Exists(abs)) { map[e.RelativePath] = null; continue; }
+                using var fs = File.OpenRead(abs);
+                map[e.RelativePath] = Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+            }
+            return map;
+        }, ct);
 
         var total = manifest.Entries.Count;
         var i = 0;
@@ -507,17 +520,43 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
                 $"Downloading {i}/{total}: {e.RelativePath}",
                 -1,
                 e.RelativePath);
-            await using var src = await api.DownloadBlobAsync(packId, e.Hash, ct);
-            await using var dst = File.Create(abs);
-            await CopyWithProgressAsync(src, dst, e.Size, currentFraction =>
+
+            // Download to a temp file, verify its hash, then atomically replace the real file.
+            // Writing straight to `abs` (as before) truncated the existing good copy immediately,
+            // so a network drop / cancel left a corrupt half-file at the final path with the
+            // previous good version already destroyed. Never verified the bytes, either.
+            var tmp = abs + ".cldownload";
+            try
             {
-                var overall = total == 0 ? 1 : ((i - 1) + currentFraction) / total;
-                ProgressHub.Report(packId,
-                    overall,
-                    $"Downloading {i}/{total}: {e.RelativePath}",
-                    currentFraction,
-                    e.RelativePath);
-            }, ct);
+                await using (var src = await api.DownloadBlobAsync(packId, e.Hash, ct))
+                await using (var dst = File.Create(tmp))
+                {
+                    await CopyWithProgressAsync(src, dst, e.Size, currentFraction =>
+                    {
+                        var overall = total == 0 ? 1 : ((i - 1) + currentFraction) / total;
+                        ProgressHub.Report(packId,
+                            overall,
+                            $"Downloading {i}/{total}: {e.RelativePath}",
+                            currentFraction,
+                            e.RelativePath);
+                    }, ct);
+                }
+
+                string actualHash;
+                await using (var vfs = File.OpenRead(tmp))
+                    actualHash = Convert.ToHexString(await SHA256.HashDataAsync(vfs, ct)).ToLowerInvariant();
+                if (!string.Equals(actualHash, e.Hash, StringComparison.OrdinalIgnoreCase))
+                    throw new IOException(
+                        $"Downloaded '{e.RelativePath}' failed integrity check (expected {e.Hash}, got {actualHash}).");
+
+                File.Move(tmp, abs, overwrite: true);
+            }
+            catch
+            {
+                try { if (File.Exists(tmp)) File.Delete(tmp); } catch { /* best effort */ }
+                throw;
+            }
+
             ProgressHub.Report(packId,
                 total == 0 ? 1 : (double)i / total,
                 $"Downloaded {i}/{total}: {e.RelativePath}",
@@ -544,6 +583,9 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         }
 
         SaveSyncManifestLock(packId, manifest.Entries.Select(e => e.RelativePath));
+        // Drop the cached mods.json so a collaborator's freshly-synced flags/categories are read
+        // from disk next time, instead of being overwritten by our stale in-memory copy.
+        _modMetadata?.Invalidate(packId);
         Report("Done.");
         ProgressHub.Clear(packId);
         settings.PackSyncedVersion[packId] = manifest.Version;

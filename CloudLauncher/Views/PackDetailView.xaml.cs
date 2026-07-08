@@ -1897,8 +1897,6 @@ public partial class PackDetailView : Page
             // Ensure pack assets (icon, description) are staged in game/.cloudlauncher/
             App.State.PackAssets.MirrorToSharedFolder(_pack.Id);
 
-            var manifest = await App.State.Api.GetManifestAsync(_pack.Id);
-
             // Determine which files in game/ to include: those matching "shared" rules,
             // plus any .cloudlauncher/ assets.
             var packRoot = App.State.Packs.PackRoot(_pack.Id);
@@ -1906,13 +1904,25 @@ public partial class PackDetailView : Page
             var gameDir = App.State.Packs.GameDir(_pack.Id);
             var sharedPaths = await Task.Run(() => CollectSharedPaths(gameDir, rules));
 
-            var newVersion = await App.State.Packs.UploadSharedAsync(_pack.Id, manifest.Version, sharedPaths, progress);
+            // Base the upload on the version THIS client last synced — NOT the server's current
+            // version. Fetching the current version and using it as the base defeated the server's
+            // optimistic-concurrency check: a client that hadn't pulled a collaborator's newer
+            // changes still passed the check, and its stale file set replaced the whole manifest,
+            // deleting the collaborator's files from every subscriber on their next sync. With the
+            // synced version, the server returns 409 when we're behind, forcing a download first.
+            var baseVersion = App.State.Settings.PackSyncedVersion.TryGetValue(_pack.Id, out var v) ? v : 0;
+            var newVersion = await App.State.Packs.UploadSharedAsync(_pack.Id, baseVersion, sharedPaths, progress);
 
             // Record the authoritative version the server returned from the commit (rather than
             // a redundant second manifest fetch) so the Update button stays hidden locally.
             App.State.Settings.PackSyncedVersion[_pack.Id] = newVersion;
             App.State.Settings.Save();
             await ReloadAsync();
+        }
+        catch (ApiException aex) when (aex.Status == System.Net.HttpStatusCode.Conflict)
+        {
+            StatusLabel.Text = "This pack changed on the server since you last synced. " +
+                               "Download the latest changes, then upload again.";
         }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
         finally { UploadButton.IsEnabled = true; }

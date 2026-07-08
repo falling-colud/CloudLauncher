@@ -45,6 +45,7 @@ public sealed class AppState
         CurseForge = new CurseForgeService(Api);
         ModFingerprints = new ModFingerprintCache();
         ModMetadata = new ModMetadataService(Packs);
+        Packs.SetModMetadata(ModMetadata);
         ModInventory = new PackModInventory(Packs, ModFingerprints, Modrinth, CurseForge, ModMetadata);
         TestScope = new TestLaunchScope(Packs);
         ModpackImport = new ModpackImportService(Modrinth, CurseForge, Api, Packs, ModFingerprints);

@@ -95,7 +95,12 @@ public sealed class ModMetadataService
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                File.WriteAllText(path, JsonSerializer.Serialize(doc, JsonOpts));
+                // Temp + atomic rename: a torn File.WriteAllText (crash/power loss mid-write) would
+                // leave an unparseable mods.json, which Load() silently resets to an empty doc —
+                // wiping every priority/category/side flag, which then syncs to collaborators.
+                var tmp = path + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(doc, JsonOpts));
+                File.Move(tmp, path, overwrite: true);
             }
             catch { /* best-effort; flags are non-critical */ }
         }
