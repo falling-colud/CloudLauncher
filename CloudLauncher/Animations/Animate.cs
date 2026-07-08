@@ -270,13 +270,15 @@ public static class Animate
         fe.RenderTransform = tt;
         fe.Opacity = 0;
 
-        // Native airspace surfaces (WebView2/WebBrowser) can't be moved by a RenderTransform, so
-        // they'd stay put and teleport to the final spot at the end. Hide them for the duration and
-        // restore them when the fade completes; the WPF panel behind slides as a solid block.
-        var restoreAirspace = SuppressAirspace(fe);
+        // A native airspace surface (WebView2) can't be moved by a RenderTransform, so it would stay
+        // put and teleport to its final spot at the end. Announce the transition so any airspace host
+        // under `fe` hides its surface for the duration and reveals it after. This is time-based and
+        // self-checking (see IsTransitionActiveFor), which — unlike a one-shot tree walk — also
+        // catches a surface created *during* the slide (e.g. a WebView2 rebuilt when its tab is revisited).
+        BeginAirspaceTransition(fe, ms);
 
         var fade = new DoubleAnimation(0, 1, dur) { EasingFunction = EaseOut };
-        fade.Completed += (_, __) => { fe.BeginAnimation(UIElement.OpacityProperty, null); fe.Opacity = 1; restoreAirspace(); };
+        fade.Completed += (_, __) => { fe.BeginAnimation(UIElement.OpacityProperty, null); fe.Opacity = 1; };
         fe.BeginAnimation(UIElement.OpacityProperty, fade);
 
         if (fromX != 0)
@@ -293,46 +295,37 @@ public static class Animate
         }
     }
 
-    /// <summary>
-    /// Hides every native airspace surface under <paramref name="root"/> (WebView2 hosts that
-    /// implement <see cref="IAirspaceHost"/>, plus any legacy <see cref="System.Windows.Interop.HwndHost"/>
-    /// such as the WPF WebBrowser) for the duration of a transition, and returns an action that
-    /// restores exactly what it hid. These surfaces ignore WPF transforms, so without this they
-    /// visibly teleport into place when a slide animation ends.
-    /// </summary>
-    private static Action SuppressAirspace(DependencyObject root)
+    // ── airspace transition coordination ──────────────────────────────────────
+    // Which element is animating, and until when. Time-based so there is no begin/end bookkeeping
+    // that could leak and leave a surface hidden forever if an animation is superseded.
+    private static FrameworkElement? _transitionRoot;
+    private static DateTime _transitionActiveUntil = DateTime.MinValue;
+
+    /// <summary>Raised when a transition starts. Airspace hosts re-check <see cref="IsTransitionActiveFor"/>.</summary>
+    public static event Action? AirspaceTransitionChanged;
+
+    private static void BeginAirspaceTransition(FrameworkElement root, double ms)
     {
-        var restore = new List<Action>();
-
-        void Walk(DependencyObject d)
-        {
-            int n = VisualTreeHelper.GetChildrenCount(d);
-            for (int i = 0; i < n; i++)
-            {
-                var child = VisualTreeHelper.GetChild(d, i);
-                switch (child)
-                {
-                    case IAirspaceHost airspace:
-                        // Suppress unconditionally (and let the host re-reveal when ready): the
-                        // surface may not exist yet at slide start and get created mid-transition,
-                        // so gating on current visibility would miss exactly that teleport case.
-                        airspace.SetAirspaceContentVisible(false);
-                        restore.Add(() => airspace.SetAirspaceContentVisible(true));
-                        continue; // its native surface is handled — no need to descend
-                    case System.Windows.Interop.HwndHost { Visibility: Visibility.Visible } host:
-                        host.Visibility = Visibility.Hidden;
-                        restore.Add(() => host.Visibility = Visibility.Visible);
-                        continue;
-                    default:
-                        Walk(child);
-                        break;
-                }
-            }
-        }
-
-        Walk(root);
-        return () => { foreach (var r in restore) r(); };
+        _transitionRoot = root;
+        // Small buffer past the animation so the reveal lands after it visually settles.
+        var until = DateTime.Now.AddMilliseconds(ms + 60);
+        if (until > _transitionActiveUntil) _transitionActiveUntil = until;
+        AirspaceTransitionChanged?.Invoke();
     }
+
+    /// <summary>True while a slide transition is in flight on an ancestor of <paramref name="element"/>.
+    /// Airspace hosts call this to decide whether to keep their native surface hidden.</summary>
+    public static bool IsTransitionActiveFor(DependencyObject element)
+    {
+        if (_transitionRoot is null || DateTime.Now >= _transitionActiveUntil) return false;
+        for (DependencyObject? n = element; n is not null; n = VisualTreeHelper.GetParent(n))
+            if (ReferenceEquals(n, _transitionRoot)) return true;
+        return false;
+    }
+
+    /// <summary>Milliseconds remaining until the current transition's reveal point (0 if none).</summary>
+    public static double TransitionRemainingMs =>
+        Math.Max(0, (_transitionActiveUntil - DateTime.Now).TotalMilliseconds);
 
     // ─────────────────────────────────────────────────────────────────────────
     //  SMOOTH SCROLL — animate the wheel instead of jumping line-by-line.

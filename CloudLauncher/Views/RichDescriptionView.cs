@@ -20,7 +20,7 @@ namespace CloudLauncher.Views;
 /// <see cref="RichDescriptionHelper"/> still backs the description editor, which leans on
 /// IE-specific contenteditable behaviour.
 /// </summary>
-public sealed class RichDescriptionView : UserControl, IDisposable, CloudLauncher.Animations.IAirspaceHost
+public sealed class RichDescriptionView : UserControl, IDisposable
 {
     // A per-user writable folder is required; the default (next to the exe) is read-only
     // once the launcher is installed under Program Files.
@@ -45,6 +45,9 @@ public sealed class RichDescriptionView : UserControl, IDisposable, CloudLaunche
     // content on (re)creation. See IAirspaceHost.
     private bool _hasRendered;
     private bool _airspaceSuppressed;
+    // Fires when the transition's slide is over, so we reveal the surface even if the (time-based)
+    // transition window is a bit longer than the animation.
+    private readonly System.Windows.Threading.DispatcherTimer _revealTimer = new();
 
     public RichDescriptionView()
     {
@@ -55,8 +58,20 @@ public sealed class RichDescriptionView : UserControl, IDisposable, CloudLaunche
         // Show a blank document until the first real Show() so the panel isn't an empty void.
         _pendingHtml = PackText.WrapHtmlDocument("<p><em>No description.</em></p>", legacyIe: false);
         _lastHtml = _pendingHtml;
-        Loaded += (_, _) => { EnsureWebView(); EnsureWebViewInitialized(); };
-        Unloaded += (_, _) => TeardownWebView();
+        _revealTimer.Tick += OnRevealTimerTick;
+        Loaded += (_, _) =>
+        {
+            Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged; // avoid double-subscribe
+            Animations.Animate.AirspaceTransitionChanged += OnAirspaceTransitionChanged;
+            EnsureWebView();
+            EnsureWebViewInitialized();
+        };
+        Unloaded += (_, _) =>
+        {
+            Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
+            _revealTimer.Stop();
+            TeardownWebView();
+        };
     }
 
     /// <summary>Render a description (HTML or markdown) into the view.</summary>
@@ -101,6 +116,10 @@ public sealed class RichDescriptionView : UserControl, IDisposable, CloudLaunche
         _initStarted = false;
         _hasRendered = false;
         _pendingHtml = _lastHtml;
+        // If we're being (re)created in the middle of a slide on an ancestor (e.g. this tab was
+        // just revisited), suppress until that transition settles so the surface doesn't pop in
+        // mid-slide and teleport.
+        if (Animations.Animate.IsTransitionActiveFor(this)) SuppressForTransition();
         UpdateSurfaceVisibility(); // start hidden until content renders
     }
 
@@ -125,15 +144,37 @@ public sealed class RichDescriptionView : UserControl, IDisposable, CloudLaunche
     public void Dispose()
     {
         _disposed = true;
+        Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
+        _revealTimer.Stop();
         TeardownWebView();
     }
 
-    // IAirspaceHost: the WebView2 is a native surface WPF can't slide, so the transition code asks
-    // us to hide it during an animation. The control keeps its own dark background, so the panel
-    // still slides as a solid block and the rendered description reappears in place, not teleporting.
-    void CloudLauncher.Animations.IAirspaceHost.SetAirspaceContentVisible(bool visible)
+    // The WebView2 is a native surface WPF can't slide, so during a transition we hide it (the
+    // control keeps its own dark background, so the panel slides as a solid block) and reveal it
+    // once the slide is over — the description appears in place instead of teleporting.
+    private void OnAirspaceTransitionChanged()
     {
-        _airspaceSuppressed = !visible;
+        if (Animations.Animate.IsTransitionActiveFor(this))
+            SuppressForTransition();
+    }
+
+    private void SuppressForTransition()
+    {
+        _airspaceSuppressed = true;
+        UpdateSurfaceVisibility();
+        // Reveal shortly after the slide settles. Restart on each transition so overlapping ones
+        // extend the suppression rather than cutting it short.
+        _revealTimer.Stop();
+        _revealTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(1, Animations.Animate.TransitionRemainingMs));
+        _revealTimer.Start();
+    }
+
+    private void OnRevealTimerTick(object? sender, EventArgs e)
+    {
+        _revealTimer.Stop();
+        // If another transition started meanwhile, wait for it instead of revealing mid-slide.
+        if (Animations.Animate.IsTransitionActiveFor(this)) { SuppressForTransition(); return; }
+        _airspaceSuppressed = false;
         UpdateSurfaceVisibility();
     }
 
