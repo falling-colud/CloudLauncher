@@ -3,6 +3,8 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using CloudLauncher.Services;
 using CloudLauncher.Shared;
 using Microsoft.Web.WebView2.Core;
@@ -19,6 +21,12 @@ namespace CloudLauncher.Views;
 /// routing, X-UA-Compatible quirks) aren't needed here. The legacy
 /// <see cref="RichDescriptionHelper"/> still backs the description editor, which leans on
 /// IE-specific contenteditable behaviour.
+///
+/// WebView2 is a native ("airspace") surface WPF can't move with a RenderTransform, so during a
+/// page/tab slide it would sit still and teleport into place at the end. To animate smoothly we
+/// keep a bitmap snapshot of the rendered description and, while a transition is in flight on an
+/// ancestor, show that snapshot (a normal WPF visual that slides with the transform) in place of
+/// the live surface, swapping back once the slide settles.
 /// </summary>
 public sealed class RichDescriptionView : UserControl, IDisposable
 {
@@ -28,50 +36,57 @@ public sealed class RichDescriptionView : UserControl, IDisposable
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "CloudLauncher", "WebView2");
 
-    // Created on Loaded and disposed on Unloaded. WebView2 owns a native browser host, so leaving
-    // one live per browse page (which the navigation journal used to retain forever) was a real
-    // memory leak. Disposing on unload + recreating on load releases it deterministically while
-    // still surviving back-stack navigation (the page reloads and we re-render _lastHtml).
-    private WebView2? _web;
+    private readonly WebView2 _web = new();
+    // Overlay shown during a transition: the last rendered frame, which slides with the animation.
+    private readonly Image _snapshot = new() { Stretch = Stretch.Fill, Visibility = Visibility.Collapsed };
+    private readonly DispatcherTimer _revealTimer = new();
+
     private bool _initStarted;
     private bool _ready;
     private bool _loadingOwnContent;
+    private bool _disposed;
+    private bool _transitionActive;
     private string? _pendingHtml;
     private string? _lastHtml;
     private RichDescriptionOptions? _options;
-    private bool _disposed;
-    // The native surface is shown only when its content has rendered AND a transition isn't
-    // suppressing it. This keeps it from "teleporting" mid-slide and avoids a flash of blank/old
-    // content on (re)creation. See IAirspaceHost.
-    private bool _hasRendered;
-    private bool _airspaceSuppressed;
-    // Fires when the transition's slide is over, so we reveal the surface even if the (time-based)
-    // transition window is a bit longer than the animation.
-    private readonly System.Windows.Threading.DispatcherTimer _revealTimer = new();
 
     public RichDescriptionView()
     {
         // Paint the document background underneath so there's no white flash before the
         // first frame renders (matches the body colour in WrapHtmlDocument).
         Background = new SolidColorBrush(Color.FromRgb(0x0B, 0x0D, 0x11));
+        _web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x0B, 0x0D, 0x11);
+        _web.NavigationStarting += OnNavigationStarting;
+        _web.NavigationCompleted += OnNavigationCompleted;
+        _web.CoreWebView2InitializationCompleted += OnCoreInitialized;
+
+        var grid = new Grid();
+        grid.Children.Add(_web);
+        grid.Children.Add(_snapshot); // overlays the web view while a transition slides
+        Content = grid;
 
         // Show a blank document until the first real Show() so the panel isn't an empty void.
         _pendingHtml = PackText.WrapHtmlDocument("<p><em>No description.</em></p>", legacyIe: false);
         _lastHtml = _pendingHtml;
+
         _revealTimer.Tick += OnRevealTimerTick;
-        Loaded += (_, _) =>
-        {
-            Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged; // avoid double-subscribe
-            Animations.Animate.AirspaceTransitionChanged += OnAirspaceTransitionChanged;
-            EnsureWebView();
-            EnsureWebViewInitialized();
-        };
-        Unloaded += (_, _) =>
-        {
-            Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
-            _revealTimer.Stop();
-            TeardownWebView();
-        };
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged; // avoid double-subscribe
+        Animations.Animate.AirspaceTransitionChanged += OnAirspaceTransitionChanged;
+        // If we loaded into a transition already in flight, cover with the snapshot immediately.
+        if (Animations.Animate.IsTransitionActiveFor(this)) BeginTransitionOverlay();
+        EnsureWebViewInitialized();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
+        _revealTimer.Stop();
     }
 
     /// <summary>Render a description (HTML or markdown) into the view.</summary>
@@ -92,78 +107,32 @@ public sealed class RichDescriptionView : UserControl, IDisposable
         }
 
         _lastHtml = html;
-        if (_ready && _web is not null)
+        if (_ready)
             NavigateOwn(html);
         else
         {
             _pendingHtml = html;
-            EnsureWebView();
             EnsureWebViewInitialized();
         }
     }
 
-    /// <summary>Create the WebView2 (idempotent). Recreates it after an unload/dispose cycle and
-    /// re-queues the last-shown HTML so back-navigation restores the same content.</summary>
-    private void EnsureWebView()
-    {
-        if (_disposed || _web is not null) return;
-        _web = new WebView2 { DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x0B, 0x0D, 0x11) };
-        _web.NavigationStarting += OnNavigationStarting;
-        _web.NavigationCompleted += OnNavigationCompleted;
-        _web.CoreWebView2InitializationCompleted += OnCoreInitialized;
-        Content = _web;
-        _ready = false;
-        _initStarted = false;
-        _hasRendered = false;
-        _pendingHtml = _lastHtml;
-        // If we're being (re)created in the middle of a slide on an ancestor (e.g. this tab was
-        // just revisited), suppress until that transition settles so the surface doesn't pop in
-        // mid-slide and teleport.
-        if (Animations.Animate.IsTransitionActiveFor(this)) SuppressForTransition();
-        UpdateSurfaceVisibility(); // start hidden until content renders
-    }
+    // ── transition handling (airspace-safe slide) ─────────────────────────────
 
-    private void TeardownWebView()
-    {
-        if (_web is null) return;
-        _web.NavigationStarting -= OnNavigationStarting;
-        _web.NavigationCompleted -= OnNavigationCompleted;
-        _web.CoreWebView2InitializationCompleted -= OnCoreInitialized;
-        if (_web.CoreWebView2 is not null)
-            _web.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
-        Content = null;
-        _web.Dispose();
-        _web = null;
-        _ready = false;
-        _initStarted = false;
-        _hasRendered = false;
-    }
-
-    /// <summary>Permanently release the browser host (call from host teardown). After this the
-    /// control will not recreate its WebView2.</summary>
-    public void Dispose()
-    {
-        _disposed = true;
-        Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
-        _revealTimer.Stop();
-        TeardownWebView();
-    }
-
-    // The WebView2 is a native surface WPF can't slide, so during a transition we hide it (the
-    // control keeps its own dark background, so the panel slides as a solid block) and reveal it
-    // once the slide is over — the description appears in place instead of teleporting.
     private void OnAirspaceTransitionChanged()
     {
         if (Animations.Animate.IsTransitionActiveFor(this))
-            SuppressForTransition();
+            BeginTransitionOverlay();
     }
 
-    private void SuppressForTransition()
+    /// <summary>Cover the live surface with the (sliding) snapshot for the rest of the transition.</summary>
+    private void BeginTransitionOverlay()
     {
-        _airspaceSuppressed = true;
-        UpdateSurfaceVisibility();
-        // Reveal shortly after the slide settles. Restart on each transition so overlapping ones
-        // extend the suppression rather than cutting it short.
+        if (_snapshot.Source is not null)
+        {
+            _snapshot.Visibility = Visibility.Visible;
+            _web.Visibility = Visibility.Hidden;
+        }
+        _transitionActive = true;
         _revealTimer.Stop();
         _revealTimer.Interval = TimeSpan.FromMilliseconds(Math.Max(1, Animations.Animate.TransitionRemainingMs));
         _revealTimer.Start();
@@ -172,43 +141,56 @@ public sealed class RichDescriptionView : UserControl, IDisposable
     private void OnRevealTimerTick(object? sender, EventArgs e)
     {
         _revealTimer.Stop();
-        // If another transition started meanwhile, wait for it instead of revealing mid-slide.
-        if (Animations.Animate.IsTransitionActiveFor(this)) { SuppressForTransition(); return; }
-        _airspaceSuppressed = false;
-        UpdateSurfaceVisibility();
+        // A newer transition may have started while this one was settling — keep covering if so.
+        if (Animations.Animate.IsTransitionActiveFor(this)) { BeginTransitionOverlay(); return; }
+        _transitionActive = false;
+        _web.Visibility = Visibility.Visible;
+        _snapshot.Visibility = Visibility.Collapsed;
     }
 
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
-        _hasRendered = true;
-        UpdateSurfaceVisibility();
+        if (!_transitionActive) _web.Visibility = Visibility.Visible;
+        _ = CaptureSnapshotAsync();
     }
 
-    /// <summary>Show the native surface only once its content has rendered and no transition is
-    /// suppressing it; otherwise keep it hidden (the control's dark background shows through).</summary>
-    private void UpdateSurfaceVisibility()
+    /// <summary>Grab the current rendered frame so a subsequent transition has something to slide.</summary>
+    private async Task CaptureSnapshotAsync()
     {
-        if (_web is null) return;
-        _web.Visibility = _hasRendered && !_airspaceSuppressed ? Visibility.Visible : Visibility.Hidden;
+        if (_web.CoreWebView2 is null) return;
+        try
+        {
+            using var ms = new MemoryStream();
+            await _web.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, ms);
+            ms.Position = 0;
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;
+            bmp.StreamSource = ms;
+            bmp.EndInit();
+            bmp.Freeze();
+            _snapshot.Source = bmp;
+        }
+        catch { /* snapshot is best-effort; without it a transition just hides the surface */ }
     }
+
+    // ── WebView2 plumbing ─────────────────────────────────────────────────────
 
     private void NavigateOwn(string html)
     {
-        if (_web is null) return;
         _loadingOwnContent = true;
         _web.NavigateToString(html);
     }
 
     private async void EnsureWebViewInitialized()
     {
-        if (_initStarted || _web is null) return;
+        if (_initStarted || _disposed) return;
         _initStarted = true;
         try
         {
             Directory.CreateDirectory(UserDataFolder);
             var env = await CoreWebView2Environment.CreateAsync(null, UserDataFolder, null);
-            if (_web is not null)
-                await _web.EnsureCoreWebView2Async(env);
+            await _web.EnsureCoreWebView2Async(env);
         }
         catch (Exception ex)
         {
@@ -220,7 +202,6 @@ public sealed class RichDescriptionView : UserControl, IDisposable
 
     private void OnCoreInitialized(object? sender, CoreWebView2InitializationCompletedEventArgs e)
     {
-        if (_web is null) return;
         if (!e.IsSuccess || _web.CoreWebView2 is null)
         {
             if (e.InitializationException is { } ex)
@@ -290,5 +271,22 @@ public sealed class RichDescriptionView : UserControl, IDisposable
 
         try { Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true }); }
         catch { /* best effort — a dead link shouldn't throw into the UI */ }
+    }
+
+    /// <summary>Release the native browser host. Optional — the control is collectible once its
+    /// page is discarded (the navigation journal no longer pins it); hosts may call this for
+    /// prompt cleanup (e.g. a browse window closing).</summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
+        _revealTimer.Stop();
+        _web.NavigationStarting -= OnNavigationStarting;
+        _web.NavigationCompleted -= OnNavigationCompleted;
+        _web.CoreWebView2InitializationCompleted -= OnCoreInitialized;
+        if (_web.CoreWebView2 is not null)
+            _web.CoreWebView2.NewWindowRequested -= OnNewWindowRequested;
+        _web.Dispose();
     }
 }
