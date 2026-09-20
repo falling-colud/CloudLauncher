@@ -8,6 +8,8 @@ public enum ModBrowseSource
     Personal = 3
 }
 
+/// <param name="VersionCount">How many versions have been uploaded. Zero means the mod page exists
+/// but has no file behind it yet, which is the difference between "install" and "nothing to install".</param>
 public sealed record HostedModSummary(
     Guid Id,
     string Slug,
@@ -22,7 +24,8 @@ public sealed record HostedModSummary(
     long DownloadCount,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    PackPermissions EffectivePermissions);
+    PackPermissions EffectivePermissions,
+    int VersionCount);
 
 public sealed record HostedModDetail(
     Guid Id,
@@ -69,11 +72,21 @@ public sealed record CreateModRequest(
     string? InitialMcVersionsCsv,
     string? InitialLoadersCsv);
 
+/// <summary>Patch for a hosted mod. Every property is optional; null leaves the stored value alone.</summary>
+/// <param name="McVersionsCsv">Replaces the mod's advertised Minecraft versions.</param>
+/// <param name="LoadersCsv">Replaces the mod's advertised loaders; normalised to lower case server-side.</param>
+/// <remarks>
+/// The two compatibility fields are editable here because uploading a version was previously the
+/// only thing that could write them: a mod created against the wrong Minecraft version stayed wrong
+/// forever, and the only way to correct it was to upload a file that said otherwise.
+/// </remarks>
 public sealed record UpdateModRequest(
     string? Name,
     string? Summary,
     string? Description,
-    PackVisibility? Visibility);
+    PackVisibility? Visibility,
+    string? McVersionsCsv = null,
+    string? LoadersCsv = null);
 
 public sealed record CreateModVersionRequest(
     string VersionString,

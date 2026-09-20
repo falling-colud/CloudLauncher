@@ -65,11 +65,20 @@ public class SharedWorldsController(AppDbContext db, SharedWorldPermissionResolv
         var total = await query.CountAsync(ct);
         var page = await query.OrderByDescending(w => w.UpdatedAt).Skip(offset).Take(limit).ToListAsync(ct);
 
+        // One grouped count for the whole page rather than a COUNT per row. Worlds with no uploaded
+        // version are simply absent from the dictionary and fall through to 0 below.
+        var pageIds = page.Select(w => w.Id).ToList();
+        var versionCounts = await db.SharedWorldVersions
+            .Where(v => pageIds.Contains(v.WorldId))
+            .GroupBy(v => v.WorldId)
+            .Select(g => new { WorldId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.WorldId, x => x.Count, ct);
+
         var items = new List<SharedWorldSummary>(page.Count);
         foreach (var w in page)
         {
             var perms = await resolver.GetAsync(w, me, ct);
-            items.Add(ToSummary(w, perms));
+            items.Add(ToSummary(w, perms, versionCounts.GetValueOrDefault(w.Id)));
         }
         return Ok(new WorldBrowsePage(items, offset, limit, total));
     }
@@ -132,7 +141,7 @@ public class SharedWorldsController(AppDbContext db, SharedWorldPermissionResolv
         db.SharedWorlds.Add(w);
         await db.SaveChangesAsync(ct);
         await db.Entry(w).Reference(x => x.Owner).LoadAsync(ct);
-        return Ok(ToSummary(w, PackPermissions.Full));
+        return Ok(ToSummary(w, PackPermissions.Full, versionCount: 0));
     }
 
     [HttpPatch("{id:guid}")]
@@ -147,6 +156,9 @@ public class SharedWorldsController(AppDbContext db, SharedWorldPermissionResolv
         if (req.Summary is not null) w.Summary = req.Summary;
         if (req.Description is not null) w.Description = req.Description;
         if (req.Visibility is not null) w.Visibility = req.Visibility.Value;
+        // Only a version upload could write this before, so a world created against the wrong
+        // Minecraft version had no way back. Null still means "leave it alone".
+        if (req.McVersion is not null) w.McVersion = req.McVersion;
         w.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
         return NoContent();
@@ -326,6 +338,33 @@ public class SharedWorldsController(AppDbContext db, SharedWorldPermissionResolv
             version.McVersion, version.PublishedAt));
     }
 
+    /// <summary>Removes one uploaded version of a shared world.</summary>
+    /// <remarks>
+    /// Deleting the last version is allowed and leaves the world itself in place — a world page with
+    /// no save behind it is a valid state (it is exactly what <see cref="Create"/> produces), and
+    /// making the final delete a special case would mean the owner could never clear a bad upload.
+    /// </remarks>
+    [HttpDelete("{id:guid}/versions/{versionId:guid}")]
+    public async Task<IActionResult> DeleteVersion(Guid id, Guid versionId, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var w = await db.SharedWorlds.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (w is null) return NotFound();
+        if (w.OwnerId != me) return Forbid();
+
+        var version = await db.SharedWorldVersions
+            .FirstOrDefaultAsync(v => v.Id == versionId && v.WorldId == id, ct);
+        if (version is null) return NotFound();
+
+        var hash = version.BlobHash;
+        db.SharedWorldVersions.Remove(version);
+        w.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, hash, ct);
+        return NoContent();
+    }
+
     [HttpGet("{id:guid}/files/{versionId:guid}")]
     public async Task<IActionResult> Download(Guid id, Guid versionId, CancellationToken ct)
     {
@@ -360,8 +399,8 @@ public class SharedWorldsController(AppDbContext db, SharedWorldPermissionResolv
         return candidate;
     }
 
-    private static SharedWorldSummary ToSummary(SharedWorld w, PackPermissions perms) => new(
+    private static SharedWorldSummary ToSummary(SharedWorld w, PackPermissions perms, int versionCount) => new(
         w.Id, w.Slug, w.Name, w.Summary, w.OwnerId, w.Owner.UserName ?? "",
         w.Visibility, w.IconBlobHash, w.McVersion,
-        w.CreatedAt, w.UpdatedAt, perms);
+        w.CreatedAt, w.UpdatedAt, perms, versionCount);
 }

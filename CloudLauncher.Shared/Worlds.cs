@@ -8,6 +8,8 @@ public enum WorldBrowseSource
     Personal = 3
 }
 
+/// <param name="VersionCount">How many versions have been uploaded. Zero means the world page exists
+/// but has no save behind it yet, which is the difference between "install" and "nothing to install".</param>
 public sealed record SharedWorldSummary(
     Guid Id,
     string Slug,
@@ -20,7 +22,8 @@ public sealed record SharedWorldSummary(
     string? McVersion,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    PackPermissions EffectivePermissions);
+    PackPermissions EffectivePermissions,
+    int VersionCount);
 
 public sealed record SharedWorldDetail(
     Guid Id,
@@ -63,11 +66,18 @@ public sealed record CreateWorldRequest(
     PackVisibility Visibility,
     string? McVersion);
 
+/// <summary>Patch for a shared world. Every property is optional; null leaves the stored value alone.</summary>
+/// <param name="McVersion">Replaces the world's advertised Minecraft version.</param>
+/// <remarks>
+/// Compatibility is editable here because uploading a version was previously the only thing that
+/// could write it: a world created against the wrong Minecraft version could never be corrected.
+/// </remarks>
 public sealed record UpdateWorldRequest(
     string? Name,
     string? Summary,
     string? Description,
-    PackVisibility? Visibility);
+    PackVisibility? Visibility,
+    string? McVersion = null);
 
 public sealed record CreateWorldVersionRequest(
     string VersionString,

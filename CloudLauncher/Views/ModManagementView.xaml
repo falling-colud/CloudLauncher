@@ -9,6 +9,9 @@
         <!-- How wide a row's name/meta block may get before the row's buttons start. Replaced at load
              from Settings → Mods; DynamicResource is what lets a change reach the rows already built. -->
         <sys:Double x:Key="ModRowContentWidth">620</sys:Double>
+        <!-- Which edge of the leftover space a row's buttons hug. Right by default so a wide window
+             keeps a straight column of controls; Settings → Mods can pull them back beside the name. -->
+        <HorizontalAlignment x:Key="ModRowActionsAlign">Right</HorizontalAlignment>
         <local:PriorityToBrushConverter x:Key="PriorityBrush"/>
         <local:PriorityToVisibilityConverter x:Key="PriorityVis"/>
         <local:BoolToVisibilityConverter x:Key="BoolVis"/>
@@ -259,12 +262,13 @@
                                                     <ColumnDefinition Width="5"/>
                                                     <ColumnDefinition Width="Auto"/>
                                                     <ColumnDefinition Width="Auto"/>
-                                                    <!-- Name/meta block, capped: everything after it
-                                                         (including Options) then sits a short mouse
-                                                         hop from the mod instead of at the far edge
-                                                         of a wide monitor. Settings → Mods tunes it. -->
+                                                    <!-- Name/meta block, capped so it does not stretch
+                                                         across a wide monitor. Settings → Mods tunes
+                                                         the cap. -->
                                                     <ColumnDefinition Width="*" MaxWidth="{DynamicResource ModRowContentWidth}"/>
-                                                    <ColumnDefinition Width="Auto"/>
+                                                    <!-- Everything left over. The action cluster lives
+                                                         in here and hugs whichever edge
+                                                         Settings → Mods asks for (right by default). -->
                                                     <ColumnDefinition Width="*"/>
                                                 </Grid.ColumnDefinitions>
 
@@ -348,7 +352,8 @@
 
                                                 <!-- actions -->
                                                 <StackPanel Grid.Column="4" Orientation="Horizontal"
-                                                            VerticalAlignment="Center" Margin="0,0,10,0">
+                                                            HorizontalAlignment="{DynamicResource ModRowActionsAlign}"
+                                                            VerticalAlignment="Center" Margin="0,0,14,0">
                                                     <Button Content="Update" Click="OnUpdateClick" Padding="10,4" FontSize="11"
                                                             MinHeight="0" Margin="0,0,8,0"
                                                             Visibility="{Binding HasUpdate, Converter={StaticResource BoolVis}}"/>

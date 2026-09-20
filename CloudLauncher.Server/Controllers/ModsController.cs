@@ -70,11 +70,20 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
             .Skip(offset).Take(limit)
             .ToListAsync(ct);
 
+        // One grouped count for the whole page rather than a COUNT per row. Mods with no uploaded
+        // version are simply absent from the dictionary and fall through to 0 below.
+        var pageIds = page.Select(m => m.Id).ToList();
+        var versionCounts = await db.ModVersions
+            .Where(v => pageIds.Contains(v.ModId))
+            .GroupBy(v => v.ModId)
+            .Select(g => new { ModId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.ModId, x => x.Count, ct);
+
         var items = new List<HostedModSummary>(page.Count);
         foreach (var m in page)
         {
             var perms = await resolver.GetAsync(m, me, ct);
-            items.Add(ToSummary(m, perms));
+            items.Add(ToSummary(m, perms, versionCounts.GetValueOrDefault(m.Id)));
         }
         return Ok(new ModBrowsePage(items, offset, limit, total));
     }
@@ -145,7 +154,7 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         db.Mods.Add(mod);
         await db.SaveChangesAsync(ct);
         await db.Entry(mod).Reference(m => m.Owner).LoadAsync(ct);
-        return Ok(ToSummary(mod, PackPermissions.Full));
+        return Ok(ToSummary(mod, PackPermissions.Full, versionCount: 0));
     }
 
     [HttpPatch("{id:guid}")]
@@ -160,6 +169,10 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         if (req.Summary is not null) { if (req.Summary.Length > 512) return BadRequest(); mod.Summary = req.Summary; }
         if (req.Description is not null) { if (req.Description.Length > 4096) return BadRequest(); mod.Description = req.Description; }
         if (req.Visibility is not null) mod.Visibility = req.Visibility.Value;
+        // Compatibility is normalised the same way Create does it, so a loader typed as "NeoForge"
+        // here still matches the lower-cased values the browse filter compares against.
+        if (req.McVersionsCsv is not null) mod.McVersionsCsv = req.McVersionsCsv;
+        if (req.LoadersCsv is not null) mod.LoadersCsv = req.LoadersCsv.ToLowerInvariant();
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
         return NoContent();
@@ -344,6 +357,32 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
             version.McVersionsCsv, version.LoadersCsv, version.PublishedAt));
     }
 
+    /// <summary>Removes one uploaded version of a mod.</summary>
+    /// <remarks>
+    /// Deleting the last version is allowed and leaves the mod itself in place — a mod page with no
+    /// file behind it is a valid state (it is exactly what <see cref="Create"/> produces), and making
+    /// the final delete a special case would mean the owner could never clear a bad upload.
+    /// </remarks>
+    [HttpDelete("{id:guid}/versions/{versionId:guid}")]
+    public async Task<IActionResult> DeleteVersion(Guid id, Guid versionId, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        if (mod is null) return NotFound();
+        if (mod.OwnerId != me) return Forbid();
+
+        var version = await db.ModVersions.FirstOrDefaultAsync(v => v.Id == versionId && v.ModId == id, ct);
+        if (version is null) return NotFound();
+
+        var hash = version.BlobHash;
+        db.ModVersions.Remove(version);
+        mod.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, hash, ct);
+        return NoContent();
+    }
+
     [HttpGet("{id:guid}/files/{versionId:guid}")]
     public async Task<IActionResult> Download(Guid id, Guid versionId, CancellationToken ct)
     {
@@ -378,9 +417,9 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         return candidate;
     }
 
-    private static HostedModSummary ToSummary(Mod m, PackPermissions perms) => new(
+    private static HostedModSummary ToSummary(Mod m, PackPermissions perms, int versionCount) => new(
         m.Id, m.Slug, m.Name, m.Summary, m.OwnerId, m.Owner.UserName ?? "",
         m.Visibility, m.IconBlobHash, m.McVersionsCsv, m.LoadersCsv,
         0, // DownloadCount placeholder — wire to a real counter later
-        m.CreatedAt, m.UpdatedAt, perms);
+        m.CreatedAt, m.UpdatedAt, perms, versionCount);
 }

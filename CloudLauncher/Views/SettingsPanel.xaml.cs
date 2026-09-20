@@ -40,6 +40,7 @@ public partial class SettingsPanel : Page
             };
             ModRowWidthSlider.Value = s.EffectiveModRowContentWidth;
             ModRowWidthLabel.Text = $"{(int)ModRowWidthSlider.Value} px";
+            ModRowActionsRightBox.IsChecked = s.ModRowActionsAtRight;
             UseCustomGameWindowBox.IsChecked = s.UseCustomGameWindow;
             CustomGameWindowOptions.IsEnabled = s.UseCustomGameWindow;
             MinecraftWindowKey.Bound = s.MinecraftWindowToggleKey;
@@ -83,6 +84,13 @@ public partial class SettingsPanel : Page
         if (ModRowWidthLabel is not null) ModRowWidthLabel.Text = $"{(int)ModRowWidthSlider.Value} px";
         if (_suppress) return;
         App.State.Settings.ModRowContentWidth = ModRowWidthSlider.Value;
+        App.State.Settings.Save();
+    }
+
+    private void OnModRowActionsChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppress) return;
+        App.State.Settings.ModRowActionsAtRight = ModRowActionsRightBox.IsChecked == true;
         App.State.Settings.Save();
     }
 

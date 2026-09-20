@@ -26,3 +26,10 @@ public sealed record GoogleAuthPollResponse(
     string? Error = null);
 
 public sealed record UserSummary(Guid Id, string Username, bool EmailConfirmed);
+
+/// <summary>Change the signed-in user's own password.</summary>
+/// <remarks>
+/// The current password is required even though the caller is already authenticated: an access
+/// token left behind on a shared machine should not be enough to lock its owner out of the account.
+/// </remarks>
+public sealed record ChangePasswordRequest(string CurrentPassword, string NewPassword);

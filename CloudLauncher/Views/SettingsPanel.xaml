@@ -260,7 +260,13 @@
                     </DockPanel>
                     <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
                                Margin="150,8,0,0" TextWrapping="Wrap"
-                               Text="How far a mod's name and version may run in the List view before its buttons start. Lower it to keep Options within a short mouse hop of the mod on a wide monitor."/>
+                               Text="How far a mod's name and version may run in the List view before it is trimmed."/>
+
+                    <CheckBox x:Name="ModRowActionsRightBox" Margin="150,14,0,0" Click="OnModRowActionsChanged"
+                              Content="Keep row buttons at the right edge"/>
+                    <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                               Margin="150,6,0,0" TextWrapping="Wrap"
+                               Text="On gives every row one straight column of controls down the right of the list. Off tucks them in right after the mod's name, a shorter mouse hop away on a wide monitor."/>
                 </StackPanel>
             </Border>
 

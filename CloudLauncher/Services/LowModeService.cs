@@ -1,9 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
 
@@ -611,6 +612,54 @@ public static class LowModeService
     }
 
     /// <summary>Reads the effective preference for a pack. Missing entry means ON.</summary>
+    /// <remarks>Only meaningful for a pack <see cref="AppliesTo(PackDetail, AppSettings)"/> accepts —
+    /// callers must ask that first, because this answers ON for a pack the profile was never written
+    /// for.</remarks>
     public static bool IsEnabled(AppSettings settings, Guid packId) =>
         !settings.PackLowMode.TryGetValue(packId, out var on) || on;
+
+    /// <summary>
+    /// The one pack this profile was measured against: Create Ultimate Selection 2. Its id is stable
+    /// across everyone who subscribes to it, so a friend's copy is the same pack and gets the option too.
+    /// </summary>
+    private static readonly Guid[] ProfiledPackIds =
+    [
+        Guid.Parse("9dc74fcc-8baf-4a33-8eec-8e985ca309f3"),
+        Guid.Parse("c2ca1e34-31e6-41be-aeb5-067913e3f602"),
+    ];
+
+    /// <summary>
+    /// Whether low mode is offered for a pack at all.
+    /// </summary>
+    /// <remarks>
+    /// <para>Low mode is not a generic "make it faster" switch — it is a hand-tuned profile for one
+    /// modpack. Its numbers were measured against Create Ultimate Selection 2's Voxy setup and its
+    /// mod list names that pack's decorative client mods by filename. Offered on an unrelated pack it
+    /// would still rewrite that pack's options.txt to CUS2's numbers while finding none of the mods it
+    /// expects — a slower, uglier game and no explanation why.</para>
+    /// <para>Matched by id first, so everyone subscribed to the real pack — including a friend's
+    /// copy — gets the option. The name is only a fallback, and only for a pack the signed-in user
+    /// OWNS: that covers their own re-import or renamed-on-disk copy without handing the checkbox to
+    /// an unrelated pack that someone else happened to call "Ultimate Selection 2". A name is not
+    /// identity, and this profile edits config files.</para>
+    /// <para>Anything else gets no checkbox, and <see cref="Apply"/> is called with <c>false</c> for it
+    /// at launch so a pack an older build had quietly lowered is put back.</para>
+    /// </remarks>
+    /// <param name="packId">The pack being launched or shown.</param>
+    /// <param name="packName">Its display name, used only for the owner-gated fallback above.</param>
+    /// <param name="ownerId">Who owns the pack (<see cref="PackDetail.OwnerId"/>).</param>
+    /// <param name="currentUserId">The signed-in user, or null when signed out — in which case the
+    /// fallback never fires and only the profiled ids qualify.</param>
+    public static bool AppliesTo(Guid packId, string? packName, Guid ownerId, Guid? currentUserId)
+    {
+        if (Array.IndexOf(ProfiledPackIds, packId) >= 0) return true;
+        if (currentUserId is not { } me || ownerId != me) return false;
+        return packName is { Length: > 0 }
+            && packName.Contains("ultimate selection 2", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Whether low mode is offered for this pack, for callers that already hold the pack and
+    /// the settings — which is all of them.</summary>
+    public static bool AppliesTo(PackDetail pack, AppSettings settings) =>
+        AppliesTo(pack.Id, pack.Name, pack.OwnerId, settings.UserId);
 }

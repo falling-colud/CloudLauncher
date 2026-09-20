@@ -107,6 +107,9 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         // "Only updates" is deliberately not restored: it is a triage filter, and opening the
         // launcher to a pack that looks empty is alarming rather than helpful.
         Resources["ModRowContentWidth"] = s.EffectiveModRowContentWidth;
+        Resources["ModRowActionsAlign"] = s.ModRowActionsAtRight
+            ? HorizontalAlignment.Right
+            : HorizontalAlignment.Left;
     }
 
     /// <summary>Re-reads the launcher-wide mod preferences (Settings → Mods) every time this page is
@@ -116,6 +119,9 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private void SyncLauncherDefaults()
     {
         Resources["ModRowContentWidth"] = App.State.Settings.EffectiveModRowContentWidth;
+        Resources["ModRowActionsAlign"] = App.State.Settings.ModRowActionsAtRight
+            ? HorizontalAlignment.Right
+            : HorizontalAlignment.Left;
         AdvChannelDefaultItem.Content = $"Launcher default ({ModUpdateChannel.Label(App.State.ModMetadata.LauncherUpdateChannel)})";
         if (_all.Count == 0) return;
 

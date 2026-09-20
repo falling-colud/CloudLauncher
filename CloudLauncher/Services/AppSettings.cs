@@ -1,5 +1,6 @@
 ﻿using System.IO;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
@@ -78,6 +79,9 @@ public sealed class AppSettings
     /// folder). Applies to every pack: the point is that a private asset stays private no matter which
     /// pack it is copied into.
     /// </summary>
+    /// <remarks>Edited by hand in settings.json until now; it is surfaced in Settings, so the list a
+    /// user sees there is this one and nothing else filters it. Keep the stored strings verbatim —
+    /// a pattern rewritten on load would silently stop matching the path someone typed.</remarks>
     public List<string> PrivatePathPatterns { get; set; } = new();
 
     /// <summary>
@@ -166,6 +170,14 @@ public sealed class AppSettings
 
     public ResourcePackSortMode ResourcePackSortMode { get; set; } = ResourcePackSortMode.Modified;
 
+    /// <summary>Shader list sort preference.</summary>
+    /// <remarks>Newest first by default, which is what <see cref="ShaderPackService.ScanAll"/> already
+    /// hands back: someone who has just dropped a shader in wants to see it without hunting, and the
+    /// alphabetical order a shader folder happens to be in means nothing to anyone. The stored value
+    /// wins once the Sort box is touched, and an absent key (an older settings.json) lands here rather
+    /// than on the enum's zero member.</remarks>
+    public ShaderSortMode ShaderSortMode { get; set; } = ShaderSortMode.RecentlyAdded;
+
     // ── mod list view (a pack's Mods Management → List view) ──────────────────
 
     /// <summary>Which column the List view sorts by. Sticky across sessions.</summary>
@@ -195,6 +207,39 @@ public sealed class AppSettings
         double.IsFinite(ModRowContentWidth)
             ? Math.Clamp(ModRowContentWidth, MinModRowContentWidth, MaxModRowContentWidth)
             : 620;
+
+    /// <summary>
+    /// Whether a List view row's buttons sit against the right edge of the row (the default) or
+    /// immediately after the name block, where the width cap above puts them.
+    /// </summary>
+    /// <remarks>
+    /// The cap alone used to decide both, which left the controls stranded mid-row on a wide window
+    /// with no straight edge to aim down. They are two separate questions, so they are two settings.
+    /// </remarks>
+    public bool ModRowActionsAtRight { get; set; } = true;
+
+    // ── mod graph view (a pack's Mods Management → Graph view) ────────────────
+
+    /// <summary>Whether the Graph view draws the dependency lines between nodes.</summary>
+    /// <remarks>
+    /// The pack's own <see cref="ModAdvancedSettings.ShowDependencyLines"/> is a property OF THE PACK:
+    /// it is written into <c>mods.json</c> and synced to collaborators, so flipping it to read one
+    /// crowded graph changes what everyone else opens. This is the same switch as a per-launcher view
+    /// preference, so the toolbar can remember how this person likes to look at a graph without
+    /// touching a shared document.
+    /// </remarks>
+    public bool GraphShowDependencyLines { get; set; } = true;
+
+    /// <summary>
+    /// How the Graph view groups nodes — the name of a <see cref="ModClusterMode"/> member. Null means
+    /// "follow the pack's <see cref="ModAdvancedSettings.DefaultClusterMode"/>", which is the state a
+    /// launcher starts in.
+    /// </summary>
+    /// <remarks>Stored as the member NAME rather than the enum, because settings.json outlives the
+    /// build that wrote it: a mode added by a newer launcher would deserialize into an out-of-range
+    /// enum value here and be applied as whatever member happens to share its number. An unrecognised
+    /// name parses as "not a mode I know" and falls back to the pack default instead.</remarks>
+    public string? GraphClusterMode { get; set; }
 
     /// <summary>
     /// Which release channel a mod download or update follows when the pack has no channel of its own:
@@ -324,6 +369,17 @@ public sealed class AppSettings
 
     /// <summary>User-defined resource pack folders. Key = folder name; value = list of resource pack keys.</summary>
     public Dictionary<string, List<string>> ResourcePackFolders { get; set; } = new();
+
+    /// <summary>Shader pack metadata, keyed the way <see cref="ShaderPackService"/> keys a shader:
+    /// <c>"{sourcePackId:N}:{fileNameOrFolderName}"</c>.</summary>
+    /// <remarks>A shader is a file in a folder and nothing else — no manifest, no id, no version. This
+    /// is where the launcher remembers what a given file actually IS (see
+    /// <see cref="ShaderPackEntry"/>); an entry with no matching file on disk is harmless and is simply
+    /// never looked up, so a shader deleted outside the launcher costs nothing.</remarks>
+    public Dictionary<string, ShaderPackEntry> ShaderPacks { get; set; } = new();
+
+    /// <summary>User-defined shader folders. Key = folder name; value = list of shader keys.</summary>
+    public Dictionary<string, List<string>> ShaderFolders { get; set; } = new();
 
     /// <summary>Per-pack last-known shared manifest version (for update detection).
     /// ConcurrentDictionary: written from background sync tasks while Save() may serialize.</summary>
@@ -457,6 +513,79 @@ public sealed class AppSettings
     public void RemoveResourcePackFromFolder(string folder, string packKey)
     {
         if (ResourcePackFolders.TryGetValue(folder, out var list)) list.Remove(packKey);
+    }
+
+    public void CreateShaderFolder(string name)
+    {
+        var key = (name ?? "").Trim();
+        if (string.IsNullOrEmpty(key)) return;
+        if (!ShaderFolders.ContainsKey(key)) ShaderFolders[key] = new();
+    }
+
+    public void DeleteShaderFolder(string name)
+    {
+        ShaderFolders.Remove(name);
+    }
+
+    public void AddShaderToFolder(string folder, string shaderKey)
+    {
+        if (!ShaderFolders.TryGetValue(folder, out var list))
+        {
+            list = new();
+            ShaderFolders[folder] = list;
+        }
+        if (!list.Contains(shaderKey)) list.Add(shaderKey);
+    }
+
+    public void RemoveShaderFromFolder(string folder, string shaderKey)
+    {
+        if (ShaderFolders.TryGetValue(folder, out var list)) list.Remove(shaderKey);
+    }
+
+    // ── shader entries ──────────────────────────────────────────────────────
+
+    /// <summary>What is known about an installed shader, or null if it was never recorded — which is
+    /// the normal state for one the user dropped into the folder by hand.</summary>
+    public ShaderPackEntry? GetShaderPack(string key) =>
+        ShaderPacks.TryGetValue(key, out var e) ? e : null;
+
+    /// <summary>The entry for a shader, created empty if this is the first thing written about it.
+    /// Mirrors <c>ResourcePackService.GetOrCreate</c>; the caller saves.</summary>
+    public ShaderPackEntry GetOrCreateShaderPack(string key)
+    {
+        if (!ShaderPacks.TryGetValue(key, out var e))
+        {
+            e = new ShaderPackEntry();
+            ShaderPacks[key] = e;
+        }
+        return e;
+    }
+
+    /// <summary>
+    /// Records where a shader came from, so a later store visit can recognise the file on disk as this
+    /// project at this version and offer the update.
+    /// </summary>
+    /// <remarks>Written at install time: nothing in a shader zip identifies it afterwards, and matching
+    /// by name is how you end up offering someone a different author's shader as an "update". A null
+    /// <paramref name="source"/> clears the provenance, which is the right answer for a file the user
+    /// replaced by hand — better no match than a wrong one.</remarks>
+    public void SetShaderPackProvenance(
+        string key, ModSource? source, string? projectId, string? versionId, string? versionNumber)
+    {
+        var e = GetOrCreateShaderPack(key);
+        e.Source = source;
+        e.ProjectId = string.IsNullOrWhiteSpace(projectId) ? null : projectId.Trim();
+        e.VersionId = string.IsNullOrWhiteSpace(versionId) ? null : versionId.Trim();
+        e.VersionNumber = string.IsNullOrWhiteSpace(versionNumber) ? null : versionNumber.Trim();
+        Save();
+    }
+
+    /// <summary>Forgets a shader: its entry and its membership of every shader folder. Called when the
+    /// file is deleted, so a folder cannot keep listing a shader that is gone.</summary>
+    public void RemoveShaderPack(string key)
+    {
+        ShaderPacks.Remove(key);
+        foreach (var list in ShaderFolders.Values) list.Remove(key);
     }
 
     public int GetMaxRamFor(Guid packId) =>
@@ -665,6 +794,22 @@ public enum ResourcePackSortMode
     Pack = 3
 }
 
+/// <summary>Shader list sort columns, in the order the Sort box lists them.</summary>
+/// <remarks>Numbered explicitly, like every other stored enum here: the numbers are what sits in
+/// settings.json, so inserting a member in the middle without one would quietly change what an
+/// existing install is sorted by.</remarks>
+public enum ShaderSortMode
+{
+    /// <summary>Alphabetical by display name.</summary>
+    Name = 0,
+    /// <summary>Grouped by the instance the shader is installed in.</summary>
+    Instance = 1,
+    /// <summary>Newest file first — the default; see <see cref="AppSettings.ShaderSortMode"/>.</summary>
+    RecentlyAdded = 2,
+    /// <summary>Largest first. A shader folder is measured whole, not just its zip.</summary>
+    Size = 3
+}
+
 public sealed class PackUsageStats
 {
     public bool IsPinned { get; set; }
@@ -757,6 +902,59 @@ public sealed class ResourcePackEntry
     public bool? SharingEnabled { get; set; }
     public bool CompatibleWithAll { get; set; } = false;
     public List<Guid> CompatiblePackIds { get; set; } = new();
+
+    // ── store provenance ────────────────────────────────────────────────────
+    // Where this zip came from, recorded at install time. A resource pack carries no id of its own, so
+    // without this the launcher can only match it back to a store listing by name - which is how you
+    // end up offering somebody a same-named pack by a different author as an "update". All four are
+    // null for a pack that was dragged in by hand, and that is a normal, permanent state: no
+    // provenance means no update check, not a broken entry.
+
+    /// <summary>The store this pack was installed from, or null if it did not come from one.</summary>
+    public ModSource? Source { get; set; }
+
+    /// <summary>Project id on <see cref="Source"/> (Modrinth id/slug, CurseForge mod id).</summary>
+    public string? ProjectId { get; set; }
+
+    /// <summary>Id of the exact file that was installed, which is what an update compares against.</summary>
+    public string? VersionId { get; set; }
+
+    /// <summary>Human-readable version of the installed file ("v1.4.2"), for display only: stores let
+    /// authors write anything here, so it is never the thing an update decision is made on.</summary>
+    public string? VersionNumber { get; set; }
+}
+
+/// <summary>
+/// Per-shader preferences stored locally, keyed by <see cref="AppSettings.ShaderPacks"/>'s key.
+/// </summary>
+/// <remarks>
+/// Deliberately smaller than <see cref="ResourcePackEntry"/>: shaders are not shared through the
+/// launcher, so there is no visibility, no hosted id and no per-instance compatibility list to keep —
+/// a shader belongs to the instance whose folder it sits in. What is worth remembering is the name to
+/// show and, above all, which store listing the file corresponds to.
+/// </remarks>
+public sealed class ShaderPackEntry
+{
+    /// <summary>Name to show instead of the file name. Empty means "use the file name".</summary>
+    public string DisplayName { get; set; } = "";
+
+    /// <summary>The store this shader was installed from, or null if it did not come from one (dragged
+    /// in by hand, or installed before the launcher recorded this).</summary>
+    public ModSource? Source { get; set; }
+
+    /// <summary>Project id on <see cref="Source"/> (Modrinth id/slug, CurseForge mod id).</summary>
+    public string? ProjectId { get; set; }
+
+    /// <summary>Id of the exact file that was installed, which is what an update compares against.</summary>
+    public string? VersionId { get; set; }
+
+    /// <summary>Human-readable version of the installed file ("v1.4.2"), for display only: stores let
+    /// authors write anything here, so it is never the thing an update decision is made on.</summary>
+    public string? VersionNumber { get; set; }
+
+    /// <summary>True once enough is known to look this shader up in the store it came from.</summary>
+    [JsonIgnore]
+    public bool HasProvenance => Source is not null && !string.IsNullOrWhiteSpace(ProjectId);
 }
 
 /// <summary>

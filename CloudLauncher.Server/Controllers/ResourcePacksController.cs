@@ -71,11 +71,20 @@ public class ResourcePacksController(
             .Skip(offset).Take(limit)
             .ToListAsync(ct);
 
+        // One grouped count for the whole page rather than a COUNT per row. Packs with no uploaded
+        // version are simply absent from the dictionary and fall through to 0 below.
+        var pageIds = page.Select(p => p.Id).ToList();
+        var versionCounts = await db.HostedResourcePackVersions
+            .Where(v => pageIds.Contains(v.ResourcePackId))
+            .GroupBy(v => v.ResourcePackId)
+            .Select(g => new { PackId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.PackId, x => x.Count, ct);
+
         var items = new List<HostedResourcePackSummary>(page.Count);
         foreach (var p in page)
         {
             var perms = await resolver.GetAsync(p, me, ct);
-            items.Add(ToSummary(p, perms));
+            items.Add(ToSummary(p, perms, versionCounts.GetValueOrDefault(p.Id)));
         }
 
         return Ok(new ResourcePackBrowsePage(items, offset, limit, total));
@@ -146,7 +155,7 @@ public class ResourcePacksController(
         db.HostedResourcePacks.Add(pack);
         await db.SaveChangesAsync(ct);
         await db.Entry(pack).Reference(p => p.Owner).LoadAsync(ct);
-        return Ok(ToSummary(pack, PackPermissions.Full));
+        return Ok(ToSummary(pack, PackPermissions.Full, versionCount: 0));
     }
 
     [HttpPatch("{id:guid}")]
@@ -161,6 +170,9 @@ public class ResourcePacksController(
         if (req.Summary is not null) { if (req.Summary.Length > 512) return BadRequest(); pack.Summary = req.Summary; }
         if (req.Description is not null) { if (req.Description.Length > 4096) return BadRequest(); pack.Description = req.Description; }
         if (req.Visibility is not null) pack.Visibility = req.Visibility.Value;
+        // Only a version upload could write this before, so a pack created against the wrong
+        // Minecraft version had no way back. Null still means "leave it alone".
+        if (req.McVersionsCsv is not null) pack.McVersionsCsv = req.McVersionsCsv;
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
         return NoContent();
@@ -343,6 +355,33 @@ public class ResourcePacksController(
             version.McVersionsCsv, version.PublishedAt));
     }
 
+    /// <summary>Removes one uploaded version of a resource pack.</summary>
+    /// <remarks>
+    /// Deleting the last version is allowed and leaves the pack itself in place — a pack page with no
+    /// file behind it is a valid state (it is exactly what <see cref="Create"/> produces), and making
+    /// the final delete a special case would mean the owner could never clear a bad upload.
+    /// </remarks>
+    [HttpDelete("{id:guid}/versions/{versionId:guid}")]
+    public async Task<IActionResult> DeleteVersion(Guid id, Guid versionId, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (pack is null) return NotFound();
+        if (pack.OwnerId != me) return Forbid();
+
+        var version = await db.HostedResourcePackVersions
+            .FirstOrDefaultAsync(v => v.Id == versionId && v.ResourcePackId == id, ct);
+        if (version is null) return NotFound();
+
+        var hash = version.BlobHash;
+        db.HostedResourcePackVersions.Remove(version);
+        pack.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, hash, ct);
+        return NoContent();
+    }
+
     [HttpGet("{id:guid}/files/{versionId:guid}")]
     public async Task<IActionResult> Download(Guid id, Guid versionId, CancellationToken ct)
     {
@@ -377,9 +416,9 @@ public class ResourcePacksController(
         return candidate;
     }
 
-    private static HostedResourcePackSummary ToSummary(HostedResourcePack p, PackPermissions perms) => new(
+    private static HostedResourcePackSummary ToSummary(HostedResourcePack p, PackPermissions perms, int versionCount) => new(
         p.Id, p.Slug, p.Name, p.Summary, p.OwnerId, p.Owner.UserName ?? "",
         p.Visibility, p.IconBlobHash, p.McVersionsCsv,
         0, // DownloadCount placeholder — wire to a real counter later
-        p.CreatedAt, p.UpdatedAt, perms);
+        p.CreatedAt, p.UpdatedAt, perms, versionCount);
 }

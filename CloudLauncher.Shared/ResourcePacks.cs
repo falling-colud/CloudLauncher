@@ -8,6 +8,8 @@ public enum ResourcePackBrowseSource
     Personal = 3
 }
 
+/// <param name="VersionCount">How many versions have been uploaded. Zero means the pack page exists
+/// but has no file behind it yet, which is the difference between "install" and "nothing to install".</param>
 public sealed record HostedResourcePackSummary(
     Guid Id,
     string Slug,
@@ -21,7 +23,8 @@ public sealed record HostedResourcePackSummary(
     long DownloadCount,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    PackPermissions EffectivePermissions);
+    PackPermissions EffectivePermissions,
+    int VersionCount);
 
 public sealed record HostedResourcePackDetail(
     Guid Id,
@@ -65,11 +68,18 @@ public sealed record CreateResourcePackRequest(
     PackVisibility Visibility,
     string? InitialMcVersionsCsv);
 
+/// <summary>Patch for a hosted resource pack. Every property is optional; null leaves the stored value alone.</summary>
+/// <param name="McVersionsCsv">Replaces the pack's advertised Minecraft versions.</param>
+/// <remarks>
+/// Compatibility is editable here because uploading a version was previously the only thing that
+/// could write it: a pack created against the wrong Minecraft version could never be corrected.
+/// </remarks>
 public sealed record UpdateResourcePackRequest(
     string? Name,
     string? Summary,
     string? Description,
-    PackVisibility? Visibility);
+    PackVisibility? Visibility,
+    string? McVersionsCsv = null);
 
 public sealed record CreateResourcePackVersionRequest(
     string VersionString,

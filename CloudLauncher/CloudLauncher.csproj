@@ -33,7 +33,7 @@
         <!-- Launcher version. Bump this before publishing an update or building the installer;
              publish-update.ps1 / build-installer.ps1 read it and the in-app updater compares
              against it. -->
-        <Version>1.3.7</Version>
+        <Version>1.3.8</Version>
     </PropertyGroup>
 
 </Project>

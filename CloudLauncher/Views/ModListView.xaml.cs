@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Windows;
@@ -45,7 +45,10 @@ public partial class ModListView : UserControl
     {
         _pack = pack;
         _ownerWindow = owner;
-        LowModeBox.IsChecked = LowModeService.IsEnabled(App.State.Settings, pack.Id);
+        // Low mode is one modpack's profile, not a general setting — see LowModeService.AppliesTo.
+        var lowModeOffered = LowModeService.AppliesTo(pack, App.State.Settings);
+        LowModePanel.Visibility = lowModeOffered ? Visibility.Visible : Visibility.Collapsed;
+        LowModeBox.IsChecked = lowModeOffered && LowModeService.IsEnabled(App.State.Settings, pack.Id);
         _ = ScanModsAsync();
     }
 

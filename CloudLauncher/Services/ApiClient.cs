@@ -149,6 +149,56 @@ public sealed class ApiClient
         return await ReadAsync<UserSummary>(await _http.GetAsync("auth/me", ct), ct);
     }
 
+    /// <summary>
+    /// Changes the password and adopts the fresh token pair the server issues.
+    /// </summary>
+    /// <remarks>
+    /// The change revokes every refresh token the account holds, including this session's, so the
+    /// replacement pair in the response is what keeps the launcher signed in. Storing it is part of
+    /// the call, not something the caller has to remember to do.
+    /// </remarks>
+    public async Task ChangePasswordAsync(ChangePasswordRequest req, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        var tokens = await ReadAsync<TokenResponse>(
+            await _http.PostAsJsonAsync("auth/change-password", req, JsonOpts, ct), ct);
+        SetTokens(tokens);
+    }
+
+    /// <summary>Signs this session out: revokes its refresh token server-side and forgets both tokens.</summary>
+    /// <remarks>
+    /// Deliberately does not call <see cref="EnsureTokenAsync"/> — refreshing a token we are about to
+    /// throw away would turn an expired session into a spurious "session expired" popup on the way
+    /// out. The stored tokens are cleared even if the server never answers, because the user asked to
+    /// be signed out of this machine and that part does not depend on the network.
+    /// </remarks>
+    public async Task LogoutAsync(CancellationToken ct = default)
+    {
+        var refreshToken = _settings.RefreshToken;
+        try
+        {
+            if (!string.IsNullOrEmpty(refreshToken))
+                await EnsureSuccess(
+                    await _http.PostAsJsonAsync("auth/logout", new RefreshRequest(refreshToken), JsonOpts, ct));
+        }
+        finally { ClearTokens(); }
+    }
+
+    /// <summary>Signs the account out everywhere, this launcher included.</summary>
+    public async Task LogoutAllAsync(CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        try { await EnsureSuccess(await _http.PostAsync("auth/logout-all", content: null, ct)); }
+        finally { ClearTokens(); }
+    }
+
+    /// <summary>How much server storage this account is using, and its quota if it has one.</summary>
+    public async Task<UserStorageUsage> GetMyStorageUsageAsync(CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        return await ReadAsync<UserStorageUsage>(await _http.GetAsync("auth/me/usage", ct), ct);
+    }
+
     // ── packs ────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -286,19 +336,28 @@ public sealed class ApiClient
         await EnsureHostedModSuccess(await _http.DeleteAsync($"mods/{modId}/teams/{teamId}", ct));
     }
 
+    /// <param name="progress">Reports total bytes handed to the socket so far, or null for no reporting.</param>
     public async Task<HostedModVersionInfo> UploadModVersionAsync(
-        Guid modId, string filePath, CreateModVersionRequest meta, CancellationToken ct = default)
+        Guid modId, string filePath, CreateModVersionRequest meta, CancellationToken ct = default,
+        IProgress<long>? progress = null)
     {
         await EnsureTokenAsync(ct);
         using var form = new MultipartFormDataContent();
         await using var fs = File.OpenRead(filePath);
-        var fileContent = new StreamContent(fs);
+        var fileContent = new StreamContent(new ProgressStream(fs, progress));
         fileContent.Headers.ContentType = new("application/java-archive");
         form.Add(fileContent, "file", Path.GetFileName(filePath));
         var metaJson = System.Text.Json.JsonSerializer.Serialize(meta, JsonOpts);
         form.Add(new StringContent(metaJson), "metadata");
         return await ReadHostedModAsync<HostedModVersionInfo>(
             await _http.PostAsync($"mods/{modId}/versions", form, ct), ct);
+    }
+
+    /// <summary>Deletes one uploaded version of a hosted mod. Deleting the last one keeps the mod.</summary>
+    public async Task DeleteModVersionAsync(Guid modId, Guid versionId, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureHostedModSuccess(await _http.DeleteAsync($"mods/{modId}/versions/{versionId}", ct));
     }
 
     public async Task<Stream> DownloadModVersionAsync(Guid modId, Guid versionId, CancellationToken ct = default)
@@ -395,19 +454,28 @@ public sealed class ApiClient
         await EnsureSuccess(await _http.DeleteAsync($"worlds/{worldId}/teams/{teamId}", ct));
     }
 
+    /// <param name="progress">Reports total bytes handed to the socket so far, or null for no reporting.</param>
     public async Task<SharedWorldVersionInfo> UploadSharedWorldVersionAsync(
-        Guid worldId, string filePath, CreateWorldVersionRequest meta, CancellationToken ct = default)
+        Guid worldId, string filePath, CreateWorldVersionRequest meta, CancellationToken ct = default,
+        IProgress<long>? progress = null)
     {
         await EnsureTokenAsync(ct);
         using var form = new MultipartFormDataContent();
         await using var fs = File.OpenRead(filePath);
-        var fileContent = new StreamContent(fs);
+        var fileContent = new StreamContent(new ProgressStream(fs, progress));
         fileContent.Headers.ContentType = new("application/zip");
         form.Add(fileContent, "file", Path.GetFileName(filePath));
         var metaJson = System.Text.Json.JsonSerializer.Serialize(meta, JsonOpts);
         form.Add(new StringContent(metaJson), "metadata");
         return await ReadAsync<SharedWorldVersionInfo>(
             await _http.PostAsync($"worlds/{worldId}/versions", form, ct), ct);
+    }
+
+    /// <summary>Deletes one uploaded version of a shared world. Deleting the last one keeps the world.</summary>
+    public async Task DeleteSharedWorldVersionAsync(Guid worldId, Guid versionId, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureSuccess(await _http.DeleteAsync($"worlds/{worldId}/versions/{versionId}", ct));
     }
 
     public async Task<Stream> DownloadSharedWorldVersionAsync(Guid worldId, Guid versionId, CancellationToken ct = default)
@@ -497,19 +565,28 @@ public sealed class ApiClient
         await EnsureSuccess(await _http.DeleteAsync($"resourcepacks/{packId}/teams/{teamId}", ct));
     }
 
+    /// <param name="progress">Reports total bytes handed to the socket so far, or null for no reporting.</param>
     public async Task<HostedResourcePackVersionInfo> UploadResourcePackVersionAsync(
-        Guid packId, string filePath, CreateResourcePackVersionRequest meta, CancellationToken ct = default)
+        Guid packId, string filePath, CreateResourcePackVersionRequest meta, CancellationToken ct = default,
+        IProgress<long>? progress = null)
     {
         await EnsureTokenAsync(ct);
         using var form = new MultipartFormDataContent();
         await using var fs = File.OpenRead(filePath);
-        var fileContent = new StreamContent(fs);
+        var fileContent = new StreamContent(new ProgressStream(fs, progress));
         fileContent.Headers.ContentType = new("application/zip");
         form.Add(fileContent, "file", Path.GetFileName(filePath));
         var metaJson = System.Text.Json.JsonSerializer.Serialize(meta, JsonOpts);
         form.Add(new StringContent(metaJson), "metadata");
         return await ReadAsync<HostedResourcePackVersionInfo>(
             await _http.PostAsync($"resourcepacks/{packId}/versions", form, ct), ct);
+    }
+
+    /// <summary>Deletes one uploaded version of a hosted resource pack. Deleting the last one keeps the pack.</summary>
+    public async Task DeleteResourcePackVersionAsync(Guid packId, Guid versionId, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureSuccess(await _http.DeleteAsync($"resourcepacks/{packId}/versions/{versionId}", ct));
     }
 
     public async Task<Stream> DownloadResourcePackVersionAsync(Guid packId, Guid versionId, CancellationToken ct = default)
@@ -620,6 +697,27 @@ public sealed class ApiClient
     {
         await EnsureTokenAsync(ct);
         await EnsureSuccess(await _http.DeleteAsync($"teams/{id}/members/{userId}", ct));
+    }
+
+    /// <summary>Renames a team. Owner only.</summary>
+    public async Task RenameTeamAsync(Guid id, RenameTeamRequest req, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureSuccess(await _http.PutAsJsonAsync($"teams/{id}", req, JsonOpts, ct));
+    }
+
+    /// <summary>Hands a team to one of its existing members. Owner only; the old owner stays a member.</summary>
+    public async Task TransferTeamOwnershipAsync(Guid id, TransferTeamOwnershipRequest req, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureSuccess(await _http.PostAsJsonAsync($"teams/{id}/transfer", req, JsonOpts, ct));
+    }
+
+    /// <summary>Leaves a team. The owner cannot: they transfer ownership or delete the team instead.</summary>
+    public async Task LeaveTeamAsync(Guid id, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureSuccess(await _http.DeleteAsync($"teams/{id}/members/me", ct));
     }
 
     public async Task DeleteTeamAsync(Guid id, CancellationToken ct = default)
@@ -962,5 +1060,69 @@ public sealed class ApiClient
                 resp.StatusCode);
         }
         return await ReadAsync<T>(resp, ct);
+    }
+
+    /// <summary>A pass-through read-only stream that reports how many bytes have been read out of it.</summary>
+    /// <remarks>
+    /// <para>Upload progress has to be measured on the way out. The only thing that knows how far an
+    /// upload has got is whatever is pulling bytes from the file, which is <see cref="StreamContent"/>
+    /// inside HttpClient — so the count is taken by sitting between the two.</para>
+    /// <para>Seeking is passed through rather than blocked, and resets the counter to the new
+    /// position: HttpClient measures a seekable body to set Content-Length and rewinds it before a
+    /// retry. Hiding that would force chunked transfer encoding on every upload, and a retried upload
+    /// would report progress continuing past the size of the file.</para>
+    /// <para>Disposing does NOT dispose the file: the upload methods own it through their own
+    /// <c>await using</c>, and this wrapper is disposed by the content it was handed to.</para>
+    /// </remarks>
+    private sealed class ProgressStream(Stream inner, IProgress<long>? progress) : Stream
+    {
+        private long _read;
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => inner.CanSeek;
+        public override bool CanWrite => false;
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set { inner.Position = value; Rebase(value); }
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            Advance(inner.Read(buffer, offset, count));
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) =>
+            Advance(await inner.ReadAsync(buffer.AsMemory(offset, count), ct));
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) =>
+            Advance(await inner.ReadAsync(buffer, ct));
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            var position = inner.Seek(offset, origin);
+            Rebase(position);
+            return position;
+        }
+
+        public override void Flush() => inner.Flush();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        private int Advance(int count)
+        {
+            if (count > 0)
+            {
+                _read += count;
+                progress?.Report(_read);
+            }
+            return count;
+        }
+
+        private void Rebase(long position)
+        {
+            _read = position;
+            progress?.Report(_read);
+        }
     }
 }

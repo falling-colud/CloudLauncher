@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
@@ -85,7 +85,11 @@ public sealed class LaunchService(
         // mods. Every mod it can disable is verified absent from the dedicated server and free of network
         // payloads, and the upload path reports them under their enabled names, so a low-mode player and a
         // full-settings player can still join the same server and still share the same pack.
-        Report(LowModeService.Apply(gameDir, LowModeService.IsEnabled(settings, pack.Id)));
+        // Only CUS2 is offered low mode (LowModeService.AppliesTo). Any other pack is applied with
+        // `false`, which is not a no-op: it is what puts back a pack an older build — which offered the
+        // switch everywhere and defaulted it ON — had quietly lowered and left with no UI to undo it.
+        Report(LowModeService.Apply(gameDir,
+            LowModeService.AppliesTo(pack, settings) && LowModeService.IsEnabled(settings, pack.Id)));
         // MCEF's ~270 MB of natives are downloaded per player and never synced, so an interrupted
         // download leaves a folder that MCEF considers installed and will not retry. The client
         // then dies during init with UnsatisfiedLinkError. Clear a broken bundle so it refetches.

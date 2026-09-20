@@ -16,6 +16,7 @@ namespace CloudLauncher.Server.Controllers;
 [ApiController]
 [Route("auth")]
 public class AuthController(
+    AppDbContext db,
     UserManager<AppUser> users,
     JwtTokenService tokens,
     IAccountEmailSender emailSender,
@@ -170,6 +171,127 @@ public class AuthController(
         if (user is null) return Unauthorized();
         return Ok(new UserSummary(id, user.UserName ?? "", user.EmailConfirmed));
     }
+
+    /// <summary>Changes the signed-in user's password and signs their other devices out.</summary>
+    /// <remarks>
+    /// Every refresh token is revoked and the caller is handed a fresh pair in the response. That is
+    /// what "everywhere else is signed out, you are not" means for a stateless access token: the
+    /// caller cannot keep a refresh token the change was supposed to invalidate, and a device that
+    /// still holds an old one cannot trade it for a new access token once its current one expires.
+    /// </remarks>
+    [Authorize]
+    [HttpPost("change-password")]
+    [EnableRateLimiting(RateLimitPolicies.Auth)]
+    public async Task<ActionResult<TokenResponse>> ChangePassword(
+        [FromBody] ChangePasswordRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(req.NewPassword))
+            return BadRequest(new { error = "New password required" });
+
+        var user = await users.FindByIdAsync(this.UserId().ToString());
+        if (user is null) return Unauthorized();
+
+        if (!await users.CheckPasswordAsync(user, req.CurrentPassword))
+            return BadRequest(new { error = "Current password is incorrect" });
+
+        var result = await users.ChangePasswordAsync(user, req.CurrentPassword, req.NewPassword);
+        if (!result.Succeeded)
+            return BadRequest(new { error = string.Join("; ", result.Errors.Select(e => e.Description)) });
+
+        await RevokeRefreshTokensAsync(user.Id, ct);
+        return Ok(await tokens.IssueAsync(user, ct));
+    }
+
+    /// <summary>Signs this session out by revoking the refresh token it holds.</summary>
+    /// <remarks>
+    /// Deliberately not <c>[Authorize]</c>: a client whose access token has already expired still has
+    /// a refresh token worth revoking, and refusing it would leave that token live for its full 30
+    /// days. Possession of the token is the only authority needed to give it up. The answer is the
+    /// same whether or not the token existed, so this cannot be used to probe for valid tokens.
+    /// </remarks>
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout([FromBody] RefreshRequest req, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(req.RefreshToken))
+        {
+            var hash = HashRefreshToken(req.RefreshToken);
+            var token = await db.RefreshTokens.FirstOrDefaultAsync(t => t.TokenHash == hash, ct);
+            if (token is not null && token.RevokedAt is null)
+            {
+                token.RevokedAt = DateTimeOffset.UtcNow;
+                await db.SaveChangesAsync(ct);
+            }
+        }
+        return NoContent();
+    }
+
+    /// <summary>Signs the user out of every device by revoking all of their refresh tokens.</summary>
+    [Authorize]
+    [HttpPost("logout-all")]
+    public async Task<IActionResult> LogoutAll(CancellationToken ct)
+    {
+        await RevokeRefreshTokensAsync(this.UserId(), ct);
+        return NoContent();
+    }
+
+    /// <summary>What the signed-in user is storing on the server, and their quota if they have one.</summary>
+    /// <remarks>
+    /// Counts each distinct blob once across everything they own. Two versions of the same mod that
+    /// are byte-identical, or a world uploaded twice under different names, occupy one file on disk;
+    /// charging for both would tell the user they are using storage that deleting would not return.
+    /// </remarks>
+    [Authorize]
+    [HttpGet("me/usage")]
+    public async Task<ActionResult<UserStorageUsage>> MyUsage(CancellationToken ct)
+    {
+        var id = this.UserId();
+        var user = await users.FindByIdAsync(id.ToString());
+        if (user is null) return Unauthorized();
+
+        var blobs = db.ModVersions
+            .Where(v => v.Mod.OwnerId == id)
+            .Select(v => new BlobRef(v.BlobHash, v.FileSize))
+            .Concat(db.SharedWorldVersions
+                .Where(v => v.World.OwnerId == id)
+                .Select(v => new BlobRef(v.BlobHash, v.FileSize)))
+            .Concat(db.HostedResourcePackVersions
+                .Where(v => v.ResourcePack.OwnerId == id)
+                .Select(v => new BlobRef(v.BlobHash, v.FileSize)))
+            .Concat(db.PackManifestEntries
+                .Where(e => e.Pack.OwnerId == id && e.Pack.IsShared)
+                .Select(e => new BlobRef(e.Hash, e.Size)));
+
+        var distinct = await blobs.Distinct().ToListAsync(ct);
+        // DISTINCT is over (hash, size); grouping again collapses the pathological case of one hash
+        // recorded with two different sizes, which would otherwise be counted twice.
+        var usedBytes = distinct.GroupBy(b => b.Hash).Sum(g => g.First().Size);
+
+        return Ok(new UserStorageUsage(usedBytes, user.StorageQuotaBytes));
+    }
+
+    /// <summary>A blob a user's content keeps alive, projected out of the version tables.</summary>
+    private sealed record BlobRef(string Hash, long Size);
+
+    /// <summary>Revokes every refresh token this user still holds.</summary>
+    private async Task RevokeRefreshTokensAsync(Guid userId, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var live = await db.RefreshTokens
+            .Where(t => t.UserId == userId && t.RevokedAt == null)
+            .ToListAsync(ct);
+        foreach (var token in live)
+            token.RevokedAt = now;
+        if (live.Count > 0) await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Hashes a raw refresh token the same way <see cref="JwtTokenService"/> stores it.</summary>
+    /// <remarks>
+    /// Refresh tokens are only ever stored hashed, and the service that writes them keeps its hashing
+    /// private, so finding a row by the raw token the client presents means repeating it here. Any
+    /// change to the algorithm there has to be mirrored here or logout silently stops matching rows.
+    /// </remarks>
+    private static string HashRefreshToken(string raw) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(raw)));
 
     /// <summary>True only when <paramref name="username"/> matches the configured bootstrap admin
     /// AND no admin account exists yet. This makes admin bootstrap a one-time, first-run event
