@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
@@ -14,7 +14,7 @@ namespace CloudLauncher;
 public partial class MainWindow : Window, IDialogHost
 {
     // ── master page state ────────────────────────────────────────────────────
-    private enum MasterPage { None, Packs, Worlds, Mods, ResourcePacks, Shaders }
+    private enum MasterPage { None, Packs, Worlds, Mods, ResourcePacks, Shaders, Servers, Configs }
     private MasterPage _currentMaster = MasterPage.None;
 
     // ── side-panel state ─────────────────────────────────────────────────────
@@ -38,10 +38,12 @@ public partial class MainWindow : Window, IDialogHost
     private bool _sidebarCollapsed = true;
 
     private static readonly string[] NavButtonNames =
-        { "NavPacks", "NavWorlds", "NavMods", "NavResourcePacks", "NavTeams", "NavAccount", "NavSettings", "NavDev" };
+        { "NavPacks", "NavWorlds", "NavMods", "NavResourcePacks", "NavServers", "NavConfigs",
+          "NavTeams", "NavAccount", "NavSettings", "NavDev" };
 
     private static readonly string[] NavLabelNames =
         { "NavPacksLabel", "NavWorldsLabel", "NavModsLabel", "NavResourcePacksLabel", "NavShadersLabel",
+          "NavServersLabel", "NavConfigsLabel",
           "NavTeamsLabel", "NavAccountLabel", "NavSettingsLabel", "NavDevLabel" };
 
     public MainWindow()
@@ -242,6 +244,26 @@ public partial class MainWindow : Window, IDialogHost
         if (MainFrame.Content is not ShaderPacksView)
             MainFrame.Navigate(new ShaderPacksView(this));
         _currentMaster = MasterPage.Shaders;
+        UpdateChrome();
+    }
+
+    public void NavigateToServers()
+    {
+        Sidebar.IsEnabled = true;
+        ResetSidePanel();
+        if (MainFrame.Content is not ServersView)
+            MainFrame.Navigate(new ServersView(this));
+        _currentMaster = MasterPage.Servers;
+        UpdateChrome();
+    }
+
+    public void NavigateToConfigs()
+    {
+        Sidebar.IsEnabled = true;
+        ResetSidePanel();
+        if (MainFrame.Content is not ConfigHubView)
+            MainFrame.Navigate(new ConfigHubView(this));
+        _currentMaster = MasterPage.Configs;
         UpdateChrome();
     }
 
@@ -655,6 +677,8 @@ public partial class MainWindow : Window, IDialogHost
     private void OnNavMods(object sender, RoutedEventArgs e)           => NavigateToMods();
     private void OnNavResourcePacks(object sender, RoutedEventArgs e) => NavigateToResourcePacks();
     private void OnNavShaders(object sender, RoutedEventArgs e) => NavigateToShaders();
+    private void OnNavServers(object sender, RoutedEventArgs e) => NavigateToServers();
+    private void OnNavConfigs(object sender, RoutedEventArgs e) => NavigateToConfigs();
 
     private void OnNavTeams(object sender, RoutedEventArgs e)    => ToggleTopLevel(SidePanelKind.Teams,    OpenTeams);
     private void OnNavAccount(object sender, RoutedEventArgs e)  => ToggleTopLevel(SidePanelKind.Account,  OpenAccount);
@@ -716,6 +740,8 @@ public partial class MainWindow : Window, IDialogHost
         NavMods.IsChecked           = _currentMaster == MasterPage.Mods;
         NavResourcePacks.IsChecked = _currentMaster == MasterPage.ResourcePacks;
         NavShaders.IsChecked       = _currentMaster == MasterPage.Shaders;
+        NavServers.IsChecked       = _currentMaster == MasterPage.Servers;
+        NavConfigs.IsChecked       = _currentMaster == MasterPage.Configs;
         NavTeams.IsChecked    = _currentSidePanel == SidePanelKind.Teams;
         NavAccount.IsChecked  = _currentSidePanel == SidePanelKind.Account
                              || _currentSidePanel == SidePanelKind.McAccount;
@@ -735,6 +761,8 @@ public partial class MainWindow : Window, IDialogHost
         NavMods.IsEnabled           = loggedIn;
         NavResourcePacks.IsEnabled = loggedIn;
         NavShaders.IsEnabled       = loggedIn;
+        NavServers.IsEnabled       = loggedIn;
+        NavConfigs.IsEnabled       = loggedIn;
 
         NavDev.Visibility = (loggedIn && string.Equals(username, "colud", StringComparison.OrdinalIgnoreCase))
             ? Visibility.Visible : Visibility.Collapsed;

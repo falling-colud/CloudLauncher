@@ -1,7 +1,10 @@
-﻿using System.Diagnostics;
+﻿using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using CloudLauncher.Services;
 
@@ -16,7 +19,87 @@ public partial class SettingsPanel : Page
     {
         _shell = shell;
         InitializeComponent();
-        Loaded += (_, _) => Refresh();
+        Loaded += (_, _) =>
+        {
+            Refresh();
+            Window.GetWindow(this)!.PreviewKeyDown += OnShellKeyDown;
+        };
+        Unloaded += (_, _) =>
+        {
+            if (Window.GetWindow(this) is { } w) w.PreviewKeyDown -= OnShellKeyDown;
+        };
+    }
+
+    // ── searching the page ───────────────────────────────────────────────────
+
+    /// <summary>Ctrl+F jumps to the filter box, as it does on every list screen.</summary>
+    private void OnShellKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsVisible) return;
+        if (e.Key != Key.F || (Keyboard.Modifiers & ModifierKeys.Control) == 0) return;
+        SettingsSearchBox.Focus();
+        SettingsSearchBox.SelectAll();
+        e.Handled = true;
+    }
+
+    private void OnSettingsSearchKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || SettingsSearchBox.Text.Length == 0) return;
+        SettingsSearchBox.Text = "";
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Hides the setting cards that do not mention what was typed.
+    /// </summary>
+    /// <remarks>
+    /// Matching walks each card's own visual text — headings, descriptions, check box labels and
+    /// button captions — rather than a hand-kept keyword list, so a setting added later is findable
+    /// without anyone remembering to index it. A card's own layout is untouched; only its visibility
+    /// changes, so clearing the box restores the page exactly.
+    /// </remarks>
+    private void OnSettingsSearchChanged(object sender, TextChangedEventArgs e)
+    {
+        var query = SettingsSearchBox.Text?.Trim();
+        var showAll = string.IsNullOrEmpty(query);
+        var matches = 0;
+
+        foreach (var child in SettingsStack.Children)
+        {
+            if (child is not Border card) continue;
+            var hit = showAll || CollectText(card).Contains(query!, StringComparison.OrdinalIgnoreCase);
+            card.Visibility = hit ? Visibility.Visible : Visibility.Collapsed;
+            if (hit) matches++;
+        }
+
+        NoSettingsMatchLabel.Visibility = !showAll && matches == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Every piece of readable text under an element, flattened into one string.</summary>
+    private static string CollectText(DependencyObject root)
+    {
+        var sb = new StringBuilder();
+        Walk(root, sb);
+        return sb.ToString();
+
+        static void Walk(DependencyObject d, StringBuilder into)
+        {
+            switch (d)
+            {
+                case TextBlock tb: into.Append(tb.Text).Append(' '); break;
+                case ContentControl { Content: string text }: into.Append(text).Append(' '); break;
+                case ComboBox combo:
+                    foreach (var item in combo.Items)
+                        into.Append(item is ComboBoxItem { Content: string c } ? c : item?.ToString()).Append(' ');
+                    break;
+            }
+
+            // The visual tree, so text inside a control's template (a check box's label, a combo
+            // item) counts too. Tooltips are deliberately left out: they explain a setting rather
+            // than name it, and matching on them would keep half the page visible for common words.
+            var count = VisualTreeHelper.GetChildrenCount(d);
+            for (var i = 0; i < count; i++) Walk(VisualTreeHelper.GetChild(d, i), into);
+        }
     }
 
     private void Refresh()
@@ -56,7 +139,11 @@ public partial class SettingsPanel : Page
             RefreshCurseForgeKeyHint();
             RefreshThemeControls();
             PacksFolderLabel.Text = s.PacksRoot;
+            PacksFolderHint.Text = Directory.Exists(s.PacksRoot)
+                ? "New instances are created here. Existing ones stay where they are unless you move them."
+                : "This folder does not exist yet — it is created the first time an instance needs it.";
             RuntimeFolderLabel.Text = AppSettings.RuntimeRoot;
+            RefreshPrivatePaths();
             VersionLabel.Text = $"Installed version {AppVersion.CurrentString}.";
         }
         finally { _suppress = false; }
@@ -163,6 +250,11 @@ public partial class SettingsPanel : Page
 
         PaintSwatch(AccentSwatch, theme.Accent ?? ThemeService.Default.Accent);
         PaintSwatch(SurfaceSwatch, theme.Surface ?? ThemeService.Default.Surface);
+        PaintSwatch(DangerSwatch, theme.Danger, "DangerBrush");
+        PaintSwatch(SuccessSwatch, theme.Success, "SuccessBrush");
+        PaintSwatch(WarningSwatch, theme.Warning, "LogWarningBrush");
+        PaintSwatch(LogMutedSwatch, theme.LogMuted, "LogMutedBrush");
+        PaintSwatch(LogAccentSwatch, theme.LogAccent, "LogAccentBrush");
         PaintSwatch(LogBgSwatch, theme.LogBackground, "LogBackgroundBrush");
         PaintSwatch(LogTextSwatch, theme.LogText, "LogTextBrush");
         PaintSwatch(LogWarnSwatch, theme.LogWarning, "LogWarningBrush");
@@ -195,8 +287,11 @@ public partial class SettingsPanel : Page
         theme.PresetName = preset.Name;
         theme.Accent = preset.Accent;
         theme.Surface = preset.Surface;
-        // A preset re-derives the log colours rather than keeping the previous theme's overrides,
-        // which is what "pick a preset" means to anyone choosing one.
+        // A preset re-derives every colour it does not set rather than keeping the previous theme's
+        // overrides, which is what "pick a preset" means to anyone choosing one. The state colours
+        // are cleared with the log ones: a red left over from the last theme against a new accent is
+        // exactly the clash a preset is chosen to avoid.
+        theme.Danger = theme.Success = theme.Warning = null;
         theme.LogBackground = theme.LogText = theme.LogMuted = theme.LogWarning = theme.LogError = null;
         theme.LogAccent = preset.LogAccent;
         ApplyThemeChange();
@@ -209,6 +304,26 @@ public partial class SettingsPanel : Page
     private async void OnPickSurface(object sender, RoutedEventArgs e) =>
         await PickAsync("Background colour", App.State.Settings.Theme.Surface ?? ThemeService.Default.Surface,
             hex => App.State.Settings.Theme.Surface = hex ?? ThemeService.Default.Surface);
+
+    private async void OnPickDanger(object sender, RoutedEventArgs e) =>
+        await PickAsync("Danger colour", App.State.Settings.Theme.Danger,
+            hex => App.State.Settings.Theme.Danger = hex);
+
+    private async void OnPickSuccess(object sender, RoutedEventArgs e) =>
+        await PickAsync("Success colour", App.State.Settings.Theme.Success,
+            hex => App.State.Settings.Theme.Success = hex);
+
+    private async void OnPickWarning(object sender, RoutedEventArgs e) =>
+        await PickAsync("Warning colour", App.State.Settings.Theme.Warning,
+            hex => App.State.Settings.Theme.Warning = hex);
+
+    private async void OnPickLogMuted(object sender, RoutedEventArgs e) =>
+        await PickAsync("Muted log text", App.State.Settings.Theme.LogMuted,
+            hex => App.State.Settings.Theme.LogMuted = hex);
+
+    private async void OnPickLogAccent(object sender, RoutedEventArgs e) =>
+        await PickAsync("Log highlights", App.State.Settings.Theme.LogAccent,
+            hex => App.State.Settings.Theme.LogAccent = hex);
 
     private async void OnPickLogBackground(object sender, RoutedEventArgs e) =>
         await PickAsync("Log background", App.State.Settings.Theme.LogBackground,
@@ -470,4 +585,192 @@ public partial class SettingsPanel : Page
         Directory.CreateDirectory(AppSettings.RuntimeRoot);
         Process.Start(new ProcessStartInfo { FileName = AppSettings.RuntimeRoot, UseShellExecute = true });
     }
+
+    // -- files that never leave this PC --------------------------------------
+
+    private readonly ObservableCollection<PrivatePathRow> _privatePaths = new();
+
+    /// <summary>Rebuilds the never-upload list: the built-in entries first, then the user's own.</summary>
+    private void RefreshPrivatePaths()
+    {
+        if (PrivatePathsList.ItemsSource is null) PrivatePathsList.ItemsSource = _privatePaths;
+        _privatePaths.Clear();
+        foreach (var p in PrivateAssetPolicy.BuiltIn) _privatePaths.Add(new PrivatePathRow(p, builtIn: true));
+        foreach (var p in App.State.Settings.PrivatePathPatterns ?? [])
+        {
+            var trimmed = p?.Trim().Replace(Path.DirectorySeparatorChar, '/');
+            if (!string.IsNullOrEmpty(trimmed)) _privatePaths.Add(new PrivatePathRow(trimmed, builtIn: false));
+        }
+
+        var mine = _privatePaths.Count(r => !r.IsBuiltIn);
+        PrivatePathsHint.Text = mine == 0
+            ? "You have not added any patterns of your own."
+            : $"{mine} pattern{(mine == 1 ? "" : "s")} of your own, on top of the built-in ones.";
+    }
+
+    private async void OnAddPrivatePath(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var pattern = await _shell.PromptAsync("Keep a path on this PC",
+                "Path inside an instance's game folder (end with / for a whole folder)");
+            if (pattern is null) return;
+
+            var clean = pattern.Trim().Replace('\\', '/').TrimStart('/');
+            if (clean.Length == 0) return;
+            if (_privatePaths.Any(r => string.Equals(r.Pattern, clean, StringComparison.OrdinalIgnoreCase)))
+            {
+                StatusLabel.Text = $"{clean} is already on the list.";
+                return;
+            }
+
+            (App.State.Settings.PrivatePathPatterns ??= []).Add(clean);
+            App.State.Settings.Save();
+            RefreshPrivatePaths();
+            StatusLabel.Text = $"{clean} will stay on this PC.";
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not add the pattern: " + ex.Message; }
+    }
+
+    private async void OnRemovePrivatePath(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (sender is not FrameworkElement { DataContext: PrivatePathRow row } || row.IsBuiltIn) return;
+            if (!await AppDialog.ConfirmAsync(_shell, "Stop protecting this path",
+                    $"Files under {row.Pattern} will be uploaded with any shared instance that contains them, "
+                    + "and a sync from the server will be able to overwrite them.",
+                    "Remove", "Cancel", danger: true))
+                return;
+
+            App.State.Settings.PrivatePathPatterns?.RemoveAll(
+                p => string.Equals(p?.Trim().Replace('\\', '/'), row.Pattern, StringComparison.OrdinalIgnoreCase));
+            App.State.Settings.Save();
+            RefreshPrivatePaths();
+            StatusLabel.Text = $"{row.Pattern} is no longer protected.";
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not remove the pattern: " + ex.Message; }
+    }
+
+    // -- moving the instances folder -----------------------------------------
+
+    /// <summary>
+    /// Points the launcher at a different instances folder, optionally taking the existing instances
+    /// with it.
+    /// </summary>
+    /// <remarks>
+    /// The copy runs off the UI thread and reports per-folder progress, because an instances folder is
+    /// routinely tens of gigabytes. A folder that cannot be moved (usually because Minecraft still has
+    /// a file open in it) stops the move and leaves everything where it was rather than half-migrating.
+    /// </remarks>
+    private async void OnChangePacksFolder(object sender, RoutedEventArgs e)
+    {
+        try { await ChangePacksFolderAsync(); }
+        catch (Exception ex) { StatusLabel.Text = "Could not change the instances folder: " + ex.Message; }
+        finally { ChangePacksFolderButton.IsEnabled = true; }
+    }
+
+    private async Task ChangePacksFolderAsync()
+    {
+        var current = App.State.Settings.PacksRoot;
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Choose a folder for your instances",
+            InitialDirectory = Directory.Exists(current) ? current : AppSettings.RuntimeRoot
+        };
+        if (dialog.ShowDialog(_shell) != true) return;
+
+        var chosen = Path.GetFullPath(dialog.FolderName);
+        if (PathsEqual(chosen, current)) { StatusLabel.Text = "That is already the instances folder."; return; }
+        if (IsInside(chosen, current))
+        {
+            await AppDialog.MessageAsync(_shell, "Pick a folder outside this one",
+                "The new folder is inside the current instances folder, so moving would copy it into itself.");
+            return;
+        }
+
+        var sources = Directory.Exists(current)
+            ? Directory.GetDirectories(current)
+            : [];
+
+        var move = false;
+        if (sources.Length > 0)
+        {
+            move = await AppDialog.ConfirmAsync(_shell, "Move your instances?",
+                $"{sources.Length} instance folder{(sources.Length == 1 ? "" : "s")} live in the old location.\n\n"
+                + "Move them across, or leave them behind and start fresh in the new folder?",
+                "Move them", "Leave them", danger: false);
+        }
+
+        ChangePacksFolderButton.IsEnabled = false;
+        Directory.CreateDirectory(chosen);
+
+        if (move)
+        {
+            var moved = 0;
+            try
+            {
+                await Task.Run(() =>
+                {
+                    foreach (var source in sources)
+                    {
+                        var name = Path.GetFileName(source);
+                        var destination = Path.Combine(chosen, name);
+                        if (Directory.Exists(destination))
+                            throw new IOException($"'{name}' already exists in the new folder.");
+
+                        // Directory.Move is a rename within a volume and a full copy across one;
+                        // either way it throws rather than half-writing, which is what we want here.
+                        Directory.Move(source, destination);
+                        moved++;
+                        var done = moved;
+                        Dispatcher.Invoke(() =>
+                            StatusLabel.Text = $"Moving instances… {done} of {sources.Length}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                StatusLabel.Text = $"Stopped after {moved} of {sources.Length}: {ex.Message}";
+                await AppDialog.MessageAsync(_shell, "The move stopped",
+                    $"{moved} of {sources.Length} instance folders were moved before this failed:\n\n{ex.Message}\n\n"
+                    + "Close Minecraft if an instance is running, then try again. The instances folder has "
+                    + "not been changed, so nothing is lost.");
+                return;
+            }
+        }
+
+        App.State.Settings.PacksRoot = chosen;
+        App.State.Settings.Save();
+        Refresh();
+
+        // Pack folder lookups are cached per session against the old root, so anything already
+        // resolved would still point at the previous location until the launcher restarts.
+        await AppDialog.MessageAsync(_shell, "Instances folder changed",
+            $"Instances now live in:\n{chosen}\n\n"
+            + "Restart CloudLauncher so every page picks up the new location.");
+        StatusLabel.Text = "Instances folder changed. Restart the launcher to finish.";
+    }
+
+    private static bool PathsEqual(string a, string b) =>
+        string.Equals(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)),
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)),
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when <paramref name="candidate"/> sits under <paramref name="parent"/>.</summary>
+    private static bool IsInside(string candidate, string parent)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(parent)) + Path.DirectorySeparatorChar;
+        return Path.GetFullPath(candidate).StartsWith(root, StringComparison.OrdinalIgnoreCase);
+    }
+}
+
+/// <summary>One row of the never-upload list. Built-in entries cannot be removed.</summary>
+public sealed class PrivatePathRow(string pattern, bool builtIn)
+{
+    public string Pattern { get; } = pattern;
+    public bool IsBuiltIn { get; } = builtIn;
+    public Visibility BuiltInVisibility => IsBuiltIn ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility RemoveVisibility => IsBuiltIn ? Visibility.Collapsed : Visibility.Visible;
 }

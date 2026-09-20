@@ -171,7 +171,8 @@
                              ScrollViewer.ScrollChanged="OnResultsScroll">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="8" Background="Transparent">
+                                <Border Padding="8" Background="Transparent"
+                                        MouseRightButtonUp="OnResultRightClick">
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="52"/>

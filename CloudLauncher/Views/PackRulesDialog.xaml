@@ -6,6 +6,7 @@
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Surface1Brush}"
         Foreground="{DynamicResource TextPrimaryBrush}">
+    <Grid>
     <Grid Margin="22">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -40,11 +41,14 @@
                     <DataGridComboBoxColumn Header="Action" Width="130"
                                             SelectedValueBinding="{Binding Action, UpdateSourceTrigger=PropertyChanged}"
                                             ItemsSource="{x:Static local:PackRulesDialog.ActionValues}"/>
-                    <DataGridTemplateColumn Width="80">
+                    <!-- Row action at the right edge, as on the instance list. -->
+                    <DataGridTemplateColumn x:Name="DeleteColumn" Width="80">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
                                 <Button Content="Delete" Style="{StaticResource DangerButton}"
                                         Padding="6,2" MinWidth="0" MinHeight="0" FontSize="11"
+                                        HorizontalAlignment="Right"
+                                        ToolTip="Remove this rule"
                                         Click="OnDeleteRule"/>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
@@ -57,18 +61,28 @@
                 BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0">
             <DockPanel>
                 <TextBlock Text="Add rule:" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <ComboBox x:Name="NewActionBox" Width="140" DockPanel.Dock="Right" Margin="8,0,0,0"/>
-                <Button Content="Add" Style="{StaticResource AccentButton}"
+                <ComboBox x:Name="NewActionBox" Width="140" DockPanel.Dock="Right" Margin="8,0,0,0"
+                          ToolTip="Shared files are uploaded for everyone; Local stays on this PC; Ignored is never synced"/>
+                <Button x:Name="AddRuleButton" Content="Add" Style="{StaticResource AccentButton}"
                         DockPanel.Dock="Right" Click="OnAddRule" Margin="8,0,0,0"/>
                 <TextBox x:Name="NewPatternBox"
-                         ToolTip="e.g. mods/ or options.txt or config/*.json"/>
+                         KeyDown="OnNewPatternKeyDown"
+                         ToolTip="e.g. mods/ or options.txt or config/*.json — press Enter to add"/>
             </DockPanel>
         </Border>
 
         <DockPanel Grid.Row="3" Margin="0,12,0,0">
             <Button DockPanel.Dock="Right" Content="Close" Click="OnClose" IsCancel="True"/>
-            <Button DockPanel.Dock="Right" Content="Reset to defaults" Click="OnResetDefaults"/>
-            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+            <Button x:Name="ResetDefaultsButton" DockPanel.Dock="Right" Content="Reset to defaults"
+                    ToolTip="Replace every rule with the built-in set"
+                    Click="OnResetDefaults"/>
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                       TextWrapping="Wrap"/>
         </DockPanel>
+    </Grid>
+
+        <!-- Confirmations render inside this window: it is modal, so an overlay drawn on the main
+             window would be visible but unclickable. -->
+        <Grid x:Name="DialogLayer" Visibility="Collapsed"/>
     </Grid>
 </Window>

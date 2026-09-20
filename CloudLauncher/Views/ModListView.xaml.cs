@@ -423,16 +423,20 @@ public partial class ModListView : UserControl
         if (versions.Count == 0) { StatusLabel.Text = $"No versions found for {mod.DisplayName}."; return; }
 
         var chosen = await ModVersionPickerDialog.ShowAsync(host, mod.DisplayName, versions,
-            _pack.MinecraftVersion, ModUpdater.LoaderTag(_pack), mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber);
+            _pack.MinecraftVersion, ModUpdater.LoaderTag(_pack), mod.PrimaryVersion?.Id,
+            mod.PrimaryVersion?.VersionNumber, mod.Meta.UpdateLocked);
         if (chosen is null) { StatusLabel.Text = ""; return; }
         if (!await ConfirmUpdateGuardsAsync(mod)) { StatusLabel.Text = ""; return; }
 
-        StatusLabel.Text = $"Installing {mod.DisplayName} {chosen.VersionNumber}…";
+        StatusLabel.Text = $"Installing {mod.DisplayName} {chosen.Version.VersionNumber}…";
         try
         {
-            if (await ModUpdater.InstallVersionAsync(mod, chosen))
+            if (await ModUpdater.InstallVersionAsync(mod, chosen.Version))
             {
-                StatusLabel.Text = $"Installed {mod.DisplayName} {chosen.VersionNumber}.";
+                // The picker's "Keep this version" box is what pins a deliberate downgrade, so a
+                // later "Update all" does not quietly undo it.
+                ModVersionPickerDialog.ApplyKeepVersion(_pack.Id, mod, chosen);
+                StatusLabel.Text = $"Installed {mod.DisplayName} {chosen.Version.VersionNumber}.";
                 await ScanModsAsync();
             }
             else StatusLabel.Text = "That version has no downloadable file.";
@@ -587,7 +591,12 @@ public partial class ModListView : UserControl
         }
         else
         {
-            var deps = ModGraphService.PlanEnable(all, mod);
+            // Honours the pack's "Auto-download and enable required dependencies" switch, the same
+            // way the Modpack Management page does — the two must not disagree about what enabling
+            // a mod pulls in with it.
+            var deps = adv.AutoDownloadDependencies
+                ? ModGraphService.PlanEnable(all, mod)
+                : Array.Empty<PackMod>();
             if (!inv.SetEnabled(mod, true))
             {
                 StatusLabel.Text = $"Could not enable {mod.DisplayName}.";

@@ -5,6 +5,14 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Views;
 
+/// <summary>
+/// The Minecraft options stamped into every new instance's <c>options.txt</c>.
+/// </summary>
+/// <remarks>
+/// Saves on every change, like Settings one screen up. It used to hide behind a Save button and
+/// throw the whole page away when you navigated off it — the one page in the launcher that did, and
+/// the one where a lost edit (thirteen keybinds) costs the most to redo.
+/// </remarks>
 public partial class MCDefaultsPanel : Page
 {
     private readonly MainWindow _shell;
@@ -58,6 +66,28 @@ public partial class MCDefaultsPanel : Page
     {
         if (!IsLoaded || _suppress) return;
         UpdateLabels();
+        SaveNow();
+    }
+
+    /// <summary>Checkbox clicks (fullscreen, VSync, view bobbing, auto-jump).</summary>
+    private void OnOptionChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded || _suppress) return;
+        SaveNow();
+    }
+
+    /// <summary>The GUI scale picker.</summary>
+    private void OnOptionSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _suppress) return;
+        SaveNow();
+    }
+
+    /// <summary>Any of the thirteen keybind rows finishing a rebind.</summary>
+    private void OnKeybindChanged(object sender, EventArgs e)
+    {
+        if (!IsLoaded || _suppress) return;
+        SaveNow();
     }
 
     private void UpdateLabels()
@@ -71,7 +101,10 @@ public partial class MCDefaultsPanel : Page
         SoundFxValue.Text         = $"{(int)SoundFxSlider.Value}%";
     }
 
-    private void OnSave(object sender, RoutedEventArgs e)
+    /// <summary>Writes every control's current value into the stored defaults.</summary>
+    /// <remarks>Called from each control's own handler, so the page has no unsaved state at any
+    /// point and nothing to warn about on the way out.</remarks>
+    private void SaveNow()
     {
         var d = App.State.Settings.McDefaults;
         d.Fov                = (int)FovSlider.Value;
@@ -102,19 +135,25 @@ public partial class MCDefaultsPanel : Page
         d.KeyTogglePerspective = KeyTogglePerspective.Bound;
 
         App.State.Settings.Save();
-        StatusLabel.Text = "Defaults saved.";
+        StatusLabel.Text = "Saved.";
     }
 
-    private void OnResetDefaults(object sender, RoutedEventArgs e)
+    private async void OnResetDefaults(object sender, RoutedEventArgs e)
     {
-        if (MessageBox.Show(_shell,
-                "Reset every option above to vanilla Minecraft defaults?",
-                "Reset", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
-            return;
-        App.State.Settings.McDefaults = new McDefaults();
-        App.State.Settings.Save();
-        LoadFromSettings();
-        StatusLabel.Text = "Reset to vanilla defaults.";
+        try
+        {
+            if (!await AppDialog.ConfirmAsync(_shell, "Reset defaults",
+                    "Put every option on this page back to vanilla Minecraft's defaults?\n\n"
+                    + "Instances you already created keep their own options.txt — only new ones are affected.",
+                    "Reset", "Cancel", danger: true))
+                return;
+
+            App.State.Settings.McDefaults = new McDefaults();
+            App.State.Settings.Save();
+            LoadFromSettings();
+            StatusLabel.Text = "Reset to vanilla defaults.";
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not reset: " + ex.Message; }
     }
 
     private async void OnApplyToPack(object sender, RoutedEventArgs e)
@@ -125,8 +164,7 @@ public partial class MCDefaultsPanel : Page
             var picker = new PackPickerDialog(packs) { Owner = _shell };
             if (picker.ShowDialog() != true || picker.SelectedPackId is not Guid id) return;
 
-            // Save current values first, then merge into the chosen instance's options.txt.
-            OnSave(sender, e);
+            // The page saves as it is edited, so the stored defaults are already current.
             var pack = packs.First(p => p.Id == id);
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
             var gameDir = App.State.Packs.GameDir(pack.Id);

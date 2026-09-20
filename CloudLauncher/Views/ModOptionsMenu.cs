@@ -43,6 +43,7 @@ public static class ModOptionsMenu
     private const int IcFlag = 0xE7C1, IcTag = 0xE8EC, IcLink = 0xE71B, IcLibrary = 0xE8F1, IcAdd = 0xE710;
     private const int IcWarn = 0xE7BA, IcFolder = 0xE8B7, IcDelete = 0xE74D, IcNote = 0xE70B;
     private const int IcLock = 0xE72E;
+    private const int IcCopy = 0xE8C8; // "Copy"
     private const int IcChannel = 0xE8AB; // "Switch" — which release channel updates come from
     private const int IcSize = 0xE9D9; // "BarChart" — mirrors the three-bar meter on the cards
 
@@ -65,6 +66,8 @@ public static class ModOptionsMenu
 
         if (!multi && primary.PageUrl is not null)
             menu.Items.Add(Item("Open website", () => OpenUrl(primary.PageUrl!), Glyph(IcGlobe)));
+
+        menu.Items.Add(BuildCopy(targets));
 
         // ── Note ── one free-text note per mod, so this stays single-target.
         if (!multi)
@@ -243,12 +246,19 @@ public static class ModOptionsMenu
 
         // ── Incompatibility ──
         var anyIncompat = targets.Any(t =>
-            t.Meta.IncompatibleWithUnknown || t.Meta.UpdateIncompatible || t.Meta.IncompatibleWith.Count > 0);
+            t.Meta.IncompatibleWithUnknown || t.Meta.UpdateIncompatible
+            || t.Meta.UpdateIncompatibleWithUnknown || t.Meta.IncompatibleWith.Count > 0);
         var incompat = Parent("Incompatibility", Glyph(IcWarn), anyIncompat ? "✓" : null);
         incompat.Items.Add(FlagToggle("Incompatible with unknown / other mods", targets, ctx,
             m => m.IncompatibleWithUnknown, (m, v) => m.IncompatibleWithUnknown = v));
         incompat.Items.Add(FlagToggle("Updating breaks compatibility", targets, ctx,
             m => m.UpdateIncompatible, (m, v) => m.UpdateIncompatible = v));
+        // The model's fourth incompatibility flag. It had no control at all, so it could only ever be
+        // set by hand-editing mods.json — a field the format advertised and the app would not write.
+        var unknownUpdate = FlagToggle("Updating breaks compatibility with unknown mods", targets, ctx,
+            m => m.UpdateIncompatibleWithUnknown, (m, v) => m.UpdateIncompatibleWithUnknown = v);
+        unknownUpdate.ToolTip = "For a mod whose updates are known to break things you have not installed yet — a warning to your future self, since the launcher cannot see the clash.";
+        incompat.Items.Add(unknownUpdate);
         // Specific mod-to-mod conflicts (single mod only): pick exactly which other mod clashes.
         if (!multi)
             AppendIncompatibleMods(incompat, primary, ctx);
@@ -263,6 +273,43 @@ public static class ModOptionsMenu
                 () => ctx.OnDelete!.Invoke(targets), Glyph(IcDelete)));
 
         return menu;
+    }
+
+    // ── copy ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Copy the mod's name, page link or jar filename to the clipboard.
+    /// </summary>
+    /// <remarks>
+    /// The three things anyone ever needs out of this page and could not previously get: a name to
+    /// paste into a search, a link to send someone, and the jar's filename — which is what a crash
+    /// report names, and is often not the display name at all. For several selected mods the items
+    /// copy the whole selection, one per line, which is how a mod list gets quoted in a bug report.
+    /// </remarks>
+    private static MenuItem BuildCopy(IReadOnlyList<PackMod> targets)
+    {
+        var multi = targets.Count > 1;
+        var primary = targets[0];
+        var parent = Parent("Copy", Glyph(IcCopy), null);
+
+        parent.Items.Add(Item(multi ? $"{targets.Count} names" : "Name",
+            () => Services.ClipboardHelper.TrySetText(Lines(targets.Select(t => t.DisplayName)))));
+
+        var links = targets.Where(t => t.PageUrl is not null).Select(t => t.PageUrl!).ToList();
+        parent.Items.Add(Item(multi ? $"{links.Count} page links" : "Page link",
+            () => Services.ClipboardHelper.TrySetText(Lines(links)), enabled: links.Count > 0));
+
+        parent.Items.Add(Item(multi ? $"{targets.Count} file names" : "File name",
+            () => Services.ClipboardHelper.TrySetText(
+                Lines(targets.Select(t => System.IO.Path.GetFileName(t.FilePath))))));
+
+        if (!multi)
+            parent.Items.Add(Item("Name and version",
+                () => Services.ClipboardHelper.TrySetText($"{primary.DisplayName} {primary.VersionLabel}")));
+
+        return parent;
+
+        static string Lines(IEnumerable<string> values) => string.Join(Environment.NewLine, values);
     }
 
     // ── note ────────────────────────────────────────────────────────────────────

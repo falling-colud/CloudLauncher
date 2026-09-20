@@ -11,15 +11,22 @@ namespace CloudLauncher.Views;
 /// alpha (experimental) channels. Compatible versions show first; "Show all" reveals the rest.</summary>
 public partial class ModVersionPickerDialog : UserControl
 {
+    /// <summary>What the picker came back with: the version to install, and whether the mod should
+    /// be held at it afterwards.</summary>
+    /// <param name="KeepVersion">The "Keep this version" box. True locks the mod to what is being
+    /// installed; false releases any lock it already had, since the box comes up pre-ticked for an
+    /// already-locked mod and unticking it is the only way to say "let updates move this again".</param>
+    public sealed record PickResult(ModVersion Version, bool KeepVersion);
+
     private readonly List<ModVersion> _all;
     private readonly string? _mc;
     private readonly string? _loader;
     private readonly string? _currentVersionId;
     private readonly string? _currentVersionNumber;
-    private readonly TaskCompletionSource<ModVersion?> _tcs = new();
+    private readonly TaskCompletionSource<PickResult?> _tcs = new();
 
     public ModVersionPickerDialog(string title, List<ModVersion> versions, string? mc, string? loader,
-        string? currentVersionId = null, string? currentVersionNumber = null)
+        string? currentVersionId = null, string? currentVersionNumber = null, bool keepVersion = false)
     {
         InitializeComponent();
         TitleLabel.Text = title;
@@ -28,19 +35,42 @@ public partial class ModVersionPickerDialog : UserControl
         _loader = string.IsNullOrWhiteSpace(loader) ? null : loader;
         _currentVersionId = string.IsNullOrWhiteSpace(currentVersionId) ? null : currentVersionId;
         _currentVersionNumber = string.IsNullOrWhiteSpace(currentVersionNumber) ? null : currentVersionNumber;
+        KeepVersionBox.IsChecked = keepVersion;
         Loaded += (_, _) => { Animate.SlideFadeIn(this, 0, 14, 200); Refresh(); Focus(); };
         Focusable = true;
     }
 
-    public Task<ModVersion?> Result => _tcs.Task;
+    public Task<PickResult?> Result => _tcs.Task;
     public void Cancel() => _tcs.TrySetResult(null);
 
-    public static async Task<ModVersion?> ShowAsync(MainWindow host, string title, List<ModVersion> versions,
-        string? mc, string? loader, string? currentVersionId = null, string? currentVersionNumber = null)
+    /// <param name="keepVersion">Initial state of the "Keep this version" box — pass the mod's
+    /// existing <see cref="ModMeta.UpdateLocked"/> so a locked mod stays locked unless the user
+    /// says otherwise.</param>
+    public static async Task<PickResult?> ShowAsync(MainWindow host, string title, List<ModVersion> versions,
+        string? mc, string? loader, string? currentVersionId = null, string? currentVersionNumber = null,
+        bool keepVersion = false)
     {
-        var card = new ModVersionPickerDialog(title, versions, mc, loader, currentVersionId, currentVersionNumber);
+        var card = new ModVersionPickerDialog(title, versions, mc, loader, currentVersionId, currentVersionNumber,
+            keepVersion);
         await host.ShowCardAsync(card, card.Result, card.Cancel);
         return card.Result.Result;
+    }
+
+    /// <summary>
+    /// Applies the picker's "Keep this version" answer to a mod that has just been installed from it.
+    /// </summary>
+    /// <remarks>
+    /// Ticked pins the mod: <see cref="ModMeta.UpdateLocked"/> stops "Update all" moving it, and
+    /// <see cref="ModMeta.PinnedVersionId"/> records exactly which version the user chose so the
+    /// tooltip and the list can say so. Unticked clears both, which is how a lock is released —
+    /// the box arrives pre-ticked for an already-locked mod, so leaving it unticked is a decision.
+    /// Call it after a successful install, so a failed download never changes the mod's flags.
+    /// </remarks>
+    public static void ApplyKeepVersion(Guid packId, PackMod mod, PickResult result)
+    {
+        mod.Meta.UpdateLocked = result.KeepVersion;
+        mod.Meta.PinnedVersionId = result.KeepVersion ? result.Version.Id : null;
+        App.State.ModInventory.SaveMeta(packId, mod);
     }
 
     private void Refresh()
@@ -88,7 +118,8 @@ public partial class ModVersionPickerDialog : UserControl
     private void Accept()
     {
         // Never "install" the version that's already there (double-click / Enter on the current row).
-        if (List.SelectedItem is VersionRowVm { IsCurrent: false } row) _tcs.TrySetResult(row.Version);
+        if (List.SelectedItem is VersionRowVm { IsCurrent: false } row)
+            _tcs.TrySetResult(new PickResult(row.Version, KeepVersionBox.IsChecked == true));
     }
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)

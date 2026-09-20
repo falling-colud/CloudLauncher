@@ -5,9 +5,19 @@
       Title="Settings"
       Background="{DynamicResource Surface0Brush}">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <StackPanel Margin="22,18,22,28">
+        <StackPanel x:Name="SettingsStack" Margin="22,18,22,28">
 
-            <TextBlock Style="{StaticResource H2}" Text="Settings"/>
+            <DockPanel>
+                <TextBox x:Name="SettingsSearchBox" DockPanel.Dock="Right" Width="230"
+                         VerticalAlignment="Center" TextChanged="OnSettingsSearchChanged"
+                         PreviewKeyDown="OnSettingsSearchKeyDown"
+                         ToolTip="Show only the sections mentioning what you type (Ctrl+F)"/>
+                <TextBlock Style="{StaticResource H2}" Text="Settings" VerticalAlignment="Center"/>
+            </DockPanel>
+
+            <TextBlock x:Name="NoSettingsMatchLabel" Style="{StaticResource Muted}" Visibility="Collapsed"
+                       Margin="0,24,0,0" HorizontalAlignment="Center"
+                       Text="No settings matched that search."/>
 
             <!-- Default RAM -->
             <Border Style="{StaticResource Card}" Margin="0,18,0,16" Padding="22,18">
@@ -149,6 +159,28 @@
                                 ToolTip="The deepest surface. Every other panel, border and text tier is derived from it — pick a light colour for a light launcher."/>
                     </DockPanel>
 
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,2,0,10" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextTertiaryBrush}"
+                               Text="State colours. Leave one unset to derive it from the two above."/>
+
+                    <WrapPanel Margin="0,0,0,4">
+                        <StackPanel Margin="0,0,20,10">
+                            <TextBlock Text="Danger" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <Button x:Name="DangerSwatch" Width="46" Height="26" Click="OnPickDanger" Padding="0"
+                                    ToolTip="Delete, Remove and every other destructive button"/>
+                        </StackPanel>
+                        <StackPanel Margin="0,0,20,10">
+                            <TextBlock Text="Success" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <Button x:Name="SuccessSwatch" Width="46" Height="26" Click="OnPickSuccess" Padding="0"
+                                    ToolTip="Up-to-date badges, finished downloads, confirmations"/>
+                        </StackPanel>
+                        <StackPanel Margin="0,0,20,10">
+                            <TextBlock Text="Warning" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <Button x:Name="WarningSwatch" Width="46" Height="26" Click="OnPickWarning" Padding="0"
+                                    ToolTip="Update-available badges and anything that needs attention but is not an error"/>
+                        </StackPanel>
+                    </WrapPanel>
+
                     <Border Height="1" Background="{DynamicResource BorderSubtleBrush}" Margin="0,8,0,14"/>
 
                     <TextBlock Style="{StaticResource H3}" Text="Logs" FontSize="13" Margin="0,0,0,4"/>
@@ -172,6 +204,16 @@
                         <StackPanel Margin="0,0,20,10">
                             <TextBlock Text="Errors" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
                             <Button x:Name="LogErrorSwatch" Width="46" Height="26" Click="OnPickLogError" Padding="0"/>
+                        </StackPanel>
+                        <StackPanel Margin="0,0,20,10">
+                            <TextBlock Text="Muted" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <Button x:Name="LogMutedSwatch" Width="46" Height="26" Click="OnPickLogMuted" Padding="0"
+                                    ToolTip="Timestamps and other low-priority log text"/>
+                        </StackPanel>
+                        <StackPanel Margin="0,0,20,10">
+                            <TextBlock Text="Highlights" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <Button x:Name="LogAccentSwatch" Width="46" Height="26" Click="OnPickLogAccent" Padding="0"
+                                    ToolTip="Matches from the log search box and other highlighted lines"/>
                         </StackPanel>
                     </WrapPanel>
 
@@ -312,15 +354,23 @@
                                Text="Where instances and the Minecraft runtime are stored on this machine."
                                TextWrapping="Wrap" Margin="0,0,0,16"/>
 
-                    <DockPanel Margin="0,0,0,10">
+                    <DockPanel Margin="0,0,0,4">
                         <TextBlock DockPanel.Dock="Left" Text="Instances folder" Width="120"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
-                        <Button DockPanel.Dock="Right" Content="Open" Click="OnOpenPacksFolder"/>
+                        <!-- Row actions at the right edge -->
+                        <Button DockPanel.Dock="Right" Content="Open" Click="OnOpenPacksFolder"
+                                ToolTip="Open this folder in Explorer"/>
+                        <Button DockPanel.Dock="Right" x:Name="ChangePacksFolderButton" Content="Change..."
+                                Click="OnChangePacksFolder" Margin="0,0,8,0"
+                                ToolTip="Put your instances on another drive. You choose whether the existing ones move with it."/>
                         <TextBlock x:Name="PacksFolderLabel" VerticalAlignment="Center"
                                    TextTrimming="CharacterEllipsis" FontFamily="{StaticResource MonoFont}"
                                    FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"
                                    Margin="0,0,16,0"/>
                     </DockPanel>
+                    <TextBlock x:Name="PacksFolderHint" Style="{StaticResource Caption}"
+                               Margin="120,0,0,10" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextTertiaryBrush}"/>
 
                     <DockPanel>
                         <TextBlock DockPanel.Dock="Left" Text="Runtime" Width="120"
@@ -330,6 +380,59 @@
                                    TextTrimming="CharacterEllipsis" FontFamily="{StaticResource MonoFont}"
                                    FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"
                                    Margin="0,0,16,0"/>
+                    </DockPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Never-upload paths -->
+            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource H3}" Text="Files that never leave this PC" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,10"
+                               Text="Anything matching one of these paths is left out when a shared instance is uploaded, and a sync from the server is never allowed to overwrite or delete it. Use it for large local-only assets that everyone else does not need."/>
+                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,12"
+                               Foreground="{DynamicResource TextTertiaryBrush}">
+                        Paths are relative to an instance&apos;s <Run FontFamily="{StaticResource MonoFont}">game/</Run> folder.
+                        A trailing <Run FontFamily="{StaticResource MonoFont}">/</Run> means the whole folder
+                        (<Run FontFamily="{StaticResource MonoFont}">config/mymod/bundle/</Run>); otherwise it is an exact
+                        path or a glob (<Run FontFamily="{StaticResource MonoFont}">saves/**</Run>).
+                    </TextBlock>
+
+                    <Border Background="{DynamicResource Surface1Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="8" Padding="6" MinHeight="60">
+                        <ItemsControl x:Name="PrivatePathsList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <DockPanel Margin="4,3">
+                                        <!-- Row actions at the right edge -->
+                                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                Content="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                Foreground="{DynamicResource DangerBrush}"
+                                                Visibility="{Binding RemoveVisibility}"
+                                                Click="OnRemovePrivatePath"
+                                                ToolTip="Stop protecting this path"/>
+                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                VerticalAlignment="Center" Margin="8,0,0,0"
+                                                Visibility="{Binding BuiltInVisibility}"
+                                                ToolTip="Shipped with the launcher and always applied">
+                                            <TextBlock Text="built-in" Style="{StaticResource PillText}"/>
+                                        </Border>
+                                        <TextBlock Text="{Binding Pattern}" VerticalAlignment="Center"
+                                                   FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </DockPanel>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </Border>
+
+                    <DockPanel Margin="0,10,0,0">
+                        <Button DockPanel.Dock="Right" Content="Add pattern..." Click="OnAddPrivatePath"
+                                Style="{StaticResource AccentButton}"/>
+                        <TextBlock x:Name="PrivatePathsHint" Style="{StaticResource Caption}"
+                                   VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"/>
                     </DockPanel>
                 </StackPanel>
             </Border>

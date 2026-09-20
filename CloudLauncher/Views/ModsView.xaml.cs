@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -54,13 +54,38 @@ public partial class ModsView : Page
 
             if (Window.GetWindow(this) is Window w)
                 w.PreviewKeyDown += OnShellKeyDown;
+            ThemeService.Changed += OnThemeChanged;
         };
         Unloaded += (_, _) =>
         {
             if (Window.GetWindow(this) is Window w)
                 w.PreviewKeyDown -= OnShellKeyDown;
+            ThemeService.Changed -= OnThemeChanged;
             _cts.Cancel();
         };
+    }
+
+    /// <summary>The chip and badge colours are assigned brushes, not DynamicResource bindings —
+    /// ThemeService hands out brand-new brush objects on every Apply, so a page that is already open
+    /// has to repaint itself or it keeps the previous palette until you navigate away and back.</summary>
+    private void OnThemeChanged()
+    {
+        ApplyChipStyles();
+        RepaintHostedBadges();
+    }
+
+    private void RepaintHostedBadges()
+    {
+        var background = (Brush)FindResource("AccentSoftBrush");
+        var foreground = (Brush)FindResource("AccentBrush");
+        var touched = false;
+        foreach (var row in _rows.Where(r => r.Hosted is not null))
+        {
+            row.SourceBadgeBackground = background;
+            row.SourceBadgeForeground = foreground;
+            touched = true;
+        }
+        if (touched) ResultsList.Items.Refresh();
     }
 
     // ── source chips ─────────────────────────────────────────────────────────
@@ -123,8 +148,13 @@ public partial class ModsView : Page
 
     private async void OnSourceChipClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is ModSourceChipRow row && !row.IsDivider)
-            await SelectChipAsync(row);
+        try
+        {
+            if (sender is FrameworkElement fe && fe.DataContext is ModSourceChipRow row && !row.IsDivider)
+                await SelectChipAsync(row);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Couldn't switch source: " + ex.Message); }
     }
 
     private async Task SelectChipAsync(ModSourceChipRow chip)
@@ -150,6 +180,15 @@ public partial class ModsView : Page
         {
             _ = ResetAndLoadAsync();
             e.Handled = true;
+        }
+        // Delete / F2 act on the selected row, but only on your own hosted mods and never while
+        // the user is typing a search — those keys belong to the text box then.
+        else if (e.Key is Key.Delete or Key.F2 && SearchBox.Visibility != Visibility.Visible)
+        {
+            if (ResultsList.SelectedItem is not ModBrowseRow { IsOwnedByMe: true } row) return;
+            e.Handled = true;
+            if (e.Key == Key.Delete) _ = DeleteHostedModAsync(row);
+            else _ = RenameHostedModAsync(row);
         }
     }
 
@@ -236,15 +275,25 @@ public partial class ModsView : Page
 
     private async void OnApplyFilters(object sender, RoutedEventArgs e)
     {
-        _filterMcVersion = string.IsNullOrWhiteSpace(FilterMcBox.Text) ? null : FilterMcBox.Text.Trim();
-        var loaderItem = FilterLoaderBox.SelectedItem as ComboBoxItem;
-        var loader = loaderItem?.Content as string;
-        _filterLoader = string.IsNullOrWhiteSpace(loader) || loader == "(any)" ? null : loader;
-        FiltersPopup.IsOpen = false;
-        await ResetAndLoadAsync();
+        try
+        {
+            _filterMcVersion = string.IsNullOrWhiteSpace(FilterMcBox.Text) ? null : FilterMcBox.Text.Trim();
+            var loaderItem = FilterLoaderBox.SelectedItem as ComboBoxItem;
+            var loader = loaderItem?.Content as string;
+            _filterLoader = string.IsNullOrWhiteSpace(loader) || loader == "(any)" ? null : loader;
+            FiltersPopup.IsOpen = false;
+            await ResetAndLoadAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Couldn't apply the filters: " + ex.Message); }
     }
 
-    private async void OnRefresh(object sender, RoutedEventArgs e) => await ResetAndLoadAsync();
+    private async void OnRefresh(object sender, RoutedEventArgs e)
+    {
+        try { await ResetAndLoadAsync(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Refresh failed: " + ex.Message); }
+    }
 
     // ── loading ──────────────────────────────────────────────────────────────
 
@@ -265,11 +314,16 @@ public partial class ModsView : Page
     private async void OnResultsScroll(object sender, ScrollChangedEventArgs e)
     {
         if (_isLoading || !_hasMore || _activeChip is null) return;
-        if (e.OriginalSource is ScrollViewer sv &&
-            sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 200)
+        try
         {
-            await LoadMoreAsync(_cts.Token);
+            if (e.OriginalSource is ScrollViewer sv &&
+                sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 200)
+            {
+                await LoadMoreAsync(_cts.Token);
+            }
         }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Couldn't load more results: " + ex.Message); }
     }
 
     private async Task LoadMoreAsync(CancellationToken ct)
@@ -316,8 +370,7 @@ public partial class ModsView : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            StatusLabel.Foreground = (Brush)FindResource("DangerBrush");
-            StatusLabel.Text = "Error: " + ex.Message;
+            SetListError("Error: " + ex.Message);
             _hasMore = false;
         }
         finally
@@ -385,14 +438,24 @@ public partial class ModsView : Page
     private async void OnResultSelected(object sender, SelectionChangedEventArgs e)
     {
         if (ResultsList.SelectedItem is not ModBrowseRow row) return;
-        if (row.Hosted is not null) await LoadHostedModDetailAsync(row.Hosted.Id);
-        else if (row.External is not null) await LoadExternalModDetailAsync(row.External);
+        try
+        {
+            if (row.Hosted is not null) await LoadHostedModDetailAsync(row.Hosted.Id);
+            else if (row.External is not null) await LoadExternalModDetailAsync(row.External);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Couldn't load that mod: " + ex.Message); }
     }
 
     private async void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ResultsList.SelectedItem is ModBrowseRow row)
-            await InstallRowAsync(row);
+        try
+        {
+            if (ResultsList.SelectedItem is ModBrowseRow row)
+                await InstallRowAsync(row);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Install failed: " + ex.Message); }
     }
 
     // The Overview tab renders rich HTML/markdown in an embedded WebView2. Its HWND draws
@@ -406,6 +469,15 @@ public partial class ModsView : Page
     }
 
     private void ShowOverview(string? content, bool isMarkdown = false) => OverviewBrowser.Show(content, isMarkdown);
+
+    /// <summary>Screenshots and Links exist only for CurseForge/Modrinth projects. Collapsing the
+    /// tabs (rather than showing an apologetic sentence) keeps the hosted pane honest.</summary>
+    private void ShowStoreOnlyTabs(bool show)
+    {
+        var visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        ScreenshotsTab.Visibility = visibility;
+        LinksTab.Visibility = visibility;
+    }
 
     private async Task LoadHostedModDetailAsync(Guid modId)
     {
@@ -425,7 +497,9 @@ public partial class ModsView : Page
             _currentProjectUrl = null;
 
             ModNameLabel.Text = detail.Name;
-            ModMetaLabel.Text = $"by {detail.OwnerUsername} · CloudLauncher · {detail.Visibility}";
+            ModMetaLabel.Text =
+                $"by {detail.OwnerUsername} · {detail.Versions.Count} version{(detail.Versions.Count == 1 ? "" : "s")}"
+                + $" · updated {detail.UpdatedAt.LocalDateTime:d} · {detail.Visibility} · {detail.Slug}";
             SelectedIconFallback.Text = InitialFor(detail.Name);
             SetSelectedIcon(null);
             OpenProjectButton.Visibility = Visibility.Collapsed;
@@ -433,11 +507,16 @@ public partial class ModsView : Page
                 ? Visibility.Visible : Visibility.Collapsed;
             InstallSelectedButton.Visibility = Visibility.Visible;
             InstallSelectedButton.IsEnabled = detail.Versions.Count > 0;
+            InstallSelectedButton.ToolTip = detail.Versions.Count > 0
+                ? "Install the newest compatible version into one of your instances"
+                : "Nothing to install yet — upload a version from Manage first";
+            ToolTipService.SetShowOnDisabled(InstallSelectedButton, true);
 
             ModTabs.SelectedIndex = 0;
             ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
-            ScreenshotsEmptyText.Text = "Hosted mod screenshots are managed from the mod's detail page when supported by the server.";
-            ScreenshotsEmptyText.Visibility = Visibility.Visible;
+            // A hosted mod has neither screenshots nor project links, so those two tabs could only
+            // ever show a placebo sentence: hide them instead of leaving two dead tabs on the pane.
+            ShowStoreOnlyTabs(false);
             ScreenshotList.ItemsSource = null;
             ScreenshotList.Visibility = Visibility.Collapsed;
             ConfigureLinks(new ModProjectLinks(null, null, null, null, null));
@@ -474,8 +553,10 @@ public partial class ModsView : Page
         ManageHostedButton.Visibility = Visibility.Collapsed;
         InstallSelectedButton.Visibility = Visibility.Visible;
         InstallSelectedButton.IsEnabled = true;
+        InstallSelectedButton.ToolTip = "Install the newest compatible version, with its required dependencies";
         ModTabs.SelectedIndex = 0;
         ShowOverview("Loading…");
+        ShowStoreOnlyTabs(true);
         ScreenshotsEmptyText.Text = "Loading screenshots...";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
@@ -555,20 +636,37 @@ public partial class ModsView : Page
 
     private async void OnCreateMod(object sender, RoutedEventArgs e)
     {
-        var dlg = new CreateModDialog { Owner = _shell };
-        if (dlg.ShowDialog() != true) return;
-
-        var personalChip = _chips.FirstOrDefault(c => c.Kind == ModBrowseSourceKind.CloudLauncherPersonal);
-        if (personalChip is not null) _activeChip = personalChip;
-        ApplyChipStyles();
-        await ResetAndLoadAsync();
-
-        if (dlg.Created is { } created)
+        try
         {
-            var row = _rows.FirstOrDefault(r => r.Hosted?.Id == created.Id);
-            if (row is not null) ResultsList.SelectedItem = row;
-            _shell.OpenModDetail(created.Id, created.Name);
+            var dlg = new CreateModDialog { Owner = _shell };
+            if (dlg.ShowDialog() != true) return;
+
+            // A jar picked in the create dialog can only be uploaded once the mod exists, so the
+            // upload card opens here, pre-loaded, before the list is refreshed and the page opened.
+            if (dlg.Created is { } newMod && dlg.FirstJarPath is { } jar)
+            {
+                try
+                {
+                    var detail = await App.State.Api.GetModAsync(newMod.Id);
+                    await UploadModVersionDialog.ShowAsync(_shell, detail, jar);
+                }
+                catch (Exception ex) { SetDownloadError("The mod was created, but the upload failed: " + ex.Message); }
+            }
+
+            var personalChip = _chips.FirstOrDefault(c => c.Kind == ModBrowseSourceKind.CloudLauncherPersonal);
+            if (personalChip is not null) _activeChip = personalChip;
+            ApplyChipStyles();
+            await ResetAndLoadAsync();
+
+            if (dlg.Created is { } created)
+            {
+                var row = _rows.FirstOrDefault(r => r.Hosted?.Id == created.Id);
+                if (row is not null) ResultsList.SelectedItem = row;
+                _shell.OpenModDetail(created.Id, created.Name);
+            }
         }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Create failed: " + ex.Message); }
     }
 
     private async void OnImportMod(object sender, RoutedEventArgs e)
@@ -587,23 +685,31 @@ public partial class ModsView : Page
             if (dlg.ShowDialog(_shell) != true) return;
 
             var folder = ModsFolderFor(pack);
-            var copied = 0;
-            foreach (var file in dlg.FileNames)
-            {
-                var dest = UniqueFilePath(folder, Path.GetFileName(file));
-                File.Copy(file, dest);
-                copied++;
-            }
+            StatusLabel.SetResourceReference(ForegroundProperty, "TextSecondaryBrush");
+            StatusLabel.Text = $"Importing {dlg.FileNames.Length} file(s) to {pack.Name}…";
 
-            StatusLabel.Foreground = (Brush)FindResource("AccentBrush");
+            // Jars can be tens of megabytes and the source is often a network drive: copying on the
+            // UI thread would freeze the launcher and the status line above would never paint.
+            var files = dlg.FileNames;
+            var copied = await Task.Run(() =>
+            {
+                var n = 0;
+                foreach (var file in files)
+                {
+                    File.Copy(file, UniqueFilePath(folder, Path.GetFileName(file)));
+                    n++;
+                }
+                return n;
+            });
+
+            StatusLabel.SetResourceReference(ForegroundProperty, "AccentBrush");
             StatusLabel.Text = copied == 1
                 ? $"Imported {Path.GetFileName(dlg.FileNames[0])} to {pack.Name}."
                 : $"Imported {copied} mods to {pack.Name}.";
         }
         catch (Exception ex)
         {
-            StatusLabel.Foreground = (Brush)FindResource("DangerBrush");
-            StatusLabel.Text = "Import failed: " + ex.Message;
+            SetListError("Import failed: " + ex.Message);
         }
     }
 
@@ -611,6 +717,241 @@ public partial class ModsView : Page
     {
         if (_currentHostedMod is not null)
             _shell.OpenModDetail(_currentHostedMod.Id, _currentHostedMod.Name);
+    }
+
+    // ── row context menu ─────────────────────────────────────────────────────
+
+    /// <summary>Right-click selects the row first, so the menu, the detail pane and the keyboard
+    /// shortcuts are always talking about the same mod.</summary>
+    private void OnRowRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: ModBrowseRow row })
+            ResultsList.SelectedItem = row;
+    }
+
+    /// <summary>Shows only the items that apply: owner actions for your own hosted mods, the store
+    /// page for CurseForge/Modrinth rows, and nothing that would only ever return 403.</summary>
+    private void OnRowMenuOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ContextMenu menu) return;
+        var row = menu.PlacementTarget is FrameworkElement { DataContext: ModBrowseRow r } ? r : null;
+        if (row is null) return;
+
+        var hosted = row.Hosted is not null;
+        var owner = row.IsOwnedByMe;
+
+        ApplyMenuGlyphs(menu);
+        Show(menu, "CtxManage", hosted);
+        Show(menu, "CtxInstall", row.IsInstallable);
+        Show(menu, "CtxUploadVersion", owner);
+        Show(menu, "CtxOwnerSeparator", owner);
+        Show(menu, "CtxRename", owner);
+        Show(menu, "CtxVisibility", owner);
+        Show(menu, "CtxPermissions", owner);
+        Show(menu, "CtxOpenPage", !hosted);
+        Show(menu, "CtxCopyId", hosted);
+        Show(menu, "CtxCopySlug", hosted);
+        Show(menu, "CtxDeleteSeparator", owner);
+        Show(menu, "CtxDelete", owner);
+
+        // Tick the mod's current visibility so the submenu reads as state, not just as actions.
+        // The app's MenuItem template draws no check box, so the tick goes in the gesture column —
+        // the same convention ModOptionsMenu uses for its toggles.
+        if (Find(menu, "CtxVisibility") is MenuItem visibility && row.Hosted is { } summary)
+        {
+            foreach (var item in visibility.Items.OfType<MenuItem>())
+                item.InputGestureText = (item.Tag as string) == summary.Visibility.ToString() ? "✓" : "";
+        }
+    }
+
+    /// <summary>Glyph codes for the row menu, in the same MDL2 vocabulary as ModOptionsMenu.</summary>
+    private static readonly (string Name, int Glyph)[] MenuGlyphs =
+    {
+        ("CtxManage", 0xE7C3), ("CtxInstall", 0xE896), ("CtxUploadVersion", 0xE898),
+        ("CtxRename", 0xE8AC), ("CtxVisibility", 0xE7B3), ("CtxPermissions", 0xE716),
+        ("CtxOpenPage", 0xE774), ("CtxCopyId", 0xE8C8), ("CtxCopySlug", 0xE8C8),
+        ("CtxDelete", 0xE74D)
+    };
+
+    /// <summary>Fills the menu's icon gutter once per menu instance (the items live in a
+    /// DataTemplate, so each row gets its own copy the first time it is opened).</summary>
+    private static void ApplyMenuGlyphs(ContextMenu menu)
+    {
+        foreach (var (name, glyph) in MenuGlyphs)
+        {
+            if (Find(menu, name) is not MenuItem { Icon: null } item) continue;
+            var icon = new TextBlock
+            {
+                Text = char.ConvertFromUtf32(glyph),
+                Width = 16,
+                TextAlignment = TextAlignment.Center,
+                FontFamily = (FontFamily)Application.Current.FindResource("IconFont"),
+                FontSize = 13,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            // A resource reference, not an assigned brush: the menu outlives a theme change.
+            icon.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
+            item.Icon = icon;
+        }
+    }
+
+    private static FrameworkElement? Find(ContextMenu menu, string name) =>
+        menu.Items.OfType<FrameworkElement>().FirstOrDefault(i => i.Name == name);
+
+    private static void Show(ContextMenu menu, string name, bool visible)
+    {
+        if (Find(menu, name) is { } item)
+            item.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The row a menu item belongs to, via the context menu's placement target.</summary>
+    private static ModBrowseRow? RowFromMenuSender(object sender)
+    {
+        if (sender is not MenuItem mi) return (sender as FrameworkElement)?.DataContext as ModBrowseRow;
+        var parent = mi.Parent;
+        while (parent is MenuItem p) parent = p.Parent;
+        return parent is ContextMenu { PlacementTarget: FrameworkElement { DataContext: ModBrowseRow row } }
+            ? row
+            : null;
+    }
+
+    private void OnCtxManage(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Hosted is { } mod) _shell.OpenModDetail(mod.Id, mod.Name);
+    }
+
+    private async void OnCtxInstall(object sender, RoutedEventArgs e)
+    {
+        if (_installing || RowFromMenuSender(sender) is not { } row) return;
+        _installing = true;
+        try { await InstallRowAsync(row); }
+        finally { _installing = false; }
+    }
+
+    private async void OnCtxUploadVersion(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Hosted is not { } summary) return;
+        try
+        {
+            var detail = await App.State.Api.GetModAsync(summary.Id);
+            var created = await UploadModVersionDialog.ShowAsync(_shell, detail);
+            if (created is null) return;
+            SetDownloadSuccess($"Uploaded {created.VersionString} to {detail.Name}.");
+            await ResetAndLoadAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetDownloadError("Upload failed: " + ex.Message); }
+    }
+
+    private async void OnCtxRename(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender) is { } row) await RenameHostedModAsync(row);
+    }
+
+    private async Task RenameHostedModAsync(ModBrowseRow row)
+    {
+        if (row.Hosted is not { } mod) return;
+        try
+        {
+            var dlg = new SimpleInputDialog("Rename mod", "New name", mod.Name) { Owner = _shell };
+            if (dlg.ShowDialog() != true) return;
+            var name = dlg.Result?.Trim();
+            if (string.IsNullOrWhiteSpace(name) || name == mod.Name) return;
+
+            await App.State.Api.UpdateModAsync(mod.Id, new UpdateModRequest(name, null, null, null));
+            SetDownloadSuccess($"Renamed to {name}.");
+            await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { SetDownloadError("Rename failed: " + ex.Message); }
+    }
+
+    private async void OnCtxSetVisibility(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Hosted is not { } mod) return;
+        if (sender is not MenuItem { Tag: string tag } || !Enum.TryParse<PackVisibility>(tag, out var visibility)) return;
+        if (visibility == mod.Visibility) return;
+        try
+        {
+            await App.State.Api.UpdateModAsync(mod.Id, new UpdateModRequest(null, null, null, visibility));
+            SetDownloadSuccess($"{mod.Name} is now {visibility}.");
+            await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { SetDownloadError("Couldn't change visibility: " + ex.Message); }
+    }
+
+    private async void OnCtxPermissions(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Hosted is not { } mod) return;
+        try
+        {
+            // PermissionsDialog needs the full detail (collaborators + teams), which the browse
+            // summary does not carry.
+            var detail = await App.State.Api.GetModAsync(mod.Id);
+            new PermissionsDialog(detail) { Owner = _shell }.ShowDialog();
+        }
+        catch (Exception ex) { SetDownloadError("Couldn't open collaborators: " + ex.Message); }
+    }
+
+    private void OnCtxOpenPage(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.External is { } mod) OpenUrl(BuildProjectUrl(mod));
+    }
+
+    private void OnCtxCopyId(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Hosted is not { } mod) return;
+        SetDownloadSuccess(ClipboardHelper.TrySetText(mod.Id.ToString())
+            ? "Copied the mod ID."
+            : "The clipboard is in use by another program.");
+    }
+
+    private void OnCtxCopySlug(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Hosted is not { } mod) return;
+        SetDownloadSuccess(ClipboardHelper.TrySetText(mod.Slug)
+            ? $"Copied {mod.Slug}."
+            : "The clipboard is in use by another program.");
+    }
+
+    private async void OnCtxDelete(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender) is { } row) await DeleteHostedModAsync(row);
+    }
+
+    private async Task DeleteHostedModAsync(ModBrowseRow row)
+    {
+        if (row.Hosted is not { } mod) return;
+        try
+        {
+            var versions = mod.VersionCount;
+            var consequence = versions == 0
+                ? "It has no uploaded versions."
+                : $"Its {versions} uploaded version{(versions == 1 ? "" : "s")} will stop being downloadable for everyone it is shared with.";
+            var ok = await AppDialog.ConfirmAsync(_shell, "Delete mod",
+                $"Delete {mod.Name}? {consequence} This cannot be undone.",
+                "Delete", "Cancel", danger: true);
+            if (!ok) return;
+
+            await App.State.Api.DeleteModAsync(mod.Id);
+            _rows.Remove(row);
+            ClearSelectedMod();
+            CountLabel.Text = _rows.Count == 0 ? "" : $"{_rows.Count} result{(_rows.Count == 1 ? "" : "s")}";
+            UpdateEmptyState();
+            SetDownloadSuccess($"Deleted {mod.Name}.");
+        }
+        catch (Exception ex) { SetDownloadError("Delete failed: " + ex.Message); }
+    }
+
+    /// <summary>Opens a version's stored changelog in the app's own dialog layer — the only place
+    /// in the client that ever showed one was the launcher's own release notes.</summary>
+    private async void OnShowChangelog(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: VersionDisplayRow row } || !row.HasChangelog) return;
+        try
+        {
+            await AppDialog.MessageAsync(_shell, $"Changelog · {row.VersionNumber}", row.Changelog!);
+        }
+        catch (Exception ex) { SetDownloadError(ex.Message); }
     }
 
     // ── install/download ─────────────────────────────────────────────────────
@@ -733,18 +1074,108 @@ public partial class ModsView : Page
         await InstallExternalVersionAsync(mod, version, pack);
     }
 
+    /// <summary>
+    /// Installs one store version into an instance together with every dependency it declares as
+    /// required.
+    /// </summary>
+    /// <remarks>
+    /// The Mods screen used to drop the single chosen jar into mods/ and stop there, which left
+    /// anything built on a library (Sodium, JEI, an Architectury mod) with an instance that refuses
+    /// to start. This mirrors what the per-instance browser does: resolve the required graph first,
+    /// skip files already present, and only then fetch. Dependencies are never flagged, and the root
+    /// mod records the store it came from so later update checks follow the right project.
+    /// </remarks>
     private async Task InstallExternalVersionAsync(ModSummary mod, ModVersion version, PackSummary pack)
     {
-        var file = version.Files.FirstOrDefault(f => f.IsPrimary) ?? version.Files.FirstOrDefault()
-            ?? throw new InvalidOperationException("No file found for this version.");
-        file = await ResolveDownloadFileAsync(mod, version, file);
-        if (string.IsNullOrWhiteSpace(file.DownloadUrl))
-            throw new InvalidOperationException("No download URL available for this file.");
-
         var folder = ModsFolderFor(pack);
-        var dest = UniqueFilePath(folder, file.Filename);
-        await DownloadFileToAsync(file.DownloadUrl, dest);
-        SetDownloadSuccess($"Installed {file.Filename} to {pack.Name}.");
+        DownloadProgress.Visibility = Visibility.Visible;
+        DownloadProgress.IsIndeterminate = true;
+        DownloadProgress.Value = 0;
+        DownloadStatus.Text = $"Resolving dependencies for {mod.Name}...";
+
+        try
+        {
+            var downloads = await ModDependencyResolver.ResolveRequiredDownloadsAsync(
+                mod,
+                version,
+                pack.MinecraftVersion ?? "",
+                PackLoaderTag(pack),
+                App.State.Modrinth,
+                App.State.CurseForge,
+                App.State.ModMetadata.EffectiveUpdateChannel(pack.Id));
+
+            if (downloads.Count == 0)
+                throw new InvalidOperationException("No download URL available for this file.");
+
+            // Count what is really missing first, so the progress below is not "3 of 12" where
+            // nine were already in the folder.
+            var pending = downloads
+                .Where(item => !(item.IsDependency && File.Exists(Path.Combine(folder, item.File.Filename))))
+                .ToList();
+            var skipped = downloads.Count - pending.Count;
+
+            var saved = 0;
+            var rootFileName = "";
+            for (var i = 0; i < pending.Count; i++)
+            {
+                var item = pending[i];
+                var dest = UniqueFilePath(folder, item.File.Filename);
+                DownloadStatus.Text = pending.Count == 1
+                    ? $"Downloading {item.File.Filename}..."
+                    : $"Downloading {item.File.Filename} ({i + 1} of {pending.Count})...";
+
+                var index = i;
+                var progress = new Progress<(long done, long total)>(p =>
+                {
+                    if (p.total <= 0) return;
+                    DownloadProgress.IsIndeterminate = false;
+                    // Each file owns its slice of the bar, so the bar never restarts mid-install.
+                    DownloadProgress.Value = (index + (double)p.done / p.total) / pending.Count * 100;
+                });
+                await App.State.Modrinth.DownloadFileAsync(item.File.DownloadUrl, dest, progress);
+                saved++;
+
+                if (item.IsDependency) continue;
+                rootFileName = item.File.Filename;
+                RememberInstallSource(pack.Id, item);
+            }
+
+            DownloadProgress.Value = 100;
+            var dependencies = saved - (string.IsNullOrEmpty(rootFileName) ? 0 : 1);
+            var extras = new List<string>(2);
+            if (dependencies > 0) extras.Add($"{dependencies} dependenc{(dependencies == 1 ? "y" : "ies")}");
+            if (skipped > 0) extras.Add($"{skipped} already present");
+            SetDownloadSuccess(
+                $"Installed {(string.IsNullOrEmpty(rootFileName) ? mod.Name : rootFileName)} to {pack.Name}"
+                + (extras.Count == 0 ? "." : $" ({string.Join(", ", extras)})."));
+        }
+        finally
+        {
+            DownloadProgress.Visibility = Visibility.Collapsed;
+            DownloadProgress.IsIndeterminate = false;
+            DownloadProgress.Value = 0;
+        }
+    }
+
+    /// <summary>Records which store a just-installed jar came from, keyed by project id with a
+    /// file-name fallback, so the instance's update check follows the same project later.</summary>
+    private static void RememberInstallSource(Guid packId, ModDownloadItem item)
+    {
+        if (item.Mod.Source is not (ModSource.CurseForge or ModSource.Modrinth)) return;
+        try
+        {
+            var keys = ModMetadataService.CandidateKeys(
+                item.Mod.Source == ModSource.Modrinth ? item.Mod : null,
+                item.Mod.Source == ModSource.CurseForge ? item.Mod : null,
+                item.File.Filename);
+            var meta = App.State.ModMetadata.GetMeta(packId, keys);
+            meta.PreferredSource = item.Mod.Source;
+            App.State.ModMetadata.SetMeta(packId, keys, meta);
+        }
+        catch
+        {
+            // Provenance is a nicety — a metadata write failure must not fail the install.
+        }
     }
 
     private async Task InstallHostedVersionAsync(HostedModDetail mod, HostedModVersionInfo version)
@@ -782,47 +1213,6 @@ public partial class ModsView : Page
         }
     }
 
-    private async Task<ModVersionFile> ResolveDownloadFileAsync(ModSummary mod, ModVersion version, ModVersionFile file)
-    {
-        if (version.Source != ModSource.CurseForge || !string.IsNullOrWhiteSpace(file.DownloadUrl))
-            return file;
-
-        var ids = version.Id.Split(':', 2);
-        var modId = ids.Length == 2 && int.TryParse(ids[0], out var parsedModId)
-            ? parsedModId
-            : int.TryParse(mod.Id, out var fallbackModId) ? fallbackModId : 0;
-        var fileId = ids.Length == 2 && int.TryParse(ids[1], out var parsedFileId) ? parsedFileId : 0;
-        if (modId == 0 || fileId == 0) return file;
-
-        var url = await App.State.CurseForge.GetDownloadUrlAsync(modId, fileId);
-        return string.IsNullOrWhiteSpace(url) ? file : file with { DownloadUrl = url };
-    }
-
-    private async Task DownloadFileToAsync(string url, string destPath)
-    {
-        DownloadProgress.Visibility = Visibility.Visible;
-        DownloadProgress.IsIndeterminate = true;
-        DownloadProgress.Value = 0;
-        DownloadStatus.Text = $"Downloading {Path.GetFileName(destPath)}...";
-
-        try
-        {
-            var progress = new Progress<(long done, long total)>(p =>
-            {
-                if (p.total <= 0) return;
-                DownloadProgress.IsIndeterminate = false;
-                DownloadProgress.Value = (double)p.done / p.total * 100;
-            });
-            await App.State.Modrinth.DownloadFileAsync(url, destPath, progress);
-        }
-        finally
-        {
-            DownloadProgress.Visibility = Visibility.Collapsed;
-            DownloadProgress.IsIndeterminate = false;
-            DownloadProgress.Value = 0;
-        }
-    }
-
     private async Task<PackSummary?> PickTargetPackAsync(
         string title,
         string description,
@@ -833,16 +1223,16 @@ public partial class ModsView : Page
         var packs = await App.State.Api.ListPacksAsync();
         if (packs.Count == 0)
         {
-            MessageBox.Show(_shell, "Create an instance before installing or importing mods.",
-                "No instance", MessageBoxButton.OK, MessageBoxImage.Information);
+            await AppDialog.MessageAsync(_shell, "No instance",
+                "Create an instance before installing or importing mods.");
             return null;
         }
 
         var candidates = canPick is null ? packs : packs.Where(canPick).ToList();
         if (candidates.Count == 0)
         {
-            MessageBox.Show(_shell, noMatchMessage ?? "No compatible instance was found.",
-                "No compatible instance", MessageBoxButton.OK, MessageBoxImage.Information);
+            await AppDialog.MessageAsync(_shell, "No compatible instance",
+                noMatchMessage ?? "No compatible instance was found.");
             return null;
         }
 
@@ -876,20 +1266,26 @@ public partial class ModsView : Page
         return candidate;
     }
 
-    private void SetDownloadSuccess(string message)
+    /// <summary>An error about the list itself (loading, importing) rather than about a download,
+    /// so it does not overwrite what the detail pane is saying.</summary>
+    private void SetListError(string message)
     {
-        DownloadStatus.Foreground = (Brush)FindResource("AccentBrush");
-        DownloadStatus.Text = message;
-        StatusLabel.Foreground = (Brush)FindResource("AccentBrush");
         StatusLabel.Text = message;
+        StatusLabel.SetResourceReference(ForegroundProperty, "DangerBrush");
     }
 
-    private void SetDownloadError(string message)
+    private void SetDownloadSuccess(string message) => SetStatusText(message, "AccentBrush");
+
+    private void SetDownloadError(string message) => SetStatusText(message, "DangerBrush");
+
+    /// <summary>Writes both status lines. The colour goes in as a resource reference rather than a
+    /// resolved brush so the text follows a theme change instead of freezing in the old palette.</summary>
+    private void SetStatusText(string message, string brushKey)
     {
-        DownloadStatus.Foreground = (Brush)FindResource("DangerBrush");
         DownloadStatus.Text = message;
-        StatusLabel.Foreground = (Brush)FindResource("DangerBrush");
+        DownloadStatus.SetResourceReference(ForegroundProperty, brushKey);
         StatusLabel.Text = message;
+        StatusLabel.SetResourceReference(ForegroundProperty, brushKey);
     }
 
     // ── external mod details helpers ─────────────────────────────────────────
@@ -1093,9 +1489,20 @@ public partial class ModsView : Page
         public string? IconUrl { get; init; }
         public string Initial { get; init; } = "?";
         public string SourceBadge { get; init; } = "";
-        public Brush SourceBadgeBackground { get; init; } = Brushes.Transparent;
-        public Brush SourceBadgeForeground { get; init; } = Brushes.White;
+        public Brush SourceBadgeBackground { get; set; } = Brushes.Transparent;
+        public Brush SourceBadgeForeground { get; set; } = Brushes.White;
         public bool IsInstallable { get; init; } = true;
+
+        /// <summary>Why Install is greyed out, or what it will do. Shown on the disabled button too,
+        /// so an empty hosted mod explains itself instead of looking broken.</summary>
+        public string InstallToolTip { get; init; } = "Install the newest compatible version";
+
+        /// <summary>Hover text for the whole row: the summary plus the compatibility line.</summary>
+        public string RowToolTip { get; init; } = "";
+
+        /// <summary>True when this is one of the signed-in user's own hosted mods — the owner-only
+        /// half of the row's context menu.</summary>
+        public bool IsOwnedByMe => Hosted is not null && Hosted.OwnerId == App.State.Settings.UserId;
 
         public static ModBrowseRow FromExternal(ModSummary mod, string platform, Brush badgeBackground, Brush badgeForeground) => new()
         {
@@ -1107,20 +1514,41 @@ public partial class ModsView : Page
             Initial = InitialFor(mod.Name),
             SourceBadge = platform,
             SourceBadgeBackground = badgeBackground,
-            SourceBadgeForeground = badgeForeground
+            SourceBadgeForeground = badgeForeground,
+            InstallToolTip = $"Install the newest {platform} version that fits an instance, with its required dependencies",
+            RowToolTip = string.IsNullOrWhiteSpace(mod.Description) ? mod.Name : mod.Description!
         };
 
-        public static ModBrowseRow FromHosted(HostedModSummary mod, Brush badgeBackground, Brush badgeForeground) => new()
+        public static ModBrowseRow FromHosted(HostedModSummary mod, Brush badgeBackground, Brush badgeForeground)
         {
-            Hosted = mod,
-            Name = mod.Name,
-            Summary = string.IsNullOrWhiteSpace(mod.Summary) ? "(no summary)" : mod.Summary!,
-            MetaLabel = $"by {mod.OwnerUsername}{FormatCompat(mod.McVersionsCsv, mod.LoadersCsv)}",
-            Initial = InitialFor(mod.Name),
-            SourceBadge = mod.Visibility.ToString(),
-            SourceBadgeBackground = badgeBackground,
-            SourceBadgeForeground = badgeForeground
-        };
+            // A mod page with no uploaded jar has nothing to install: say so on the row instead of
+            // letting the user pick an instance and only then meeting an error.
+            var hasVersions = mod.VersionCount > 0;
+            var versions = hasVersions
+                ? $" · {mod.VersionCount} version{(mod.VersionCount == 1 ? "" : "s")}"
+                : " · no versions yet";
+            return new ModBrowseRow
+            {
+                Hosted = mod,
+                Name = mod.Name,
+                Summary = string.IsNullOrWhiteSpace(mod.Summary) ? "(no summary)" : mod.Summary!,
+                MetaLabel = $"by {mod.OwnerUsername}{FormatCompat(mod.McVersionsCsv, mod.LoadersCsv)}{versions}",
+                Initial = InitialFor(mod.Name),
+                SourceBadge = mod.Visibility.ToString(),
+                SourceBadgeBackground = badgeBackground,
+                SourceBadgeForeground = badgeForeground,
+                IsInstallable = hasVersions,
+                InstallToolTip = hasVersions
+                    ? "Install the newest compatible version into one of your instances"
+                    : "Nothing to install yet — upload a version from Manage first",
+                RowToolTip = (string.IsNullOrWhiteSpace(mod.Summary) ? mod.Name : mod.Summary!)
+                    + $"\n{FormatCompatLine(mod.McVersionsCsv, mod.LoadersCsv)}"
+            };
+        }
+
+        private static string FormatCompatLine(string? mcVersionsCsv, string? loadersCsv) =>
+            $"MC {(string.IsNullOrWhiteSpace(mcVersionsCsv) ? "any" : mcVersionsCsv)} · "
+            + $"{(string.IsNullOrWhiteSpace(loadersCsv) ? "any loader" : loadersCsv)}";
 
         private static string FormatCompat(string? mcVersionsCsv, string? loadersCsv)
         {
@@ -1142,6 +1570,22 @@ public partial class ModsView : Page
         public string DateLabel { get; init; } = "";
         public string SizeLabel { get; init; } = "";
 
+        /// <summary>The version's own notes. Hosted mods store one per upload; the stores' own
+        /// per-version notes are not part of <see cref="ModVersion"/>, so those rows have none.</summary>
+        public string? Changelog { get; init; }
+
+        public bool HasChangelog => !string.IsNullOrWhiteSpace(Changelog);
+
+        public Visibility ChangelogButtonVisibility =>
+            HasChangelog ? Visibility.Visible : Visibility.Collapsed;
+
+        /// <summary>Row hover text — the first few lines of the changelog, so the grid answers
+        /// "what changed?" without a click.</summary>
+        public string? ChangelogToolTip => HasChangelog ? Truncate(Changelog!, 400) : null;
+
+        private static string Truncate(string text, int max) =>
+            text.Length <= max ? text : text[..max].TrimEnd() + "…";
+
         public static VersionDisplayRow FromExternal(ModVersion version) => new()
         {
             ExternalVersion = version,
@@ -1161,7 +1605,8 @@ public partial class ModsView : Page
             LoaderList = version.LoadersCsv ?? "",
             ReleaseChannel = version.ReleaseChannel,
             DateLabel = version.PublishedAt.LocalDateTime.ToString("yyyy-MM-dd"),
-            SizeLabel = FormatSize(version.FileSize)
+            SizeLabel = FormatSize(version.FileSize),
+            Changelog = version.Changelog
         };
     }
 }

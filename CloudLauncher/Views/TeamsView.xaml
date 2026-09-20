@@ -1,13 +1,14 @@
 ﻿<Page x:Class="CloudLauncher.Views.TeamsView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Teams"
       Background="{DynamicResource Surface0Brush}">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
+    <ScrollViewer VerticalScrollBarVisibility="Auto" anim:Animate.SmoothScroll="True">
         <StackPanel Margin="18">
             <TextBlock Style="{StaticResource H1}" Text="Teams"/>
             <TextBlock Style="{StaticResource Muted}"
-                       Text="Create teams to share instances with multiple people at once."
+                       Text="Create teams to share instances, mods, worlds and resource packs with several people at once."
                        Margin="0,2,0,16"/>
 
             <!-- Create -->
@@ -16,53 +17,121 @@
                     <TextBlock Style="{StaticResource H3}" Text="Create a team" Margin="0,0,0,8"/>
                     <DockPanel>
                         <Button DockPanel.Dock="Right" Content="Create" Style="{StaticResource AccentButton}"
-                                Click="OnCreateTeam"/>
-                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
-                                Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                                Click="OnRefresh" ToolTip="Refresh"/>
-                        <TextBox x:Name="NewTeamBox" Margin="0,0,8,0" KeyDown="OnNewTeamKeyDown"/>
+                                Click="OnCreateTeam"
+                                ToolTip="Creates the team and selects it so you can add members straight away"/>
+                        <TextBox x:Name="NewTeamBox" Margin="0,0,8,0" KeyDown="OnNewTeamKeyDown"
+                                 ToolTip="A name between 1 and 64 characters. Team names are unique across the server."/>
                     </DockPanel>
                 </StackPanel>
             </Border>
 
             <!-- Teams list -->
-            <TextBlock Style="{StaticResource H3}" Text="Your teams" Margin="0,0,0,8"/>
+            <DockPanel Margin="0,0,0,8">
+                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        Click="OnRefresh" ToolTip="Refresh the team list (F5)"/>
+                <ComboBox x:Name="SortBox" DockPanel.Dock="Right" Width="150" Margin="8,0,6,0"
+                          SelectionChanged="OnSortChanged" ToolTip="How the team list is ordered">
+                    <ComboBoxItem Content="Sort by name"/>
+                    <ComboBoxItem Content="Sort by members"/>
+                    <ComboBoxItem Content="Sort by shared items"/>
+                </ComboBox>
+                <TextBox x:Name="SearchBox" DockPanel.Dock="Right" Width="200"
+                         TextChanged="OnSearchChanged" PreviewKeyDown="OnSearchPreviewKeyDown"
+                         ToolTip="Filter by team name or owner (Ctrl+F)"/>
+                <TextBlock Style="{StaticResource H3}" Text="Your teams" VerticalAlignment="Center"/>
+            </DockPanel>
+
             <Border Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                     CornerRadius="8" Padding="6" MinHeight="140">
                 <Grid>
                     <ListBox x:Name="TeamsList" SelectionChanged="OnTeamSelected"
-                             Background="Transparent" BorderThickness="0">
+                             Background="Transparent" BorderThickness="0"
+                             HorizontalContentAlignment="Stretch"
+                             anim:Animate.EntranceStagger="True">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <DockPanel>
-                                    <Border DockPanel.Dock="Right" Style="{StaticResource Pill}">
-                                        <TextBlock Text="{Binding MemberCountLabel}" Style="{StaticResource PillText}"/>
-                                    </Border>
-                                    <StackPanel>
-                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
-                                        <TextBlock Text="{Binding OwnerLabel}" Style="{StaticResource Caption}"/>
-                                    </StackPanel>
-                                </DockPanel>
+                                <Border Background="Transparent" Padding="4,3"
+                                        anim:Animate.HoverLift="True"
+                                        ToolTip="{Binding RowTooltip}">
+                                    <Border.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Rename…" Click="OnCtxRenameTeam">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Transfer ownership…" Click="OnCtxTransferOwnership">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8D7;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <Separator/>
+                                            <MenuItem Header="Copy team ID" Click="OnCtxCopyTeamId">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <Separator/>
+                                            <MenuItem Header="Leave team" Click="OnCtxLeaveTeam">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE89B;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Delete team…" Click="OnCtxDeleteTeam">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
+                                    <DockPanel>
+                                        <!-- Row actions live at the right edge -->
+                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                VerticalAlignment="Center" Margin="8,0,0,0">
+                                            <TextBlock Text="{Binding MemberCountLabel}" Style="{StaticResource PillText}"/>
+                                        </Border>
+                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                VerticalAlignment="Center"
+                                                Visibility="{Binding SharedPillVisibility}">
+                                            <TextBlock Text="{Binding SharedCountLabel}" Style="{StaticResource PillText}"/>
+                                        </Border>
+                                        <StackPanel>
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                            <TextBlock Text="{Binding OwnerLabel}" Style="{StaticResource Caption}"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
                     <TextBlock x:Name="TeamsEmptyLabel" Visibility="Collapsed"
-                               Style="{StaticResource Muted}"
+                               Style="{StaticResource Muted}" TextWrapping="Wrap" TextAlignment="Center"
                                Text="You're not on any teams yet — create one above."
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="TeamsLoadingLabel" Visibility="Collapsed"
+                               Style="{StaticResource Caption}" Text="Loading…"
                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Grid>
             </Border>
 
             <!-- Members -->
-            <TextBlock x:Name="DetailHeader" Style="{StaticResource H3}" Margin="0,18,0,8"
+            <TextBlock x:Name="DetailHeader" Style="{StaticResource H3}" Margin="0,18,0,2"
                        Text="Select a team to manage members"/>
+            <TextBlock x:Name="DetailSubHeader" Style="{StaticResource Caption}" Margin="0,0,0,8"
+                       TextWrapping="Wrap"/>
 
             <DockPanel Margin="0,0,0,8">
                 <Button DockPanel.Dock="Right" Style="{StaticResource DangerButton}"
-                        x:Name="DeleteTeamButton" Content="Delete team" Click="OnDeleteTeam"/>
+                        x:Name="DeleteTeamButton" Content="Delete team" Click="OnDeleteTeam"
+                        ToolTip="Deletes the team. Everything shared with it loses that access."/>
+                <Button DockPanel.Dock="Right" x:Name="LeaveTeamButton" Content="Leave"
+                        Margin="0,0,8,0" Click="OnLeaveTeam"
+                        ToolTip="Removes you from this team. You lose access to everything shared with it."/>
                 <Button DockPanel.Dock="Right" x:Name="AddMemberButton"
-                        Content="Add" Click="OnAddMember" Style="{StaticResource AccentButton}"/>
+                        Content="Add" Click="OnAddMember" Style="{StaticResource AccentButton}"
+                        Margin="0,0,8,0" ToolTip="Add an existing CloudLauncher account by username"/>
                 <TextBox x:Name="NewMemberBox" Margin="0,0,8,0"
                          ToolTip="Username to add" KeyDown="OnNewMemberKeyDown"/>
             </DockPanel>
@@ -70,31 +139,98 @@
             <Border Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                     CornerRadius="8" Padding="6" MinHeight="100">
-                <ListBox x:Name="MembersList" Background="Transparent" BorderThickness="0">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <DockPanel>
-                                <Button DockPanel.Dock="Right" Content="Remove"
-                                        Style="{StaticResource DangerButton}"
-                                        Padding="8,3" MinWidth="0" MinHeight="0" FontSize="11"
-                                        Click="OnRemoveMember"/>
-                                <StackPanel Orientation="Horizontal">
-                                    <Border Width="28" Height="28" CornerRadius="14"
-                                            Background="{DynamicResource AccentSoftBrush}"
-                                            VerticalAlignment="Center" Margin="0,0,10,0">
-                                        <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}"
-                                                   FontSize="12" Foreground="{DynamicResource AccentBrush}"
-                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </Border>
-                                    <TextBlock Text="{Binding Username}" VerticalAlignment="Center"/>
-                                </StackPanel>
-                            </DockPanel>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
+                <Grid>
+                    <ListBox x:Name="MembersList" Background="Transparent" BorderThickness="0"
+                             HorizontalContentAlignment="Stretch"
+                             anim:Animate.EntranceStagger="True">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="Transparent" Padding="4,3"
+                                        anim:Animate.HoverLift="True"
+                                        ToolTip="{Binding RowTooltip}">
+                                    <Border.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Make owner…" Click="OnCtxMakeOwner"
+                                                      Visibility="{Binding MakeOwnerVisibility}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8D7;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Copy user ID" Click="OnCtxCopyUserId">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <Separator/>
+                                            <MenuItem Header="Remove from team" Click="OnRemoveMember"
+                                                      Visibility="{Binding RemoveVisibility}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Leave team" Click="OnLeaveTeam"
+                                                      Visibility="{Binding LeaveVisibility}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE89B;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
+                                    <DockPanel>
+                                        <!-- Row actions at the right edge -->
+                                        <Button DockPanel.Dock="Right" Content="Remove"
+                                                Style="{StaticResource DangerButton}"
+                                                Padding="8,3" MinWidth="0" MinHeight="0" FontSize="11"
+                                                VerticalAlignment="Center" Margin="8,0,0,0"
+                                                Visibility="{Binding RemoveVisibility}"
+                                                Click="OnRemoveMember"
+                                                ToolTip="Take this person off the team"/>
+                                        <Button DockPanel.Dock="Right" Content="Leave team"
+                                                Style="{StaticResource DangerButton}"
+                                                Padding="8,3" MinWidth="0" MinHeight="0" FontSize="11"
+                                                VerticalAlignment="Center" Margin="8,0,0,0"
+                                                Visibility="{Binding LeaveVisibility}"
+                                                Click="OnLeaveTeam"
+                                                ToolTip="Remove yourself from this team"/>
+                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                VerticalAlignment="Center" Margin="8,0,0,0"
+                                                Visibility="{Binding OwnerPillVisibility}">
+                                            <TextBlock Text="Owner" Style="{StaticResource PillText}"/>
+                                        </Border>
+                                        <TextBlock DockPanel.Dock="Right" Text="{Binding JoinedLabel}"
+                                                   Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                                   Margin="8,0,0,0"/>
+                                        <StackPanel Orientation="Horizontal">
+                                            <Border Width="28" Height="28" CornerRadius="14"
+                                                    Background="{DynamicResource AccentSoftBrush}"
+                                                    VerticalAlignment="Center" Margin="0,0,10,0">
+                                                <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}"
+                                                           FontSize="12" Foreground="{DynamicResource AccentBrush}"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <TextBlock Text="{Binding Username}" VerticalAlignment="Center"/>
+                                            <TextBlock Text="you" Style="{StaticResource Caption}"
+                                                       VerticalAlignment="Center" Margin="6,0,0,0"
+                                                       Visibility="{Binding YouVisibility}"/>
+                                            <TextBlock Text="unverified email" Style="{StaticResource Caption}"
+                                                       VerticalAlignment="Center" Margin="6,0,0,0"
+                                                       Foreground="{DynamicResource TextTertiaryBrush}"
+                                                       Visibility="{Binding UnverifiedVisibility}"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock x:Name="MembersEmptyLabel" Visibility="Collapsed"
+                               Style="{StaticResource Muted}" TextWrapping="Wrap" TextAlignment="Center"
+                               Text="Select a team above to see who is on it."
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Grid>
             </Border>
 
-            <TextBlock x:Name="StatusLabel" Style="{StaticResource ErrorText}" Margin="0,12,0,0"/>
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,12,0,0"
+                       TextWrapping="Wrap" Foreground="{DynamicResource TextSecondaryBrush}"/>
         </StackPanel>
     </ScrollViewer>
 </Page>

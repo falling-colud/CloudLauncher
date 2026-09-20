@@ -9,6 +9,15 @@ namespace CloudLauncher.Views;
 public partial class CreateModDialog : Window
 {
     public HostedModSummary? Created { get; private set; }
+
+    /// <summary>The jar the user picked to publish as this mod's first version, if any.</summary>
+    /// <remarks>
+    /// The upload itself is not done here: a version can only be uploaded once the mod exists, and
+    /// the upload card lives in the shell's dialog layer, which this window is not part of. The
+    /// caller reads this after a successful create and opens that card with the file pre-selected.
+    /// </remarks>
+    public string? FirstJarPath { get; private set; }
+
     private bool _isCreating;
 
     public CreateModDialog()
@@ -19,6 +28,26 @@ public partial class CreateModDialog : Window
     }
 
     private void OnCancel(object sender, RoutedEventArgs e) { DialogResult = false; Close(); }
+
+    private void OnPickFirstJar(object sender, RoutedEventArgs e)
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Pick the jar to upload as the first version",
+            Filter = "Mod jars (*.jar)|*.jar|All files|*"
+        };
+        if (dlg.ShowDialog(this) != true) return;
+        FirstJarPath = dlg.FileName;
+        FirstJarLabel.Text = System.IO.Path.GetFileName(dlg.FileName);
+        ClearJarButton.Visibility = Visibility.Visible;
+    }
+
+    private void OnClearFirstJar(object sender, RoutedEventArgs e)
+    {
+        FirstJarPath = null;
+        FirstJarLabel.Text = "Pick a jar and the upload dialog opens once the mod exists.";
+        ClearJarButton.Visibility = Visibility.Collapsed;
+    }
 
     private async Task LoadMinecraftVersionsAsync()
     {
@@ -90,10 +119,12 @@ public partial class CreateModDialog : Window
         if (LoaderNeoForge.IsChecked == true) loaders.Add("neoforge");
         if (LoaderQuilt.IsChecked == true)    loaders.Add("quilt");
 
+        var description = DescriptionBox.Text.Trim();
+
         var req = new CreateModRequest(
             name,
             summary,
-            null,
+            string.IsNullOrWhiteSpace(description) ? null : description,
             vis,
             mcVersion,
             loaders.Count > 0 ? string.Join(',', loaders) : null);

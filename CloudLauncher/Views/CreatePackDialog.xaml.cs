@@ -14,8 +14,40 @@ public partial class CreatePackDialog : Window
     public CreatePackDialog()
     {
         InitializeComponent();
+        UpdateSummaryCounter();
         Loaded += async (_, _) => await LoadMinecraftVersionsAsync();
     }
+
+    private void OnSummaryChanged(object sender, TextChangedEventArgs e) => UpdateSummaryCounter();
+
+    /// <summary>Counts down to the server's summary limit, and turns red once over it.</summary>
+    /// <remarks>The server truncates silently, so without this the first sign that a long summary
+    /// was cut is seeing it cut in the browser.</remarks>
+    private void UpdateSummaryCounter()
+    {
+        if (SummaryCounter is null || SummaryBox is null) return;
+        var used = SummaryBox.Text.Length;
+        var over = used > PackText.SummaryMaxLength;
+        SummaryCounter.Text = over
+            ? $"{used - PackText.SummaryMaxLength} over the limit"
+            : $"{used}/{PackText.SummaryMaxLength}";
+        SummaryCounter.SetResourceReference(TextBlock.ForegroundProperty,
+            over ? "DangerBrush" : "TextTertiaryBrush");
+    }
+
+    private void OnVisibilityChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (VisibilityNote is null) return;
+        VisibilityNote.Visibility = GetSelectedVisibility() == PackVisibility.Private
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+    }
+
+    private PackVisibility GetSelectedVisibility() =>
+        VisibilityBox?.SelectedItem is ComboBoxItem { Tag: string tag }
+        && Enum.TryParse<PackVisibility>(tag, out var v)
+            ? v
+            : PackVisibility.Private;
 
     private async Task LoadMinecraftVersionsAsync()
     {
@@ -130,14 +162,34 @@ public partial class CreatePackDialog : Window
             }
         }
 
+        var summary = SummaryBox.Text.Trim();
+        if (summary.Length > PackText.SummaryMaxLength)
+        {
+            StatusLabel.Text = $"The summary is {summary.Length - PackText.SummaryMaxLength} characters too long.";
+            SummaryBox.Focus();
+            return;
+        }
+
+        var visibility = GetSelectedVisibility();
+
         _isCreating = true;
-        StatusLabel.Text = "Creating…";
         System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
         try
         {
-            CreatedPack = await App.State.Api.CreatePackAsync(
-                new CreatePackRequest(name, null, isEmpty, mc, loader, loaderVersion));
-            App.State.Packs.EnsurePackFolder(CreatedPack.Id, CreatedPack.Name, CreatedPack.IsShared);
+            // Pressing Create again after the publish step failed must not make a second instance:
+            // the first press already created one and only the visibility call went wrong.
+            if (CreatedPack is null)
+            {
+                StatusLabel.Text = "Creating…";
+                CreatedPack = await App.State.Api.CreatePackAsync(
+                    new CreatePackRequest(name, null, isEmpty, mc, loader, loaderVersion,
+                        Summary: summary.Length == 0 ? null : summary));
+                App.State.Packs.EnsurePackFolder(CreatedPack.Id, CreatedPack.Name, CreatedPack.IsShared);
+            }
+
+            if (visibility != PackVisibility.Private && !await TryPublishAsync(CreatedPack, visibility))
+                return; // message is on the status line; Create now retries just the publish
+
             DialogResult = true;
             Close();
         }
@@ -149,9 +201,43 @@ public partial class CreatePackDialog : Window
         }
     }
 
+    /// <summary>
+    /// Applies a non-Private visibility to the instance that was just created, turning server
+    /// hosting on with it.
+    /// </summary>
+    /// <remarks>
+    /// Create has no visibility field, so publishing is a second call. Hosting has to go with it:
+    /// visibility and hosting are independent flags, and a pack that is Public but not hosted shows
+    /// up in everyone's browser with an Add button that hands them an empty instance.
+    /// Returning false leaves the created instance in place and Private, which is the safe end of
+    /// the mistake, and lets the user press Create again to retry only this step.
+    /// </remarks>
+    private async Task<bool> TryPublishAsync(PackSummary pack, PackVisibility visibility)
+    {
+        StatusLabel.Text = "Publishing…";
+        try
+        {
+            var published = await App.State.Api.UpdatePackAsync(pack.Id,
+                new UpdatePackRequest(null, null, visibility, IsShared: true, null, null, null, null));
+            App.State.Packs.EnsurePackFolder(published.Id, published.Name, published.IsShared);
+            CreatedPack = published;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = $"'{pack.Name}' was created but couldn't be published: {ex.Message} "
+                               + "It is private for now — press Create to try publishing again, "
+                               + "or Cancel and publish it later from its Options.";
+            return false;
+        }
+    }
+
+    /// <remarks>Once the instance exists on the server, Cancel can only decline the publish step —
+    /// it cannot un-create it. Report success so the caller still lists the new instance instead of
+    /// leaving it invisible until the next refresh.</remarks>
     private void OnCancel(object sender, RoutedEventArgs e)
     {
-        DialogResult = false;
+        DialogResult = CreatedPack is not null;
         Close();
     }
 }

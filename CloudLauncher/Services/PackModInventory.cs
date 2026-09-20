@@ -160,6 +160,47 @@ public sealed class PackMod : INotifyPropertyChanged
     public string? Note => string.IsNullOrWhiteSpace(Meta.Note) ? null : Meta.Note!.Trim();
     public bool HasNote => Note is not null;
 
+    // ── recorded incompatibilities ─────────────────────────────────────────────
+
+    private IReadOnlyList<string> _conflicts = Array.Empty<string>();
+
+    /// <summary>Display names of the other installed mods this one is recorded as incompatible with,
+    /// filled in by <see cref="PackModInventory.ResolveConflicts"/>.</summary>
+    /// <remarks>Resolved for the whole list at once rather than computed per mod: the record is a
+    /// list of mod <em>keys</em>, so answering it for one mod means indexing every other mod's keys,
+    /// and a card-level property doing that would be O(n²) on every repaint.</remarks>
+    public IReadOnlyList<string> ConflictsWith => _conflicts;
+
+    /// <summary>True when this mod carries a conflict worth showing: a recorded clash with another
+    /// installed mod, or the standing "incompatible with mods not installed here" flag.</summary>
+    public bool HasConflict => _conflicts.Count > 0 || Meta.IncompatibleWithUnknown;
+
+    /// <summary>What the CONFLICT pill's tooltip says — the mods by name, so the pill is actionable
+    /// rather than just alarming.</summary>
+    public string ConflictLabel
+    {
+        get
+        {
+            var lines = new List<string>();
+            if (_conflicts.Count > 0)
+                lines.Add("Marked incompatible with: " + string.Join(", ", _conflicts));
+            if (Meta.IncompatibleWithUnknown)
+                lines.Add("Marked incompatible with mods that are not installed here.");
+            if (Meta.UpdateIncompatible)
+                lines.Add("Updating this mod is marked as breaking compatibility.");
+            return lines.Count == 0 ? "" : string.Join(Environment.NewLine, lines);
+        }
+    }
+
+    /// <summary>Sets the resolved conflict names, raising change notification only when they moved —
+    /// the resolve runs over the whole pack after every metadata edit.</summary>
+    internal void SetConflicts(IReadOnlyList<string> names)
+    {
+        if (_conflicts.Count == names.Count && _conflicts.SequenceEqual(names, StringComparer.Ordinal)) return;
+        _conflicts = names;
+        Refresh();
+    }
+
     /// <summary>First line of the note, trimmed to fit a card row.</summary>
     public string NotePreview
     {
@@ -237,8 +278,15 @@ public sealed class PackMod : INotifyPropertyChanged
         if (Priority != 0) flags.Add($"priority {Priority}");
         if (ContentSize != 0) flags.Add($"{ContentSizeLabel.ToLowerInvariant()} content");
         if (Meta.UpdateIncompatible) flags.Add("update-incompatible");
-        if (Meta.UpdateLocked) flags.Add("updates locked");
+        if (Meta.UpdateIncompatibleWithUnknown) flags.Add("update-incompatible with unknown mods");
+        if (Meta.UpdateLocked)
+            flags.Add(Meta.PinnedVersionId is null
+                ? "updates locked"
+                : $"kept at {VersionLabel}");
         if (flags.Count > 0) sb.AppendLine("Flags: " + string.Join(", ", flags));
+        // The incompatibility record is otherwise invisible — it is written from the options menu and
+        // then never mentioned again, which is exactly the trap it exists to prevent.
+        if (ConflictLabel is { Length: > 0 } conflict) sb.AppendLine(conflict);
         if (Meta.Categories.Count > 0) sb.AppendLine("Categories: " + string.Join(", ", Meta.Categories));
         if (RequiredDependencies.Count > 0) sb.AppendLine($"Dependencies: {RequiredDependencies.Count}");
         if (HasUpdate)
@@ -535,6 +583,40 @@ public sealed class PackModInventory
     {
         _metadata.SetMeta(packId, mod.CandidateKeys, mod.Meta);
         mod.Refresh();
+    }
+
+    /// <summary>
+    /// Resolves each mod's recorded mod-to-mod incompatibilities into the names of the installed mods
+    /// it clashes with, so the views can show them (see <see cref="PackMod.ConflictsWith"/>).
+    /// </summary>
+    /// <remarks>
+    /// A conflict is recorded on both mods by the options menu, but metadata written by an older
+    /// build — or edited by hand in <c>mods.json</c> — may only carry one direction, so a link found
+    /// either way is mirrored onto both here. Mods whose partner is not installed contribute nothing:
+    /// a clash with a mod this pack does not have is not a conflict the user can act on, and
+    /// <see cref="ModMeta.IncompatibleWithUnknown"/> is the flag for that case.
+    /// </remarks>
+    public static void ResolveConflicts(IReadOnlyList<PackMod> mods)
+    {
+        var byKey = new Dictionary<string, PackMod>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in mods)
+            foreach (var key in m.CandidateKeys)
+                byKey[key] = m;
+
+        // PackMod does not override Equals, so the default comparer is reference identity — which is
+        // what "this mod object" means here, since two jars can share a display name.
+        var names = new Dictionary<PackMod, SortedSet<string>>();
+        foreach (var m in mods) names[m] = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var m in mods)
+            foreach (var key in m.Meta.IncompatibleWith)
+            {
+                if (!byKey.TryGetValue(key, out var other) || ReferenceEquals(other, m)) continue;
+                names[m].Add(other.DisplayName);
+                if (names.TryGetValue(other, out var back)) back.Add(m.DisplayName);
+            }
+
+        foreach (var m in mods) m.SetConflicts(names[m].ToList());
     }
 
     /// <summary>Re-stamps the pack-wide defaults (store preference, update channel) onto already

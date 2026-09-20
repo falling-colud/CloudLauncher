@@ -1,7 +1,7 @@
 ﻿<Window x:Class="CloudLauncher.Views.CreatePackDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Create instance" Height="620" Width="560"
+        Title="Create instance" Height="760" Width="560"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Background="{DynamicResource Surface1Brush}"
         Foreground="{DynamicResource TextPrimaryBrush}">
@@ -19,7 +19,35 @@
 
         <StackPanel Grid.Row="1">
             <Label Content="Instance name"/>
-            <TextBox x:Name="NameBox" Margin="0,0,0,12"/>
+            <TextBox x:Name="NameBox" Margin="0,0,0,12"
+                     MaxLength="128"
+                     ToolTip="Shown in your instance list, and to anyone you publish this to"/>
+
+            <DockPanel>
+                <Label Content="Summary"/>
+                <TextBlock x:Name="SummaryCounter" DockPanel.Dock="Right"
+                           Style="{StaticResource Caption}" VerticalAlignment="Center"
+                           HorizontalAlignment="Right"/>
+            </DockPanel>
+            <TextBox x:Name="SummaryBox" Margin="0,0,0,12"
+                     AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="52" MaxHeight="90"
+                     VerticalScrollBarVisibility="Auto"
+                     TextChanged="OnSummaryChanged"
+                     ToolTip="One or two lines describing the instance. This is the subtitle people see in the pack browser."/>
+
+            <Label Content="Who can see it"/>
+            <ComboBox x:Name="VisibilityBox" Margin="0,0,0,4"
+                      SelectionChanged="OnVisibilityChanged"
+                      ToolTip="You can change this later in the instance's Options">
+                <ComboBoxItem Content="Private — only me" Tag="Private" IsSelected="True"/>
+                <ComboBoxItem Content="Team — the teams I share it with" Tag="Team"/>
+                <ComboBoxItem Content="Public — anyone on this server" Tag="Public"/>
+            </ComboBox>
+            <TextBlock x:Name="VisibilityNote" Style="{StaticResource Caption}"
+                       TextWrapping="Wrap" Margin="0,0,0,12"
+                       Visibility="Collapsed"
+                       Text="Publishing also turns on server hosting, so the files you put in this instance are uploaded for the people who add it."/>
         </StackPanel>
 
         <Border Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12">

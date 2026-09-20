@@ -276,6 +276,48 @@ public sealed class AppSettings
     /// </summary>
     public string? CurseForgeApiKey { get; set; }
 
+    // ── servers ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Admin details for servers the user runs, keyed by the server address exactly as it appears in
+    /// an instance's <c>servers.dat</c> (lower-cased, and with the default port left off when that is
+    /// how it was typed — see <see cref="ServerKey"/>).
+    /// </summary>
+    /// <remarks>
+    /// Deliberately keyed on the address rather than on an instance, because one server is usually
+    /// reachable from several instances and the console is a property of the server, not of the copy
+    /// of the server list that happens to name it.
+    /// </remarks>
+    public Dictionary<string, ServerAdminEntry> ServerAdmins { get; set; } = new();
+
+    /// <summary>The key <see cref="ServerAdmins"/> uses for a server address.</summary>
+    public static string ServerKey(string address) => (address ?? "").Trim().ToLowerInvariant();
+
+    /// <summary>Admin details for one server, or null when the user has not filled any in.</summary>
+    public ServerAdminEntry? GetServerAdmin(string address) =>
+        ServerAdmins.TryGetValue(ServerKey(address), out var e) ? e : null;
+
+    public ServerAdminEntry GetOrCreateServerAdmin(string address)
+    {
+        var key = ServerKey(address);
+        if (!ServerAdmins.TryGetValue(key, out var e)) ServerAdmins[key] = e = new ServerAdminEntry();
+        return e;
+    }
+
+    public void RemoveServerAdmin(string address) => ServerAdmins.Remove(ServerKey(address));
+
+    // ── config & scripts hub ─────────────────────────────────────────────────
+
+    /// <summary>
+    /// Files the user has pinned in the Config and scripts page, as "{packId:N}/{relative/path}".
+    /// A pinned file that no longer exists is shown greyed rather than dropped, so a pin survives an
+    /// instance being re-synced or a pack being temporarily unavailable.
+    /// </summary>
+    public List<string> ConfigHubPins { get; set; } = new();
+
+    /// <summary>Last filter the Config and scripts page was left on, so it opens where it was left.</summary>
+    public string? ConfigHubLastFilter { get; set; }
+
     /// <summary>Colours for the launcher chrome and the log views.</summary>
     public ThemeSettings Theme { get; set; } = new();
 
@@ -993,4 +1035,35 @@ public sealed class McDefaults
     public string KeyAttack    { get; set; } = "key.mouse.left";
     public string KeyUse       { get; set; } = "key.mouse.right";
     public string KeyTogglePerspective { get; set; } = "key.keyboard.f5";
+}
+
+/// <summary>
+/// What the launcher needs to talk to a server's console, plus how the user labelled it.
+/// </summary>
+/// <remarks>
+/// <para>RCON is the only remote-console protocol vanilla Minecraft speaks, and it authenticates with
+/// a single shared password sent over an unencrypted socket. The password is therefore stored here in
+/// clear, exactly as <see cref="AppSettings.CurseForgeApiKey"/> and the account tokens beside it are —
+/// settings.json is already the trust boundary for this application. The UI says so where the
+/// password is entered, and the value is never logged or sent anywhere but the server it belongs to.</para>
+/// </remarks>
+public sealed class ServerAdminEntry
+{
+    /// <summary>What to call this server in the launcher. Empty falls back to the servers.dat name.</summary>
+    public string? Label { get; set; }
+
+    /// <summary>RCON host. Empty means "the same host as the game address".</summary>
+    public string? RconHost { get; set; }
+
+    /// <summary>RCON port. Minecraft's default is 25575.</summary>
+    public int RconPort { get; set; } = 25575;
+
+    /// <summary>RCON password, as configured in the server's server.properties.</summary>
+    public string? RconPassword { get; set; }
+
+    /// <summary>Commands the user has run against this server, newest last, capped by the console UI.</summary>
+    public List<string> CommandHistory { get; set; } = new();
+
+    [JsonIgnore]
+    public bool HasConsole => !string.IsNullOrWhiteSpace(RconPassword);
 }

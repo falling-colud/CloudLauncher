@@ -282,6 +282,36 @@
                             </Grid>
                         </ToggleButton>
 
+                        <ToggleButton x:Name="NavServers" Style="{StaticResource NavButton}"
+                                      Click="OnNavServers" ToolTip="Servers">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="60"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="&#xE774;"
+                                           FontFamily="{StaticResource IconFont}" FontSize="15"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="NavServersLabel" Grid.Column="1"
+                                           Style="{StaticResource NavLabel}" Text="Servers"/>
+                            </Grid>
+                        </ToggleButton>
+
+                        <ToggleButton x:Name="NavConfigs" Style="{StaticResource NavButton}"
+                                      Click="OnNavConfigs" ToolTip="Config &amp; scripts">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="60"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="&#xE943;"
+                                           FontFamily="{StaticResource IconFont}" FontSize="15"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="NavConfigsLabel" Grid.Column="1"
+                                           Style="{StaticResource NavLabel}" Text="Config &amp; scripts"/>
+                            </Grid>
+                        </ToggleButton>
+
                         <ToggleButton x:Name="NavShaders" Style="{StaticResource NavButton}"
                                       Click="OnNavShaders" ToolTip="Shader packs">
                             <Grid>

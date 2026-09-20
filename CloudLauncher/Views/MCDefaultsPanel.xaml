@@ -8,7 +8,7 @@
 
             <TextBlock Style="{StaticResource H2}" Text="Minecraft defaults"/>
             <TextBlock Style="{StaticResource Muted}"
-                       Text="These settings are stamped into the options.txt of new instances you create. You can also apply them to a specific instance at any time."
+                       Text="These settings are stamped into the options.txt of new instances you create, and save as you change them. You can also apply them to an existing instance at any time."
                        TextWrapping="Wrap" Margin="0,6,0,18"/>
 
             <!-- VIDEO -->
@@ -68,7 +68,7 @@
                         <TextBlock DockPanel.Dock="Left" Text="GUI scale" Width="160"
                                    VerticalAlignment="Center" Foreground="{DynamicResource TextSecondaryBrush}"/>
                         <ComboBox x:Name="GuiScaleBox" Width="180" HorizontalAlignment="Left"
-                                  SelectedIndex="0">
+                                  SelectedIndex="0" SelectionChanged="OnOptionSelectionChanged">
                             <ComboBoxItem Content="Auto"/>
                             <ComboBoxItem Content="1×"/>
                             <ComboBoxItem Content="2×"/>
@@ -77,10 +77,10 @@
                         </ComboBox>
                     </DockPanel>
 
-                    <CheckBox x:Name="FullscreenBox" Content="Fullscreen" Margin="0,4,0,8"/>
-                    <CheckBox x:Name="VSyncBox" Content="Enable VSync" Margin="0,0,0,8"/>
-                    <CheckBox x:Name="ViewBobbingBox" Content="View bobbing" Margin="0,0,0,8"/>
-                    <CheckBox x:Name="AutoJumpBox" Content="Auto-jump" Margin="0,0,0,0"/>
+                    <CheckBox x:Name="FullscreenBox" Content="Fullscreen" Margin="0,4,0,8" Click="OnOptionChanged"/>
+                    <CheckBox x:Name="VSyncBox" Content="Enable VSync" Margin="0,0,0,8" Click="OnOptionChanged"/>
+                    <CheckBox x:Name="ViewBobbingBox" Content="View bobbing" Margin="0,0,0,8" Click="OnOptionChanged"/>
+                    <CheckBox x:Name="AutoJumpBox" Content="Auto-jump" Margin="0,0,0,0" Click="OnOptionChanged"/>
                 </StackPanel>
             </Border>
 
@@ -152,33 +152,33 @@
                         </Grid.RowDefinitions>
 
                         <!-- Left column -->
-                        <local:KeybindRow x:Name="KeyForward"   Label="Forward"    Grid.Row="0" Grid.Column="0" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyForward"   Label="Forward"    Grid.Row="0" Grid.Column="0" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyBack"      Label="Back"       Grid.Row="1" Grid.Column="0" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyBack"      Label="Back"       Grid.Row="1" Grid.Column="0" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyLeft"      Label="Strafe left"  Grid.Row="2" Grid.Column="0" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyLeft"      Label="Strafe left"  Grid.Row="2" Grid.Column="0" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyRight"     Label="Strafe right" Grid.Row="3" Grid.Column="0" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyRight"     Label="Strafe right" Grid.Row="3" Grid.Column="0" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyJump"      Label="Jump"       Grid.Row="4" Grid.Column="0" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyJump"      Label="Jump"       Grid.Row="4" Grid.Column="0" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeySneak"     Label="Sneak"      Grid.Row="5" Grid.Column="0" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeySneak"     Label="Sneak"      Grid.Row="5" Grid.Column="0" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyTogglePerspective" Label="Toggle perspective" Grid.Row="6" Grid.Column="0"
+                        <local:KeybindRow x:Name="KeyTogglePerspective" Label="Toggle perspective" Grid.Row="6" Grid.Column="0" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
 
                         <!-- Right column -->
-                        <local:KeybindRow x:Name="KeySprint"    Label="Sprint"     Grid.Row="0" Grid.Column="2" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeySprint"    Label="Sprint"     Grid.Row="0" Grid.Column="2" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyInventory" Label="Inventory"  Grid.Row="1" Grid.Column="2" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyInventory" Label="Inventory"  Grid.Row="1" Grid.Column="2" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyChat"      Label="Chat"       Grid.Row="2" Grid.Column="2" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyChat"      Label="Chat"       Grid.Row="2" Grid.Column="2" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyDrop"      Label="Drop item"  Grid.Row="3" Grid.Column="2" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyDrop"      Label="Drop item"  Grid.Row="3" Grid.Column="2" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyAttack"    Label="Attack"     Grid.Row="4" Grid.Column="2" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyAttack"    Label="Attack"     Grid.Row="4" Grid.Column="2" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
-                        <local:KeybindRow x:Name="KeyUse"       Label="Use / place" Grid.Row="5" Grid.Column="2" Margin="0,0,0,10"
+                        <local:KeybindRow x:Name="KeyUse"       Label="Use / place" Grid.Row="5" Grid.Column="2" Margin="0,0,0,10" BoundChanged="OnKeybindChanged"
                                           xmlns:local="clr-namespace:CloudLauncher.Views"/>
                     </Grid>
                 </StackPanel>
@@ -186,10 +186,11 @@
 
             <!-- ACTIONS -->
             <DockPanel Margin="0,4,0,0">
-                <Button Click="OnResetDefaults" Content="Reset to Minecraft defaults" Margin="0,0,8,0"/>
-                <Button DockPanel.Dock="Right" Click="OnApplyToPack" Content="Apply to an instance..." Margin="0,0,8,0"/>
-                <Button DockPanel.Dock="Right" Click="OnSave"
-                        Content="Save defaults" Style="{StaticResource AccentButton}"/>
+                <Button Click="OnResetDefaults" Content="Reset to Minecraft defaults" Margin="0,0,8,0"
+                        ToolTip="Puts every option on this page back to vanilla Minecraft's own defaults"/>
+                <Button DockPanel.Dock="Right" Click="OnApplyToPack" Content="Apply to an instance..."
+                        Style="{StaticResource AccentButton}"
+                        ToolTip="Merges these defaults into an existing instance's options.txt"/>
             </DockPanel>
 
             <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,12,0,0"

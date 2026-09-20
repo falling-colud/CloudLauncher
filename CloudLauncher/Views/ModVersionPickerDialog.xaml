@@ -2,7 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
-            BorderThickness="1" CornerRadius="12" Padding="22" Width="520" Height="580">
+            BorderThickness="1" CornerRadius="12" Padding="22" Width="520" Height="614">
         <Border.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
         </Border.Effect>
@@ -11,15 +11,23 @@
                        TextTrimming="CharacterEllipsis"/>
             <TextBlock x:Name="SubLabel" DockPanel.Dock="Top" Style="{StaticResource Muted}" Margin="0,2,0,12"/>
 
-            <Grid DockPanel.Dock="Bottom" Margin="0,12,0,0">
-                <CheckBox x:Name="ShowAllBox" Content="Show all versions" VerticalAlignment="Center"
-                          HorizontalAlignment="Left" Click="OnShowAllChanged"
-                          ToolTip="Include versions for other Minecraft versions / loaders"/>
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <Button Content="Cancel" Style="{StaticResource SubtleButton}" Click="OnCancel" Margin="0,0,8,0"/>
-                    <Button x:Name="InstallButton" Content="Install" Style="{StaticResource AccentButton}" Click="OnInstall"/>
-                </StackPanel>
-            </Grid>
+            <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+                <!-- Without this, deliberately going back to an older version is undone by the next
+                     "Update all" — the user had to separately remember to right-click the mod and
+                     tick "Lock updates". Choosing a version IS the intent, so it is offered here. -->
+                <CheckBox x:Name="KeepVersionBox" Content="Keep this version — bulk updates skip it"
+                          HorizontalAlignment="Left" Margin="0,0,0,10"
+                          ToolTip="Locks the mod to whatever you install here. Untick to let &quot;Update all&quot; move it again."/>
+                <Grid>
+                    <CheckBox x:Name="ShowAllBox" Content="Show all versions" VerticalAlignment="Center"
+                              HorizontalAlignment="Left" Click="OnShowAllChanged"
+                              ToolTip="Include versions for other Minecraft versions / loaders"/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Content="Cancel" Style="{StaticResource SubtleButton}" Click="OnCancel" Margin="0,0,8,0"/>
+                        <Button x:Name="InstallButton" Content="Install" Style="{StaticResource AccentButton}" Click="OnInstall"/>
+                    </StackPanel>
+                </Grid>
+            </StackPanel>
 
             <Border Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="1" CornerRadius="6">

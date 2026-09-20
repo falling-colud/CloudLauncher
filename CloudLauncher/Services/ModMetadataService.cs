@@ -298,14 +298,20 @@ public sealed class ModMetadataService
     /// <param name="SharedCategories">Categories both already have.</param>
     /// <param name="Assignments">Mod in this pack -> the categories the source puts it in.</param>
     /// <param name="UnmatchedSourceMods">Mods the source categorises that are not installed here.</param>
+    /// <param name="FlagAssignments">Mods whose per-mod settings — priority, content size, side,
+    /// library, extra, channel, lock and note — can be taken from the source pack. Only mods whose
+    /// own metadata here is still untouched (<see cref="ModMeta.IsDefault"/>) qualify, so importing
+    /// can never overwrite something the user set in this pack.</param>
     public sealed record CategoryImportPlan(
         IReadOnlyList<CustomCategory> NewCategories,
         IReadOnlyList<string> SharedCategories,
         IReadOnlyList<(PackMod Mod, IReadOnlyList<string> Categories)> Assignments,
-        int UnmatchedSourceMods)
+        int UnmatchedSourceMods,
+        IReadOnlyList<(PackMod Mod, ModMeta From)> FlagAssignments)
     {
         public int TaggedMods => Assignments.Count;
-        public bool IsEmpty => NewCategories.Count == 0 && Assignments.Count == 0;
+        public int FlaggedMods => FlagAssignments.Count;
+        public bool IsEmpty => NewCategories.Count == 0 && Assignments.Count == 0 && FlagAssignments.Count == 0;
     }
 
     /// <summary>
@@ -341,6 +347,7 @@ public sealed class ModMetadataService
         var shared = importable.Where(c => targetCatNames.Contains(c.Name)).Select(c => c.Name).ToList();
 
         var assignments = new List<(PackMod, IReadOnlyList<string>)>();
+        var flagAssignments = new List<(PackMod, ModMeta)>();
         var matchedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var mod in targetMods)
         {
@@ -352,13 +359,48 @@ public sealed class ModMetadataService
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
             if (wanted.Count > 0) assignments.Add((mod, wanted));
+
+            // Setting a pack up twice used to mean re-flagging every mod by hand: the import copied
+            // the category names and dropped priority, size, side, library, notes and locks. It only
+            // fills in mods this pack has said nothing about yet, so "adds, never clears" still holds.
+            if (mod.Meta.IsDefault && HasImportableFlags(from)) flagAssignments.Add((mod, from));
         }
 
         var categorisedInSource = sourceMods.Count(kv =>
             kv.Value.Categories.Any(c => !string.Equals(c, LibraryCategory, StringComparison.OrdinalIgnoreCase)));
         var unmatched = Math.Max(0, categorisedInSource - matchedKeys.Count);
 
-        return new CategoryImportPlan(newCats, shared, assignments, unmatched);
+        return new CategoryImportPlan(newCats, shared, assignments, unmatched, flagAssignments);
+    }
+
+    /// <summary>Whether a source mod carries any per-mod setting worth copying. Categories are not
+    /// counted: they travel through <see cref="CategoryImportPlan.Assignments"/>.</summary>
+    private static bool HasImportableFlags(ModMeta from) =>
+        from.Priority != 0 || from.ContentSize != 0 || from.Side != ModSide.Both
+        || from.IsLibrary || from.IsExtra || from.UpdateLocked || from.UpdateChannel is not null
+        || !string.IsNullOrWhiteSpace(from.Note);
+
+    /// <summary>
+    /// Copies the per-mod settings the import carries onto a target mod's (still untouched) metadata.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not everything on <see cref="ModMeta"/>. <c>IsTesting</c> is left behind because
+    /// a test set is about what you are doing right now in one instance, not a property of the mod;
+    /// <c>PinnedVersionId</c> and <c>PreferredSource</c> are left behind because they name a
+    /// version and a store this pack may not be on; and the incompatibility lists are left behind
+    /// because they hold keys of the <em>source</em> pack's mods.
+    /// </remarks>
+    private static void CopyImportableFlags(ModMeta from, ModMeta to)
+    {
+        to.Priority = from.Priority;
+        to.ContentSize = from.ContentSize;
+        to.Side = from.Side;
+        to.IsLibrary = from.IsLibrary;
+        to.IsExtra = from.IsExtra;
+        to.UpdateChannel = from.UpdateChannel;
+        to.UpdateLocked = from.UpdateLocked;
+        to.UpdateIncompatible = from.UpdateIncompatible;
+        if (!string.IsNullOrWhiteSpace(from.Note)) to.Note = from.Note;
     }
 
     private static ModMeta? FirstMatch(Dictionary<string, ModMeta> sourceMods, IReadOnlyList<string> keys, HashSet<string> matched)
@@ -382,6 +424,16 @@ public sealed class ModMetadataService
         {
             foreach (var cat in plan.NewCategories)
                 doc.Categories.Add(new CustomCategory { Name = cat.Name, Color = cat.Color });
+        }
+
+        // Flags first, so a mod that is in both lists ends up with the source's settings AND its
+        // categories in one stored write rather than two.
+        foreach (var (mod, from) in plan.FlagAssignments)
+        {
+            var meta = GetMeta(targetPackId, mod.CandidateKeys);
+            CopyImportableFlags(from, meta);
+            StoreMeta(targetPackId, mod.CandidateKeys, meta);
+            mod.Meta = meta;
         }
 
         foreach (var (mod, categories) in plan.Assignments)

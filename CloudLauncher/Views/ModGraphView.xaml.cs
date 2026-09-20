@@ -5,6 +5,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using CloudLauncher.Services;
 
 namespace CloudLauncher.Views;
@@ -32,12 +33,20 @@ public partial class ModGraphView : UserControl
     private static readonly Brush ArrowBrush = Frozen(Color.FromArgb(225, 0x93, 0x9E, 0xB2));
     private static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
 
+    /// <summary>How many nodes get their contents built per turn of the dispatcher, and how many
+    /// dependency lines. Sized so a chunk is a few milliseconds of work on a slow machine: small
+    /// enough that input and rendering still get in between, big enough that a 1900-mod pack is not
+    /// a hundred round-trips through the dispatcher queue.</summary>
+    private const int NodeChunk = 100, EdgeChunk = 250;
+
     private Guid _packId;
     private IReadOnlyList<PackMod> _mods = Array.Empty<PackMod>();
     private Window? _owner;
     private Action<PackMod>? _onOpenMod;
     private Action? _onReload;
     private Action? _onModsChanged; // lightweight "flags changed" signal (marks other views stale)
+    private Action<IReadOnlyList<PackMod>>? _onUpdate;
+    private Action<IReadOnlyList<PackMod>>? _onRecheckUpdates;
 
     private readonly Dictionary<PackMod, Rect> _rect = new();
     private readonly Dictionary<PackMod, Border> _nodeEls = new();
@@ -45,6 +54,22 @@ public partial class ModGraphView : UserControl
     private ModGraph? _graph;
     private bool _userInteracted; // once true, we stop auto-fitting so the user's zoom/pan sticks
     private bool _everLaidOut;
+
+    /// <summary>Bumped by every <see cref="Rebuild"/>. A build in flight compares against it after
+    /// each chunk and abandons itself the moment a newer one starts.</summary>
+    private int _buildGen;
+
+    /// <summary>True while a chunked build is still filling nodes or drawing lines. Dragging is held
+    /// off until it clears: a drag redraws every edge, and doing that against a half-built canvas
+    /// would fight the build for the same children collection.</summary>
+    private bool _building;
+
+    /// <summary>Nodes placed by the layout whose contents have not been built yet. Replaced (never
+    /// cleared in place) on each rebuild, so an abandoned build keeps iterating its own list safely.</summary>
+    private List<(PackMod mod, Border host)> _pendingNodes = new();
+
+    /// <summary>Current text in the find box, lower-cased; empty means "no find is active".</summary>
+    private string _findQuery = "";
 
     // interaction state
     private bool _panning;
@@ -85,8 +110,13 @@ public partial class ModGraphView : UserControl
     private bool IsCirclesMode => ClusterBox.SelectedIndex == 2;
     private bool IsCustomMode => ClusterBox.SelectedIndex == 3;
 
+    /// <param name="onUpdate">Installs the newest version of the given mods — the List view's own
+    /// implementation, so "Update to newest" behaves identically here.</param>
+    /// <param name="onRecheckUpdates">Re-runs the update check for the given mods after something
+    /// changed what counts as an update for them (their channel, or the store they follow).</param>
     public void Load(Guid packId, IReadOnlyList<PackMod> mods, Window? owner,
-        Action<PackMod>? onOpenMod = null, Action? onReload = null, Action? onModsChanged = null)
+        Action<PackMod>? onOpenMod = null, Action? onReload = null, Action? onModsChanged = null,
+        Action<IReadOnlyList<PackMod>>? onUpdate = null, Action<IReadOnlyList<PackMod>>? onRecheckUpdates = null)
     {
         _packId = packId;
         _mods = mods;
@@ -94,23 +124,103 @@ public partial class ModGraphView : UserControl
         _onOpenMod = onOpenMod;
         _onReload = onReload;
         _onModsChanged = onModsChanged;
-        ShowLines.IsChecked = App.State.ModMetadata.Advanced(packId).ShowDependencyLines;
+        _onUpdate = onUpdate;
+        _onRecheckUpdates = onRecheckUpdates;
+        RestoreToolbarState();
         // Fit only the first time we lay this pack out; later data refreshes keep the user's view.
         var first = !_everLaidOut;
         _everLaidOut = true;
         Rebuild(refit: first);
     }
 
+    /// <summary>
+    /// Puts the toolbar back the way this launcher last left it, falling back to the pack's own
+    /// defaults.
+    /// </summary>
+    /// <remarks>
+    /// The pack's <see cref="ModAdvancedSettings"/> are written into its <c>mods.json</c> and synced
+    /// to collaborators, so they are the pack's defaults, not this person's view preference —
+    /// turning the lines off to read one crowded graph must not change what everyone else opens.
+    /// The per-launcher <see cref="AppSettings.GraphShowDependencyLines"/> /
+    /// <see cref="AppSettings.GraphClusterMode"/> hold the view state; the pack supplies the value
+    /// the first time, and an unrecognised stored cluster mode (written by a newer build) falls back
+    /// to the pack's too. Set while <c>_suppressToolbar</c> is up so restoring the controls does not
+    /// fire their handlers and save the values straight back.
+    /// </remarks>
+    private void RestoreToolbarState()
+    {
+        var adv = App.State.ModMetadata.Advanced(_packId);
+        var settings = App.State.Settings;
+        var mode = Enum.TryParse<ModClusterMode>(settings.GraphClusterMode, ignoreCase: true, out var parsed)
+                   && Enum.IsDefined(parsed)
+            ? parsed
+            : adv.DefaultClusterMode;
+
+        _suppressToolbar = true;
+        try
+        {
+            ShowLines.IsChecked = settings.GraphShowDependencyLines;
+            ClusterBox.SelectedIndex = IndexFor(mode);
+        }
+        finally { _suppressToolbar = false; }
+    }
+
+    /// <summary>True while the toolbar is being set from storage rather than by the user.</summary>
+    private bool _suppressToolbar;
+
+    // The ComboBox lists the modes in reading order (categories, layers, circles, free), which is not
+    // the order ModClusterMode happens to declare them in — so the mapping is spelled out both ways
+    // rather than cast through the index.
+    private static int IndexFor(ModClusterMode mode) => mode switch
+    {
+        ModClusterMode.Dependencies => 1,
+        ModClusterMode.Circles => 2,
+        ModClusterMode.CustomTree => 3,
+        _ => 0
+    };
+
+    private static ModClusterMode ModeFor(int index) => index switch
+    {
+        1 => ModClusterMode.Dependencies,
+        2 => ModClusterMode.Circles,
+        3 => ModClusterMode.CustomTree,
+        _ => ModClusterMode.Category
+    };
+
+    /// <summary>Called by the hub the instant the Graph tab is selected, before the build is even
+    /// scheduled, so the tab has something honest on it rather than the previous pack's canvas or
+    /// an empty box.</summary>
+    public void ShowBuilding()
+    {
+        if (!IsInitialized) return;
+        GraphStatus.Text = "Laying out…";
+    }
+
     // ── rebuild / layout ────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Re-lays the graph out. The positions are computed and the node frames placed synchronously —
+    /// that part is arithmetic and a rectangle each — and everything expensive (each node's icon,
+    /// labels, markers and tooltip, then every dependency line) is filled in afterwards in chunks by
+    /// <see cref="FinishBuildAsync"/>, yielding the UI thread between them.
+    /// </summary>
+    /// <remarks>
+    /// Building all of it inline is what made opening this tab on a large pack look like the
+    /// launcher had hung: ~1900 nodes is tens of thousands of visuals, and the thread does not come
+    /// back until the last one exists. Splitting it this way means the canvas appears immediately as
+    /// a field of node-shaped frames that fill in over the next few hundred milliseconds, and the
+    /// window stays responsive throughout.
+    /// </remarks>
     private void Rebuild(bool refit = true)
     {
         if (!IsInitialized) return;
+        var gen = ++_buildGen;   // abandons any build still running for the previous layout
         GraphCanvas.Children.Clear();
         _rect.Clear();
         _nodeEls.Clear();
         _lineEls.Clear();
         _clusters.Clear();
+        _pendingNodes = new List<(PackMod, Border)>();
 
         HintLabel.Text = IsCustomMode
             ? "Drag nodes to arrange · scroll to zoom · drag background to pan"
@@ -124,6 +234,7 @@ public partial class ModGraphView : UserControl
         {
             GraphStatus.Text = "No mods to graph.";
             GraphCanvas.Width = GraphCanvas.Height = 0;
+            _building = false;
             return;
         }
 
@@ -136,17 +247,70 @@ public partial class ModGraphView : UserControl
         };
 
         _graph = ModGraph.Build(_mods);
-        DrawEdges();
-        SetLinesVisible(ShowLines.IsChecked == true);
-
         GraphCanvas.Width = Math.Max(size.w, 50);
         GraphCanvas.Height = Math.Max(size.h, 50);
-        GraphStatus.Text = $"{_mods.Count} mod(s)";
 
         RefreshCollapseButton();
 
         // Only recentre on a full (re)layout — never on a mod edit, so the user's view is preserved.
+        // Fit from the frames, before the contents exist: the extent is already final.
         if (refit) { _userInteracted = false; TryFit(); }
+
+        _ = FinishBuildAsync(gen, _pendingNodes);
+    }
+
+    /// <summary>Fills in the placed nodes and then the dependency lines, a chunk per turn of the
+    /// dispatcher. Abandons itself as soon as a newer <see cref="Rebuild"/> has started.</summary>
+    private async Task FinishBuildAsync(int gen, List<(PackMod mod, Border host)> pending)
+    {
+        _building = true;
+        try
+        {
+            for (var i = 0; i < pending.Count; i += NodeChunk)
+            {
+                var end = Math.Min(i + NodeChunk, pending.Count);
+                for (var k = i; k < end; k++) FillNode(pending[k].mod, pending[k].host);
+
+                if (end < pending.Count)
+                {
+                    GraphStatus.Text = $"Drawing {end} of {pending.Count} mods…";
+                    // Background priority: input, layout and render all outrank an empty callback
+                    // queued there, so awaiting one hands the thread back to the window and resumes
+                    // only once it has caught up.
+                    await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+                    if (gen != _buildGen) return;
+                }
+            }
+
+            var edges = CollectEdges();
+            var visible = ShowLines.IsChecked == true;
+            for (var i = 0; i < edges.Count; i += EdgeChunk)
+            {
+                var end = Math.Min(i + EdgeChunk, edges.Count);
+                for (var k = i; k < end; k++) AddEdge(edges[k].from, edges[k].to, visible);
+
+                if (end < edges.Count)
+                {
+                    GraphStatus.Text = $"Drawing {end} of {edges.Count} dependency lines…";
+                    await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+                    if (gen != _buildGen) return;
+                }
+            }
+
+            // The checkbox may have been flipped between chunks, so settle every line on the state it
+            // is in now rather than the one each chunk captured.
+            SetLinesVisible(ShowLines.IsChecked == true);
+
+            GraphStatus.Text = $"{_mods.Count} mod(s)" + (edges.Count > 0 ? $"  ·  {edges.Count} link(s)" : "");
+            // A find typed while the graph was building still applies to it. Only when one is active:
+            // ApplyFind writes its own status line, and on a fresh build with no query every node is
+            // already in its base state.
+            if (_findQuery.Length > 0) ApplyFind();
+        }
+        finally
+        {
+            if (gen == _buildGen) _building = false;
+        }
     }
 
     private (double w, double h) LayoutCategories()
@@ -533,9 +697,12 @@ public partial class ModGraphView : UserControl
 
     // ── edges ──────────────────────────────────────────────────────────────────
 
-    private void DrawEdges()
+    /// <summary>Every edge as a pair of endpoint rectangles. Cheap and allocation-only, so the
+    /// chunked build can work out how much there is to draw before it starts drawing.</summary>
+    private List<(Rect from, Rect to)> CollectEdges()
     {
         var graph = _graph ??= ModGraph.Build(_mods);
+        var pairs = new List<(Rect, Rect)>();
         foreach (var m in _mods)
         {
             if (!_rect.TryGetValue(m, out var ra)) continue;
@@ -543,12 +710,22 @@ public partial class ModGraphView : UserControl
             {
                 if (!_rect.TryGetValue(dep, out var rb)) continue;
                 // Arrow points FROM the dependency TO the mod that needs it (dep → dependent).
-                AddEdge(rb, ra);
+                pairs.Add((rb, ra));
             }
         }
+        return pairs;
     }
 
-    private void AddEdge(Rect from, Rect to)
+    private void DrawEdges()
+    {
+        var visible = ShowLines.IsChecked == true;
+        foreach (var (from, to) in CollectEdges()) AddEdge(from, to, visible);
+    }
+
+    /// <param name="visible">Whether the line starts out shown. Passed in rather than read per edge
+    /// so a chunked build cannot leave half the lines in the wrong state if the checkbox is flipped
+    /// mid-build — <see cref="OnToggleLines"/> sweeps the whole collection afterwards anyway.</param>
+    private void AddEdge(Rect from, Rect to, bool visible = true)
     {
         var ca = new Point(from.X + from.Width / 2, from.Y + from.Height / 2);
         var cb = new Point(to.X + to.Width / 2, to.Y + to.Height / 2);
@@ -570,7 +747,11 @@ public partial class ModGraphView : UserControl
         fig.Segments.Add(new QuadraticBezierSegment(ctrl, end, true));
         var geo = new PathGeometry();
         geo.Figures.Add(fig);
-        var path = new Path { Data = geo, Stroke = EdgeBrush, StrokeThickness = 1.5, IsHitTestVisible = false };
+        var path = new Path
+        {
+            Data = geo, Stroke = EdgeBrush, StrokeThickness = 1.5, IsHitTestVisible = false,
+            Visibility = visible ? Visibility.Visible : Visibility.Collapsed
+        };
         Panel.SetZIndex(path, 0);
         GraphCanvas.Children.Add(path);
         _lineEls.Add(path);
@@ -591,7 +772,8 @@ public partial class ModGraphView : UserControl
                 new Point(back.X - ap.X * arrowW, back.Y - ap.Y * arrowW)
             },
             Fill = ArrowBrush,
-            IsHitTestVisible = false
+            IsHitTestVisible = false,
+            Visibility = visible ? Visibility.Visible : Visibility.Collapsed
         };
         Panel.SetZIndex(arrow, 0);
         GraphCanvas.Children.Add(arrow);
@@ -609,12 +791,14 @@ public partial class ModGraphView : UserControl
         return new Point(c.X + dx * t, c.Y + dy * t);
     }
 
+    /// <summary>Re-draws every dependency line after a drag moved a node or a cluster. Synchronous
+    /// on purpose — it has to keep up with the mouse — and only reachable once the chunked build has
+    /// finished, since dragging is blocked while <c>_building</c> is set.</summary>
     private void RedrawEdges()
     {
         foreach (var e in _lineEls) GraphCanvas.Children.Remove(e);
         _lineEls.Clear();
         DrawEdges();
-        SetLinesVisible(ShowLines.IsChecked == true);
     }
 
     private void SetLinesVisible(bool visible)
@@ -731,30 +915,56 @@ public partial class ModGraphView : UserControl
         return header;
     }
 
+    /// <summary>Places a node's frame at (x, y) and queues its contents for the chunked fill. The
+    /// frame carries the node's size, colours and mouse handlers, so the canvas is laid out, hit-
+    /// testable and correctly sized from the moment the layout returns.</summary>
     private Border Place(PackMod m, double x, double y)
     {
-        var node = CreateNode(m);
+        var node = CreateNodeFrame(m);
         Canvas.SetLeft(node, x);
         Canvas.SetTop(node, y);
         Panel.SetZIndex(node, 1);
         GraphCanvas.Children.Add(node);
         _rect[m] = new Rect(x, y, NodeW, NodeH);
         _nodeEls[m] = node;
+        _pendingNodes.Add((m, node));
         return node;
     }
 
-    private Border CreateNode(PackMod m)
+    private Border CreateNodeFrame(PackMod m)
     {
         var emphasized = PriorityPalette.IsEmphasized(m.Priority);
         var border = new Border
         {
             Width = NodeW, Height = NodeH, CornerRadius = new CornerRadius(8),
             Background = Res("Surface3Brush"),
-            BorderBrush = emphasized ? PriorityPalette.BorderFor(m.Priority) : Res("BorderStrongBrush"),
+            BorderBrush = BaseBorderFor(m),
             BorderThickness = new Thickness(emphasized ? 2 : 1),
             Cursor = Cursors.Hand,
-            Opacity = m.Enabled ? 1.0 : 0.45,
-            ToolTip = new ToolTip { Content = new TextBlock { Text = m.TooltipText, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 } }
+            Opacity = BaseOpacityFor(m)
+        };
+        border.MouseLeftButtonDown += (_, e) => OnNodeDown(border, m, e);
+        border.MouseMove += OnNodeMove;
+        border.MouseLeftButtonUp += OnNodeUp;
+        border.MouseRightButtonUp += (_, e) => { ShowOptions(m, border); e.Handled = true; };
+        return border;
+    }
+
+    /// <summary>The node's border when no find is running: its priority colour, or the plain one.</summary>
+    private Brush BaseBorderFor(PackMod m) =>
+        PriorityPalette.IsEmphasized(m.Priority) ? PriorityPalette.BorderFor(m.Priority) : Res("BorderStrongBrush");
+
+    /// <summary>Disabled mods are drawn back, which is what a node's opacity means before the find
+    /// box gets an opinion about it.</summary>
+    private static double BaseOpacityFor(PackMod m) => m.Enabled ? 1.0 : 0.45;
+
+    /// <summary>Builds a placed node's contents — the expensive half, run in chunks off the layout
+    /// so a big pack's graph appears rather than arriving all at once several seconds late.</summary>
+    private void FillNode(PackMod m, Border border)
+    {
+        border.ToolTip = new ToolTip
+        {
+            Content = new TextBlock { Text = m.TooltipText, TextWrapping = TextWrapping.Wrap, MaxWidth = 420 }
         };
 
         var grid = new Grid { Margin = new Thickness(8, 0, 8, 0) };
@@ -820,17 +1030,13 @@ public partial class ModGraphView : UserControl
         }
 
         border.Child = grid;
-        border.MouseLeftButtonDown += (_, e) => OnNodeDown(border, m, e);
-        border.MouseMove += OnNodeMove;
-        border.MouseLeftButtonUp += OnNodeUp;
-        border.MouseRightButtonUp += (_, e) => { ShowOptions(m, border); e.Handled = true; };
-        return border;
     }
 
     // ── node drag ────────────────────────────────────────────────────────────────
 
     private void OnNodeDown(Border node, PackMod mod, MouseButtonEventArgs e)
     {
+        if (_building) return;   // a drag redraws every edge; let the build finish owning the canvas
         _dragNode = node;
         _dragMod = mod;
         _dragMoved = false;
@@ -880,7 +1086,7 @@ public partial class ModGraphView : UserControl
 
     private void OnClusterDown(ClusterVisual cv, MouseButtonEventArgs e)
     {
-        if (!IsCategoryMode) return;
+        if (!IsCategoryMode || _building) return;
         _dragCluster = cv;
         _clusterDragMoved = false;
         _clusterDragStart = e.GetPosition(GraphCanvas);
@@ -1146,18 +1352,23 @@ public partial class ModGraphView : UserControl
         var mc = mod.PrimaryVersion?.GameVersions.FirstOrDefault();
         var loader = mod.PrimaryVersion?.Loaders.FirstOrDefault();
         var chosen = await ModVersionPickerDialog.ShowAsync(host, mod.DisplayName, versions, mc, loader,
-            mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber);
+            mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber, mod.Meta.UpdateLocked);
         if (chosen is null) { GraphStatus.Text = ""; return; }
 
-        if (mod.Meta.UpdateLocked && !await AppDialog.ConfirmAsync(host, "Mod is locked",
-                $"{mod.DisplayName} is locked to its current version.\n\nChange it anyway? It stays locked afterwards.",
+        // The picker's own "Keep this version" box already says where the lock should land.
+        if (mod.Meta.UpdateLocked && !chosen.KeepVersion && !await AppDialog.ConfirmAsync(host, "Mod is locked",
+                $"{mod.DisplayName} is locked to its current version.\n\nChange it anyway?",
                 "Change anyway", "Keep locked"))
         { GraphStatus.Text = ""; return; }
 
-        GraphStatus.Text = $"Installing {chosen.VersionNumber}…";
+        GraphStatus.Text = $"Installing {chosen.Version.VersionNumber}…";
         try
         {
-            if (await ModUpdater.InstallVersionAsync(mod, chosen)) _onReload?.Invoke();
+            if (await ModUpdater.InstallVersionAsync(mod, chosen.Version))
+            {
+                ModVersionPickerDialog.ApplyKeepVersion(_packId, mod, chosen);
+                _onReload?.Invoke();
+            }
             else GraphStatus.Text = "That version has no downloadable file.";
         }
         catch (Exception ex) { GraphStatus.Text = ex.Message; }
@@ -1174,6 +1385,17 @@ public partial class ModGraphView : UserControl
         _onReload?.Invoke(); // re-scan so the nodes disappear from both List and Graph
     }
 
+    /// <summary>
+    /// The mod options menu, with every callback the List view's own menu has — so right-clicking a
+    /// mod offers the same actions whichever tab it is clicked in.
+    /// </summary>
+    /// <remarks>
+    /// "Update to newest" and the update re-check used to be absent here simply because this context
+    /// left their callbacks null, and <see cref="ModOptionsMenu"/> hides an item whose callback is
+    /// missing — so the same mod quietly offered a different menu depending on the tab. Updating and
+    /// re-checking are handed up to the hub rather than re-implemented, because the lock rules and
+    /// the re-check behaviour must not be able to drift between tabs.
+    /// </remarks>
     private void ShowOptions(PackMod m, FrameworkElement anchor)
     {
         var ctx = new ModOptionsContext
@@ -1185,13 +1407,26 @@ public partial class ModGraphView : UserControl
             OnChanged = () => { Rebuild(refit: false); _onModsChanged?.Invoke(); },
             OnOpenPage = OpenPage,
             OnSetEnabled = (list, en) => { foreach (var mm in list) App.State.ModInventory.SetEnabled(mm, en); Rebuild(refit: false); },
+            OnUpdate = list =>
+            {
+                if (_onUpdate is null) return;
+                GraphStatus.Text = list.Count == 1 ? $"Updating {list[0].DisplayName}…" : $"Updating {list.Count} mod(s)…";
+                _onUpdate(list);   // re-scans when it finishes, which rebuilds this graph
+            },
             OnUpdateToVersion = UpdateNodeToVersion,
+            OnRecheckUpdates = list =>
+            {
+                if (_onRecheckUpdates is null) return;
+                GraphStatus.Text = "Re-checking for updates…";
+                _onRecheckUpdates(list);
+            },
             OnDelete = DeleteNodesFromGraph,
             OnReveal = mm =>
             {
                 var dir = System.IO.Path.GetDirectoryName(mm.FilePath);
                 if (dir is null) return;
-                try { Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true }); } catch { }
+                try { Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true }); }
+                catch (Exception ex) { GraphStatus.Text = "Could not open the folder: " + ex.Message; }
             }
         };
         var menu = ModOptionsMenu.Build(m, ctx);
@@ -1203,6 +1438,105 @@ public partial class ModGraphView : UserControl
 
     // ── toolbar ──────────────────────────────────────────────────────────────────
 
-    private void OnClusterChanged(object sender, SelectionChangedEventArgs e) { if (IsLoaded) Rebuild(); }
-    private void OnToggleLines(object sender, RoutedEventArgs e) => SetLinesVisible(ShowLines.IsChecked == true);
+    private void OnClusterChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _suppressToolbar) return;
+        // Remember how this person likes to look at a graph (see RestoreToolbarState for why this is
+        // a launcher setting rather than the pack's).
+        App.State.Settings.GraphClusterMode = ModeFor(ClusterBox.SelectedIndex).ToString();
+        App.State.Settings.Save();
+        Rebuild();
+    }
+
+    private void OnToggleLines(object sender, RoutedEventArgs e)
+    {
+        var on = ShowLines.IsChecked == true;
+        SetLinesVisible(on);
+        if (_suppressToolbar) return;
+        App.State.Settings.GraphShowDependencyLines = on;
+        App.State.Settings.Save();
+    }
+
+    // ── find ─────────────────────────────────────────────────────────────────────
+
+    private void OnFindChanged(object sender, TextChangedEventArgs e)
+    {
+        _findQuery = FindBox.Text?.Trim() ?? "";
+        FindPlaceholder.Visibility = _findQuery.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        FindClearButton.Visibility = _findQuery.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        ApplyFind();
+    }
+
+    private void OnFindKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || FindBox.Text.Length == 0) return;
+        FindBox.Text = "";
+        e.Handled = true;
+    }
+
+    private void OnFindClear(object sender, RoutedEventArgs e)
+    {
+        FindBox.Text = "";
+        FindBox.Focus();
+    }
+
+    /// <summary>
+    /// Dims every node whose name does not match the find box and outlines the ones that do; an empty
+    /// box puts every node back to its own state.
+    /// </summary>
+    /// <remarks>
+    /// Dimming rather than hiding, because a node's position is the information here: pulling the
+    /// non-matches out would rearrange the very clusters the user is reading the graph for. A single
+    /// match is scrolled to as well, since on a 1900-mod pack the one lit node is very likely off
+    /// screen at the zoom the graph opens at.
+    /// </remarks>
+    private void ApplyFind()
+    {
+        if (_nodeEls.Count == 0) return;
+
+        if (_findQuery.Length == 0)
+        {
+            foreach (var (mod, node) in _nodeEls)
+            {
+                node.Opacity = BaseOpacityFor(mod);
+                node.BorderBrush = BaseBorderFor(mod);
+            }
+            GraphStatus.Text = $"{_mods.Count} mod(s)";
+            return;
+        }
+
+        var accent = Res("AccentBrush");
+        PackMod? only = null;
+        var hits = 0;
+        foreach (var (mod, node) in _nodeEls)
+        {
+            var hit = Matches(mod);
+            if (hit) { hits++; only = mod; }
+            node.Opacity = hit ? 1.0 : 0.15;
+            node.BorderBrush = hit ? accent : BaseBorderFor(mod);
+        }
+
+        GraphStatus.Text = hits switch
+        {
+            0 => $"No mod matches “{_findQuery}”",
+            1 => $"1 match  ·  {_mods.Count} mod(s)",
+            _ => $"{hits} matches  ·  {_mods.Count} mod(s)"
+        };
+
+        if (hits == 1 && only is not null) CenterOn(only);
+    }
+
+    private bool Matches(PackMod m) =>
+        m.DisplayName.Contains(_findQuery, StringComparison.OrdinalIgnoreCase)
+        || m.FileName.Contains(_findQuery, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Pans (without zooming) so a node sits in the middle of the viewport.</summary>
+    private void CenterOn(PackMod mod)
+    {
+        if (!_rect.TryGetValue(mod, out var r) || Viewport.ActualWidth < 10) return;
+        _userInteracted = true;   // a deliberate move: don't let a later auto-fit undo it
+        var s = ZoomT.ScaleX;
+        PanT.X = Viewport.ActualWidth / 2 - (r.X + r.Width / 2) * s;
+        PanT.Y = Viewport.ActualHeight / 2 - (r.Y + r.Height / 2) * s;
+    }
 }

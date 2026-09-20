@@ -83,8 +83,31 @@ public partial class ModExplorerPage : Page
             UiScale.Changed -= ApplyModScale;   // re-apply the mod-list zoom live when the slider moves
             UiScale.Changed += ApplyModScale;
             ApplyModScale();
+            ThemeService.Changed -= RepaintThemedChips;
+            ThemeService.Changed += RepaintThemedChips;
         };
-        Unloaded += (_, _) => UiScale.Changed -= ApplyModScale;
+        Unloaded += (_, _) =>
+        {
+            UiScale.Changed -= ApplyModScale;
+            ThemeService.Changed -= RepaintThemedChips;
+        };
+    }
+
+    /// <summary>
+    /// Re-paints the source chips after the theme changed.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ThemeService"/> swaps in brand-new frozen brushes on every apply, so the brushes
+    /// <see cref="ApplyChipStyles"/> and <see cref="StyleSourceChip"/> resolve are snapshots that
+    /// keep whatever the accent was when they ran. The chips are built in code (their colours depend
+    /// on which one is active, which is not expressible as a single DynamicResource), so the fix is
+    /// to run the paint again rather than to bind it.
+    /// </remarks>
+    private void RepaintThemedChips()
+    {
+        if (!IsLoaded) return;
+        ApplyChipStyles();
+        UpdateSourceToggle();
     }
 
     private void ApplyModScale() => UiScale.ApplyModListScale(ResultsList);
@@ -763,6 +786,70 @@ public partial class ModExplorerPage : Page
         await QuickDownloadAsync(row.Source);
     }
 
+    /// <summary>
+    /// Right-click on a search result: the three download modes plus the link actions.
+    /// </summary>
+    /// <remarks>
+    /// A result row's only action was the round quick-download button, and the grey "Test" and
+    /// orange "Custom" modes lived solely in the detail pane — so flagging a mod on the way in meant
+    /// clicking through to its page first. The download items go flat when the mod is already in the
+    /// pack, and the row's own tooltip supplies the reason.
+    /// </remarks>
+    private void OnResultRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement el || el.DataContext is not ModResultRow row) return;
+        e.Handled = true;
+        ResultsList.SelectedItem = row;   // right-clicking outside the selection selects that row
+
+        var mod = row.Source;
+        var canDownload = !row.IsDownloaded;
+        var menu = new ContextMenu { PlacementTarget = el };
+
+        MenuItem Item(string header, Action onClick, bool enabled = true, string? tip = null)
+        {
+            var mi = new MenuItem { Header = header, IsEnabled = enabled };
+            if (tip is not null) { mi.ToolTip = tip; ToolTipService.SetShowOnDisabled(mi, true); }
+            mi.Click += (_, _) => onClick();
+            menu.Items.Add(mi);
+            return mi;
+        }
+
+        var reason = canDownload ? null : row.DownloadTooltip;
+        Item("Download", () => _ = QuickDownloadAsync(mod), canDownload, reason);
+        Item("Download as test", () => _ = QuickDownloadWithFlagsAsync(mod, m => m.IsTesting = true), canDownload, reason);
+        Item("Download with options…", () => _ = CustomDownloadAsync(mod), canDownload, reason);
+
+        menu.Items.Add(new Separator());
+        Item("Open website", () => OpenModWebsite(mod), ModWebsiteUrl(mod) is not null);
+        Item("Copy link", () => ClipboardHelper.TrySetText(ModWebsiteUrl(mod)), ModWebsiteUrl(mod) is not null);
+        Item("Copy name", () => ClipboardHelper.TrySetText(mod.Name));
+        menu.IsOpen = true;
+    }
+
+    /// <summary>The mod's page on the store it came from — null for a store we have no URL shape for.</summary>
+    private static string? ModWebsiteUrl(ModSummary mod) => mod.Source switch
+    {
+        ModSource.Modrinth => $"https://modrinth.com/mod/{mod.Slug}",
+        ModSource.CurseForge => $"https://www.curseforge.com/minecraft/mc-mods/{mod.Slug}",
+        _ => null
+    };
+
+    private void OpenModWebsite(ModSummary mod)
+    {
+        if (ModWebsiteUrl(mod) is not { } url) return;
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+        catch (Exception ex) { DownloadStatus.Text = "Could not open that page: " + ex.Message; }
+    }
+
+    /// <summary>The "Custom ▾" download for a given mod — shared by the detail pane's button and the
+    /// result row's context menu.</summary>
+    private async Task CustomDownloadAsync(ModSummary mod)
+    {
+        if (Window.GetWindow(this) is not MainWindow host) return;
+        var options = await ModDownloadOptionsDialog.ShowAsync(host, mod.Name, _pack.Id);
+        if (options is not null) await QuickDownloadWithFlagsAsync(mod, options.ApplyTo);
+    }
+
     private async void OnDownloadVersion(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement el || el.DataContext is not VersionRow row) return;
@@ -873,12 +960,19 @@ public partial class ModExplorerPage : Page
                 return;
             }
 
+            // "Auto-download and enable required dependencies" (Mods Management → Advanced) off means
+            // exactly this: fetch the mod that was asked for and nothing else. The checkbox is saved
+            // to the pack and shared with collaborators, and this is one of the two places that read
+            // it (the other is enabling a mod in the hub).
+            var autoDeps = App.State.ModMetadata.Advanced(_pack.Id).AutoDownloadDependencies;
+
             // Work out what actually needs fetching first, so the progress numbers below are the
             // real count rather than "3 of 12" where nine were already present.
             var pending = new List<ModDownloadItem>();
             var skipped = 0;
             foreach (var item in downloads)
             {
+                if (item.IsDependency && !autoDeps) { skipped++; continue; }
                 var dest = Path.Combine(folder, item.File.Filename);
                 if (item.IsDependency && (File.Exists(dest) || await IsDependencyAlreadyInstalledAsync(item.Mod)))
                 {
@@ -919,7 +1013,7 @@ public partial class ModExplorerPage : Page
 
                         // The root mod records the store it was installed from — so a jar that's listed on both
                         // stores keeps this store's identity (label, page, updates) whatever the pack's default
-                        // store is — plus any requested download-mode flags. Dependencies are never auto-flagged.
+                        // store is — plus any requested download-mode flags.
                         if (!item.IsDependency)
                         {
                             var store = item.Mod.Source is ModSource.CurseForge or ModSource.Modrinth ? item.Mod.Source : (ModSource?)null;
@@ -929,6 +1023,18 @@ public partial class ModExplorerPage : Page
                                     if (store is not null) m.PreferredSource = store;
                                     applyToRoot?.Invoke(m);
                                 });
+                        }
+                        else
+                        {
+                            // A jar that only came along because something else needed it IS a library
+                            // mod, and the library-aware disable cascade the Advanced tab advertises has
+                            // nothing to clean up unless it is flagged as one. Only brand-new, untouched
+                            // metadata is auto-flagged: a mod the user has already classified keeps
+                            // whatever they decided.
+                            SetDownloadedMetaFlag(item.Mod, item.File.Filename, m =>
+                            {
+                                if (m.IsDefault) m.IsLibrary = true;
+                            });
                         }
                         Interlocked.Increment(ref saved);
                     }
@@ -991,10 +1097,8 @@ public partial class ModExplorerPage : Page
     private async void OnCustomDownload(object sender, RoutedEventArgs e)
     {
         if (_currentMod is null) { DownloadStatus.Text = "Select a mod first."; return; }
-        if (Window.GetWindow(this) is not MainWindow host) return;
-        var options = await ModDownloadOptionsDialog.ShowAsync(host, _currentMod.Name);
-        if (options is not null)
-            await QuickDownloadWithFlagsAsync(_currentMod, options.ApplyTo);
+        try { await CustomDownloadAsync(_currentMod); }
+        catch (Exception ex) { DownloadStatus.Text = "Download failed: " + ex.Message; }
     }
 
     private async Task QuickDownloadWithFlagsAsync(ModSummary mod, Action<ModMeta> apply)

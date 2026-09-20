@@ -47,8 +47,76 @@ public partial class PackBrowserView : Page
         ResultsList.ItemsSource = _rows;
         PackTabs.SelectionChanged += OnPackTabChanged;
         App.State.ModpackDownload.PackAdded += OnPackAdded;
-        Loaded += async (_, _) => await InitAsync();
-        Unloaded += (_, _) => App.State.ModpackDownload.PackAdded -= OnPackAdded;
+        Loaded += async (_, _) =>
+        {
+            // The chip and badge colours are painted in code (their active/inactive state is per
+            // row, so a DynamicResource cannot express it). ThemeService hands out brand-new brush
+            // objects on every Apply, so the paint has to be re-run when the theme changes or this
+            // page keeps the old accent until it is navigated away from and back.
+            ThemeService.Changed += OnThemeChanged;
+            if (Window.GetWindow(this) is { } w) w.PreviewKeyDown += OnShellKeyDown;
+            await InitAsync();
+        };
+        Unloaded += (_, _) =>
+        {
+            App.State.ModpackDownload.PackAdded -= OnPackAdded;
+            ThemeService.Changed -= OnThemeChanged;
+            if (Window.GetWindow(this) is { } w) w.PreviewKeyDown -= OnShellKeyDown;
+        };
+    }
+
+    /// <summary>Repaints everything this page colours from code so live theming works here too.</summary>
+    private void OnThemeChanged()
+    {
+        ApplyChipStyles();
+        foreach (var row in _rows.Where(r => r.Kind == PackBrowseRowKind.Internal))
+        {
+            row.SourceBadgeBackground = (Brush)FindResource("AccentSoftBrush");
+            row.SourceBadgeForeground = (Brush)FindResource("AccentBrush");
+        }
+        ResultsList.Items.Refresh();
+    }
+
+    private void OnShellKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsVisible) return;
+        if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            SearchBox.Focus();
+            SearchBox.SelectAll();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F5)
+        {
+            _ = RefreshEverythingAsync();
+            e.Handled = true;
+        }
+    }
+
+    private async void OnRefresh(object sender, RoutedEventArgs e) => await RefreshEverythingAsync();
+
+    /// <summary>
+    /// Re-runs the current chip's query. Also re-reads the list of packs you already have, because
+    /// the Add/Open state of every CloudLauncher row depends on it and it goes stale as soon as you
+    /// add or delete an instance on another screen.
+    /// </summary>
+    private async Task RefreshEverythingAsync()
+    {
+        RefreshButton.IsEnabled = false;
+        try
+        {
+            await RefreshAddedPacksAsync();
+            await ResetAndLoadAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            SetStatus("Refresh failed: " + ex.Message, error: true);
+        }
+        finally
+        {
+            RefreshButton.IsEnabled = true;
+        }
     }
 
     private void OnPackTabChanged(object sender, SelectionChangedEventArgs e)
@@ -106,13 +174,24 @@ public partial class PackBrowserView : Page
         }
     }
 
+    /// <summary>
+    /// Builds the source strip. Grouped the way the Mods and Resource-pack browsers group theirs:
+    /// the third-party catalogs first, then a divider, then everything that lives on this
+    /// CloudLauncher server — starting with your own packs, since this is the only screen in the
+    /// launcher that lists what you have published.
+    /// </summary>
     private async Task BuildChipsAsync()
     {
         _chips.Clear();
         _chips.Add(NewChip("", "CurseForge", SourceKind.CurseForge));
         _chips.Add(NewChip("", "Modrinth", SourceKind.Modrinth));
-        _chips.Add(NewChip("", "CloudLauncher Public", SourceKind.CloudLauncherPublic));
+        _chips.Add(NewChip("", "CloudLauncher Public", SourceKind.CloudLauncherPublic));
+        _chips.Add(NewDividerChip());
+        _chips.Add(NewChip("", "My packs", SourceKind.CloudLauncherPersonal,
+            toolTip: "Instances you own, listed the way everyone else sees them"));
         _chips.Add(NewChip("", "Shared with me", SourceKind.CloudLauncherShared));
+        _chips.Add(NewChip("", "All teams", SourceKind.CloudLauncherTeam,
+            toolTip: "Packs shared with every team you are in"));
 
         try
         {
@@ -125,13 +204,32 @@ public partial class PackBrowserView : Page
         ApplyChipStyles();
     }
 
-    private SourceChipRow NewChip(string icon, string label, SourceKind kind, Guid? teamId = null) =>
-        new() { Icon = icon, Label = label, Kind = kind, TeamId = teamId };
+    private static SourceChipRow NewChip(string icon, string label, SourceKind kind, Guid? teamId = null,
+        string? toolTip = null) =>
+        new() { Icon = icon, Label = label, Kind = kind, TeamId = teamId, ToolTipText = toolTip };
+
+    /// <summary>A non-clickable separator between the external catalogs and this server's sources.</summary>
+    private static SourceChipRow NewDividerChip() => new()
+    {
+        IsDivider = true,
+        Label = "|",
+        IconVisibility = Visibility.Collapsed,
+        CursorHint = Cursors.Arrow
+    };
 
     private void ApplyChipStyles()
     {
         foreach (var c in _chips)
         {
+            if (c.IsDivider)
+            {
+                c.Background = Brushes.Transparent;
+                c.BorderColor = Brushes.Transparent;
+                c.Foreground = (Brush)FindResource("TextTertiaryBrush");
+                c.FontWeight = FontWeights.Normal;
+                continue;
+            }
+
             var isActive = c == _activeChip;
             c.Background = (Brush)FindResource(isActive ? "AccentBrush" : "Surface2Brush");
             c.BorderColor = (Brush)FindResource(isActive ? "AccentBrush" : "BorderBrush");
@@ -143,8 +241,17 @@ public partial class PackBrowserView : Page
 
     private async void OnSourceChipClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is SourceChipRow row)
+        if (sender is not FrameworkElement fe || fe.DataContext is not SourceChipRow row || row.IsDivider)
+            return;
+        try
+        {
             await SelectChipAsync(row);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            SetStatus($"Couldn't load {row.Label}: {ex.Message}", error: true);
+        }
     }
 
     private async Task SelectChipAsync(SourceChipRow chip)
@@ -169,7 +276,9 @@ public partial class PackBrowserView : Page
                 _searchTimer.Stop();
                 if (_activeChip is null || string.Equals(_searchText.Trim(), _lastSearched, StringComparison.Ordinal)) return;
                 _lastSearched = _searchText.Trim();
-                await ResetAndLoadAsync();
+                try { await ResetAndLoadAsync(); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { SetStatus("Search failed: " + ex.Message, error: true); }
             };
         }
         _searchTimer.Stop();
@@ -178,21 +287,26 @@ public partial class PackBrowserView : Page
 
     private async void OnSearchKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter)
+        try
         {
-            e.Handled = true;
-            _searchTimer?.Stop();
-            _lastSearched = _searchText.Trim();
-            await ResetAndLoadAsync();
+            if (e.Key == Key.Enter)
+            {
+                e.Handled = true;
+                _searchTimer?.Stop();
+                _lastSearched = _searchText.Trim();
+                await ResetAndLoadAsync();
+            }
+            else if (e.Key == Key.Escape)
+            {
+                SearchBox.Text = "";
+                _searchText = "";
+                _searchTimer?.Stop();
+                _lastSearched = "";
+                await ResetAndLoadAsync();
+            }
         }
-        else if (e.Key == Key.Escape)
-        {
-            SearchBox.Text = "";
-            _searchText = "";
-            _searchTimer?.Stop();
-            _lastSearched = "";
-            await ResetAndLoadAsync();
-        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Search failed: " + ex.Message, error: true); }
     }
 
     private void OnFiltersClick(object sender, RoutedEventArgs e) => FiltersPopup.IsOpen = !FiltersPopup.IsOpen;
@@ -204,7 +318,9 @@ public partial class PackBrowserView : Page
         var loader = loaderItem?.Content as string;
         _filterLoader = (string.IsNullOrEmpty(loader) || loader == "(any)") ? null : loader;
         FiltersPopup.IsOpen = false;
-        await ResetAndLoadAsync();
+        try { await ResetAndLoadAsync(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Error: " + ex.Message, error: true); }
     }
 
     private async Task ResetAndLoadAsync()
@@ -226,7 +342,11 @@ public partial class PackBrowserView : Page
         if (e.OriginalSource is ScrollViewer sv &&
             sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 200)
         {
-            await LoadMoreAsync(_cts.Token);
+            // LoadMoreAsync reports its own failures; this catch only exists so a throw from the
+            // scroll handler cannot escape as an unhandled exception and take the launcher down.
+            try { await LoadMoreAsync(_cts.Token); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { SetStatus("Error: " + ex.Message, error: true); }
         }
     }
 
@@ -252,6 +372,9 @@ public partial class PackBrowserView : Page
                 case SourceKind.CloudLauncherPublic:
                     added = await LoadCloudLauncherAsync(PackBrowseSource.Public, null, ct);
                     break;
+                case SourceKind.CloudLauncherPersonal:
+                    added = await LoadCloudLauncherAsync(PackBrowseSource.Owned, null, ct);
+                    break;
                 case SourceKind.CloudLauncherShared:
                     added = await LoadCloudLauncherAsync(PackBrowseSource.Shared, null, ct);
                     break;
@@ -264,15 +387,29 @@ public partial class PackBrowserView : Page
 
             _offset += added;
             if (added == 0) _hasMore = false;
-            CountLabel.Text = _rows.Count == 0 ? "" : $"{_rows.Count} result{(_rows.Count == 1 ? "" : "s")}";
+            CountLabel.Text = _rows.Count == 0
+                ? ""
+                : $"{_rows.Count} result{(_rows.Count == 1 ? "" : "s")}{(HasFilters ? " (filtered)" : "")}";
             EmptyState.Visibility = (_rows.Count == 0 && !_hasMore) ? Visibility.Visible : Visibility.Collapsed;
             if (_rows.Count == 0 && !_hasMore)
             {
-                EmptyTitle.Text = "No results";
+                // "You have none" and "none matched what you asked for" are different problems and
+                // need different advice, so the empty state distinguishes them.
+                var searching = !string.IsNullOrWhiteSpace(_searchText) || HasFilters;
+                EmptyTitle.Text = _activeChip.Kind == SourceKind.CloudLauncherPersonal && !searching
+                    ? "No packs published"
+                    : "No results";
                 EmptyDetail.Text = _activeChip.Kind switch
                 {
+                    SourceKind.CloudLauncherPersonal when searching =>
+                        "None of your packs match your search and filters.",
+                    SourceKind.CloudLauncherPersonal =>
+                        "You haven't created a pack yet — create an instance, then set its visibility "
+                        + "to Team or Public in its Options to publish it here.",
                     SourceKind.CloudLauncherPublic => "No public packs match your search.",
                     SourceKind.CloudLauncherShared => "Nobody has shared a pack with you yet.",
+                    SourceKind.CloudLauncherTeam when _activeChip.TeamId is null =>
+                        "None of your teams has a pack shared with it yet.",
                     SourceKind.CloudLauncherTeam   => "This team has no packs yet.",
                     _ => "Try a different search or filter."
                 };
@@ -281,7 +418,7 @@ public partial class PackBrowserView : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            StatusLabel.Text = "Error: " + ex.Message;
+            SetStatus("Error: " + ex.Message, error: true);
             _hasMore = false;
         }
         finally
@@ -310,13 +447,54 @@ public partial class PackBrowserView : Page
         return hits.Count;
     }
 
+    /// <summary>
+    /// Loads one screenful from this server's catalog, honouring the Minecraft-version and loader
+    /// filters.
+    /// </summary>
+    /// <remarks>
+    /// The browse endpoint takes no version or loader parameter, so the filter is applied here on
+    /// the page that came back. That means a page can be filtered down to nothing, which would look
+    /// like "no results" while the server still has matches further down — so keep pulling pages
+    /// until something matches or the server runs out. The cap keeps a filter that matches nothing
+    /// from walking the whole catalog in one go; scrolling continues it.
+    /// </remarks>
     private async Task<int> LoadCloudLauncherAsync(PackBrowseSource source, Guid? teamId, CancellationToken ct)
     {
-        var page = await App.State.Api.BrowsePacksAsync(source, teamId, _searchText, _offset, PageSize, ct);
-        foreach (var p in page.Items) _rows.Add(RowFromInternal(p));
-        _hasMore = _offset + page.Items.Count < page.Total;
-        return page.Items.Count;
+        const int maxPagesPerCall = 8;
+        var scanned = 0;
+        var matched = 0;
+
+        for (var page = 0; page < maxPagesPerCall; page++)
+        {
+            var result = await App.State.Api.BrowsePacksAsync(
+                source, teamId, _searchText, _offset + scanned, PageSize, ct);
+            scanned += result.Items.Count;
+
+            foreach (var p in result.Items.Where(MatchesPackFilters))
+            {
+                _rows.Add(RowFromInternal(p));
+                matched++;
+            }
+
+            _hasMore = _offset + scanned < result.Total;
+            if (matched > 0 || !_hasMore || result.Items.Count == 0) break;
+        }
+
+        // The caller advances the paging cursor by what we return, and the cursor counts rows the
+        // server handed over — not the subset that survived the filter.
+        return scanned;
     }
+
+    /// <summary>True when the Filters popup is narrowing the results.</summary>
+    private bool HasFilters =>
+        !string.IsNullOrWhiteSpace(_filterMcVersion) || !string.IsNullOrWhiteSpace(_filterLoader);
+
+    /// <summary>True when a pack passes the Filters popup. An unset filter matches everything.</summary>
+    private bool MatchesPackFilters(PackSummary p) =>
+        (string.IsNullOrWhiteSpace(_filterMcVersion)
+            || string.Equals(p.MinecraftVersion, _filterMcVersion, StringComparison.OrdinalIgnoreCase))
+        && (string.IsNullOrWhiteSpace(_filterLoader)
+            || string.Equals(p.Loader.ToString(), _filterLoader, StringComparison.OrdinalIgnoreCase));
 
     private static PackBrowseRow RowFromExternal(ModSummary m, string platform) => new()
     {
@@ -348,10 +526,20 @@ public partial class PackBrowserView : Page
             SourceBadge = "CloudLauncher",
             SourceBadgeBackground = (Brush)FindResource("AccentSoftBrush"),
             SourceBadgeForeground = (Brush)FindResource("AccentBrush"),
-            ActionLabel = "Add"
+            ActionLabel = "Add",
+            // Hosted packs carry no icon of their own, but once a pack is yours its artwork is in
+            // the instance's synced assets folder, so at least your own rows are not grey letters.
+            IconImage = TryLoadLocalIcon(p.Id)
         };
         ApplyInternalActionState(row);
         return row;
+    }
+
+    /// <summary>The locally synced cover art for a pack you already have, or null.</summary>
+    private static System.Windows.Media.ImageSource? TryLoadLocalIcon(Guid packId)
+    {
+        try { return App.State.PackAssets.TryLoadIconImage(packId); }
+        catch { return null; } // missing/locked instance folder — fall back to the letter tile
     }
 
     // ── detail panel ─────────────────────────────────────────────────────────
@@ -359,13 +547,17 @@ public partial class PackBrowserView : Page
     private async void OnResultSelected(object sender, SelectionChangedEventArgs e)
     {
         if (ResultsList.SelectedItem is not PackBrowseRow row) return;
-        await LoadRowDetailAsync(row);
+        try { await LoadRowDetailAsync(row); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Couldn't load that pack: " + ex.Message, error: true); }
     }
 
     private async void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ResultsList.SelectedItem is PackBrowseRow row)
-            await DownloadRowAsync(row, null);
+        if (ResultsList.SelectedItem is not PackBrowseRow row) return;
+        try { await DownloadRowAsync(row, null); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
     }
 
     private async Task LoadRowDetailAsync(PackBrowseRow row)
@@ -391,6 +583,7 @@ public partial class PackBrowserView : Page
         DownloadStatus.Text = "";
         DownloadSelectedButton.Content = row.ActionLabel;
         DownloadSelectedButton.Visibility = row.ActionVisibility;
+        DownloadSelectedButton.ToolTip = string.IsNullOrWhiteSpace(row.StateHint) ? null : row.StateHint;
         AddedHint.Text = row.StateHint;
         PackTabs.SelectedIndex = 0;
         OverviewBrowser.Visibility = Visibility.Visible;
@@ -418,6 +611,7 @@ public partial class PackBrowserView : Page
 
     private async Task LoadExternalDetailAsync(ModSummary mod, CancellationToken ct)
     {
+        ShowExternalTabs(true);
         _currentProjectUrl = BuildProjectUrl(mod);
         OpenProjectButton.Visibility = Visibility.Visible;
         ConfigureLinks(new ModProjectLinks(_currentProjectUrl, null, null, null, null));
@@ -443,11 +637,7 @@ public partial class PackBrowserView : Page
         _currentProjectUrl = null;
         OpenProjectButton.Visibility = Visibility.Collapsed;
         ConfigureLinks(new ModProjectLinks(null, null, null, null, null));
-
-        ScreenshotsEmptyText.Text = "Screenshots aren't available for CloudLauncher packs.";
-        ScreenshotsEmptyText.Visibility = Visibility.Visible;
-        ScreenshotList.ItemsSource = null;
-        ScreenshotList.Visibility = Visibility.Collapsed;
+        ShowExternalTabs(false);
 
         try
         {
@@ -464,24 +654,26 @@ public partial class PackBrowserView : Page
                 ShowOverviewDescription(_cachedDescription, isMarkdown);
             }
 
-            VersionsGrid.ItemsSource = new List<PackVersionRow>
-            {
-                new()
-                {
-                    VersionNumber = detail.MinecraftVersion ?? "Latest",
-                    McVersions = detail.MinecraftVersion ?? "—",
-                    LoaderList = FormatLoader(detail.Loader, detail.LoaderVersion),
-                    ReleaseChannel = detail.Visibility.ToString(),
-                    DateLabel = detail.UpdatedAt.LocalDateTime.ToString("yyyy-MM-dd"),
-                    SizeLabel = "",
-                    ActionLabel = "Add",
-                    ActionVisibility = IsInternalPackAdded(detail.Id) ? Visibility.Collapsed : Visibility.Visible,
-                    IsInternal = true
-                }
-            };
-            VersionFilterNote.Text = "(CloudLauncher catalog)";
+            ShowInternalDetails(detail);
         }
         catch (OperationCanceledException) { throw; }
+        catch (ApiException api) when (api.Status == HttpStatusCode.Forbidden)
+        {
+            // The owner set the pack back to Private (or dropped you as a collaborator) after the
+            // list was fetched. Without this arm the user sees the raw "403 Forbidden: {...}" body.
+            ShowOverviewDescription(
+                $"You no longer have access to '{summary.Name}'.\n\n"
+                + "Its owner stopped sharing it, so it can't be downloaded or played. "
+                + "You can remove it from your instance list from the right-click menu on the row.",
+                false);
+            InternalDetailsList.ItemsSource = null;
+            if (_currentRow is { } row) await ReportLostAccessAsync(row);
+        }
+        catch (ApiException api) when (api.Status == HttpStatusCode.NotFound)
+        {
+            ShowOverviewDescription($"'{summary.Name}' no longer exists — its owner deleted it.", false);
+            InternalDetailsList.ItemsSource = null;
+        }
         catch (Exception ex)
         {
             ShowOverviewDescription(
@@ -490,6 +682,66 @@ public partial class PackBrowserView : Page
                 "Error loading detail: " + ex.Message,
                 false);
         }
+    }
+
+    /// <summary>
+    /// Fills the Details tab for a CloudLauncher pack with facts that are actually true of it.
+    /// </summary>
+    /// <remarks>
+    /// This tab used to be "Versions" holding one fabricated row whose Version column was the
+    /// Minecraft version and whose Channel column read "Public" or "Private" — it looked like a
+    /// release channel and told the user nothing. Hosted packs have no release history: the server
+    /// keeps one live copy of the instance.
+    /// </remarks>
+    private void ShowInternalDetails(PackDetail detail)
+    {
+        var facts = new List<PackFactRow>
+        {
+            new("Minecraft version", detail.MinecraftVersion ?? "—"),
+            new("Loader", FormatLoader(detail.Loader, detail.LoaderVersion)),
+            new("Visibility", detail.Visibility switch
+            {
+                PackVisibility.Public => "Public — anyone on this server can find it",
+                PackVisibility.Team   => "Team — visible to the teams it is shared with",
+                _                     => "Private — only you and its collaborators"
+            }),
+            new("Hosted on the server",
+                detail.IsShared ? "Yes — its files can be downloaded" : "No — there are no files to download",
+                detail.IsShared
+                    ? null
+                    : "Turn on 'Host this instance on the server' in the instance's Options so people who add it get its files."),
+            new("Owner", detail.OwnerUsername),
+            new("Shared with",
+                $"{Plural(detail.Collaborators.Count, "collaborator")}, {Plural(detail.Teams.Count, "team")}"),
+            new("Created", detail.CreatedAt.LocalDateTime.ToString("d MMM yyyy")),
+            new("Last updated", detail.UpdatedAt.LocalDateTime.ToString("d MMM yyyy HH:mm"))
+        };
+
+        InternalDetailsList.ItemsSource = facts;
+        VersionsGrid.ItemsSource = null;
+    }
+
+    private static string Plural(int count, string noun) =>
+        $"{count} {noun}{(count == 1 ? "" : "s")}";
+
+    /// <summary>
+    /// Shows or hides the two tabs that only a CurseForge/Modrinth project can fill. A hosted pack
+    /// has neither screenshots nor project links, so leaving them in place meant every CloudLauncher
+    /// pack showed two tabs whose only content was a sentence explaining they were empty.
+    /// </summary>
+    private void ShowExternalTabs(bool external)
+    {
+        ScreenshotsTab.Visibility = external ? Visibility.Visible : Visibility.Collapsed;
+        LinksTab.Visibility = external ? Visibility.Visible : Visibility.Collapsed;
+        VersionsTab.Header = external ? "Versions" : "Details";
+        VersionsToolbar.Visibility = external ? Visibility.Visible : Visibility.Collapsed;
+        VersionsGridHost.Visibility = external ? Visibility.Visible : Visibility.Collapsed;
+        InternalDetailsHost.Visibility = external ? Visibility.Collapsed : Visibility.Visible;
+
+        if (external) return;
+        ScreenshotList.ItemsSource = null;
+        ScreenshotList.Visibility = Visibility.Collapsed;
+        ScreenshotsEmptyText.Visibility = Visibility.Collapsed;
     }
 
     private void ShowVersions(bool all)
@@ -516,24 +768,38 @@ public partial class PackBrowserView : Page
     private async void OnDownloadRow(object sender, RoutedEventArgs e)
     {
         if (sender is not Button b || b.Tag is not PackBrowseRow row) return;
-        await DownloadRowAsync(row, b);
+        try { await DownloadRowAsync(row, b); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
     }
 
-    private async void OnDownloadSelectedPack(object sender, RoutedEventArgs e) =>
-        await DownloadCurrentAsync(sender as Button);
+    private async void OnDownloadSelectedPack(object sender, RoutedEventArgs e)
+    {
+        try { await DownloadCurrentAsync(sender as Button); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
+    }
 
     private async void OnDownloadVersion(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement { DataContext: PackVersionRow versionRow }) return;
-        if (versionRow.IsInternal)
+        var button = sender as Button;
+        try
         {
-            if (_currentRow is not null)
-                await DownloadRowAsync(_currentRow, sender as Button);
-            return;
-        }
+            if (versionRow.IsInternal)
+            {
+                if (_currentRow is not null)
+                    await DownloadRowAsync(_currentRow, button);
+                return;
+            }
 
-        if (_currentExternal is null || versionRow.Source is null) return;
-        await DownloadExternalAsync(_currentExternal, versionRow.Source, sender as Button);
+            if (_currentExternal is null || versionRow.Source is null) return;
+            if (button is not null) button.IsEnabled = false;
+            try { await DownloadExternalAsync(_currentExternal, versionRow.Source, button); }
+            finally { if (button is not null) button.IsEnabled = true; }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Download failed: " + ex.Message, error: true); }
     }
 
     private async Task DownloadCurrentAsync(Button? button)
@@ -544,7 +810,8 @@ public partial class PackBrowserView : Page
 
     private async Task DownloadRowAsync(PackBrowseRow row, Button? button)
     {
-        if (row.Kind == PackBrowseRowKind.Internal && row.Internal is { } internalPack && IsInternalPackAdded(internalPack.Id))
+        if (row.Kind == PackBrowseRowKind.Internal && row.Internal is { } internalPack
+            && (IsInternalPackAdded(internalPack.Id) || IsMine(internalPack)))
         {
             // Already yours: take them to it, where Play and Download live.
             _shell.OpenPackDetail(internalPack.Id, internalPack.Name);
@@ -557,10 +824,7 @@ public partial class PackBrowserView : Page
             if (row.Kind == PackBrowseRowKind.Internal && row.Internal is not null)
             {
                 var pack = await App.State.ModpackDownload.SubscribeInternalPackAsync(row.Internal);
-                StatusLabel.Foreground = (Brush)FindResource("AccentBrush");
-                StatusLabel.Text = $"Added '{pack.Name}' to your packs.";
-                DownloadStatus.Foreground = (Brush)FindResource("AccentBrush");
-                DownloadStatus.Text = StatusLabel.Text;
+                SetStatus($"Added '{pack.Name}' to your packs.", error: false);
                 OnPackAdded(pack);
             }
             else if (row.External is not null)
@@ -568,12 +832,17 @@ public partial class PackBrowserView : Page
                 await DownloadExternalAsync(row.External, selectedVersion: null, button);
             }
         }
+        catch (ApiException api) when (api.Status == HttpStatusCode.Forbidden)
+        {
+            await ReportLostAccessAsync(row);
+        }
+        catch (ApiException api) when (api.Status == HttpStatusCode.NotFound)
+        {
+            SetStatus("That pack no longer exists — its owner deleted it.", error: true);
+        }
         catch (Exception ex)
         {
-            StatusLabel.Foreground = (Brush)FindResource("DangerBrush");
-            StatusLabel.Text = "Download failed: " + ex.Message;
-            DownloadStatus.Foreground = (Brush)FindResource("DangerBrush");
-            DownloadStatus.Text = StatusLabel.Text;
+            SetStatus("Download failed: " + ex.Message, error: true);
         }
         finally
         {
@@ -581,9 +850,62 @@ public partial class PackBrowserView : Page
         }
     }
 
+    /// <summary>
+    /// Says, in words, what a 403 on a pack actually means: the owner stopped sharing it. Offers the
+    /// only cleanup that helps — dropping it from your list — when the pack is still sitting there.
+    /// </summary>
+    private async Task ReportLostAccessAsync(PackBrowseRow row)
+    {
+        var name = row.Title;
+        SetStatus($"You no longer have access to '{name}' — its owner stopped sharing it.", error: true);
+
+        if (row.Internal is not { } pack || !IsInternalPackAdded(pack.Id)) return;
+
+        var remove = await AppDialog.ConfirmAsync(_shell, "Access removed",
+            $"'{name}' is no longer shared with you, so it can't be downloaded or played.\n\n"
+            + "Remove it from your instance list? The files already on this PC are left alone.",
+            "Remove from my list", "Keep it", danger: true);
+        if (remove) await RemoveFromMyListAsync(pack);
+    }
+
+    /// <summary>Unsubscribes from a hosted pack and stops listing it locally.</summary>
+    private async Task RemoveFromMyListAsync(PackSummary pack)
+    {
+        try
+        {
+            await App.State.Api.UnsubscribePackAsync(pack.Id);
+        }
+        catch (ApiException api) when (api.Status is HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
+        {
+            // Already gone server-side; hiding it locally is still the right outcome.
+        }
+
+        App.State.Settings.HidePack(pack.Id);
+        _addedPackIds.Remove(pack.Id);
+        RefreshInternalActionState(pack.Id);
+        SetStatus($"Removed '{pack.Name}' from your list.", error: false);
+    }
+
+    /// <summary>
+    /// Writes to both status lines at once — the footer one and the one under the detail panel —
+    /// so a message is visible wherever the user is looking.
+    /// </summary>
+    /// <remarks>Colour is set by resource reference rather than by assigning a brush, because
+    /// ThemeService swaps the brush objects on every theme change and an assigned brush would be
+    /// frozen at the old colour.</remarks>
+    private void SetStatus(string message, bool error)
+    {
+        var key = error ? "DangerBrush" : "AccentBrush";
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, key);
+        DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty, key);
+        StatusLabel.Text = message;
+        DownloadStatus.Text = message;
+    }
+
     private async Task DownloadExternalAsync(ModSummary mod, ModVersion? selectedVersion, Button? button)
     {
-        StatusLabel.Foreground = (Brush)FindResource("TextSecondaryBrush");
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
+        DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
         StatusLabel.Text = $"Starting download for '{mod.Name}'…";
         DownloadStatus.Text = StatusLabel.Text;
 
@@ -597,10 +919,7 @@ public partial class PackBrowserView : Page
 
         await App.State.ModpackDownload.StartExternalDownloadAsync(mod, selectedVersion, metadata);
 
-        StatusLabel.Foreground = (Brush)FindResource("AccentBrush");
-        StatusLabel.Text = $"'{mod.Name}' is downloading — check your instances.";
-        DownloadStatus.Foreground = (Brush)FindResource("AccentBrush");
-        DownloadStatus.Text = StatusLabel.Text;
+        SetStatus($"'{mod.Name}' is downloading — check your instances.", error: false);
     }
 
     private async Task<List<ModVersion>> LoadVersionsForModAsync(ModSummary mod, CancellationToken ct)
@@ -639,9 +958,14 @@ public partial class PackBrowserView : Page
         OverviewBrowser.Show("");
         ScreenshotList.ItemsSource = null;
         VersionsGrid.ItemsSource = null;
+        InternalDetailsList.ItemsSource = null;
         VersionFilterNote.Text = "";
         DownloadStatus.Text = "";
+        AddedHint.Text = "";
         OpenProjectButton.Visibility = Visibility.Collapsed;
+        // Put the tabs back, or a CurseForge pack selected after a CloudLauncher one would inherit
+        // the collapsed Screenshots/Links tabs and the Details fact sheet.
+        ShowExternalTabs(true);
     }
 
     private bool TryShowLocalPackDescription(Guid packId)
@@ -719,6 +1043,85 @@ public partial class PackBrowserView : Page
         }
     }
 
+    // ── row context menu ─────────────────────────────────────────────────────
+
+    /// <summary>Resolves the row a context-menu item belongs to, the way PackListView does.</summary>
+    private static PackBrowseRow? RowFromMenuSender(object sender)
+    {
+        if (sender is FrameworkElement el && el.DataContext is PackBrowseRow direct) return direct;
+        if (sender is MenuItem mi)
+        {
+            var parent = mi.Parent;
+            while (parent is MenuItem p) parent = p.Parent;
+            if (parent is ContextMenu cm && cm.PlacementTarget is FrameworkElement target
+                && target.DataContext is PackBrowseRow row) return row;
+        }
+        return null;
+    }
+
+    private async void OnCtxPrimaryAction(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender) is not { } row) return;
+        try { await DownloadRowAsync(row, null); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
+    }
+
+    private void OnCtxOpenInstance(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Internal is { } pack)
+            _shell.OpenPackDetail(pack.Id, pack.Name);
+    }
+
+    private void OnCtxOpenProjectPage(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.External is { } mod)
+            OpenUrl(BuildProjectUrl(mod));
+    }
+
+    private void OnCtxCopyId(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Internal is not { } pack) return;
+        SetStatus(ClipboardHelper.TrySetText(pack.Id.ToString())
+            ? "Pack ID copied."
+            : "Couldn't copy — the clipboard is in use by another program.",
+            error: false);
+    }
+
+    private void OnCtxCopyUrl(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.External is not { } mod) return;
+        SetStatus(ClipboardHelper.TrySetText(BuildProjectUrl(mod))
+            ? "Project URL copied."
+            : "Couldn't copy — the clipboard is in use by another program.",
+            error: false);
+    }
+
+    private async void OnCtxRemoveFromList(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender)?.Internal is not { } pack) return;
+        try
+        {
+            var mine = IsMine(pack);
+            var confirmed = await AppDialog.ConfirmAsync(_shell, "Remove from my list",
+                mine
+                    ? $"'{pack.Name}' is yours — removing it here only hides it from your instance "
+                      + "list. It stays on the server and anyone you shared it with keeps it.\n\nHide it?"
+                    : $"Stop listing '{pack.Name}' as one of your instances?\n\n"
+                      + "You can add it again from this browser while it is still shared with you. "
+                      + "Files already downloaded to this PC are left alone.",
+                mine ? "Hide" : "Remove", "Cancel", danger: true);
+            if (!confirmed) return;
+
+            await RemoveFromMyListAsync(pack);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            SetStatus("Couldn't remove it: " + ex.Message, error: true);
+        }
+    }
+
     private void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
@@ -772,14 +1175,33 @@ public partial class PackBrowserView : Page
     /// <remarks>A pack shared with you is in your instance list the moment the owner adds you, before
     /// you have downloaded a single file — which is exactly when someone goes looking for a download
     /// button in the browser.</remarks>
+    /// <remarks>
+    /// A pack you own is never "Add"-able: the server answers <c>subscribe</c> with 400 "You own
+    /// this pack", so the My-packs chip would otherwise be a list of buttons that always fail.
+    /// </remarks>
     private void ApplyInternalActionState(PackBrowseRow row)
     {
         if (row.Internal is not { } pack) return;
-        var added = IsInternalPackAdded(pack.Id);
+        var added = IsInternalPackAdded(pack.Id) || IsMine(pack);
         row.ActionVisibility = Visibility.Visible;
         row.ActionLabel = added ? "Open" : "Add";
-        row.StateHint = added ? "Already in your instances — open it to download its files" : "";
+        row.StateHint = IsMine(pack)
+            ? "You own this pack — open it to edit or publish it"
+            : added ? "Already in your instances — open it to download its files" : "";
+
+        // Visibility and hosting are set on two unrelated cards, so a pack can be published while
+        // its files were never uploaded. Anyone who adds that gets an empty instance, so say so
+        // before they click rather than after.
+        var notHosted = !pack.IsShared;
+        row.NotHostedVisibility = notHosted ? Visibility.Visible : Visibility.Collapsed;
+        if (notHosted && !added)
+            row.StateHint = "Not hosted on the server — this pack has no files to download yet";
+
+        row.AddedMenuVisibility = IsInternalPackAdded(pack.Id) ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    private static bool IsMine(PackSummary pack) =>
+        App.State.Settings.UserId is { } me && pack.OwnerId == me;
 
     // ── view-models ──────────────────────────────────────────────────────────
 
@@ -788,6 +1210,9 @@ public partial class PackBrowserView : Page
         CurseForge,
         Modrinth,
         CloudLauncherPublic,
+
+        /// <summary>Packs you own, as they appear to everyone else.</summary>
+        CloudLauncherPersonal,
         CloudLauncherShared,
         CloudLauncherTeam
     }
@@ -800,6 +1225,12 @@ public partial class PackBrowserView : Page
         public string Label { get; set; } = "";
         public SourceKind Kind { get; set; }
         public Guid? TeamId { get; set; }
+        public string? ToolTipText { get; set; }
+
+        /// <summary>A visual separator between chip groups; not selectable.</summary>
+        public bool IsDivider { get; set; }
+        public Visibility IconVisibility { get; set; } = Visibility.Visible;
+        public Cursor CursorHint { get; set; } = Cursors.Hand;
         public Brush Background { get; set; } = Brushes.Transparent;
         public Brush BorderColor { get; set; } = Brushes.Transparent;
         public Brush Foreground { get; set; } = Brushes.Black;
@@ -823,9 +1254,32 @@ public partial class PackBrowserView : Page
         public string ActionLabel { get; set; } = "Download";
         public Visibility ActionVisibility { get; set; } = Visibility.Visible;
 
+        /// <summary>Cover art held locally, for a hosted pack that has no icon URL of its own.</summary>
+        public System.Windows.Media.ImageSource? IconImage { get; set; }
+
         /// <summary>Why the button says what it says, for the detail panel.</summary>
         public string StateHint { get; set; } = "";
+
+        /// <summary>Shown on a published pack whose files were never uploaded to the server.</summary>
+        public Visibility NotHostedVisibility { get; set; } = Visibility.Collapsed;
+
+        public Visibility InternalMenuVisibility =>
+            Kind == PackBrowseRowKind.Internal ? Visibility.Visible : Visibility.Collapsed;
+
+        public Visibility ExternalMenuVisibility =>
+            Kind == PackBrowseRowKind.External ? Visibility.Visible : Visibility.Collapsed;
+
+        /// <summary>Items that only make sense once a hosted pack is in your instance list.</summary>
+        public Visibility AddedMenuVisibility { get; set; } = Visibility.Collapsed;
+
+        /// <summary>The row's own hover text: the full summary plus why its button says what it says.</summary>
+        public string RowToolTip =>
+            string.Join("\n", new[] { Title, Subtitle, MetaLabel, StateHint }
+                .Where(s => !string.IsNullOrWhiteSpace(s)));
     }
+
+    /// <summary>One label/value line on a CloudLauncher pack's Details tab.</summary>
+    public sealed record PackFactRow(string Label, string Value, string? Hint = null);
 
     public sealed record PackVersionRow
     {

@@ -18,8 +18,46 @@
                         Padding="10,4" MinHeight="0" Margin="16,0,0,0" VerticalAlignment="Center"
                         Click="OnCollapseAll"
                         ToolTip="Fold every category down to its header — or open them all again"/>
+
+                <!-- Find: dims everything that does not match and centres a single hit. The graph is
+                     otherwise the one view of a pack with no way at all to locate a mod. -->
+                <Border Width="190" MinHeight="28" Margin="16,0,0,0" VerticalAlignment="Center"
+                        Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                        BorderThickness="1" CornerRadius="6">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="{StaticResource IconFont}"
+                                   FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}"
+                                   VerticalAlignment="Center" Margin="9,0,7,0"/>
+                        <Grid Grid.Column="1">
+                            <TextBlock x:Name="FindPlaceholder" Text="Find a mod…"
+                                       Foreground="{DynamicResource TextTertiaryBrush}"
+                                       VerticalAlignment="Center" IsHitTestVisible="False"/>
+                            <TextBox x:Name="FindBox" Background="Transparent" BorderThickness="0"
+                                     VerticalAlignment="Center" TextChanged="OnFindChanged"
+                                     PreviewKeyDown="OnFindKeyDown"
+                                     ToolTip="Dim every node except the mods whose name matches">
+                                <TextBox.Template>
+                                    <ControlTemplate TargetType="TextBox">
+                                        <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+                                    </ControlTemplate>
+                                </TextBox.Template>
+                            </TextBox>
+                        </Grid>
+                        <Button x:Name="FindClearButton" Grid.Column="2" Style="{StaticResource IconButton}"
+                                Content="&#xE711;" FontFamily="{StaticResource IconFont}" FontSize="10"
+                                Margin="0,0,2,0" Visibility="Collapsed" Click="OnFindClear"
+                                ToolTip="Clear (Esc)"/>
+                    </Grid>
+                </Border>
+
                 <TextBlock x:Name="HintLabel" Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
-                           VerticalAlignment="Center" Margin="16,0,0,0"
+                           VerticalAlignment="Center" Margin="16,0,0,0" MaxWidth="330"
+                           TextTrimming="CharacterEllipsis"
                            Text="Scroll to zoom · drag background to pan"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">

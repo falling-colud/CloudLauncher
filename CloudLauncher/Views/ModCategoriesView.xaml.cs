@@ -77,8 +77,13 @@ public partial class ModCategoriesView : UserControl
     /// <param name="onOpenMod">Opens a mod's page in the launcher — the menu's top action.</param>
     /// <param name="onReload">Re-scans the pack's mods, after something that changes the files on
     /// disk (a delete, or installing a different version).</param>
+    /// <param name="onUpdate">Installs the newest version of the given mods — the List view's own
+    /// implementation, so "Update to newest" behaves identically here.</param>
+    /// <param name="onRecheckUpdates">Re-runs the update check for the given mods after something
+    /// changed what counts as an update for them (their channel, or the store they follow).</param>
     public void Load(Guid packId, IReadOnlyList<PackMod> mods, MainWindow? owner, Action? onChanged,
-        Action<PackMod>? onOpenMod = null, Action? onReload = null)
+        Action<PackMod>? onOpenMod = null, Action? onReload = null,
+        Action<IReadOnlyList<PackMod>>? onUpdate = null, Action<IReadOnlyList<PackMod>>? onRecheckUpdates = null)
     {
         _packId = packId;
         _mods = mods;
@@ -86,11 +91,15 @@ public partial class ModCategoriesView : UserControl
         _onChanged = onChanged;
         _onOpenMod = onOpenMod;
         _onReload = onReload;
+        _onUpdate = onUpdate;
+        _onRecheckUpdates = onRecheckUpdates;
         Refresh();
     }
 
     private Action<PackMod>? _onOpenMod;
     private Action? _onReload;
+    private Action<IReadOnlyList<PackMod>>? _onUpdate;
+    private Action<IReadOnlyList<PackMod>>? _onRecheckUpdates;
 
     // ── refresh ─────────────────────────────────────────────────────────────────
 
@@ -501,6 +510,21 @@ public partial class ModCategoriesView : UserControl
             Refresh();
             _onChanged?.Invoke();
         },
+        // Handed up to the hub rather than re-implemented: "Update to newest" has to obey the same
+        // update-lock rules here as it does in the List view, and one implementation is how that
+        // stays true. Without these two the menu silently dropped both items on this tab.
+        OnUpdate = list =>
+        {
+            if (_onUpdate is null) return;
+            Status.Text = list.Count == 1 ? $"Updating {list[0].DisplayName}…" : $"Updating {list.Count} mod(s)…";
+            _onUpdate(list);
+        },
+        OnRecheckUpdates = list =>
+        {
+            if (_onRecheckUpdates is null) return;
+            Status.Text = "Re-checking for updates…";
+            _onRecheckUpdates(list);
+        },
         OnUpdateToVersion = UpdateModToVersionAsync,
         OnDelete = DeleteModsAsync,
         OnReveal = mod =>
@@ -530,20 +554,23 @@ public partial class ModCategoriesView : UserControl
         var mc = mod.PrimaryVersion?.GameVersions.FirstOrDefault();
         var loader = mod.PrimaryVersion?.Loaders.FirstOrDefault();
         var chosen = await ModVersionPickerDialog.ShowAsync(host, mod.DisplayName, versions, mc, loader,
-            mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber);
+            mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber, mod.Meta.UpdateLocked);
         if (chosen is null) { Status.Text = ""; return; }
 
-        if (mod.Meta.UpdateLocked && !await AppDialog.ConfirmAsync(host, "Mod is locked",
-                $"{mod.DisplayName} is locked to its current version.\n\nChange it anyway? It stays locked afterwards.",
+        // The picker's own "Keep this version" box already says where the lock should land, so a
+        // ticked box is not asked to confirm moving the lock it is setting.
+        if (mod.Meta.UpdateLocked && !chosen.KeepVersion && !await AppDialog.ConfirmAsync(host, "Mod is locked",
+                $"{mod.DisplayName} is locked to its current version.\n\nChange it anyway?",
                 "Change anyway", "Keep locked"))
         { Status.Text = ""; return; }
 
-        Status.Text = $"Installing {chosen.VersionNumber}…";
+        Status.Text = $"Installing {chosen.Version.VersionNumber}…";
         try
         {
-            if (await ModUpdater.InstallVersionAsync(mod, chosen))
+            if (await ModUpdater.InstallVersionAsync(mod, chosen.Version))
             {
-                Status.Text = $"{mod.DisplayName} is now on {chosen.VersionNumber}.";
+                ModVersionPickerDialog.ApplyKeepVersion(_packId, mod, chosen);
+                Status.Text = $"{mod.DisplayName} is now on {chosen.Version.VersionNumber}.";
                 _onReload?.Invoke();   // the jar changed on disk: re-scan rather than trust this list
             }
             else Status.Text = "That version has no downloadable file.";
@@ -725,15 +752,20 @@ public partial class ModCategoriesView : UserControl
                 return;
 
             App.State.ModMetadata.ApplyCategoryImport(_packId, plan);
-            Status.Text = $"Imported {plan.NewCategories.Count} categor{(plan.NewCategories.Count == 1 ? "y" : "ies")} " +
-                          $"and tagged {plan.TaggedMods} mod(s) from {source.Name}.";
+            Status.Text = $"Imported {plan.NewCategories.Count} categor{(plan.NewCategories.Count == 1 ? "y" : "ies")}, " +
+                          $"tagged {plan.TaggedMods} mod(s)" +
+                          (plan.FlaggedMods > 0 ? $" and copied settings onto {plan.FlaggedMods}" : "") +
+                          $" from {source.Name}.";
             Refresh();
             _onChanged?.Invoke();
         }
         catch (Exception ex) { Status.Text = "Import failed: " + ex.Message; }
     }
 
-    private static string DescribePlan(ModMetadataService.CategoryImportPlan plan, string sourceName)
+    /// <summary>The confirm text for a category/settings import. Shared with the hub's Tools menu,
+    /// which offers the same import from outside this tab, so both spell out exactly the same
+    /// consequences.</summary>
+    internal static string DescribePlan(ModMetadataService.CategoryImportPlan plan, string sourceName)
     {
         var lines = new List<string>();
         lines.Add(plan.NewCategories.Count > 0
@@ -749,6 +781,10 @@ public partial class ModCategoriesView : UserControl
         lines.Add(plan.TaggedMods > 0
             ? $"Tag {plan.TaggedMods} mod(s) in this pack the way {sourceName} has them."
             : "No mods to tag — the ones this pack shares with it are already tagged.");
+
+        if (plan.FlaggedMods > 0)
+            lines.Add($"Copy priority, content size, side, library, note and lock onto {plan.FlaggedMods} mod(s) " +
+                      "that have no settings of their own here.");
 
         if (plan.UnmatchedSourceMods > 0)
             lines.Add($"{plan.UnmatchedSourceMods} mod(s) {sourceName} categorises are not installed here and are skipped.");

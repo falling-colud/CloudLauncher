@@ -73,6 +73,9 @@ public partial class ModPlanView : UserControl
     private MainWindow? _owner;
     private Action<PackMod>? _onOpenMod;
     private Action? _onModsChanged;
+    private Action? _onReload;
+    private Action<IReadOnlyList<PackMod>>? _onUpdate;
+    private Action<IReadOnlyList<PackMod>>? _onRecheckUpdates;
     private PlanBoard? _board;
     private bool _loaded;
     private bool _suppressBoardChange;
@@ -156,14 +159,24 @@ public partial class ModPlanView : UserControl
 
     /// <summary>Binds the board to a pack's live mod list. Safe to call repeatedly — later calls
     /// just re-resolve the cards against the refreshed inventory.</summary>
+    /// <param name="onReload">Re-scans the pack's mods, after something that changed the files on
+    /// disk (a delete, or installing a different version).</param>
+    /// <param name="onUpdate">Installs the newest version of the given mods — the List view's own
+    /// implementation, so "Update to newest" behaves identically here.</param>
+    /// <param name="onRecheckUpdates">Re-runs the update check for the given mods after something
+    /// changed what counts as an update for them (their channel, or the store they follow).</param>
     public void Load(Guid packId, IReadOnlyList<PackMod> mods, MainWindow? owner,
-        Action<PackMod>? onOpenMod = null, Action? onModsChanged = null)
+        Action<PackMod>? onOpenMod = null, Action? onModsChanged = null, Action? onReload = null,
+        Action<IReadOnlyList<PackMod>>? onUpdate = null, Action<IReadOnlyList<PackMod>>? onRecheckUpdates = null)
     {
         _packId = packId;
         _mods = mods;
         _owner = owner;
         _onOpenMod = onOpenMod;
         _onModsChanged = onModsChanged;
+        _onReload = onReload;
+        _onUpdate = onUpdate;
+        _onRecheckUpdates = onRecheckUpdates;
 
         var first = !_loaded;
         _loaded = true;
@@ -2679,6 +2692,16 @@ public partial class ModPlanView : UserControl
         menu.IsOpen = true;
     }
 
+    /// <summary>
+    /// The mod options menu for a card, with every callback the List view's own menu has.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ModOptionsMenu"/> hides an item whose callback is null, so this context used to be
+    /// why the same mod offered four fewer actions on the board than in the list — "Update to
+    /// newest", "Update to version…", "Reveal in Explorer" and "Delete file" were simply absent.
+    /// Note that deleting is still the <em>file</em>: removing a card from the board is a separate
+    /// item inserted above, and the two must not be confused with one another.
+    /// </remarks>
     private ModOptionsContext BuildModContext() => new()
     {
         PackId = _packId,
@@ -2692,8 +2715,92 @@ public partial class ModPlanView : UserControl
         {
             foreach (var m in list) App.State.ModInventory.SetEnabled(m, en);
             ModsChanged();
+        },
+        OnUpdate = list =>
+        {
+            if (_onUpdate is null) return;
+            PlanStatus.Text = list.Count == 1 ? $"Updating {list[0].DisplayName}…" : $"Updating {list.Count} mod(s)…";
+            _onUpdate(list);
+        },
+        OnRecheckUpdates = list =>
+        {
+            if (_onRecheckUpdates is null) return;
+            PlanStatus.Text = "Re-checking for updates…";
+            _onRecheckUpdates(list);
+        },
+        OnUpdateToVersion = UpdateModToVersionAsync,
+        OnDelete = DeleteModFilesAsync,
+        OnReveal = mod =>
+        {
+            var dir = System.IO.Path.GetDirectoryName(mod.FilePath);
+            if (dir is null) return;
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true }); }
+            catch (Exception ex) { PlanStatus.Text = "Could not open the folder: " + ex.Message; }
         }
     };
+
+    /// <summary>Pick a specific version for a mod on the board and install it.</summary>
+    private async void UpdateModToVersionAsync(PackMod mod)
+    {
+        try
+        {
+            if (mod.PrimaryMod is null || _owner is not { } host)
+            {
+                PlanStatus.Text = $"{mod.DisplayName} isn't identified yet.";
+                return;
+            }
+            PlanStatus.Text = $"Loading versions for {mod.DisplayName}…";
+            var versions = await ModUpdater.FetchVersionsAsync(mod.PrimaryMod);
+            if (versions.Count == 0) { PlanStatus.Text = "No versions found."; return; }
+
+            var mc = mod.PrimaryVersion?.GameVersions.FirstOrDefault();
+            var loader = mod.PrimaryVersion?.Loaders.FirstOrDefault();
+            var chosen = await ModVersionPickerDialog.ShowAsync(host, mod.DisplayName, versions, mc, loader,
+                mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber, mod.Meta.UpdateLocked);
+            if (chosen is null) { PlanStatus.Text = ""; return; }
+
+            if (mod.Meta.UpdateLocked && !chosen.KeepVersion && !await AppDialog.ConfirmAsync(host, "Mod is locked",
+                    $"{mod.DisplayName} is locked to its current version.\n\nChange it anyway? It stays locked afterwards.",
+                    "Change anyway", "Keep locked"))
+            { PlanStatus.Text = ""; return; }
+
+            PlanStatus.Text = $"Installing {chosen.Version.VersionNumber}…";
+            if (await ModUpdater.InstallVersionAsync(mod, chosen.Version))
+            {
+                ModVersionPickerDialog.ApplyKeepVersion(_packId, mod, chosen);
+                PlanStatus.Text = $"{mod.DisplayName} is now on {chosen.Version.VersionNumber}.";
+                _onReload?.Invoke();   // the jar changed on disk: re-scan rather than trust this board
+            }
+            else PlanStatus.Text = "That version has no downloadable file.";
+        }
+        catch (Exception ex) { PlanStatus.Text = "Install failed: " + ex.Message; }
+    }
+
+    /// <summary>Deletes the jars behind the given cards. The cards themselves stay until the re-scan
+    /// comes back and finds the mods gone.</summary>
+    private async void DeleteModFilesAsync(IReadOnlyList<PackMod> mods)
+    {
+        try
+        {
+            if (mods.Count == 0 || _owner is not { } host) return;
+            var message = mods.Count == 1
+                ? $"Delete {System.IO.Path.GetFileName(mods[0].FilePath)}?\n\nThis removes the jar from the pack, not just its card."
+                : $"Delete {mods.Count} mod files?\n\nThis removes the jars from the pack, not just their cards.";
+            if (!await AppDialog.ConfirmAsync(host, "Delete mods", message, "Delete", "Cancel", danger: true)) return;
+
+            var failed = 0;
+            foreach (var mod in mods)
+            {
+                try { System.IO.File.Delete(mod.FilePath); }
+                catch { failed++; }
+            }
+            PlanStatus.Text = failed == 0
+                ? $"Deleted {mods.Count} mod(s)."
+                : $"Deleted {mods.Count - failed} of {mods.Count}; {failed} could not be removed (in use?).";
+            _onReload?.Invoke();
+        }
+        catch (Exception ex) { PlanStatus.Text = "Delete failed: " + ex.Message; }
+    }
 
     private void ModsChanged()
     {
