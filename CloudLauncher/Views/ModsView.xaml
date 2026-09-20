@@ -76,6 +76,22 @@
                         </TextBox>
                     </Grid>
                 </Border>
+                <!-- Sort. Only meaningful for the CloudLauncher sources, so it hides itself on the
+                     CurseForge and Modrinth chips rather than sitting there doing nothing. -->
+                <Button x:Name="SortButton" Style="{StaticResource IconButton}" Click="OnSortButtonClick"
+                        Content="&#xE8CB;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        ToolTip="Sort hosted mods">
+                    <Button.ContextMenu>
+                        <ContextMenu Opened="OnSortMenuOpened">
+                            <MenuItem x:Name="SortUpdatedMenuItem" Header="Recently updated" Tag="updated"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortCreatedMenuItem" Header="Newest" Tag="created"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortNameMenuItem" Header="Name" Tag="name"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
                 <Button Style="{StaticResource IconButton}" Click="OnFiltersClick"
                         Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
                         ToolTip="Filters"/>

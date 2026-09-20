@@ -46,7 +46,12 @@ public partial class LocalResourcePackDetailView : Page
             }
 
             if (_pack is null) { StatusLabel.Text = "Resource pack file no longer exists."; return; }
-            if (!File.Exists(_pack.FilePath)) { StatusLabel.Text = "The resource pack zip was deleted on disk."; return; }
+            // A pack may be an unpacked folder rather than a zip — Minecraft loads both.
+            if (!File.Exists(_pack.FilePath) && !Directory.Exists(_pack.FilePath))
+            {
+                StatusLabel.Text = "This resource pack was deleted on disk.";
+                return;
+            }
 
             _entry = App.State.ResourcePacks.GetOrCreate(_pack.Key);
 
@@ -58,6 +63,7 @@ public partial class LocalResourcePackDetailView : Page
                 SourcePackLabel.Text = _pack.SourcePackName.ToUpperInvariant();
                 MetaLabel.Text = $"Modified {_pack.LastModified.LocalDateTime:g} · {FormatSize(_pack.SizeBytes)}";
                 FilePathLabel.Text = _pack.FilePath;
+                ApplyPackMeta(_pack);
                 ConfigureOverviewEditor();
 
                 AllPacksBox.IsChecked = _pack.CompatibleWithAll;
@@ -82,6 +88,38 @@ public partial class LocalResourcePackDetailView : Page
             finally { _suppress = false; }
         }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
+    }
+
+    /// <summary>
+    /// Fills in what the pack itself declares — its icon, description and pack format — plus whether
+    /// the instance currently has it turned on.
+    /// </summary>
+    /// <remarks>Read off the UI thread is not worth it here: this page shows exactly one pack, and
+    /// <see cref="ResourcePackService.ReadMeta"/> caches by path and timestamp, so the grid the user
+    /// arrived from has usually already paid for it.</remarks>
+    private void ApplyPackMeta(ResourcePackInfo pack)
+    {
+        PackInitialLabel.Text = string.IsNullOrWhiteSpace(pack.DisplayName)
+            ? "?"
+            : pack.DisplayName.Trim()[..1].ToUpperInvariant();
+
+        var meta = ResourcePackService.ReadMeta(pack.FilePath, pack.IsFolder);
+        PackIconImage.Source = meta.Icon;
+
+        var hasDescription = !string.IsNullOrWhiteSpace(meta.Description);
+        PackDescriptionCaption.Visibility = hasDescription ? Visibility.Visible : Visibility.Collapsed;
+        PackDescriptionLabel.Visibility = hasDescription ? Visibility.Visible : Visibility.Collapsed;
+        PackDescriptionLabel.Text = meta.Description ?? "";
+
+        FormatPill.Visibility = meta.PackFormat is null ? Visibility.Collapsed : Visibility.Visible;
+        FormatPillText.Text = meta.PackFormat is int pf ? $"pack_format {pf}" : "";
+
+        EnabledPill.Visibility = pack.Enabled ? Visibility.Visible : Visibility.Collapsed;
+        EnabledPillText.Text = pack.Priority > 0 ? $"ON · #{pack.Priority}" : "ON";
+
+        var kind = pack.IsFolder ? "PACK FOLDER" : pack.IsLocal ? "LOCAL ONLY" : null;
+        KindPill.Visibility = kind is null ? Visibility.Collapsed : Visibility.Visible;
+        KindPillText.Text = kind ?? "";
     }
 
     private void ConfigureOverviewEditor()
@@ -159,32 +197,36 @@ public partial class LocalResourcePackDetailView : Page
         OverviewSaveStatus.Text = "Overview saved.";
     }
 
+    /// <summary>
+    /// Publishes the zip as a new hosted version.
+    /// </summary>
+    /// <remarks>Only a zip can be uploaded: an unpacked pack folder has no single file to post, and
+    /// zipping it behind the user's back would upload something they never checked.</remarks>
     private async void OnShareOrUploadZip(object sender, RoutedEventArgs e)
     {
-        if (_pack is null || !File.Exists(_pack.FilePath)) return;
+        if (_pack is null) return;
+        if (_pack.IsFolder)
+        {
+            StatusLabel.Text = "This pack is an unpacked folder — zip it first, then upload the zip.";
+            return;
+        }
+        if (!File.Exists(_pack.FilePath)) { StatusLabel.Text = "The zip is no longer on disk."; return; }
+
         SaveOverviewToSettings();
 
-        var versionDlg = new SimpleInputDialog(
-            "Upload resource pack version",
-            "Version string (e.g. 1.0.0):",
-            DateTimeOffset.Now.ToString("yyyy.MM.dd.HHmm"))
+        var versionDlg = new UploadResourcePackVersionDialog(
+            _pack.FilePath,
+            DateTimeOffset.Now.ToString("yyyy.MM.dd.HHmm"),
+            SourceMinecraftVersion())
         { Owner = _shell };
-        if (versionDlg.ShowDialog() != true || string.IsNullOrWhiteSpace(versionDlg.Result)) return;
+        if (versionDlg.ShowDialog() != true || versionDlg.Result is null) return;
 
         UploadHostedButton.IsEnabled = false;
-        StatusLabel.Text = "Uploading hosted version...";
+        StatusLabel.Text = "Uploading hosted version…";
         try
         {
             var hostedId = await EnsureHostedResourcePackAsync();
-
-            var meta = new CreateResourcePackVersionRequest(
-                versionDlg.Result.Trim(),
-                null,
-                "release",
-                Path.GetFileName(_pack.FilePath),
-                SourceMinecraftVersion());
-
-            await App.State.Api.UploadResourcePackVersionAsync(hostedId, _pack.FilePath, meta);
+            await App.State.Api.UploadResourcePackVersionAsync(hostedId, _pack.FilePath, versionDlg.Result);
             StatusLabel.Text = "Uploaded.";
             HostedStatusLabel.Text = $"Linked to hosted pack {hostedId}.";
             await LoadHostedVersionsAsync();
@@ -197,6 +239,71 @@ public partial class LocalResourcePackDetailView : Page
         {
             UploadHostedButton.IsEnabled = true;
         }
+    }
+
+    // ── per-version actions ──────────────────────────────────────────────────
+
+    private static HostedRpVersionDisplayRow? VersionFrom(object sender)
+    {
+        DependencyObject? p = sender as DependencyObject;
+        while (p is MenuItem m) p = m.Parent as MenuItem ?? m.Parent;
+        return p is ContextMenu { PlacementTarget: FrameworkElement fx }
+            ? fx.DataContext as HostedRpVersionDisplayRow
+            : null;
+    }
+
+    private async void OnCtxSaveVersion(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_entry?.HostedResourcePackId is not Guid hid) return;
+            if (VersionFrom(sender) is not HostedRpVersionDisplayRow row) return;
+
+            var dlg = new Microsoft.Win32.SaveFileDialog
+            {
+                FileName = string.IsNullOrWhiteSpace(row.FileName) ? row.VersionString + ".zip" : row.FileName,
+                Filter = "Zip (*.zip)|*.zip|All files|*"
+            };
+            if (dlg.ShowDialog(_shell) != true) return;
+
+            StatusLabel.Text = "Downloading…";
+            await using var stream = await App.State.Api.DownloadResourcePackVersionAsync(hid, row.Id);
+            await using var fs = File.Create(dlg.FileName);
+            await stream.CopyToAsync(fs);
+            StatusLabel.Text = "Saved to " + dlg.FileName;
+        }
+        catch (Exception ex) { StatusLabel.Text = "Download failed: " + ex.Message; }
+    }
+
+    private void OnCtxCopyVersionLink(object sender, RoutedEventArgs e)
+    {
+        if (_entry?.HostedResourcePackId is not Guid hid) return;
+        if (VersionFrom(sender) is not HostedRpVersionDisplayRow row) return;
+        var url = $"{App.State.Settings.ServerUrl.TrimEnd('/')}/resourcepacks/{hid}/files/{row.Id}";
+        if (ClipboardHelper.TrySetText(url)) StatusLabel.Text = "Download link copied.";
+    }
+
+    /// <summary>Takes one uploaded version back down. Uploading the wrong zip used to be permanent —
+    /// nothing in the app could remove a version once it was published.</summary>
+    private async void OnCtxDeleteVersion(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_entry?.HostedResourcePackId is not Guid hid) return;
+            if (VersionFrom(sender) is not HostedRpVersionDisplayRow row) return;
+
+            if (!await AppDialog.ConfirmAsync(_shell,
+                    "Delete version",
+                    $"Delete version {row.VersionString}?\n\n"
+                    + "Anyone who has not downloaded it yet will no longer be able to.",
+                    "Delete version", "Cancel", danger: true))
+                return;
+
+            await App.State.Api.DeleteResourcePackVersionAsync(hid, row.Id);
+            StatusLabel.Text = $"Deleted version {row.VersionString}.";
+            await LoadHostedVersionsAsync();
+        }
+        catch (Exception ex) { StatusLabel.Text = "Delete failed: " + ex.Message; }
     }
 
     private async void OnEditHostedPermissions(object sender, RoutedEventArgs e)
@@ -317,8 +424,14 @@ public partial class LocalResourcePackDetailView : Page
 
     private void OnOpenFolder(object sender, RoutedEventArgs e)
     {
-        if (_pack is null || !File.Exists(_pack.FilePath)) return;
-        Process.Start(new ProcessStartInfo { FileName = Path.GetDirectoryName(_pack.FilePath) ?? "", UseShellExecute = true });
+        if (_pack is null) return;
+        if (!File.Exists(_pack.FilePath) && !Directory.Exists(_pack.FilePath)) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + _pack.FilePath + "\"")
+            { UseShellExecute = true });
+        }
+        catch (Exception ex) { StatusLabel.Text = ex.Message; }
     }
 
     private static string FormatSize(long bytes) =>
@@ -332,15 +445,28 @@ public sealed class HostedRpVersionDisplayRow
 {
     public Guid Id { get; init; }
     public string VersionString { get; init; } = "";
+    public string FileName { get; init; } = "";
     public string MetaLabel { get; init; } = "";
     public string McVersionLabel { get; init; } = "";
+
+    /// <summary>Carries the changelog and channel, which the row itself has no space for and which
+    /// are the only things that say whether a version is worth taking.</summary>
+    public string Tooltip { get; init; } = "";
 
     public static HostedRpVersionDisplayRow From(HostedResourcePackVersionInfo v) => new()
     {
         Id = v.Id,
         VersionString = v.VersionString,
+        FileName = v.FileName,
         MetaLabel = $"{v.FileName} · {FormatSize(v.FileSize)} · {v.PublishedAt:g}",
-        McVersionLabel = string.IsNullOrWhiteSpace(v.McVersionsCsv) ? "Any MC" : $"MC {v.McVersionsCsv.Split(',').FirstOrDefault()?.Trim()}"
+        McVersionLabel = string.IsNullOrWhiteSpace(v.McVersionsCsv) ? "Any MC" : $"MC {v.McVersionsCsv.Split(',').FirstOrDefault()?.Trim()}",
+        Tooltip = string.Join("\n", new[]
+        {
+            $"{v.VersionString} · {v.ReleaseChannel}",
+            $"{v.FileName} · {FormatSize(v.FileSize)}",
+            $"Published {v.PublishedAt.LocalDateTime:g}",
+            string.IsNullOrWhiteSpace(v.Changelog) ? "" : "\n" + v.Changelog!.Trim()
+        }.Where(x => x.Length > 0))
     };
 
     private static string FormatSize(long bytes) =>

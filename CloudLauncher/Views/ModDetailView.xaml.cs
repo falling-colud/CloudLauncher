@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using CloudLauncher.Services;
 using CloudLauncher.Shared;
 
@@ -101,10 +102,157 @@ public partial class ModDetailView : Page, ISidePanelBackHandler
             VersionsEmpty.Visibility = _mod.Versions.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             VersionsEmptyHint.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
 
+            IconFallback.Text = string.IsNullOrWhiteSpace(_mod.Name)
+                ? "?"
+                : _mod.Name.Trim()[0].ToString().ToUpperInvariant();
+            IconActions.Visibility = ownerOnly;
+            RemoveIconButton.IsEnabled = _mod.IconBlobHash is not null;
+            // Fetched off the seed path: the icon is decoration, and a slow or missing one must not
+            // hold up the fields the owner came here to edit.
+            _ = LoadIconAsync(_mod.Id, _mod.IconBlobHash);
+
             MarkClean();
         }
         finally { _suppressDirty = false; }
     }
+
+    // ── icon ─────────────────────────────────────────────────────────────────
+
+    /// <summary>Shows the mod's icon, falling back to the letter tile.</summary>
+    /// <remarks>
+    /// The bytes come through the API client rather than being handed to the &lt;Image&gt; as a URL:
+    /// the icon route is authorised for anything that is not public, and an image binding sends no
+    /// token. The client writes the file to a content-addressed cache, so this is a download exactly
+    /// once per distinct icon and a file read every time after.
+    /// <para>The mod id is re-checked before the image is assigned. The page can be reloaded while a
+    /// fetch is in the air, and an icon arriving for a mod that is no longer on screen must not paint
+    /// over the one that is.</para>
+    /// </remarks>
+    private async Task LoadIconAsync(Guid modId, string? iconBlobHash)
+    {
+        IconImage.Source = null;
+        if (iconBlobHash is null) return;
+        try
+        {
+            var path = await App.State.Api.GetModIconFileAsync(modId, iconBlobHash);
+            if (path is null || _mod?.Id != modId) return;
+
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad; // decode now, then let go of the file
+            bmp.DecodePixelWidth = 128;                 // 64 px well on a high-DPI screen
+            bmp.UriSource = new Uri(path, UriKind.Absolute);
+            bmp.EndInit();
+            if (bmp.CanFreeze) bmp.Freeze();
+            IconImage.Source = bmp;
+        }
+        catch (Exception ex)
+        {
+            // A missing or corrupt icon leaves the letter tile showing, which is a fine answer.
+            AppLog.LogError("ModDetailView.LoadIcon", ex);
+        }
+    }
+
+    private async void OnChangeIcon(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dlg = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Pick an icon for this mod",
+                Filter = "Images (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg|All files|*"
+            };
+            if (dlg.ShowDialog(_shell) != true) return;
+            await UploadIconAsync(dlg.FileName);
+        }
+        catch (Exception ex) { SetStatus("Could not set the icon: " + ex.Message, error: true); }
+    }
+
+    private void OnIconDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = _isOwner && DroppedImage(e) is not null ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private async void OnIconDrop(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        try
+        {
+            if (!_isOwner) return;
+            if (DroppedImage(e) is { } path) await UploadIconAsync(path);
+        }
+        catch (Exception ex) { SetStatus("Could not set the icon: " + ex.Message, error: true); }
+    }
+
+    /// <summary>The single image in a drag payload. Several files at once is ignored rather than
+    /// guessed at — a mod has exactly one icon.</summary>
+    private static string? DroppedImage(DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return null;
+        var files = e.Data.GetData(DataFormats.FileDrop) as string[] ?? Array.Empty<string>();
+        if (files.Length != 1 || !File.Exists(files[0])) return null;
+        var ext = Path.GetExtension(files[0]);
+        return ext.Equals(".png", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase)
+            ? files[0]
+            : null;
+    }
+
+    /// <remarks>The size is checked here as well as on the server so dropping a 4K screenshot fails
+    /// instantly with the reason, instead of after however long it takes to send it.</remarks>
+    private async Task UploadIconAsync(string filePath)
+    {
+        if (_mod is null || !_isOwner) return;
+
+        var info = new FileInfo(filePath);
+        if (info.Length > MaxIconBytes)
+        {
+            SetStatus($"That image is {info.Length / 1024} KB. Icons have to be 1024 KB or smaller.", error: true);
+            return;
+        }
+
+        SetBusy(true, "Uploading icon…");
+        ChangeIconButton.IsEnabled = false;
+        try
+        {
+            await App.State.Api.UploadModIconAsync(_mod.Id, filePath);
+            await ReloadAsync();
+            SetStatus("Icon updated.", error: false);
+        }
+        catch (Exception ex) { SetStatus("Icon upload failed: " + ex.Message, error: true); }
+        finally
+        {
+            SetBusy(false, null);
+            ChangeIconButton.IsEnabled = true;
+        }
+    }
+
+    private async void OnRemoveIcon(object sender, RoutedEventArgs e)
+    {
+        if (_mod is null || !_isOwner) return;
+        try
+        {
+            var ok = await AppDialog.ConfirmAsync(_shell, "Remove icon",
+                $"Go back to the letter tile for {_mod.Name}?",
+                "Remove", "Cancel", danger: false);
+            if (!ok) return;
+
+            RemoveIconButton.IsEnabled = false;
+            await App.State.Api.DeleteModIconAsync(_mod.Id);
+            await ReloadAsync();
+            SetStatus("Icon removed.", error: false);
+        }
+        catch (Exception ex)
+        {
+            RemoveIconButton.IsEnabled = true;
+            SetStatus("Could not remove the icon: " + ex.Message, error: true);
+        }
+    }
+
+    /// <summary>Mirrors the server's cap so an oversized file is refused before it is sent.</summary>
+    private const long MaxIconBytes = 1024 * 1024;
 
     // ── dirty tracking ───────────────────────────────────────────────────────
 
@@ -287,11 +435,7 @@ public partial class ModDetailView : Page, ISidePanelBackHandler
             var folder = ModsFolderFor(pack);
             var dest = UniqueFilePath(folder, row.Source.FileName);
             SetBusy(true, $"Installing {row.Source.FileName} to {pack.Name}…");
-            await using (var stream = await App.State.Api.DownloadModVersionAsync(_mod.Id, row.Id))
-            await using (var fs = File.Create(dest))
-            {
-                await stream.CopyToAsync(fs);
-            }
+            await DownloadToFileAsync(row, dest, $"Installing {row.Source.FileName} to {pack.Name}");
             SetStatus($"Installed {Path.GetFileName(dest)} to {pack.Name}.", error: false);
         }
         catch (Exception ex) { SetStatus("Install failed: " + ex.Message, error: true); }
@@ -316,11 +460,7 @@ public partial class ModDetailView : Page, ISidePanelBackHandler
             if (dlg.ShowDialog(_shell) != true) return;
 
             SetBusy(true, $"Saving {row.Source.FileName}…");
-            await using (var stream = await App.State.Api.DownloadModVersionAsync(_mod.Id, row.Id))
-            await using (var fs = File.Create(dlg.FileName))
-            {
-                await stream.CopyToAsync(fs);
-            }
+            await DownloadToFileAsync(row, dlg.FileName, $"Saving {row.Source.FileName}");
             SetStatus("Saved to " + dlg.FileName, error: false);
         }
         catch (Exception ex) { SetStatus("Download failed: " + ex.Message, error: true); }
@@ -347,6 +487,25 @@ public partial class ModDetailView : Page, ISidePanelBackHandler
             : "The clipboard is in use by another program.", error: false);
     }
 
+    /// <summary>Corrects an uploaded version's details without replacing its file.</summary>
+    /// <remarks>
+    /// Reuses the upload card in edit mode rather than growing a second form: the fields are the
+    /// same four, and keeping one card means the rules about what a publishable version looks like
+    /// are stated in exactly one place.
+    /// </remarks>
+    private async void OnCtxEditVersion(object sender, RoutedEventArgs e)
+    {
+        if (RowFrom(sender) is not { } row || _mod is null || !_isOwner) return;
+        try
+        {
+            var updated = await UploadModVersionDialog.ShowEditAsync(_shell, _mod, row.Source);
+            if (updated is null) return;
+            SetStatus($"Updated {updated.VersionString}.", error: false);
+            await ReloadAsync();
+        }
+        catch (Exception ex) { SetStatus("Could not save the version: " + ex.Message, error: true); }
+    }
+
     private async void OnCtxDeleteVersion(object sender, RoutedEventArgs e)
     {
         if (RowFrom(sender) is not { } row || _mod is null || !_isOwner) return;
@@ -365,6 +524,53 @@ public partial class ModDetailView : Page, ISidePanelBackHandler
     }
 
     // ── install helpers ──────────────────────────────────────────────────────
+
+    /// <summary>Streams one version to <paramref name="destination"/>, driving the page's bar.</summary>
+    /// <remarks>
+    /// <para>The bar is determinate whenever the response carries a Content-Length, which it does for
+    /// every version the blob store serves; it drops back to the spinner only if a proxy chunked the
+    /// body and the total is unknown. A 30 MB jar over a slow link used to be an indeterminate
+    /// barber's pole that said nothing about whether it was nearly done.</para>
+    /// <para>The reporter writes to the UI from <see cref="Progress{T}"/>'s captured context, and is
+    /// throttled to whole percent: a 64 KB copy buffer means thousands of callbacks per file, and
+    /// re-rendering the bar for each of them costs more than the download.</para>
+    /// </remarks>
+    private async Task DownloadToFileAsync(VersionRowVm row, string destination, string what)
+    {
+        if (_mod is null) return;
+
+        var lastPercent = -1;
+        var progress = new Progress<(long done, long total)>(p =>
+        {
+            if (p.total <= 0)
+            {
+                BusyBar.IsIndeterminate = true;
+                SetStatus($"{what}… {FormatSize(p.done)}", error: false);
+                return;
+            }
+            var percent = (int)(p.done * 100 / p.total);
+            if (percent == lastPercent) return;
+            lastPercent = percent;
+            BusyBar.IsIndeterminate = false;
+            BusyBar.Value = percent;
+            SetStatus($"{what}… {FormatSize(p.done)} of {FormatSize(p.total)}", error: false);
+        });
+
+        try
+        {
+            await using var stream = await App.State.Api.DownloadModVersionAsync(
+                _mod.Id, row.Id, progress: progress);
+            await using var fs = File.Create(destination);
+            await stream.CopyToAsync(fs);
+        }
+        finally
+        {
+            // Left as it was found, so the next indeterminate use of the bar still spins.
+            BusyBar.IsIndeterminate = true;
+            BusyBar.Value = 0;
+        }
+    }
+
 
     /// <summary>Asks which instance a jar should land in, offering only instances this build can
     /// actually run in — a modded profile on a Minecraft version and loader the build advertises.</summary>

@@ -23,6 +23,15 @@ public partial class ResourcePackBrowserView : Page
     private string? _currentProjectUrl;
     private string _searchText = "";
     private string? _filterMcVersion;
+    private List<string> _filterCategories = new();
+    private int _categoryGeneration;
+
+    /// <summary>0 = relevance, 1 = latest, 2 = downloads. Mapped per store when searching.</summary>
+    private int _sortMode;
+
+    /// <summary>Display names and file stems of every pack already installed anywhere, so a row can
+    /// say "Installed" instead of quietly producing a second copy.</summary>
+    private HashSet<string> _installedNames = new(StringComparer.OrdinalIgnoreCase);
 
     private CancellationTokenSource _cts = new();
     private bool _isLoading;
@@ -38,7 +47,93 @@ public partial class ResourcePackBrowserView : Page
         SourceStrip.ItemsSource = _chips;
         ResultsList.ItemsSource = _rows;
         PackTabs.SelectionChanged += OnPackTabsChanged;
-        Loaded += async (_, _) => await InitAsync();
+        Loaded += async (_, _) =>
+        {
+            if (Window.GetWindow(this) is Window w) w.PreviewKeyDown += OnShellKeyDown;
+            await InitAsync();
+        };
+        Unloaded += (_, _) =>
+        {
+            if (Window.GetWindow(this) is Window w) w.PreviewKeyDown -= OnShellKeyDown;
+            _cts.Cancel();
+        };
+    }
+
+    /// <summary>Ctrl+F focuses search and F5 re-runs it, the same two keys every other list in the
+    /// app answers to.</summary>
+    private async void OnShellKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsVisible) return;
+        try
+        {
+            if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+            {
+                SearchBox.Focus();
+                SearchBox.SelectAll();
+                e.Handled = true;
+            }
+            else if (e.Key == Key.F5)
+            {
+                e.Handled = true;
+                await ResetAndLoadAsync();
+            }
+        }
+        catch (Exception ex) { Fail("Refresh failed: " + ex.Message); }
+    }
+
+    private async void OnRefresh(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            await RefreshInstalledIndexAsync();
+            await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { Fail("Refresh failed: " + ex.Message); }
+    }
+
+    private void Note(string text)
+    {
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
+        StatusLabel.Text = text;
+    }
+
+    private void Okay(string text)
+    {
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
+        StatusLabel.Text = text;
+    }
+
+    private void Fail(string text)
+    {
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
+        StatusLabel.Text = text;
+    }
+
+    /// <summary>
+    /// Builds the set of pack names already installed across every instance.
+    /// </summary>
+    /// <remarks>One scan, reused for every result row. It runs off the UI thread because it walks
+    /// each instance's resourcepacks/ folder, and a failure is not worth surfacing: the worst case is
+    /// that a row does not say "Installed".</remarks>
+    private async Task RefreshInstalledIndexAsync()
+    {
+        try
+        {
+            var packs = await App.State.Api.ListPacksAsync();
+            _installedNames = await Task.Run(() => App.State.ResourcePacks.ScanAll(packs)
+                .SelectMany(i => new[] { i.DisplayName, Path.GetFileNameWithoutExtension(i.FileName) })
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase));
+            MarkInstalledRows();
+        }
+        catch { /* the marker is a nicety, never a blocker */ }
+    }
+
+    private void MarkInstalledRows()
+    {
+        var changed = false;
+        foreach (var row in _rows) changed |= row.ApplyInstalled(_installedNames.Contains(row.Title));
+        if (changed) ResultsList.Items.Refresh();
     }
 
     // Render rich HTML/markdown descriptions in an embedded WebView2. Its HWND draws over
@@ -55,6 +150,7 @@ public partial class ResourcePackBrowserView : Page
 
     private async Task InitAsync()
     {
+        await RefreshInstalledIndexAsync();
         await BuildChipsAsync();
         if (_activeChip is null && _chips.Count > 0)
             await SelectChipAsync(_chips.First(c => !c.IsDivider));
@@ -122,6 +218,10 @@ public partial class ResourcePackBrowserView : Page
     {
         _activeChip = chip;
         ApplyChipStyles();
+        // Categories belong to the store, so switching chip replaces the list and drops any
+        // selection made against the previous store.
+        _filterCategories = new();
+        await RefreshCategoryFilterAsync();
         await ResetAndLoadAsync();
     }
 
@@ -157,9 +257,76 @@ public partial class ResourcePackBrowserView : Page
 
     private async void OnApplyFilters(object sender, RoutedEventArgs e)
     {
-        _filterMcVersion = string.IsNullOrWhiteSpace(FilterMcBox.Text) ? null : FilterMcBox.Text.Trim();
-        FiltersPopup.IsOpen = false;
-        await ResetAndLoadAsync();
+        try
+        {
+            _filterMcVersion = string.IsNullOrWhiteSpace(FilterMcBox.Text) ? null : FilterMcBox.Text.Trim();
+            _filterCategories = CategoryFilterPanel.Visibility == Visibility.Visible
+                                && FilterCategoryList.ItemsSource is IEnumerable<RpCategoryFilterItem> items
+                ? items.Where(i => i.IsChecked).Select(i => i.Value).ToList()
+                : new();
+            FiltersPopup.IsOpen = false;
+            await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { Fail("Error: " + ex.Message); }
+    }
+
+    private async void OnSortChanged(object sender, SelectionChangedEventArgs e)
+    {
+        try
+        {
+            var mode = SortBox.SelectedIndex < 0 ? 0 : SortBox.SelectedIndex;
+            if (mode == _sortMode) return;
+            _sortMode = mode;
+            if (_activeChip is not null) await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { Fail("Error: " + ex.Message); }
+    }
+
+    private void OnClearCategories(object sender, RoutedEventArgs e)
+    {
+        if (FilterCategoryList.ItemsSource is not IEnumerable<RpCategoryFilterItem> items) return;
+        foreach (var item in items) item.IsChecked = false;
+        // The items are plain objects with no change notification, so rebind to clear the boxes.
+        var source = FilterCategoryList.ItemsSource;
+        FilterCategoryList.ItemsSource = null;
+        FilterCategoryList.ItemsSource = source;
+    }
+
+    /// <summary>
+    /// Loads the category list belonging to whichever store the active chip points at.
+    /// </summary>
+    /// <remarks>The two stores' category vocabularies do not line up, so there is no merged list to
+    /// show — the panel is hidden entirely for the hosted chips, which have no categories at all, and
+    /// for a store that returned nothing because it is unreachable.</remarks>
+    private async Task RefreshCategoryFilterAsync()
+    {
+        var generation = ++_categoryGeneration;
+        List<ModBrowseCategory> categories;
+        string sourceLabel;
+
+        switch (_activeChip?.Kind)
+        {
+            case RpBrowseSourceKind.CurseForge:
+                sourceLabel = "  ·  CurseForge";
+                categories = await App.State.CurseForge.GetCategoriesAsync(CurseForgeService.ClassIdResourcePacks);
+                break;
+            case RpBrowseSourceKind.Modrinth:
+                sourceLabel = "  ·  Modrinth";
+                categories = await App.State.Modrinth.GetCategoriesAsync("resourcepack");
+                break;
+            default:
+                CategoryFilterPanel.Visibility = Visibility.Collapsed;
+                _filterCategories = new();
+                return;
+        }
+
+        if (generation != _categoryGeneration) return; // a newer chip selection superseded this fetch
+
+        CategorySourceLabel.Text = sourceLabel;
+        FilterCategoryList.ItemsSource = categories
+            .Select(c => new RpCategoryFilterItem { Label = c.Label, Value = c.Value })
+            .ToList();
+        CategoryFilterPanel.Visibility = categories.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async Task ResetAndLoadAsync()
@@ -244,13 +411,28 @@ public partial class ResourcePackBrowserView : Page
         };
     }
 
+    /// <summary>CurseForge sort fields: 2 popularity, 3 last updated, 6 total downloads.</summary>
+    private int CurseSortField() => _sortMode switch { 1 => 3, 2 => 6, _ => 2 };
+
+    /// <summary>Modrinth's index values for the same three choices.</summary>
+    private string ModrinthIndex() => _sortMode switch { 1 => "newest", 2 => "downloads", _ => "relevance" };
+
     private async Task<int> LoadCurseForgeAsync(CancellationToken ct)
     {
+        var categoryIds = _filterCategories
+            .Select(v => int.TryParse(v, out var id) ? id : 0)
+            .Where(id => id > 0)
+            .ToList();
+
         var hits = await App.State.CurseForge.SearchAsync(
             _searchText, _filterMcVersion, loader: null,
             limit: PageSize, offset: _offset,
-            classId: CurseForgeService.ClassIdResourcePacks, ct: ct);
+            classId: CurseForgeService.ClassIdResourcePacks,
+            sortField: CurseSortField(),
+            categoryIds: categoryIds.Count > 0 ? categoryIds : null,
+            ct: ct);
         foreach (var m in hits) _rows.Add(RowFromCurseExternal(m));
+        MarkInstalledRows();
         return hits.Count;
     }
 
@@ -258,8 +440,11 @@ public partial class ResourcePackBrowserView : Page
     {
         var hits = await App.State.Modrinth.SearchAsync(
             _searchText, _filterMcVersion, loader: null,
-            limit: PageSize, offset: _offset, projectType: "resourcepack", ct: ct);
+            categories: _filterCategories.Count > 0 ? _filterCategories : null,
+            limit: PageSize, offset: _offset, projectType: "resourcepack",
+            index: ModrinthIndex(), ct: ct);
         foreach (var m in hits) _rows.Add(RowFromMrExternal(m));
+        MarkInstalledRows();
         return hits.Count;
     }
 
@@ -341,8 +526,9 @@ public partial class ResourcePackBrowserView : Page
         var packs = await App.State.Api.ListPacksAsync();
         if (packs.Count == 0)
         {
-            MessageBox.Show(_shell, "Create an instance first.",
-                "No instance", MessageBoxButton.OK, MessageBoxImage.Information);
+            // A status line rather than a modal: the user is mid-browse and nothing here needs an
+            // acknowledgement, it just needs to say why nothing happened.
+            Fail("Create an instance first — a resource pack is installed into one.");
             return;
         }
         var picker = new PackPickerDialog(packs,
@@ -363,29 +549,57 @@ public partial class ResourcePackBrowserView : Page
 
             if (zipPath is null) throw new InvalidOperationException("Download failed.");
 
-            var dir = ResourcePacksDir(pack);
-            var dest = UniqueZipPath(dir, $"{SafeFileBase(row.Title)}.zip");
+            Note("Installing…");
+            var source = zipPath;
+            var dest = await Task.Run(() =>
+            {
+                var dir = ResourcePacksDir(pack);
+                var target = UniqueZipPath(dir, $"{SafeFileBase(row.Title)}.zip");
+                File.Copy(source, target, overwrite: false);
+                try { File.Delete(source); } catch { /* temp file, best effort */ }
+                return target;
+            });
 
-            StatusLabel.Foreground = (Brush)FindResource("TextSecondaryBrush");
-            StatusLabel.Text = "Installing…";
-            File.Copy(zipPath, dest, overwrite: false);
-            try { File.Delete(zipPath); } catch { }
+            RecordProvenance(pack, dest, row, version);
+            await RefreshInstalledIndexAsync();
 
-            StatusLabel.Foreground = (Brush)FindResource("AccentBrush");
-            StatusLabel.Text = $"Installed to {dest}";
-            DownloadStatus.Foreground = (Brush)FindResource("AccentBrush");
+            Okay($"Installed to {dest}");
+            DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
             DownloadStatus.Text = $"Installed to {dest}";
         }
         catch (Exception ex)
         {
-            StatusLabel.Foreground = (Brush)FindResource("DangerBrush");
-            StatusLabel.Text = "Install failed: " + ex.Message;
-            DownloadStatus.Foreground = (Brush)FindResource("DangerBrush");
+            Fail("Install failed: " + ex.Message);
+            DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
             DownloadStatus.Text = "Install failed: " + ex.Message;
         }
         finally
         {
             if (button is not null) button.IsEnabled = true;
+        }
+    }
+
+    /// <summary>
+    /// Records which store listing this zip came from, and names it after the project.
+    /// </summary>
+    /// <remarks>A resource pack has no identity of its own once it is on disk — no manifest id, no
+    /// version. Unless this is written at install time the launcher can never match the file back to
+    /// the listing, which is exactly what checking for an update needs. A hosted pack gets its
+    /// hosting link instead, which serves the same purpose.</remarks>
+    private static void RecordProvenance(PackSummary pack, string destPath, RpBrowseRow row, RpVersionRow? version)
+    {
+        var key = ResourcePackService.Key(pack.Id, Path.GetFileName(destPath));
+
+        if (row.Kind == RpBrowseRowKind.External && row.External is { } ext)
+        {
+            var chosen = version?.ExternalVersion;
+            App.State.ResourcePacks.SetProvenance(key, ext.Source, ext.Id, chosen?.Id, chosen?.VersionNumber);
+            App.State.ResourcePacks.Rename(key, ext.Name);
+        }
+        else if (row.Kind == RpBrowseRowKind.CloudLauncher && row.Hosted is { } hosted)
+        {
+            App.State.ResourcePacks.LinkHostedResourcePack(key, hosted.Id);
+            App.State.ResourcePacks.Rename(key, hosted.Name);
         }
     }
 
@@ -771,6 +985,32 @@ public partial class ResourcePackBrowserView : Page
         public string SourceBadge { get; set; } = "";
         public Brush SourceBadgeBackground { get; set; } = Brushes.Transparent;
         public Brush SourceBadgeForeground { get; set; } = Brushes.White;
+
+        /// <summary>True when a pack of this name is already installed in one of the instances.</summary>
+        public bool IsInstalled { get; private set; }
+
+        public string DownloadLabel => IsInstalled ? "Installed" : "Download";
+
+        public string DownloadTooltip => IsInstalled
+            ? "Already installed — downloading again adds a second copy"
+            : "Download into one of your instances";
+
+        /// <summary>Returns true only when the flag changed, so the caller refreshes the list once
+        /// rather than on every row.</summary>
+        public bool ApplyInstalled(bool installed)
+        {
+            if (IsInstalled == installed) return false;
+            IsInstalled = installed;
+            return true;
+        }
+    }
+
+    /// <summary>One checkable store category in the filter popup.</summary>
+    public sealed class RpCategoryFilterItem
+    {
+        public string Label { get; init; } = "";
+        public string Value { get; init; } = "";
+        public bool IsChecked { get; set; }
     }
 
     public sealed class RpVersionRow

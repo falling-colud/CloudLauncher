@@ -25,7 +25,20 @@ public sealed record GoogleAuthPollResponse(
     TokenResponse? Tokens = null,
     string? Error = null);
 
-public sealed record UserSummary(Guid Id, string Username, bool EmailConfirmed);
+/// <summary>Who a user is, as any screen that lists or identifies people sees them.</summary>
+/// <param name="Email">The registered address, or null when this summary came from somewhere that
+/// does not disclose it.</param>
+/// <remarks>
+/// <para><c>Email</c> is appended last and defaults to null so every existing positional
+/// construction site — the team roster in TeamsController among them — keeps compiling and keeps
+/// meaning exactly what it did.</para>
+/// <para>Only <c>auth/me</c> fills it in, and only ever with the caller's own address. Telling the
+/// Account page "unverified" without telling it which mailbox to go and look in made the one action
+/// that fixes it — resending the mail — start by asking the user for something the server already
+/// knew. A team roster deliberately leaves it null: a shared team is not a reason to hand every
+/// member's address to every other member.</para>
+/// </remarks>
+public sealed record UserSummary(Guid Id, string Username, bool EmailConfirmed, string? Email = null);
 
 /// <summary>Change the signed-in user's own password.</summary>
 /// <remarks>

@@ -95,3 +95,34 @@ public sealed record CreateModVersionRequest(
     string FileName,
     string? McVersionsCsv,
     string? LoadersCsv);
+
+/// <summary>Patch for one uploaded version of a hosted mod. Every property is optional; null leaves
+/// the stored value alone.</summary>
+/// <remarks>
+/// A version could previously only be uploaded or deleted. Correcting a typo in the version string,
+/// a changelog written in a hurry, or a channel set to "release" by accident therefore meant deleting
+/// the file and uploading the same bytes again under a new id — which broke every link to the old one
+/// and lost its publish date. Patching leaves the blob, the id and the publish date alone and edits
+/// only what the owner typed.
+/// </remarks>
+public sealed record UpdateModVersionRequest(
+    string? VersionString = null,
+    string? Changelog = null,
+    string? ReleaseChannel = null,
+    string? McVersionsCsv = null,
+    string? LoadersCsv = null);
+
+/// <summary>How <c>GET /mods/browse</c> orders its results.</summary>
+/// <remarks>
+/// Sent as a plain string rather than an enum so an older server that does not know the parameter
+/// ignores it, and a newer client asking for a mode this server has never heard of falls back to the
+/// default instead of erroring. Only the CloudLauncher sources honour it — CurseForge and Modrinth
+/// results arrive in the store's own order.
+/// </remarks>
+public static class ModBrowseSort
+{
+    public const string Updated = "updated";
+    public const string Created = "created";
+    public const string Name = "name";
+    public const string Downloads = "downloads";
+}

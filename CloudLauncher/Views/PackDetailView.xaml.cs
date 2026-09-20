@@ -9,6 +9,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using CloudLauncher.Services;
 using CloudLauncher.Shared;
@@ -28,6 +29,15 @@ public partial class PackDetailView : Page
     private bool _isOwner;
     private bool _suppressEvents;
     private bool _fileTransferInProgress;
+
+    /// <summary>Live while an upload or a download is running, so the same button can cancel it.
+    /// Both service calls already take a token and already check it inside their copy loops — the
+    /// only thing missing was something to hold the source.</summary>
+    private CancellationTokenSource? _syncCts;
+
+    /// <summary>Cancels the background thumbnail pass when the tab is refreshed or the page closes,
+    /// so a folder of three hundred captures does not keep decoding into a view that is gone.</summary>
+    private CancellationTokenSource? _screenshotCts;
 
     private readonly DispatcherTimer _autoApplyTimer = new() { Interval = TimeSpan.FromSeconds(30) };
     private readonly DispatcherTimer _overviewSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(1200) };
@@ -69,11 +79,22 @@ public partial class PackDetailView : Page
         GameView.FilesDropped   += OnFilesDropped;
         GameView.FileActivated  += OpenInEditor;   // double-click a file -> built-in editor
         SharedView.FilesDropped += OnFilesDropped;
+        SharedView.FileActivated += OpenInEditor;
+        // Dropping a jar or a config in from Explorer is the same gesture the Mods screen accepts;
+        // both columns take it, and both land it in whichever folder is open.
+        GameView.ExternalFilesDropped   += (root, dir, files) => OnExternalFilesDropped(GameView, root, dir, files);
+        SharedView.ExternalFilesDropped += (root, dir, files) => OnExternalFilesDropped(SharedView, root, dir, files);
+        GameView.DeleteRequested   += () => _ = DeleteSelectedAsync(GameView);
+        GameView.RenameRequested   += () => _ = RenameSelectedAsync(GameView);
+        SharedView.DeleteRequested += () => _ = DeleteSelectedAsync(SharedView);
+        SharedView.RenameRequested += () => _ = RenameSelectedAsync(SharedView);
+        LogContent.StatsChanged += UpdateLogLinesLabel;
         ProgressHub.ProgressChanged += OnHeroProgressChanged;
         ProgressHub.ProgressCleared += OnHeroProgressCleared;
         App.State.Instances.StateChanged += OnInstanceStateChanged;
         App.State.ModpackDownload.PackAdded += OnPackDownloadUpdated;
         AddHandler(UIElement.PreviewMouseWheelEvent, new MouseWheelEventHandler(OnPagePreviewMouseWheel), true);
+        AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler(OnPagePreviewKeyDown), true);
         Loaded += async (_, _) => await ReloadAsync();
         if (_hostedInMinecraftWindow)
         {
@@ -85,6 +106,10 @@ public partial class PackDetailView : Page
         {
             _autoApplyTimer.Stop();
             _overviewSaveTimer.Stop();
+            // A half-finished transfer or thumbnail pass has no view left to report into. Guarded:
+            // this handler is async void, so an exception here would reach the dispatcher.
+            try { _syncCts?.Cancel(); } catch (ObjectDisposedException) { }
+            try { _screenshotCts?.Cancel(); } catch (ObjectDisposedException) { }
             // Unsubscribe FIRST, before any awaitable/throwable work. Otherwise a throw in the
             // save below would skip unsubscription and leak this whole view (its visual tree,
             // WebView2/WebBrowser hosts, and the static AppLog handler) for the process lifetime.
@@ -164,6 +189,33 @@ public partial class PackDetailView : Page
             DetailCurrentProgressBar.IsIndeterminate = false;
             DetailCurrentProgressBar.Value = info.CurrentFraction * 100;
             CurrentProgressPercent.Text = $"{(int)(info.CurrentFraction * 100)}%";
+        }
+    }
+
+    /// <summary>F5 reloads whichever tab is showing and Ctrl+F lands in its search box, the same two
+    /// keys the Instances, Worlds, Mods and Resource pack screens already answer to.</summary>
+    private void OnPagePreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.F5)
+        {
+            EnsureTabLoaded(_currentTab, force: true);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key != Key.F || Keyboard.Modifiers != ModifierKeys.Control) return;
+
+        switch (_currentTab)
+        {
+            case DetailTabKind.Logs:
+                LogFilterBox.Focus();
+                LogFilterBox.SelectAll();
+                e.Handled = true;
+                break;
+            case DetailTabKind.Files:
+                GameView.FocusFilter();
+                e.Handled = true;
+                break;
         }
     }
 
@@ -474,6 +526,13 @@ public partial class PackDetailView : Page
 
     // ── Minecraft logs (game/logs/) ──────────────────────────────────────────
 
+    /// <summary>
+    /// Rebuilds the log list: the two live pseudo-logs, then every file in game/logs and every
+    /// crash report in game/crash-reports, newest first.
+    /// </summary>
+    /// <remarks>Crash reports belong here even though they are not logs. When a modded instance dies,
+    /// <c>crash-reports/crash-*.txt</c> is the file that says why — and it was the one file this tab
+    /// never showed, so the answer to "it crashed, what happened" lived in Explorer.</remarks>
     private void RefreshLogsList()
     {
         if (_pack is null) return;
@@ -482,17 +541,26 @@ public partial class PackDetailView : Page
             LogRow.LauncherLogPseudo(),
             LogRow.SyncLogPseudo()
         };
-        var dir = Path.Combine(App.State.Packs.GameDir(_packId), "logs");
-        if (Directory.Exists(dir))
-        {
-            foreach (var f in new DirectoryInfo(dir).GetFiles("*.log*").OrderByDescending(f => f.LastWriteTime))
-                rows.Add(new LogRow(f));
-        }
+
+        var gameDir = App.State.Packs.GameDir(_packId);
+        var files = new List<LogRow>();
+        CollectLogFiles(Path.Combine(gameDir, "logs"), "*.log*", isCrashReport: false, files);
+        CollectLogFiles(Path.Combine(gameDir, "crash-reports"), "crash-*.txt", isCrashReport: true, files);
+        rows.AddRange(files.OrderByDescending(r => r.Kind == LogRowKind.CrashReport)
+                           .ThenByDescending(r => r.SortTime));
 
         var previouslySelected = (LogsList.SelectedItem as LogRow)?.Key;
         LogsList.ItemsSource = rows;
-        var fileCount = rows.Count - 2;
-        LogsCountLabel.Text = fileCount <= 0 ? "(no Minecraft logs yet)" : $"{fileCount} Minecraft log{(fileCount == 1 ? "" : "s")}";
+
+        var logCount = files.Count(r => r.Kind == LogRowKind.GameLog);
+        var crashCount = files.Count - logCount;
+        LogsCountLabel.Text = (logCount, crashCount) switch
+        {
+            (0, 0) => "No Minecraft logs yet",
+            (_, 0) => $"{logCount} log{(logCount == 1 ? "" : "s")}",
+            (0, _) => $"{crashCount} crash report{(crashCount == 1 ? "" : "s")}",
+            _ => $"{logCount} log{(logCount == 1 ? "" : "s")} · {crashCount} crash report{(crashCount == 1 ? "" : "s")}"
+        };
 
         var match = previouslySelected != null
             ? rows.FirstOrDefault(r => r.Key == previouslySelected)
@@ -500,7 +568,191 @@ public partial class PackDetailView : Page
         LogsList.SelectedItem = match ?? rows[0];
     }
 
+    private void CollectLogFiles(string dir, string pattern, bool isCrashReport, List<LogRow> into)
+    {
+        if (!Directory.Exists(dir)) return;
+        try
+        {
+            foreach (var f in new DirectoryInfo(dir).GetFiles(pattern))
+                into.Add(new LogRow(f, isCrashReport));
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = $"Could not read {Path.GetFileName(dir)}: {ex.Message}";
+        }
+    }
+
     private void OnRefreshLogs(object sender, RoutedEventArgs e) => RefreshLogsList();
+
+    // ── Logs tab: find, level filter, copy, save ─────────────────────────────
+
+    private void OnLogFilterChanged(object sender, TextChangedEventArgs e)
+    {
+        LogContent.FilterText = LogFilterBox.Text.Trim();
+    }
+
+    private void OnLogFilterKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape) return;
+        LogFilterBox.Clear();
+        e.Handled = true;
+    }
+
+    private void OnLogLevelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (LogContent is null) return; // fires once while the template is still loading
+        LogContent.FilterMode = LogLevelBox.SelectedIndex switch
+        {
+            1 => LogFilterMode.Problems,
+            2 => LogFilterMode.Errors,
+            _ => LogFilterMode.All
+        };
+    }
+
+    /// <summary>Keeps the "N of M lines" caption honest, and says so when the buffer cap has eaten
+    /// the start of a long session — losing the first ten thousand lines silently is how someone
+    /// concludes a mod never loaded.</summary>
+    private void UpdateLogLinesLabel()
+    {
+        if (LogLinesLabel is null) return;
+
+        var shown = LogContent.VisibleLineCount;
+        var total = LogContent.TotalLineCount;
+        var text = LogContent.IsFiltered
+            ? $"{shown:N0} of {total:N0} lines"
+            : $"{total:N0} lines";
+        if (LogContent.TrimmedLineCount > 0)
+            text += $" · earliest {LogContent.TrimmedLineCount:N0} trimmed";
+        LogLinesLabel.Text = text;
+    }
+
+    private void OnCopyLog(object sender, RoutedEventArgs e)
+    {
+        var text = LogContent.IsFiltered ? LogContent.VisibleText : LogContent.Text;
+        if (string.IsNullOrWhiteSpace(text)) { StatusLabel.Text = "There is nothing in this log to copy."; return; }
+        StatusLabel.Text = ClipboardHelper.TrySetText(text)
+            ? LogContent.IsFiltered
+                ? $"Copied {LogContent.VisibleLineCount:N0} matching line(s)."
+                : "Log copied to the clipboard."
+            : "Could not reach the clipboard — another program is holding it.";
+    }
+
+    private async void OnSaveLogAs(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (LogsList.SelectedItem is not LogRow row) return;
+            var text = LogContent.IsFiltered ? LogContent.VisibleText : LogContent.Text;
+            if (string.IsNullOrWhiteSpace(text)) { StatusLabel.Text = "There is nothing in this log to save."; return; }
+
+            var suggested = row.HasFile
+                ? Path.GetFileNameWithoutExtension(row.Path) + ".txt"
+                : $"{SafeFileName(_pack?.Name ?? "instance")}-{row.DisplayName.ToLowerInvariant().Replace(' ', '-')}.txt";
+            var dlg = new Microsoft.Win32.SaveFileDialog
+            {
+                Title = "Save log",
+                Filter = "Text file (*.txt)|*.txt|Log file (*.log)|*.log|All files (*.*)|*.*",
+                FileName = suggested,
+                AddExtension = true,
+                DefaultExt = ".txt"
+            };
+            if (dlg.ShowDialog(ListOwnerWindow) != true) return;
+
+            var path = dlg.FileName;
+            await Task.Run(() => File.WriteAllText(path, text));
+            StatusLabel.Text = "Saved " + path;
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not save the log: " + ex.Message;
+        }
+    }
+
+    /// <summary>Strips the characters Windows will not take in a file name.</summary>
+    private static string SafeFileName(string value)
+    {
+        var cleaned = new string(value.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c).ToArray());
+        return string.IsNullOrWhiteSpace(cleaned) ? "instance" : cleaned.Trim();
+    }
+
+    // ── Logs tab: right-click menu ───────────────────────────────────────────
+
+    private LogRow? SelectedLogRow => LogsList.SelectedItem as LogRow;
+
+    private void OnLogOpenInEditor(object sender, RoutedEventArgs e)
+    {
+        if (RequireLogFile() is not { } row) return;
+        try
+        {
+            FileEditorWindow.OpenFileFor(Window.GetWindow(this), _packId, _pack?.Name ?? "Instance", row.Path);
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not open that log: " + ex.Message; }
+    }
+
+    private void OnLogCopyContents(object sender, RoutedEventArgs e) => OnCopyLog(sender, e);
+
+    private void OnLogCopyPath(object sender, RoutedEventArgs e)
+    {
+        if (RequireLogFile() is not { } row) return;
+        StatusLabel.Text = ClipboardHelper.TrySetText(row.Path)
+            ? "Path copied."
+            : "Could not reach the clipboard.";
+    }
+
+    private void OnLogReveal(object sender, RoutedEventArgs e)
+    {
+        if (RequireLogFile() is not { } row) return;
+        RevealInExplorer(row.Path);
+    }
+
+    private async void OnLogDelete(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (RequireLogFile() is not { } row) return;
+            var ok = await AppDialog.ConfirmAsync(ListOwnerWindow, "Delete log",
+                $"Delete {row.DisplayName}? This removes the file from disk.",
+                "Delete", "Cancel", danger: true);
+            if (!ok) return;
+
+            File.Delete(row.Path);
+            StatusLabel.Text = $"Deleted {row.DisplayName}.";
+            RefreshLogsList();
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not delete that log: " + ex.Message;
+        }
+    }
+
+    /// <summary>The selected row when it is a real file, otherwise null with the reason on screen —
+    /// the launcher and sync rows are live buffers, not files, so reveal/delete mean nothing for them.</summary>
+    private LogRow? RequireLogFile()
+    {
+        var row = SelectedLogRow;
+        if (row is null) { StatusLabel.Text = "Select a log first."; return null; }
+        if (!row.HasFile)
+        {
+            StatusLabel.Text = $"“{row.DisplayName}” is a live view, not a file on disk — use Copy or Save as… instead.";
+            return null;
+        }
+        return row;
+    }
+
+    /// <summary>Opens Explorer with the file selected, rather than just opening its folder.</summary>
+    private void RevealInExplorer(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = File.Exists(path) ? $"/select,\"{path}\"" : $"\"{path}\"",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not open Explorer: " + ex.Message; }
+    }
 
     /// <summary>Opens the instance's game folder — the one that holds mods/, config/, saves/ and
     /// kubejs/ — in Explorer.</summary>
@@ -555,7 +807,16 @@ public partial class PackDetailView : Page
         Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
     }
 
-    private void OnLogsSelected(object sender, SelectionChangedEventArgs e)
+    /// <summary>WPF does not select a row on right-click, so the context menu would otherwise act on
+    /// whichever log happened to be selected rather than the one under the cursor.</summary>
+    private void OnLogsListRightButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is not DependencyObject src) return;
+        if (ItemsControl.ContainerFromElement(LogsList, src) is ListBoxItem item)
+            item.IsSelected = true;
+    }
+
+    private async void OnLogsSelected(object sender, SelectionChangedEventArgs e)
     {
         // Unsubscribe launcher-log tailing whenever the selection changes
         AppLog.MessageAppended -= OnLauncherLogAppended;
@@ -570,25 +831,39 @@ public partial class PackDetailView : Page
         if (row.IsSyncLog) { LogContent.SetText(LogBox.Text); return; }
         try
         {
-            string text;
-            if (row.Path.EndsWith(".gz", StringComparison.OrdinalIgnoreCase))
-            {
-                using var fs = File.OpenRead(row.Path);
-                using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionMode.Decompress);
-                using var sr = new StreamReader(gz);
-                text = sr.ReadToEnd();
-            }
-            else
-            {
-                using var fs = new FileStream(row.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var sr = new StreamReader(fs);
-                text = sr.ReadToEnd();
-            }
-            const int maxChars = 200_000;
-            if (text.Length > maxChars) text = "[…older lines trimmed…]\n" + text.Substring(text.Length - maxChars);
+            // A modded latest.log runs to tens of megabytes; reading and decompressing it on the UI
+            // thread froze the window for as long as the disk took.
+            var path = row.Path;
+            var text = await Task.Run(() => ReadLogText(path));
+            // The user may have clicked another log while this one was being read.
+            if ((LogsList.SelectedItem as LogRow)?.Key != row.Key) return;
             LogContent.SetText(text);
         }
         catch (Exception ex) { LogContent.SetText("Could not read log: " + ex.Message); }
+    }
+
+    /// <summary>Reads a log file, transparently un-gzipping a rolled one, keeping only the tail of a
+    /// very long file — the end is where the failure is.</summary>
+    private static string ReadLogText(string path)
+    {
+        string text;
+        if (path.EndsWith(".gz", StringComparison.OrdinalIgnoreCase))
+        {
+            using var fs = File.OpenRead(path);
+            using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionMode.Decompress);
+            using var sr = new StreamReader(gz);
+            text = sr.ReadToEnd();
+        }
+        else
+        {
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var sr = new StreamReader(fs);
+            text = sr.ReadToEnd();
+        }
+
+        const int maxChars = 200_000;
+        if (text.Length > maxChars) text = "[…older lines trimmed…]\n" + text[^maxChars..];
+        return text;
     }
 
     /// <summary>Mirror the hidden LogBox into the Logs tab if the user is viewing the sync log.</summary>
@@ -640,41 +915,84 @@ public partial class PackDetailView : Page
         catch { /* offline or no api — skip */ }
     }
 
-    private void RefreshPackScreenshots()
+    /// <summary>
+    /// Rebuilds the Screenshots tab: the folder scan runs off the UI thread, the cards appear
+    /// immediately, and the pictures are decoded afterwards in small batches.
+    /// </summary>
+    /// <remarks>Both halves matter on a real instance. Enumerating and stat-ing a few hundred files
+    /// on the UI thread froze the window on the way in; decoding every one of those 4K captures at
+    /// native resolution for a 230px card then held gigabytes of bitmap for the rest of the session.
+    /// Cards first, pictures after, is also what it feels like it should do.</remarks>
+    private async void RefreshPackScreenshots()
     {
+        _screenshotCts?.Cancel();
+        var cts = new CancellationTokenSource();
+        _screenshotCts = cts;
+        var ct = cts.Token;
+
         _packScreenshotRows.Clear();
+        PackScreenshotCountLabel.Text = "Looking for screenshots…";
 
-        var rows = new List<PackScreenshotRow>();
-        foreach (var (dir, label) in PackScreenshotFolders())
+        try
         {
-            if (!Directory.Exists(dir)) continue;
-
-            try
+            var folders = PackScreenshotFolders().ToList();
+            var canSetAsIcon = _isOwner;
+            var rows = await Task.Run(() =>
             {
-                var directory = new DirectoryInfo(dir);
-                foreach (var file in directory.EnumerateFiles("*", SearchOption.TopDirectoryOnly))
+                var found = new List<PackScreenshotRow>();
+                foreach (var (dir, label) in folders)
                 {
-                    if (IsScreenshotFile(file))
-                        rows.Add(new PackScreenshotRow(file, label));
+                    if (!Directory.Exists(dir)) continue;
+                    ct.ThrowIfCancellationRequested();
+                    foreach (var file in new DirectoryInfo(dir).EnumerateFiles("*", SearchOption.TopDirectoryOnly))
+                    {
+                        if (IsScreenshotFile(file))
+                            found.Add(new PackScreenshotRow(file, label, canSetAsIcon));
+                    }
                 }
-            }
-            catch (Exception ex)
+                return found.OrderByDescending(r => r.LastWriteTime).ToList();
+            }, ct);
+
+            if (ct.IsCancellationRequested) return;
+
+            foreach (var row in rows)
+                _packScreenshotRows.Add(row);
+
+            PackScreenshotList.Visibility = _packScreenshotRows.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            PackScreenshotsEmptyText.Visibility = _packScreenshotRows.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
+            PackScreenshotCountLabel.Text = _packScreenshotRows.Count switch
             {
-                StatusLabel.Text = "Could not read screenshots: " + ex.Message;
-            }
+                0 => "No screenshots found in this instance.",
+                1 => "1 screenshot found in this instance.",
+                var count => $"{count} screenshots found in this instance."
+            };
+
+            await LoadScreenshotThumbnailsAsync(rows, ct);
         }
-
-        foreach (var row in rows.OrderByDescending(r => r.LastWriteTime))
-            _packScreenshotRows.Add(row);
-
-        PackScreenshotList.Visibility = _packScreenshotRows.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        PackScreenshotsEmptyText.Visibility = _packScreenshotRows.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
-        PackScreenshotCountLabel.Text = _packScreenshotRows.Count switch
+        catch (OperationCanceledException) { /* a newer refresh, or the page closed */ }
+        catch (Exception ex)
         {
-            0 => "No screenshots found in this instance.",
-            1 => "1 screenshot found in this instance.",
-            var count => $"{count} screenshots found in this instance."
-        };
+            StatusLabel.Text = "Could not read screenshots: " + ex.Message;
+            PackScreenshotCountLabel.Text = "Could not read the screenshots folder.";
+        }
+    }
+
+    /// <summary>Decodes card-sized thumbnails a batch at a time, handing each batch back to the UI
+    /// before starting the next so the tab stays usable while a big folder fills in.</summary>
+    private static async Task LoadScreenshotThumbnailsAsync(IReadOnlyList<PackScreenshotRow> rows, CancellationToken ct)
+    {
+        const int batchSize = 8;
+        for (var i = 0; i < rows.Count; i += batchSize)
+        {
+            ct.ThrowIfCancellationRequested();
+            var batch = rows.Skip(i).Take(batchSize).ToList();
+            var decoded = await Task.Run(
+                () => batch.Select(r => (Row: r, Image: PackScreenshotRow.DecodeThumbnail(r.Source.FullName))).ToList(),
+                ct);
+            if (ct.IsCancellationRequested) return;
+            foreach (var (row, image) in decoded)
+                row.SetThumbnail(image);
+        }
     }
 
     private IEnumerable<(string Path, string Label)> PackScreenshotFolders()
@@ -707,10 +1025,145 @@ public partial class PackDetailView : Page
 
     private void OnOpenPackScreenshot(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: PackScreenshotRow row })
+        if (sender is not FrameworkElement { DataContext: PackScreenshotRow row }) return;
+        e.Handled = true;
+        OpenScreenshotPreview(row);
+    }
+
+    // ── Screenshots tab: right-click menu ────────────────────────────────────
+
+    /// <summary>Opens the preview window on <paramref name="row"/>, handing it the whole tab so the
+    /// arrow keys can walk the rest of the folder without coming back here.</summary>
+    private void OpenScreenshotPreview(PackScreenshotRow row)
+    {
+        var siblings = _packScreenshotRows
+            .Select(r => (r.FullImageUrl, r.Title))
+            .ToList();
+        var index = _packScreenshotRows.IndexOf(row);
+        ScreenshotPreviewWindow.ShowFor(Window.GetWindow(this), row.FullImageUrl, row.Title, siblings, index);
+    }
+
+    /// <summary>The row a screenshot context-menu item was raised for. Cards carry their own
+    /// DataContext, so nothing needs to be selected first.</summary>
+    private static PackScreenshotRow? ScreenshotRowOf(object sender)
+    {
+        if (sender is not FrameworkElement element) return null;
+        if (element.DataContext is PackScreenshotRow direct) return direct;
+        // A context menu is not in the card's visual tree, so if the inherited DataContext has not
+        // arrived, ask the card the menu was opened on.
+        return (element.Parent as ContextMenu)?.PlacementTarget is FrameworkElement target
+            ? target.DataContext as PackScreenshotRow
+            : null;
+    }
+
+    private void OnScreenshotOpen(object sender, RoutedEventArgs e)
+    {
+        if (ScreenshotRowOf(sender) is { } row) OpenScreenshotPreview(row);
+    }
+
+    private void OnScreenshotCopyImage(object sender, RoutedEventArgs e)
+    {
+        if (ScreenshotRowOf(sender) is not { } row) return;
+        try
         {
-            e.Handled = true;
-            ScreenshotPreviewWindow.ShowFor(Window.GetWindow(this), row.FullImageUrl, row.Title);
+            // The picture, not the path: this is the one that pastes into Discord or an issue. Decoded
+            // fresh at full size rather than reusing the card's 230px thumbnail.
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.UriSource = new Uri(row.Source.FullName);
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.EndInit();
+            image.Freeze();
+            Clipboard.SetImage(image);
+            StatusLabel.Text = $"Copied {row.Source.Name} to the clipboard.";
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not copy that image: " + ex.Message;
+        }
+    }
+
+    private void OnScreenshotCopyPath(object sender, RoutedEventArgs e)
+    {
+        if (ScreenshotRowOf(sender) is not { } row) return;
+        StatusLabel.Text = ClipboardHelper.TrySetText(row.Source.FullName)
+            ? "Path copied."
+            : "Could not reach the clipboard.";
+    }
+
+    private void OnScreenshotReveal(object sender, RoutedEventArgs e)
+    {
+        if (ScreenshotRowOf(sender) is { } row) RevealInExplorer(row.Source.FullName);
+    }
+
+    private void OnScreenshotSetAsIcon(object sender, RoutedEventArgs e)
+    {
+        if (ScreenshotRowOf(sender) is not { } row) return;
+        if (_pack is null || !_isOwner) { StatusLabel.Text = "Only the instance owner can change its image."; return; }
+        try
+        {
+            App.State.PackAssets.SaveIconFromFile(_pack.Id, row.Source.FullName);
+            ApplyHeroIcon(_pack);
+            UpdateImageEditUi();
+            _shell.RefreshPackCover(_pack.Id);
+            StatusLabel.Text = $"“{row.Title}” is now this instance's image.";
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Couldn't set image: " + ex.Message;
+        }
+    }
+
+    private void OnScreenshotRename(object sender, RoutedEventArgs e)
+    {
+        if (ScreenshotRowOf(sender) is not { } row) return;
+        try
+        {
+            var extension = row.Source.Extension;
+            var dlg = new SimpleInputDialog("Rename screenshot", "New name", row.Title) { Owner = ListOwnerWindow };
+            if (dlg.ShowDialog() != true) return;
+
+            var name = (dlg.Result ?? "").Trim();
+            if (name.Length == 0 || string.Equals(name, row.Title, StringComparison.Ordinal)) return;
+            if (name.Any(c => Path.GetInvalidFileNameChars().Contains(c)))
+            {
+                StatusLabel.Text = "That name has characters Windows will not allow in a file name.";
+                return;
+            }
+
+            // Keep the extension: renaming a .png to "cool shot" would leave Windows with nothing to
+            // open it with, and the tab's own scanner goes by extension too.
+            if (!name.EndsWith(extension, StringComparison.OrdinalIgnoreCase)) name += extension;
+            var target = Path.Combine(row.Source.DirectoryName ?? "", name);
+            if (File.Exists(target)) { StatusLabel.Text = "There is already a screenshot with that name."; return; }
+
+            File.Move(row.Source.FullName, target);
+            StatusLabel.Text = $"Renamed to {name}.";
+            RefreshPackScreenshots();
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not rename that screenshot: " + ex.Message;
+        }
+    }
+
+    private async void OnScreenshotDelete(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (ScreenshotRowOf(sender) is not { } row) return;
+            var ok = await AppDialog.ConfirmAsync(ListOwnerWindow, "Delete screenshot",
+                $"Delete {row.Source.Name}? It is removed from disk and cannot be recovered from the launcher.",
+                "Delete", "Cancel", danger: true);
+            if (!ok) return;
+
+            File.Delete(row.Source.FullName);
+            StatusLabel.Text = $"Deleted {row.Source.Name}.";
+            RefreshPackScreenshots();
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not delete that screenshot: " + ex.Message;
         }
     }
 
@@ -2051,6 +2504,265 @@ public partial class PackDetailView : Page
         Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
     }
 
+    // ── Files tab: rename, delete, new folder, copy path ─────────────────────
+
+    /// <summary>Shared column "Edit file" — the same editor the Game column opens.</summary>
+    private void OnEditSelectedSharedFile(object sender, RoutedEventArgs e)
+    {
+        var selected = SharedView.GetSelectedFiles().FirstOrDefault();
+        if (selected is null) { StatusLabel.Text = "Select a file to edit."; return; }
+        OpenInEditor(selected);
+    }
+
+    private void OnGameCopyPath(object sender, RoutedEventArgs e) => CopySelectedPath(GameView);
+    private void OnSharedCopyPath(object sender, RoutedEventArgs e) => CopySelectedPath(SharedView);
+
+    private void CopySelectedPath(FolderView view)
+    {
+        var entry = view.SelectedEntry;
+        if (entry is null) { StatusLabel.Text = "Select a file first."; return; }
+        var full = AbsolutePathFor(entry.RelativePath);
+        StatusLabel.Text = ClipboardHelper.TrySetText(full) ? "Path copied." : "Could not reach the clipboard.";
+    }
+
+    private void OnGameRename(object sender, RoutedEventArgs e) => _ = RenameSelectedAsync(GameView);
+    private void OnSharedRename(object sender, RoutedEventArgs e) => _ = RenameSelectedAsync(SharedView);
+    private void OnGameDelete(object sender, RoutedEventArgs e) => _ = DeleteSelectedAsync(GameView);
+    private void OnSharedDelete(object sender, RoutedEventArgs e) => _ = DeleteSelectedAsync(SharedView);
+    private void OnGameNewFolder(object sender, RoutedEventArgs e) => _ = NewFolderAsync(GameView);
+
+    /// <summary>Absolute path of a Files-tab entry. Both columns are views onto game/, so one
+    /// mapping covers them both.</summary>
+    private string AbsolutePathFor(string relativePath) =>
+        Path.Combine(App.State.Packs.GameDir(_packId), relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    /// <summary>Renames one file or folder in place. Deliberately single-selection: a bulk rename is
+    /// a different feature with different rules, and offering it here would only ever rename the
+    /// first of the five things the user had highlighted.</summary>
+    private async Task RenameSelectedAsync(FolderView view)
+    {
+        try
+        {
+            var entries = view.GetSelectedEntries();
+            if (entries.Count == 0) { StatusLabel.Text = "Select a file or folder to rename."; return; }
+            if (entries.Count > 1) { StatusLabel.Text = "Rename works on one item at a time."; return; }
+
+            var entry = entries[0];
+            var source = AbsolutePathFor(entry.RelativePath);
+            var currentName = Path.GetFileName(source);
+            var dlg = new SimpleInputDialog("Rename", entry.IsFolder ? "New folder name" : "New file name", currentName)
+            {
+                Owner = ListOwnerWindow
+            };
+            if (dlg.ShowDialog() != true) return;
+
+            var name = (dlg.Result ?? "").Trim();
+            if (name.Length == 0 || string.Equals(name, currentName, StringComparison.Ordinal)) return;
+            if (name.Any(c => Path.GetInvalidFileNameChars().Contains(c)))
+            {
+                StatusLabel.Text = "That name has characters Windows will not allow in a file name.";
+                return;
+            }
+
+            var target = Path.Combine(Path.GetDirectoryName(source) ?? "", name);
+            if (File.Exists(target) || Directory.Exists(target))
+            {
+                StatusLabel.Text = $"“{name}” already exists in that folder.";
+                return;
+            }
+
+            // A rule matches on the path, so renaming a shared file quietly unshares it. Say so
+            // rather than letting the next upload drop it from the server without a word.
+            var wasShared = entry.IsAutoShared;
+
+            if (entry.IsFolder) Directory.Move(source, target);
+            else File.Move(source, target);
+
+            StatusLabel.Text = wasShared
+                ? $"Renamed to {name}. It no longer matches its shared rule — re-mark it if it should still sync."
+                : $"Renamed to {name}.";
+            await RefreshFileListsAsync(runAutoApply: false);
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not rename that: " + ex.Message;
+        }
+    }
+
+    /// <summary>Deletes the selected files and folders from the instance on disk.</summary>
+    /// <remarks>Both columns show game/, so this is the same delete either way — which is exactly why
+    /// the confirmation calls out shared files: removing one here also removes it from the server for
+    /// every collaborator at the next upload.</remarks>
+    private async Task DeleteSelectedAsync(FolderView view)
+    {
+        if (_fileTransferInProgress) return;
+        try
+        {
+            var entries = view.GetSelectedEntries();
+            if (entries.Count == 0) { StatusLabel.Text = "Select something to delete."; return; }
+
+            var sharedCount = entries.Count(en => en.IsAutoShared);
+            var what = entries.Count == 1
+                ? $"“{entries[0].DisplayName.TrimEnd('/')}”"
+                : $"{entries.Count} items";
+            var message = $"Delete {what} from this instance's game folder? This cannot be undone.";
+            if (entries.Any(en => en.IsFolder))
+                message += "\n\nFolders are deleted with everything inside them.";
+            if (sharedCount > 0)
+                message += $"\n\n{(sharedCount == entries.Count ? "They are" : $"{sharedCount} of them are")} marked shared — the next upload removes them from the server for everyone.";
+
+            var ok = await AppDialog.ConfirmAsync(ListOwnerWindow, "Delete from instance", message,
+                "Delete", "Cancel", danger: true);
+            if (!ok) return;
+
+            _fileTransferInProgress = true;
+            StatusLabel.Text = "Deleting…";
+            var paths = entries.Select(en => en.RelativePath).ToList();
+            var root = App.State.Packs.GameDir(_packId);
+            var (removed, error) = await Task.Run(() => DeleteEntriesFromRoot(root, paths));
+
+            StatusLabel.Text = error is not null
+                ? $"Deleted {removed} item(s), then failed: {error}"
+                : $"Deleted {removed} item(s).";
+            await RefreshFileListsAsync(runAutoApply: false);
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Delete failed: " + ex.Message;
+        }
+        finally { _fileTransferInProgress = false; }
+    }
+
+    /// <summary>Creates a folder inside whichever folder the Game column is showing.</summary>
+    private async Task NewFolderAsync(FolderView view)
+    {
+        try
+        {
+            var dlg = new SimpleInputDialog("New folder", "Folder name", "") { Owner = ListOwnerWindow };
+            if (dlg.ShowDialog() != true) return;
+
+            var name = (dlg.Result ?? "").Trim();
+            if (name.Length == 0) return;
+            if (name.Any(c => Path.GetInvalidFileNameChars().Contains(c)))
+            {
+                StatusLabel.Text = "That name has characters Windows will not allow in a folder name.";
+                return;
+            }
+
+            var parentRel = view.CurrentRelativeDir;
+            var parent = parentRel.Length == 0
+                ? App.State.Packs.GameDir(_packId)
+                : AbsolutePathFor(parentRel);
+            var target = Path.Combine(parent, name);
+            if (Directory.Exists(target)) { StatusLabel.Text = "That folder already exists."; return; }
+
+            Directory.CreateDirectory(target);
+            StatusLabel.Text = $"Created {name}/.";
+            await RefreshFileListsAsync(runAutoApply: false);
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not create that folder: " + ex.Message;
+        }
+    }
+
+    /// <summary>
+    /// Files dragged in from Explorer (or the desktop, or a browser's download bar) land in whichever
+    /// folder the column is showing. Dropping onto the Shared column also marks them shared, because
+    /// that is plainly what dropping something there was meant to say.
+    /// </summary>
+    private async void OnExternalFilesDropped(FolderView view, string destRoot, string destRelativeDir, IReadOnlyList<string> sources)
+    {
+        if (_pack is null || _fileTransferInProgress) return;
+
+        _fileTransferInProgress = true;
+        try
+        {
+            var destDir = destRelativeDir.Length == 0
+                ? destRoot
+                : Path.Combine(destRoot, destRelativeDir.Replace('/', Path.DirectorySeparatorChar));
+
+            StatusLabel.Text = $"Copying {sources.Count} item(s) in…";
+            var paths = sources.ToList();
+            var (copied, relatives, error) = await Task.Run(() => CopyExternalEntries(destRoot, destDir, paths));
+
+            if (error is not null)
+            {
+                StatusLabel.Text = $"Copied {copied} item(s), then failed: {error}";
+            }
+            else
+            {
+                StatusLabel.Text = $"Copied {copied} item(s) into {(destRelativeDir.Length == 0 ? "game/" : destRelativeDir + "/")}.";
+            }
+
+            // Only the sync-preview column means "share this"; a drop on the Game column is just a copy.
+            var markShared = view.ShowOnlyShared && relatives.Count > 0;
+            if (markShared)
+            {
+                MarkPathsShared(relatives);
+                StatusLabel.Text += " Marked shared.";
+            }
+
+            await RefreshFileListsAsync(runAutoApply: false);
+        }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = "Could not copy those files in: " + ex.Message;
+        }
+        finally { _fileTransferInProgress = false; }
+    }
+
+    /// <summary>Copies dropped files and folders into <paramref name="destDir"/>, returning their
+    /// paths relative to <paramref name="destRoot"/> so the caller can write rules for them.</summary>
+    private static (int copied, List<string> relatives, string? error) CopyExternalEntries(
+        string destRoot, string destDir, IReadOnlyList<string> sources)
+    {
+        var copied = 0;
+        var relatives = new List<string>();
+        try
+        {
+            Directory.CreateDirectory(destDir);
+            foreach (var source in sources)
+            {
+                if (Directory.Exists(source))
+                {
+                    var folderName = Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar));
+                    var targetFolder = Path.Combine(destDir, folderName);
+                    foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+                    {
+                        var target = Path.Combine(targetFolder, Path.GetRelativePath(source, file));
+                        Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                        File.Copy(file, target, overwrite: true);
+                        relatives.Add(Path.GetRelativePath(destRoot, target).Replace('\\', '/'));
+                        copied++;
+                    }
+                }
+                else if (File.Exists(source))
+                {
+                    var target = Path.Combine(destDir, Path.GetFileName(source));
+                    File.Copy(source, target, overwrite: true);
+                    relatives.Add(Path.GetRelativePath(destRoot, target).Replace('\\', '/'));
+                    copied++;
+                }
+            }
+            return (copied, relatives, null);
+        }
+        catch (Exception ex) { return (copied, relatives, ex.Message); }
+    }
+
+    /// <summary>Adds a "shared" rule for each path, replacing any rule already covering it.</summary>
+    private void MarkPathsShared(IReadOnlyList<string> relativePaths)
+    {
+        var packRoot = App.State.Packs.PackRoot(_packId);
+        var rules = App.State.Rules.Load(packRoot);
+        foreach (var rel in relativePaths)
+        {
+            rules.RemoveAll(r => string.Equals(r.Pattern.TrimEnd('/'), rel.TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
+            rules.Insert(0, new PackRule { Pattern = rel, Action = RuleAction.Shared });
+        }
+        App.State.Rules.Save(packRoot, rules);
+    }
+
     // ── moves ────────────────────────────────────────────────────────────────
 
     // "Copy to shared" → adds a "shared" rule so the file is included in the next upload.
@@ -2157,14 +2869,46 @@ public partial class PackDetailView : Page
 
     // ── upload / download ────────────────────────────────────────────────────
 
+    /// <summary>
+    /// While a transfer is running the button that started it becomes its cancel button.
+    /// </summary>
+    /// <remarks>Uploading a multi-GB instance over a slow line is the longest thing this app does,
+    /// and both service calls have taken a <see cref="CancellationToken"/> and checked it inside
+    /// their copy loops all along — there was simply nothing on screen holding one.</remarks>
+    private void SetSyncUiRunning(bool running, bool downloading)
+    {
+        if (downloading)
+        {
+            UpdateButtonGlyph.Text = running ? "" : "";
+            UpdateButtonText.Text = running ? "Cancel update" : "Update available";
+            UpdateButton.ToolTip = running
+                ? "Stop downloading. Files already written stay where they are."
+                : "Download the latest version from the server";
+            UploadButton.IsEnabled = !running && _pack is { IsShared: true }
+                                     && _pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
+            return;
+        }
+
+        UploadButtonGlyph.Text = running ? "" : "";
+        UploadButtonText.Text = running ? "Cancel upload" : "Upload to server";
+        UploadButton.ToolTip = running ? "Stop the upload. Nothing is committed until it finishes." : null;
+        UpdateButton.IsEnabled = !running;
+    }
+
     private async void OnUpload(object sender, RoutedEventArgs e)
     {
         if (_pack is null) return;
+
+        // Second click on a running upload means stop.
+        if (_syncCts is not null) { CancelSync("Cancelling upload…"); return; }
+
         LogBox.Text = "";
         var progress = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
+        var cts = new CancellationTokenSource();
+        _syncCts = cts;
+        SetSyncUiRunning(true, downloading: false);
         try
         {
-            UploadButton.IsEnabled = false;
             if (_isOwner)
                 await SaveOverviewDescriptionAsync();
 
@@ -2176,7 +2920,7 @@ public partial class PackDetailView : Page
             var packRoot = App.State.Packs.PackRoot(_pack.Id);
             var rules = App.State.Rules.Load(packRoot);
             var gameDir = App.State.Packs.GameDir(_pack.Id);
-            var sharedPaths = await Task.Run(() => CollectSharedPaths(gameDir, rules));
+            var sharedPaths = await Task.Run(() => CollectSharedPaths(gameDir, rules), cts.Token);
 
             // Base the upload on the version THIS client last synced — NOT the server's current
             // version. Fetching the current version and using it as the base defeated the server's
@@ -2185,7 +2929,7 @@ public partial class PackDetailView : Page
             // deleting the collaborator's files from every subscriber on their next sync. With the
             // synced version, the server returns 409 when we're behind, forcing a download first.
             var baseVersion = App.State.Settings.PackSyncedVersion.TryGetValue(_pack.Id, out var v) ? v : 0;
-            var newVersion = await App.State.Packs.UploadSharedAsync(_pack.Id, baseVersion, sharedPaths, progress);
+            var newVersion = await App.State.Packs.UploadSharedAsync(_pack.Id, baseVersion, sharedPaths, progress, cts.Token);
 
             // Record the authoritative version the server returned from the commit (rather than
             // a redundant second manifest fetch) so the Update button stays hidden locally.
@@ -2198,8 +2942,28 @@ public partial class PackDetailView : Page
             StatusLabel.Text = "This pack changed on the server since you last synced. " +
                                "Download the latest changes, then upload again.";
         }
+        catch (OperationCanceledException)
+        {
+            // Nothing is committed until the server gets the whole file set, so a cancelled upload
+            // leaves the server exactly as it was.
+            StatusLabel.Text = "Upload cancelled — nothing on the server changed.";
+            ProgressHub.Clear(_packId);
+        }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
-        finally { UploadButton.IsEnabled = true; }
+        finally
+        {
+            _syncCts = null;
+            cts.Dispose();
+            SetSyncUiRunning(false, downloading: false);
+        }
+    }
+
+    /// <summary>Stops whichever transfer is running. Safe to call when none is.</summary>
+    private void CancelSync(string message)
+    {
+        if (_syncCts is null) return;
+        StatusLabel.Text = message;
+        try { _syncCts.Cancel(); } catch (ObjectDisposedException) { /* already finished */ }
     }
 
     /// <summary>
@@ -2231,12 +2995,18 @@ public partial class PackDetailView : Page
     private async void OnDownload(object sender, RoutedEventArgs e)
     {
         if (_pack is null) return;
+
+        // Second click on a running download means stop.
+        if (_syncCts is not null) { CancelSync("Cancelling download…"); return; }
+
         LogBox.Text = "";
         var progress = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
+        var cts = new CancellationTokenSource();
+        _syncCts = cts;
+        SetSyncUiRunning(true, downloading: true);
         try
         {
-            UploadButton.IsEnabled = false;
-            await App.State.Packs.DownloadSharedAsync(_pack.Id, progress);
+            await App.State.Packs.DownloadSharedAsync(_pack.Id, progress, cts.Token);
             // PackSyncedVersion is updated inside DownloadSharedAsync
             ApplyHeroIcon(_pack);
             ApplyDescriptionDisplay(_pack.Id, _pack.Description ?? "");
@@ -2245,8 +3015,19 @@ public partial class PackDetailView : Page
             _ = RefreshFileListsAsync();
             StatusLabel.Text = "Up to date.";
         }
+        catch (OperationCanceledException)
+        {
+            // Files already written stay: a partial pull is still closer to the server than before it.
+            StatusLabel.Text = "Download cancelled. Files already downloaded were kept — run the update again to finish.";
+            ProgressHub.Clear(_packId);
+        }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
-        finally { UploadButton.IsEnabled = true; }
+        finally
+        {
+            _syncCts = null;
+            cts.Dispose();
+            SetSyncUiRunning(false, downloading: true);
+        }
     }
 
     // ── launch ───────────────────────────────────────────────────────────────
@@ -2274,8 +3055,7 @@ public partial class PackDetailView : Page
         if (!javaOk)
         {
             StatusLabel.Text = javaMsg;
-            MessageBox.Show(_shell, javaMsg, "Java check",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
+            await AppDialog.MessageAsync(ListOwnerWindow, "Java check", javaMsg);
             return;
         }
         LogBox.Text = "";
@@ -2407,15 +3187,25 @@ public partial class PackDetailView : Page
 
 public sealed record TagVm(string Text, Brush Background, Brush Foreground);
 
-public sealed class PackScreenshotRow
+/// <summary>One screenshot card on the instance's Screenshots tab.</summary>
+/// <remarks>The thumbnail is a separate, down-sampled bitmap from the file the preview window opens.
+/// Binding the file itself to the card's <c>Image</c> made WPF decode every capture at native
+/// resolution — a few hundred 4K PNGs shown at 230px is gigabytes of bitmap for nothing — so the card
+/// gets a 230px decode and <see cref="FullImageUrl"/> keeps the original for full-size viewing.</remarks>
+public sealed class PackScreenshotRow : System.ComponentModel.INotifyPropertyChanged
 {
-    public PackScreenshotRow(FileInfo file, string sourceLabel)
+    /// <summary>Width the card decodes at. Matches the card, so the decode is the display size.</summary>
+    public const int ThumbnailWidth = 230;
+
+    public PackScreenshotRow(FileInfo file, string sourceLabel, bool canSetAsIcon)
     {
         Source = file;
         SourceLabel = sourceLabel;
+        CanSetAsIcon = canSetAsIcon;
         ImageUrl = new Uri(file.FullName).AbsoluteUri;
         Title = Path.GetFileNameWithoutExtension(file.Name);
         MetaLabel = $"{sourceLabel} · {file.LastWriteTime:g} · {FormatSize(file.Length)}";
+        ToolTipText = $"{file.FullName}\n{MetaLabel}\nClick to open · right-click for more";
     }
 
     public FileInfo Source { get; }
@@ -2424,12 +3214,76 @@ public sealed class PackScreenshotRow
     public string FullImageUrl => ImageUrl;
     public string Title { get; }
     public string MetaLabel { get; }
+    public string ToolTipText { get; }
     public DateTime LastWriteTime => Source.LastWriteTime;
+
+    /// <summary>False on an instance someone else owns — its cover art is not ours to change.</summary>
+    public bool CanSetAsIcon { get; }
+
+    private BitmapSource? _thumbnail;
+
+    /// <summary>The card's picture. Null until the background pass has decoded it, which is why the
+    /// card sits on a surface-coloured panel rather than a blank white rectangle.</summary>
+    public BitmapSource? Thumbnail
+    {
+        get => _thumbnail;
+        private set
+        {
+            _thumbnail = value;
+            PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(nameof(Thumbnail)));
+        }
+    }
+
+    /// <summary>Hands the row a bitmap decoded elsewhere. It must be frozen: it is built on a
+    /// background thread and read by the UI one.</summary>
+    public void SetThumbnail(BitmapSource? image) => Thumbnail = image;
+
+    /// <summary>Decodes a card-sized, frozen copy of a screenshot. Safe to call off the UI thread,
+    /// and returns null rather than throwing on a file that is half-written or not an image.</summary>
+    public static BitmapSource? DecodeThumbnail(string path)
+    {
+        try
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.UriSource = new Uri(path);
+            image.DecodePixelWidth = ThumbnailWidth;
+            // OnLoad, so the file handle is closed by the time this returns — otherwise deleting or
+            // renaming the screenshot from the card's own menu fails with a sharing violation.
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch { return null; }
+    }
+
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
 
     private static string FormatSize(long bytes) =>
         bytes >= 1024L * 1024 ? $"{bytes / (1024.0 * 1024):F1} MB"
         : bytes >= 1024 ? $"{bytes / 1024.0:F0} KB"
         : $"{bytes} B";
+}
+
+/// <summary>What a row in the Logs list stands for.</summary>
+/// <remarks>Drives the row's icon colours through template triggers. The colours are deliberately
+/// <em>not</em> stored on the row: a brush read out of the resource dictionary here would be a
+/// snapshot of the palette at scan time and would survive every later theme change.</remarks>
+public enum LogRowKind
+{
+    /// <summary>A Minecraft log file from game/logs.</summary>
+    GameLog,
+
+    /// <summary>A crash report from game/crash-reports — the file that says why the game died.</summary>
+    CrashReport,
+
+    /// <summary>The in-memory upload/download log for this session.</summary>
+    Sync,
+
+    /// <summary>The launcher's own activity log.</summary>
+    Launcher
 }
 
 public sealed class LogRow
@@ -2438,16 +3292,29 @@ public sealed class LogRow
     public string Path { get; private set; } = "";
     public string DisplayName { get; private set; } = "";
     public string MetaLabel { get; private set; } = "";
-    public bool IsSyncLog { get; private set; }
-    public bool IsLauncherLog { get; private set; }
-    public string IconGlyph { get; private set; } = "";
-    public Brush IconBackground { get; private set; } = (Brush)Application.Current.FindResource("Surface3Brush");
-    public Brush IconForeground { get; private set; } = (Brush)Application.Current.FindResource("TextSecondaryBrush");
+    public string ToolTipText { get; private set; } = "";
+    public LogRowKind Kind { get; private set; } = LogRowKind.GameLog;
+    public bool IsSyncLog => Kind == LogRowKind.Sync;
+    public bool IsLauncherLog => Kind == LogRowKind.Launcher;
 
-    /// <summary>Parameterless ctor used by SyncLogPseudo().</summary>
+    /// <summary>True when a real file sits behind this row, so it can be revealed, copied or deleted.
+    /// The two pseudo-rows are live buffers with nothing on disk.</summary>
+    public bool HasFile => Path.Length > 0;
+
+    public string IconGlyph { get; private set; } = "";
+
+    /// <summary>Last-write time of the file behind the row; <see cref="DateTime.MinValue"/> for the
+    /// pseudo-rows, which are pinned to the top of the list anyway.</summary>
+    public DateTime SortTime { get; private set; } = DateTime.MinValue;
+
+    /// <summary>Segoe MDL2 glyphs are private-use code points, so they are written as numbers here
+    /// rather than pasted in as characters that no editor or diff will show.</summary>
+    private static string Glyph(int codePoint) => ((char)codePoint).ToString();
+
+    /// <summary>Parameterless ctor used by the pseudo-row factories.</summary>
     private LogRow() { }
 
-    public LogRow(System.IO.FileInfo f)
+    public LogRow(System.IO.FileInfo f, bool isCrashReport = false)
     {
         Key = "file:" + f.FullName;
         Path = f.FullName;
@@ -2458,9 +3325,11 @@ public sealed class LogRow
             >= 1024 => $"{f.Length / 1024.0:F0} KB",
             _ => $"{f.Length} B"
         };
-        MetaLabel = $"{f.LastWriteTime:g} · {size}";
-        IsSyncLog = false;
-        IconGlyph = ""; // Document glyph
+        MetaLabel = (isCrashReport ? "Crash report · " : "") + $"{f.LastWriteTime:g} · {size}";
+        Kind = isCrashReport ? LogRowKind.CrashReport : LogRowKind.GameLog;
+        SortTime = f.LastWriteTime;
+        IconGlyph = isCrashReport ? Glyph(0xE7BA) : Glyph(0xE7C3); // warning triangle / document
+        ToolTipText = f.FullName;
     }
 
     /// <summary>Pseudo-entry for the global launcher activity log.</summary>
@@ -2470,10 +3339,9 @@ public sealed class LogRow
         Path = "",
         DisplayName = "Launcher log",
         MetaLabel = "What the launcher is doing right now",
-        IsLauncherLog = true,
-        IconGlyph = "", // Diagnostic / activity glyph
-        IconBackground = (Brush)Application.Current.FindResource("Surface4Brush"),
-        IconForeground = (Brush)Application.Current.FindResource("WarningBrush"),
+        Kind = LogRowKind.Launcher,
+        IconGlyph = Glyph(0xE9D9), // Diagnostic / activity glyph
+        ToolTipText = "The launcher's own log for this session — not a file on disk."
     };
 
     /// <summary>Returns the pseudo-entry that shows the in-memory sync log content.</summary>
@@ -2483,9 +3351,8 @@ public sealed class LogRow
         Path = "",
         DisplayName = "Sync log",
         MetaLabel = "Upload / download activity from this session",
-        IsSyncLog = true,
-        IconGlyph = "",   // Cloud glyph
-        IconBackground = (Brush)Application.Current.FindResource("AccentSoftBrush"),
-        IconForeground = (Brush)Application.Current.FindResource("AccentBrush"),
+        Kind = LogRowKind.Sync,
+        IconGlyph = Glyph(0xE753),   // Cloud glyph
+        ToolTipText = "Upload and download output from this session — not a file on disk."
     };
 }

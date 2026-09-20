@@ -365,6 +365,73 @@ public class SharedWorldsController(AppDbContext db, SharedWorldPermissionResolv
         return NoContent();
     }
 
+    // ---- Icon ----
+
+    /// <summary>Sets the world's icon.</summary>
+    /// <remarks>
+    /// <c>SharedWorld.IconBlobHash</c> already existed and nothing could write it, which is why every
+    /// shared world draws as a letter tile. Same shape as the mod and resource-pack routes so one
+    /// client-side helper covers all three.
+    /// </remarks>
+    [HttpPost("{id:guid}/icon")]
+    [RequestSizeLimit(ControllerHelpers.MaxIconBytes + (1 << 16))]
+    public async Task<IActionResult> UploadIcon(Guid id, [FromForm] IFormFile file, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var world = await db.SharedWorlds.FirstOrDefaultAsync(w => w.Id == id, ct);
+        if (world is null) return NotFound();
+        if (world.OwnerId != me) return Forbid();
+
+        var (hash, error) = await ControllerHelpers.TryStoreIconAsync(blobs, file, ct);
+        if (hash is null) return BadRequest(new { error });
+
+        var previous = world.IconBlobHash;
+        world.IconBlobHash = hash;
+        world.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (previous is not null && previous != hash)
+            await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
+        return Ok(new { iconBlobHash = hash });
+    }
+
+    /// <summary>Serves the world's icon, or 404 when it has none.</summary>
+    /// <remarks>Anonymous under the same visibility rule as the world itself, so an &lt;Image&gt; with
+    /// no Authorization header can show a public world's art.</remarks>
+    [AllowAnonymous]
+    [HttpGet("{id:guid}/icon")]
+    public async Task<IActionResult> GetIcon(Guid id, CancellationToken ct)
+    {
+        var world = await db.SharedWorlds.FirstOrDefaultAsync(w => w.Id == id, ct);
+        if (world is null) return NotFound();
+
+        var perms = await resolver.GetAsync(world, this.UserIdOrNull(), ct);
+        if (!perms.HasFlag(PackPermissions.View)) return NotFound();
+
+        if (string.IsNullOrEmpty(world.IconBlobHash) || !blobs.Exists(world.IconBlobHash)) return NotFound();
+        return File(blobs.OpenRead(world.IconBlobHash), ControllerHelpers.IconResponseContentType);
+    }
+
+    /// <summary>Clears the world's icon.</summary>
+    [HttpDelete("{id:guid}/icon")]
+    public async Task<IActionResult> DeleteIcon(Guid id, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var world = await db.SharedWorlds.FirstOrDefaultAsync(w => w.Id == id, ct);
+        if (world is null) return NotFound();
+        if (world.OwnerId != me) return Forbid();
+
+        var previous = world.IconBlobHash;
+        if (previous is null) return NoContent();
+
+        world.IconBlobHash = null;
+        world.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
+        return NoContent();
+    }
+
     [HttpGet("{id:guid}/files/{versionId:guid}")]
     public async Task<IActionResult> Download(Guid id, Guid versionId, CancellationToken ct)
     {

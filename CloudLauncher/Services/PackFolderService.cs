@@ -86,6 +86,18 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         return root;
     }
 
+    /// <summary>Forgets every resolved pack root so the next lookup scans the current PacksRoot.</summary>
+    /// <remarks>
+    /// <para>The cache is a per-session map of pack id to absolute path, and every entry in it was
+    /// resolved against whatever <c>settings.PacksRoot</c> said at the time. Point the launcher at a
+    /// different instances folder and every cached entry is a path into the old one — which is why
+    /// changing the folder used to end in "restart CloudLauncher". Clearing it is enough: the next
+    /// <see cref="PackRoot"/> re-scans for the <c>.packid</c> marker under the new root.</para>
+    /// <para>Only call this when the root itself has changed. Dropping the cache is otherwise pure
+    /// cost — every pack has to be found by scanning directories again.</para>
+    /// </remarks>
+    public void InvalidateRootCache() => _rootCache.Clear();
+
     /// <summary>Creates and registers a new named pack folder.</summary>
     public string CreateNamedFolder(Guid packId, string name)
     {

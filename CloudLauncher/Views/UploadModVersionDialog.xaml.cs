@@ -29,6 +29,15 @@ public partial class UploadModVersionDialog : UserControl
     private readonly Guid _modId;
     private readonly TaskCompletionSource<HostedModVersionInfo?> _tcs = new();
 
+    /// <summary>The version being corrected, or null when this is a fresh upload.</summary>
+    /// <remarks>
+    /// Edit mode reuses this card rather than growing a second form: the fields are the same four,
+    /// and one card means the rules about what a publishable version looks like are stated once. The
+    /// difference is entirely in what the button does — a PATCH instead of a multipart POST — plus
+    /// hiding the file picker, because editing the details deliberately leaves the jar alone.
+    /// </remarks>
+    private readonly HostedModVersionInfo? _editing;
+
     /// <summary>The chosen jar. Null until the user browses or drops one; Upload stays disabled.</summary>
     private string? _filePath;
 
@@ -38,20 +47,55 @@ public partial class UploadModVersionDialog : UserControl
 
     /// <param name="initialFilePath">A jar already chosen elsewhere (the create-mod dialog), so the
     /// card opens ready to upload instead of asking for the same file twice.</param>
-    public UploadModVersionDialog(HostedModDetail mod, string? initialFilePath = null)
+    /// <param name="editing">When given, the card edits that version's details instead of
+    /// publishing a new one, and its file picker is hidden.</param>
+    public UploadModVersionDialog(HostedModDetail mod, string? initialFilePath = null,
+        HostedModVersionInfo? editing = null)
     {
         InitializeComponent();
         _modId = mod.Id;
-        SubLabel.Text = $"Publishing to {mod.Name}";
+        _editing = editing;
 
-        // Seed compatibility from the mod so the common case (this build supports what the mod
-        // says it supports) is one click, while still being editable per build.
-        McVersionsBox.Text = mod.McVersionsCsv ?? "";
-        SetLoaders(mod.LoadersCsv);
-        if (initialFilePath is not null && File.Exists(initialFilePath)) SetFile(initialFilePath);
+        if (editing is null)
+        {
+            SubLabel.Text = $"Publishing to {mod.Name}";
+            // Seed compatibility from the mod so the common case (this build supports what the mod
+            // says it supports) is one click, while still being editable per build.
+            McVersionsBox.Text = mod.McVersionsCsv ?? "";
+            SetLoaders(mod.LoadersCsv);
+            if (initialFilePath is not null && File.Exists(initialFilePath)) SetFile(initialFilePath);
+        }
+        else
+        {
+            TitleLabel.Text = "Edit version";
+            SubLabel.Text = $"{editing.VersionString} of {mod.Name} · {editing.FileName}";
+            UploadButton.Content = "Save changes";
+            // No drop zone: this is the one path that must not touch the file. Replacing a jar is
+            // still "upload a version", which keeps its own publish date and changelog.
+            DropZone.Visibility = Visibility.Collapsed;
+
+            VersionBox.Text = editing.VersionString;
+            ChangelogBox.Text = editing.Changelog ?? "";
+            McVersionsBox.Text = editing.McVersionsCsv ?? mod.McVersionsCsv ?? "";
+            SetLoaders(editing.LoadersCsv ?? mod.LoadersCsv);
+            SelectChannel(editing.ReleaseChannel);
+        }
 
         Loaded += (_, _) => { Animate.SlideFadeIn(this, 0, 14, 200); Focus(); };
         Focusable = true;
+    }
+
+    /// <summary>Picks the channel combo entry matching a stored channel string.</summary>
+    /// <remarks>A channel this build has never heard of leaves "release" selected rather than
+    /// clearing the box and quietly making the user re-pick something they never changed.</remarks>
+    private void SelectChannel(string channel)
+    {
+        foreach (var item in ChannelBox.Items.OfType<ComboBoxItem>())
+        {
+            if (!string.Equals(item.Content as string, channel, StringComparison.OrdinalIgnoreCase)) continue;
+            ChannelBox.SelectedItem = item;
+            return;
+        }
     }
 
     /// <summary>Completes with the uploaded version, or null if the user cancelled.</summary>
@@ -69,6 +113,16 @@ public partial class UploadModVersionDialog : UserControl
         string? initialFilePath = null)
     {
         var card = new UploadModVersionDialog(mod, initialFilePath);
+        await host.ShowCardAsync(card, card.Result, card.Cancel);
+        return card.Result.Result;
+    }
+
+    /// <summary>Opens the card to correct an existing version's details. The file is untouched.</summary>
+    /// <returns>The version as the server now holds it, or null if the user backed out.</returns>
+    public static async Task<HostedModVersionInfo?> ShowEditAsync(MainWindow host, HostedModDetail mod,
+        HostedModVersionInfo version)
+    {
+        var card = new UploadModVersionDialog(mod, initialFilePath: null, editing: version);
         await host.ShowCardAsync(card, card.Result, card.Cancel);
         return card.Result.Result;
     }
@@ -144,7 +198,8 @@ public partial class UploadModVersionDialog : UserControl
         if (UploadButton is null) return;
         UploadButton.IsEnabled =
             _uploadCts is null
-            && _filePath is not null
+            // Edit mode has no file to pick: the version already has one and is keeping it.
+            && (_editing is not null || _filePath is not null)
             && !string.IsNullOrWhiteSpace(VersionBox.Text)
             && !string.IsNullOrWhiteSpace(McVersionsBox.Text)
             && LoadersCsv() is not null;
@@ -177,7 +232,9 @@ public partial class UploadModVersionDialog : UserControl
 
     private async void OnUpload(object sender, RoutedEventArgs e)
     {
-        if (_filePath is null || _uploadCts is not null) return;
+        if (_uploadCts is not null) return;
+        if (_editing is not null) { await SaveEditAsync(); return; }
+        if (_filePath is null) return;
 
         var file = new FileInfo(_filePath);
         if (!file.Exists)
@@ -223,6 +280,38 @@ public partial class UploadModVersionDialog : UserControl
             SetBusy(false);
             SetStatus("Upload failed: " + ex.Message, error: true);
             UploadProgress.Value = 0;
+        }
+    }
+
+    /// <summary>Sends the edited details as a patch and closes with what the server stored.</summary>
+    /// <remarks>
+    /// All four fields are sent, not only the ones that changed: the card was seeded with the
+    /// current values and the user has had the chance to alter any of them, so what is on screen is
+    /// the intended state of all of them. An empty changelog goes as an empty string, which is how
+    /// the server is told to clear one — null there means "leave it alone".
+    /// </remarks>
+    private async Task SaveEditAsync()
+    {
+        if (_editing is null) return;
+
+        var req = new UpdateModVersionRequest(
+            VersionBox.Text.Trim(),
+            ChangelogBox.Text.Trim(),
+            (ChannelBox.SelectedItem as ComboBoxItem)?.Content as string ?? "release",
+            NormalizeCsv(McVersionsBox.Text) ?? "",
+            LoadersCsv() ?? "");
+
+        UploadButton.IsEnabled = false;
+        SetStatus("Saving…", error: false);
+        try
+        {
+            var saved = await App.State.Api.UpdateModVersionAsync(_modId, _editing.Id, req);
+            _tcs.TrySetResult(saved);
+        }
+        catch (Exception ex)
+        {
+            SetStatus("Could not save: " + ex.Message, error: true);
+            UpdateUploadButton();
         }
     }
 

@@ -744,12 +744,15 @@ public partial class SettingsPanel : Page
         App.State.Settings.Save();
         Refresh();
 
-        // Pack folder lookups are cached per session against the old root, so anything already
-        // resolved would still point at the previous location until the launcher restarts.
-        await AppDialog.MessageAsync(_shell, "Instances folder changed",
-            $"Instances now live in:\n{chosen}\n\n"
-            + "Restart CloudLauncher so every page picks up the new location.");
-        StatusLabel.Text = "Instances folder changed. Restart the launcher to finish.";
+        // Pack folder lookups are cached per session, and every entry in that cache is a path under
+        // the folder we just left. Dropping it is what makes this take effect without a restart:
+        // the next lookup re-scans the new root for each pack's .packid marker. The Instances screen
+        // is then rebuilt so the cards in front of the user are the ones in the new location rather
+        // than a page still drawn from the old paths.
+        App.State.Packs.InvalidateRootCache();
+        _shell.RefreshPacks();
+
+        StatusLabel.Text = $"Instances now live in {chosen}.";
     }
 
     private static bool PathsEqual(string a, string b) =>

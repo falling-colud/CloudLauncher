@@ -2,6 +2,7 @@
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:views="clr-namespace:CloudLauncher.Views"
+      xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Resource packs"
       Background="{DynamicResource Surface0Brush}">
     <Grid>
@@ -225,9 +226,12 @@
                 </Grid>
 
                 <ScrollViewer Grid.Row="1" Padding="0,14,0,0" VerticalScrollBarVisibility="Auto"
+                              anim:Animate.SmoothScroll="True"
+                              AllowDrop="True" DragOver="OnInstalledDragOver" Drop="OnInstalledDrop"
                               SizeChanged="OnRpListContainerSizeChanged">
                     <Grid>
-                        <ItemsControl x:Name="RpList" HorizontalAlignment="Stretch">
+                        <ItemsControl x:Name="RpList" HorizontalAlignment="Stretch"
+                                      anim:Animate.EntranceStagger="True">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                     <UniformGrid x:Name="RpGrid" Columns="4" Loaded="OnRpGridLoaded"/>
@@ -240,20 +244,59 @@
                                             Background="{DynamicResource Surface2Brush}"
                                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                                             CornerRadius="10"
+                                            anim:Animate.HoverLift="True"
+                                            ToolTip="{Binding CardTooltip}"
                                             MouseLeftButtonUp="OnRpCardClick">
                                         <Border.ContextMenu>
-                                            <ContextMenu>
-                                                <MenuItem Header="Edit" Click="OnCtxEdit"/>
-                                                <MenuItem Header="Reveal in Explorer" Click="OnCtxReveal"/>
-                                                <MenuItem Header="Rename" Click="OnCtxRename"/>
+                                            <ContextMenu Opened="OnCardMenuOpened">
+                                                <MenuItem Header="{Binding ToggleMenuHeader}" Click="OnCtxToggleEnabled">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
                                                 <Separator/>
-                                                <MenuItem Header="Copy to compatible instance..."
-                                                          Click="OnCtxCopyInstance"/>
+                                                <MenuItem Header="Edit details…" Click="OnCtxEdit">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <MenuItem Header="Rename…" Click="OnCtxRename" InputGestureText="F2">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <MenuItem Header="Rename file on disk…" Click="OnCtxRenameFile">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE8E5;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <MenuItem Header="Reveal in Explorer" Click="OnCtxReveal">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <Separator/>
+                                                <MenuItem Header="Copy to compatible instance…"
+                                                          Click="OnCtxCopyInstance">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
                                                 <MenuItem Header="Add to folder"
-                                                          SubmenuOpened="OnCtxAddToFolderOpened"/>
+                                                          SubmenuOpened="OnCtxAddToFolderOpened">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE8F1;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                    <MenuItem Header="(placeholder)"/>
+                                                </MenuItem>
                                                 <Separator/>
                                                 <MenuItem Header="Copy pack key" Click="OnCtxCopyKey"/>
-                                                <MenuItem Header="Delete zip..." Click="OnCtxDelete"/>
+                                                <MenuItem Header="Delete…" Click="OnCtxDelete" InputGestureText="Del"
+                                                          Foreground="{DynamicResource DangerBrush}">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
                                             </ContextMenu>
                                         </Border.ContextMenu>
                                         <Grid ClipToBounds="True">
@@ -272,6 +315,10 @@
                                                                FontSize="56" FontWeight="Bold"
                                                                Foreground="White" Opacity="0.92"
                                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    <!-- The pack's own pack.png, over the generated letter tile: with
+                                                         six texture packs installed the letter told you nothing. -->
+                                                    <Image Source="{Binding IconSource}" Stretch="UniformToFill"
+                                                           RenderOptions.BitmapScalingMode="HighQuality"/>
                                                     <Border Style="{StaticResource Pill}"
                                                             Background="{DynamicResource Surface4Brush}"
                                                             Margin="0,10,10,0"
@@ -279,12 +326,20 @@
                                                         <TextBlock Text="{Binding SourcePackName}" Style="{StaticResource PillText}"
                                                                    Foreground="{DynamicResource TextSecondaryBrush}"/>
                                                     </Border>
-                                                    <Border Background="#66000000" CornerRadius="4"
-                                                            Margin="10,0,0,10" Padding="6,2"
-                                                            HorizontalAlignment="Left" VerticalAlignment="Bottom">
-                                                        <TextBlock Text="RESOURCE PACK" FontSize="10" FontWeight="SemiBold"
-                                                                   Foreground="White"/>
-                                                    </Border>
+                                                    <StackPanel Orientation="Horizontal" Margin="10,0,0,10"
+                                                                HorizontalAlignment="Left" VerticalAlignment="Bottom">
+                                                        <Border Background="#66000000" CornerRadius="4" Padding="6,2">
+                                                            <TextBlock Text="{Binding KindLabel}" FontSize="10" FontWeight="SemiBold"
+                                                                       Foreground="White"/>
+                                                        </Border>
+                                                        <Border Background="{DynamicResource AccentBrush}" CornerRadius="4"
+                                                                Padding="6,2" Margin="6,0,0,0"
+                                                                ToolTip="Listed in this instance's options.txt"
+                                                                Visibility="{Binding EnabledVisibility}">
+                                                            <TextBlock Text="{Binding EnabledLabel}" FontSize="10" FontWeight="SemiBold"
+                                                                       Foreground="{DynamicResource TextOnAccentBrush}"/>
+                                                        </Border>
+                                                    </StackPanel>
                                                 </Grid>
                                             </Border>
 
@@ -301,13 +356,22 @@
                                                 <TextBlock Grid.Row="1" Text="{Binding MetaLabel}"
                                                            Style="{StaticResource Caption}" Margin="0,2,0,0"
                                                            TextTrimming="CharacterEllipsis"/>
-                                                <StackPanel Grid.Row="2" Margin="0,8,0,0">
-                                                    <TextBlock Text="{Binding CompatibilityLabel}"
-                                                               Style="{StaticResource Caption}"
-                                                               TextTrimming="CharacterEllipsis"/>
-                                                    <TextBlock Text="{Binding SizeLabel}" Style="{StaticResource Caption}"
-                                                               TextTrimming="CharacterEllipsis"/>
-                                                </StackPanel>
+                                                <!-- Primary action bottom-right, where the world and instance cards
+                                                     put Play. -->
+                                                <DockPanel Grid.Row="2" Margin="0,8,0,0" LastChildFill="True">
+                                                    <Button DockPanel.Dock="Right" Content="Copy to…"
+                                                            Click="OnCardCopyTo" Tag="{Binding}"
+                                                            Padding="10,3" MinWidth="0" MinHeight="0" FontSize="11"
+                                                            VerticalAlignment="Bottom"
+                                                            ToolTip="Copy this pack into another instance"/>
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding CompatibilityLabel}"
+                                                                   Style="{StaticResource Caption}"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                        <TextBlock Text="{Binding SizeLabel}" Style="{StaticResource Caption}"
+                                                                   TextTrimming="CharacterEllipsis"/>
+                                                    </StackPanel>
+                                                </DockPanel>
                                             </Grid>
                                         </Grid>
                                     </Border>
@@ -362,7 +426,36 @@
                                  ScrollViewer.ScrollChanged="OnResultsScroll">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <Border Padding="10" Background="Transparent">
+                                    <Border Padding="10" Background="Transparent"
+                                            ToolTip="{Binding RowTooltip}">
+                                        <Border.ContextMenu>
+                                            <ContextMenu Opened="OnBrowseMenuOpened">
+                                                <MenuItem Header="Install…" Click="OnCtxBrowseInstall">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <MenuItem x:Name="BrowseCtxManage" Header="Manage" Click="OnCtxBrowseManage">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <MenuItem x:Name="BrowseCtxOpenPage" Header="Open page" Click="OnCtxBrowseOpenPage">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE774;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                                <MenuItem x:Name="BrowseCtxCopyUrl" Header="Copy project URL" Click="OnCtxBrowseCopyUrl"/>
+                                                <Separator x:Name="BrowseCtxDeleteSeparator"/>
+                                                <MenuItem x:Name="BrowseCtxDelete" Header="Delete hosted pack…"
+                                                          Click="OnCtxBrowseDelete"
+                                                          Foreground="{DynamicResource DangerBrush}">
+                                                    <MenuItem.Icon>
+                                                        <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    </MenuItem.Icon>
+                                                </MenuItem>
+                                            </ContextMenu>
+                                        </Border.ContextMenu>
                                         <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="56"/>
@@ -402,12 +495,26 @@
                                                            Margin="0,4,0,0" Foreground="{DynamicResource TextTertiaryBrush}"/>
                                             </StackPanel>
 
-                                            <Button Grid.Column="2" Content="Install"
-                                                    Style="{StaticResource AccentButton}"
+                                            <!-- Right-edge action, and it says so when the pack is already
+                                                 in an instance: clicking Install twice used to leave two
+                                                 copies fighting in the same stack. -->
+                                            <Button Grid.Column="2" Content="{Binding InstallLabel}"
                                                     Click="OnQuickInstallRp" Tag="{Binding}"
                                                     Padding="12,5" MinHeight="30" MinWidth="0"
                                                     VerticalAlignment="Center"
-                                                    IsEnabled="{Binding IsInstallable}"/>
+                                                    ToolTip="{Binding InstallTooltip}"
+                                                    IsEnabled="{Binding IsInstallable}">
+                                                <Button.Style>
+                                                    <Style TargetType="Button" BasedOn="{StaticResource AccentButton}">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsInstalled}" Value="True">
+                                                                <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+                                                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Button.Style>
+                                            </Button>
                                         </Grid>
                                     </Border>
                                 </DataTemplate>

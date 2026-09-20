@@ -23,13 +23,16 @@ public sealed class LaunchService(
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
 
+    /// <param name="joinServerAddress">Optional <c>host</c> or <c>host:port</c> to connect to as soon
+    /// as the game reaches the main menu. See <see cref="LaunchAsync"/>.</param>
     public async Task<Process> LaunchTrackedAsync(
         PackDetail pack,
         IProgress<string>? log,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? joinServerAddress = null)
     {
         using var launch = instances.BeginLaunch(pack.Id, ct);
-        var process = await LaunchAsync(pack, log, launch.Token);
+        var process = await LaunchAsync(pack, log, launch.Token, joinServerAddress);
         var launchToken = launch.Token;
         if (!launch.Complete(process))
             throw new OperationCanceledException("Launch was cancelled.", launchToken);
@@ -37,18 +40,30 @@ public sealed class LaunchService(
         return process;
     }
 
+    /// <param name="joinServerAddress">
+    /// Optional <c>host</c> or <c>host:port</c> the game should connect to instead of stopping at the
+    /// main menu — what the Servers page's "Join" does.
+    /// </param>
+    /// <remarks>
+    /// The address is passed to CmlLib as <see cref="MLaunchOption.ServerIp"/>/
+    /// <c>ServerPort</c>, which emits <c>--quickPlayMultiplayer</c> on versions that support it and
+    /// the older <c>--server</c>/<c>--port</c> pair on the ones that do not. Passing null is exactly
+    /// the behaviour every existing caller already had.
+    /// </remarks>
     public async Task<Process> LaunchAsync(
         PackDetail pack,
         IProgress<string>? log,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? joinServerAddress = null)
     {
-        return await Task.Run(() => LaunchCoreAsync(pack, log, ct), ct);
+        return await Task.Run(() => LaunchCoreAsync(pack, log, ct, joinServerAddress), ct);
     }
 
     private async Task<Process> LaunchCoreAsync(
         PackDetail pack,
         IProgress<string>? log,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? joinServerAddress = null)
     {
         void Report(string m) { log?.Report(m); AppLog.Log("launch", m); }
 
@@ -201,6 +216,25 @@ public sealed class LaunchService(
             GameLauncherName = "CloudLauncher",
             GameLauncherVersion = "1"
         };
+        // "Join this server on launch". Additive: with no address this is the launch every other
+        // caller already got. CmlLib turns these two into --quickPlayMultiplayer on versions that
+        // have it and --server/--port on the ones that do not, so this does not need to know which
+        // Minecraft version is being started.
+        if (!string.IsNullOrWhiteSpace(joinServerAddress))
+        {
+            var (joinHost, joinPort) = MinecraftServerPing.ParseAddress(joinServerAddress);
+            if (joinHost.Length > 0)
+            {
+                args.ServerIp = joinHost;
+                args.ServerPort = joinPort;
+                Report($"Will connect to {joinHost}:{joinPort} on startup.");
+            }
+            else
+            {
+                Report($"Could not read '{joinServerAddress}' as a server address — starting at the main menu.");
+            }
+        }
+
         var extraJvm = BuildExtraJvmArguments(settings.GetJvmArgsFor(pack.Id));
         if (extraJvm is not null)
         {

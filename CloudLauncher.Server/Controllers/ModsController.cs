@@ -25,6 +25,7 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         [FromQuery] string? loader = null,
         [FromQuery] int offset = 0,
         [FromQuery] int limit = 25,
+        [FromQuery] string? sort = null,
         CancellationToken ct = default)
     {
         if (limit <= 0 || limit > 100) limit = 25;
@@ -65,8 +66,7 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
             query = query.Where(m => m.LoadersCsv != null && m.LoadersCsv.Contains(loader.ToLower()));
 
         var total = await query.CountAsync(ct);
-        var page = await query
-            .OrderByDescending(m => m.UpdatedAt)
+        var page = await ApplySort(query, sort)
             .Skip(offset).Take(limit)
             .ToListAsync(ct);
 
@@ -357,6 +357,141 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
             version.McVersionsCsv, version.LoadersCsv, version.PublishedAt));
     }
 
+    /// <summary>Corrects the details of an already-uploaded version, leaving its file alone.</summary>
+    /// <remarks>
+    /// <para>A null field keeps whatever is stored, so a caller that only wants to fix the changelog
+    /// sends only the changelog and cannot accidentally blank the rest.</para>
+    /// <para>The parent mod's denormalised CSVs are re-written exactly as <see cref="UploadVersion"/>
+    /// does it, because they exist to make the browse filters work and are supposed to describe the
+    /// most recent word on compatibility. Editing the newest version's Minecraft list and leaving the
+    /// mod advertising the old one would make the mod un-findable under the version it now supports.
+    /// </para>
+    /// </remarks>
+    [HttpPatch("{id:guid}/versions/{versionId:guid}")]
+    public async Task<ActionResult<HostedModVersionInfo>> UpdateVersion(
+        Guid id, Guid versionId, [FromBody] UpdateModVersionRequest req, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        if (mod is null) return NotFound();
+        if (mod.OwnerId != me) return Forbid();
+
+        var version = await db.ModVersions.FirstOrDefaultAsync(v => v.Id == versionId && v.ModId == id, ct);
+        if (version is null) return NotFound();
+
+        if (req.VersionString is not null)
+        {
+            var trimmed = req.VersionString.Trim();
+            if (trimmed.Length == 0 || trimmed.Length > 64)
+                return BadRequest(new { error = "Version must be 1-64 characters" });
+            version.VersionString = trimmed;
+        }
+        if (req.Changelog is not null)
+        {
+            if (req.Changelog.Length > 4096)
+                return BadRequest(new { error = "Changelog must be 4096 characters or fewer" });
+            // An empty string is a deliberate "clear it", which is the only way to take back a
+            // changelog that was wrong; null above is "leave it".
+            version.Changelog = req.Changelog.Length == 0 ? null : req.Changelog;
+        }
+        if (req.ReleaseChannel is not null)
+        {
+            var channel = req.ReleaseChannel.Trim().ToLowerInvariant();
+            if (channel is not ("release" or "beta" or "alpha"))
+                return BadRequest(new { error = "Channel must be release, beta or alpha" });
+            version.ReleaseChannel = channel;
+        }
+        if (req.McVersionsCsv is not null)
+            version.McVersionsCsv = req.McVersionsCsv.Length == 0 ? null : req.McVersionsCsv;
+        if (req.LoadersCsv is not null)
+            version.LoadersCsv = req.LoadersCsv.Length == 0 ? null : req.LoadersCsv.ToLowerInvariant();
+
+        if (!string.IsNullOrWhiteSpace(version.McVersionsCsv)) mod.McVersionsCsv = version.McVersionsCsv;
+        if (!string.IsNullOrWhiteSpace(version.LoadersCsv))    mod.LoadersCsv    = version.LoadersCsv;
+        mod.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return Ok(new HostedModVersionInfo(
+            version.Id, version.VersionString, version.Changelog, version.ReleaseChannel,
+            version.BlobHash, version.FileSize, version.FileName,
+            version.McVersionsCsv, version.LoadersCsv, version.PublishedAt));
+    }
+
+    // ---- Icon ----
+
+    /// <summary>Sets the mod's icon.</summary>
+    /// <remarks>
+    /// <c>Mod.IconBlobHash</c> has existed since the table did and <see cref="HostedModSummary"/> has
+    /// always carried it, but nothing could ever write one — so every hosted mod rendered as a grey
+    /// letter tile. Replacing an icon drops the previous blob if nothing else points at it, so
+    /// re-uploading an icon a few times does not leave a trail of dead files in the store.
+    /// </remarks>
+    [HttpPost("{id:guid}/icon")]
+    [RequestSizeLimit(ControllerHelpers.MaxIconBytes + (1 << 16))]
+    public async Task<IActionResult> UploadIcon(Guid id, [FromForm] IFormFile file, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        if (mod is null) return NotFound();
+        // The same gate uploading a version uses: owner only. The icon is part of how the mod
+        // presents itself, so it belongs with the other things only the owner can rewrite.
+        if (mod.OwnerId != me) return Forbid();
+
+        var (hash, error) = await ControllerHelpers.TryStoreIconAsync(blobs, file, ct);
+        if (hash is null) return BadRequest(new { error });
+
+        var previous = mod.IconBlobHash;
+        mod.IconBlobHash = hash;
+        mod.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (previous is not null && previous != hash)
+            await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
+        return Ok(new { iconBlobHash = hash });
+    }
+
+    /// <summary>Serves the mod's icon, or 404 when it has none.</summary>
+    /// <remarks>
+    /// Anonymous, and gated by the same visibility rule as the rest of the mod: a public mod's icon
+    /// is public, anything else needs a caller who can view the mod. It has to work without an
+    /// Authorization header because an icon's whole job is to be the source of an &lt;Image&gt;, and
+    /// a WPF image binding sends no headers — so a signed-in launcher gets private icons by fetching
+    /// the bytes through its API client instead.
+    /// </remarks>
+    [AllowAnonymous]
+    [HttpGet("{id:guid}/icon")]
+    public async Task<IActionResult> GetIcon(Guid id, CancellationToken ct)
+    {
+        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        if (mod is null) return NotFound();
+
+        var perms = await resolver.GetAsync(mod, this.UserIdOrNull(), ct);
+        if (!perms.HasFlag(PackPermissions.View)) return NotFound();
+
+        if (string.IsNullOrEmpty(mod.IconBlobHash) || !blobs.Exists(mod.IconBlobHash)) return NotFound();
+        return File(blobs.OpenRead(mod.IconBlobHash), ControllerHelpers.IconResponseContentType);
+    }
+
+    /// <summary>Clears the mod's icon, putting it back to the letter tile.</summary>
+    [HttpDelete("{id:guid}/icon")]
+    public async Task<IActionResult> DeleteIcon(Guid id, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        if (mod is null) return NotFound();
+        if (mod.OwnerId != me) return Forbid();
+
+        var previous = mod.IconBlobHash;
+        if (previous is null) return NoContent();
+
+        mod.IconBlobHash = null;
+        mod.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
+        return NoContent();
+    }
+
     /// <summary>Removes one uploaded version of a mod.</summary>
     /// <remarks>
     /// Deleting the last version is allowed and leaves the mod itself in place — a mod page with no
@@ -402,6 +537,24 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
+
+    /// <summary>Applies the browse ordering named by <paramref name="sort"/>.</summary>
+    /// <remarks>
+    /// <para>Anything unrecognised — including null, which is every older client — orders by most
+    /// recently updated, the ordering this route has always had. A browse that erupts in a 400
+    /// because a launcher sent a mode this build has not heard of would be a worse answer than a
+    /// list in the wrong order.</para>
+    /// <para><c>downloads</c> is accepted and deliberately resolves to the default: nothing counts
+    /// downloads yet (<c>HostedModSummary.DownloadCount</c> is a hard-coded zero), so sorting by it
+    /// would shuffle the list arbitrarily and call it popularity. The name is honoured now so the
+    /// route does not need changing on the day a counter exists.</para>
+    /// </remarks>
+    private static IQueryable<Mod> ApplySort(IQueryable<Mod> query, string? sort) => sort?.Trim().ToLowerInvariant() switch
+    {
+        ModBrowseSort.Created => query.OrderByDescending(m => m.CreatedAt),
+        ModBrowseSort.Name => query.OrderBy(m => m.Name),
+        _ => query.OrderByDescending(m => m.UpdatedAt)
+    };
 
     private async Task<string> GenerateUniqueSlugAsync(string name, CancellationToken ct)
     {

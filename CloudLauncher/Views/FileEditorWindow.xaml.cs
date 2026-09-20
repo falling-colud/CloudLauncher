@@ -22,13 +22,21 @@ namespace CloudLauncher.Views;
 /// <para>Its own window, not a panel, so it can sit beside the launcher (or the game) while the pack
 /// is open. Encoding, BOM and line endings are preserved by <see cref="TextFileService"/>.</para>
 /// </remarks>
-public partial class FileEditorWindow : Window
+public partial class FileEditorWindow : Window, IDialogHost
 {
     private readonly Guid _packId;
     private readonly List<string> _roots = new();
     private readonly ObservableCollection<OpenDoc> _open = new();
     private OpenDoc? _current;
     private bool _suppressEditorEvents;
+
+    /// <summary>Set once the unsaved-changes question has been answered, so the second Closing pass
+    /// (the one we raise ourselves by calling <see cref="Window.Close"/>) goes straight through.</summary>
+    private bool _forceClose;
+
+    /// <summary>How many files the editor remembers per instance. Enough to cover "I had the four
+    /// configs I was comparing open"; not so many that a stale list reopens half the pack.</summary>
+    private const int MaxRestoredFiles = 12;
 
     /// <summary>One editor window per instance: opening it twice would let two buffers of the same
     /// file overwrite each other.</summary>
@@ -76,17 +84,79 @@ public partial class FileEditorWindow : Window
         }
         catch (Exception ex) { AppLog.Log("editor", $"No folder for pack {packId}: {ex.Message}"); }
 
-        InputBindings.Add(new KeyBinding(new RelayCommand(_ => SaveCurrent()), Key.S, ModifierKeys.Control));
-        InputBindings.Add(new KeyBinding(new RelayCommand(_ => SaveAll()), Key.S, ModifierKeys.Control | ModifierKeys.Shift));
+        InputBindings.Add(new KeyBinding(new RelayCommand(_ => _ = SaveCurrentAsync()), Key.S, ModifierKeys.Control));
+        InputBindings.Add(new KeyBinding(new RelayCommand(_ => _ = SaveAllAsync()), Key.S, ModifierKeys.Control | ModifierKeys.Shift));
+        InputBindings.Add(new KeyBinding(new RelayCommand(_ => ShowFind()), Key.F, ModifierKeys.Control));
+        InputBindings.Add(new KeyBinding(new RelayCommand(_ => FindStep(forward: true)), Key.F3, ModifierKeys.None));
+        InputBindings.Add(new KeyBinding(new RelayCommand(_ => FindStep(forward: false)), Key.F3, ModifierKeys.Shift));
+        InputBindings.Add(new KeyBinding(new RelayCommand(_ => _ = CloseCurrentTabAsync()), Key.W, ModifierKeys.Control));
 
         Loaded += (_, _) =>
         {
             BuildTree();
             WarnIfRunning();
+            RestoreSession();
             RefreshStatus();   // nothing open yet: Save and Save all start disabled
         };
         Closing += OnClosingWindow;
     }
+
+    // ── session ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reopens the files that were open when this instance's editor was last closed.
+    /// </summary>
+    /// <remarks>
+    /// <para>Closing the editor mid-edit on three configs and getting nothing back is the sort of
+    /// thing that teaches people not to use it. <c>AppSettings.RecentEditedFiles</c> existed for
+    /// exactly this and had never been written or read by anything.</para>
+    /// <para>The list is global but the paths are absolute, so filtering it by this instance's roots
+    /// is what makes it per-instance without a settings change. Files that have since been deleted
+    /// (or moved out by a sync) are skipped rather than reported — they are not an error.</para>
+    /// </remarks>
+    private void RestoreSession()
+    {
+        if (_roots.Count == 0) return;
+        try
+        {
+            var mine = App.State.Settings.RecentEditedFiles
+                .Where(BelongsToThisInstance)
+                .Where(File.Exists)
+                .Take(MaxRestoredFiles)
+                .Reverse()   // newest last, so the newest ends up the selected tab
+                .ToList();
+            foreach (var path in mine) OpenFile(path);
+            if (mine.Count > 0)
+                EditorStatus.Text = $"Reopened {mine.Count} file(s) from last time.";
+        }
+        catch (Exception ex) { AppLog.Log("editor", "Could not restore the open files: " + ex.Message); }
+    }
+
+    /// <summary>Records what is open now, newest first, dropping this instance's previous entries so
+    /// a file that was closed does not come back.</summary>
+    private void SaveSession()
+    {
+        try
+        {
+            var settings = App.State.Settings;
+            var others = settings.RecentEditedFiles.Where(p => !BelongsToThisInstance(p)).ToList();
+            var mine = _open.Select(d => d.Path).Reverse().Take(MaxRestoredFiles).ToList();
+            settings.RecentEditedFiles.Clear();
+            settings.RecentEditedFiles.AddRange(mine);
+            settings.RecentEditedFiles.AddRange(others);
+            settings.Save();
+        }
+        catch (Exception ex) { AppLog.Log("editor", "Could not remember the open files: " + ex.Message); }
+    }
+
+    /// <summary>Compares on a folder boundary, not a raw prefix: two instances called "Skyblock" and
+    /// "Skyblock2" would otherwise claim each other's files.</summary>
+    private bool BelongsToThisInstance(string path) =>
+        _roots.Any(root =>
+        {
+            var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        });
 
     /// <summary>Editing a config under a running game is not forbidden — sometimes it is exactly what
     /// you want before a restart — but the game will not see it, and anything it writes on exit wins.
@@ -213,6 +283,9 @@ public partial class FileEditorWindow : Window
             var doc = new OpenDoc(path, file);
             _open.Add(doc);
             OpenTabs.SelectedItem = doc;
+            // Recorded as it happens rather than only on close, so a crash or a forced quit still
+            // leaves the list of what was open.
+            SaveSession();
         }
         catch (Exception ex)
         {
@@ -251,6 +324,7 @@ public partial class FileEditorWindow : Window
         }
         finally { _suppressEditorEvents = false; }
         RefreshStatus();
+        if (FindBar.Visibility == Visibility.Visible) UpdateFindStatus();
     }
 
     private void OnEditorTextChanged(object sender, TextChangedEventArgs e)
@@ -281,17 +355,27 @@ public partial class FileEditorWindow : Window
 
     // ── saving ───────────────────────────────────────────────────────────────
 
-    private void OnSave(object sender, RoutedEventArgs e) => SaveCurrent();
-    private void OnSaveAll(object sender, RoutedEventArgs e) => SaveAll();
-
-    private bool SaveCurrent() => _current is not null && Save(_current);
-
-    private void SaveAll()
+    private async void OnSave(object sender, RoutedEventArgs e)
     {
-        foreach (var doc in _open.Where(d => d.IsDirty).ToList()) Save(doc);
+        try { await SaveCurrentAsync(); }
+        catch (Exception ex) { EditorStatus.Text = "Could not save: " + ex.Message; }
     }
 
-    private bool Save(OpenDoc doc)
+    private async void OnSaveAll(object sender, RoutedEventArgs e)
+    {
+        try { await SaveAllAsync(); }
+        catch (Exception ex) { EditorStatus.Text = "Could not save: " + ex.Message; }
+    }
+
+    private async Task<bool> SaveCurrentAsync() => _current is not null && await SaveAsync(_current);
+
+    private async Task SaveAllAsync()
+    {
+        foreach (var doc in _open.Where(d => d.IsDirty).ToList())
+            if (!await SaveAsync(doc)) return;   // stop at the first refusal rather than asking N times
+    }
+
+    private async Task<bool> SaveAsync(OpenDoc doc)
     {
         if (doc == _current) doc.Text = Editor.Text;
         if (!doc.IsDirty && doc.Text == doc.Original.Text) return true;
@@ -299,11 +383,11 @@ public partial class FileEditorWindow : Window
         // Someone (the game, another editor, a sync) rewrote it while it was open here.
         if (TextFileService.ChangedOnDisk(doc.Path, doc.Original))
         {
-            var overwrite = MessageBox.Show(this,
-                $"{Path.GetFileName(doc.Path)} has changed on disk since you opened it.\n\n" +
+            var overwrite = await ShowConfirmAsync("File changed on disk",
+                $"{Path.GetFileName(doc.Path)} has changed on disk since you opened it. " +
                 "Save anyway and overwrite those changes?",
-                "File changed on disk", MessageBoxButton.YesNo, MessageBoxImage.Warning);
-            if (overwrite != MessageBoxResult.Yes) return false;
+                "Overwrite", "Cancel", danger: true);
+            if (!overwrite) return false;
         }
 
         try
@@ -360,34 +444,239 @@ public partial class FileEditorWindow : Window
     private void OnWrapToggled(object sender, RoutedEventArgs e) =>
         Editor.TextWrapping = WrapBox.IsChecked == true ? TextWrapping.Wrap : TextWrapping.NoWrap;
 
-    private void OnCloseTab(object sender, RoutedEventArgs e)
+    private async void OnCloseTab(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { Tag: OpenDoc doc }) return;
-        if (!ConfirmDiscard(doc)) return;
+        try
+        {
+            if (sender is not FrameworkElement { Tag: OpenDoc doc }) return;
+            await CloseTabAsync(doc);
+        }
+        catch (Exception ex) { EditorStatus.Text = "Could not close that tab: " + ex.Message; }
+    }
+
+    /// <summary>Ctrl+W on the tab the user is looking at.</summary>
+    private async Task CloseCurrentTabAsync()
+    {
+        if (_current is null) return;
+        try { await CloseTabAsync(_current); }
+        catch (Exception ex) { EditorStatus.Text = "Could not close that tab: " + ex.Message; }
+    }
+
+    private async Task CloseTabAsync(OpenDoc doc)
+    {
+        if (!await ConfirmDiscardAsync(doc)) return;
         var wasCurrent = doc == _current;
         _open.Remove(doc);
         if (wasCurrent) OpenTabs.SelectedItem = _open.LastOrDefault();
+        SaveSession();
     }
 
-    private bool ConfirmDiscard(OpenDoc doc)
+    /// <summary>
+    /// Asks what to do about a file with unsaved changes. True means "carry on closing it".
+    /// </summary>
+    /// <remarks>Two buttons, not the old three: the themed dialog is a confirm, and of the three
+    /// answers the dangerous one is "discard". So this offers Save (which closes on success) or
+    /// Cancel, and points at Revert — which already throws the edit away by reloading from disk —
+    /// for the third. That way neither Escape nor a stray click on the backdrop can lose an edit.</remarks>
+    private async Task<bool> ConfirmDiscardAsync(OpenDoc doc)
     {
         if (!doc.IsDirty) return true;
-        var answer = MessageBox.Show(this,
-            $"Save changes to {Path.GetFileName(doc.Path)}?",
-            "Unsaved changes", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-        return answer switch
-        {
-            MessageBoxResult.Yes => Save(doc),
-            MessageBoxResult.No => true,
-            _ => false
-        };
+        var save = await ShowConfirmAsync("Unsaved changes",
+            $"{Path.GetFileName(doc.Path)} has changes that are not saved.\n\n" +
+            "Save them now? To throw them away instead, cancel and use Revert.",
+            "Save", "Cancel");
+        if (!save) return false;
+        return await SaveAsync(doc);
     }
 
-    private void OnClosingWindow(object? sender, CancelEventArgs e)
+    private async void OnClosingWindow(object? sender, CancelEventArgs e)
     {
-        if (_current is not null) _current.Text = Editor.Text;
-        foreach (var doc in _open.ToList())
-            if (!ConfirmDiscard(doc)) { e.Cancel = true; return; }
+        if (_forceClose) return;
+        try
+        {
+            if (_current is not null) _current.Text = Editor.Text;
+
+            if (_open.All(d => !d.IsDirty))
+            {
+                SaveSession();
+                return;
+            }
+
+            // The overlay cannot be awaited inside a Closing handler, so the close is called off and
+            // re-raised once the question has an answer.
+            e.Cancel = true;
+            foreach (var doc in _open.ToList())
+                if (!await ConfirmDiscardAsync(doc)) return;
+
+            _forceClose = true;
+            SaveSession();
+            Close();
+        }
+        catch (Exception ex)
+        {
+            EditorStatus.Text = "Could not close the editor: " + ex.Message;
+        }
+    }
+
+    // ── find in file ─────────────────────────────────────────────────────────
+
+    /// <summary>Shows the find bar and seeds it with whatever is selected, the way every editor does.
+    /// The box at the top of the window searches file <em>names</em>; this one searches the file.</summary>
+    private void ShowFind()
+    {
+        FindBar.Visibility = Visibility.Visible;
+        if (Editor.SelectionLength is > 0 and < 200 && !Editor.SelectedText.Contains('\n'))
+            FindBox.Text = Editor.SelectedText;
+        FindBox.Focus();
+        FindBox.SelectAll();
+        UpdateFindStatus();
+    }
+
+    private void OnCloseFind(object sender, RoutedEventArgs e) => HideFind();
+
+    private void HideFind()
+    {
+        FindBar.Visibility = Visibility.Collapsed;
+        if (_current is not null) Editor.Focus();
+    }
+
+    private void OnFindTextChanged(object sender, TextChangedEventArgs e)
+    {
+        UpdateFindStatus();
+        // Search from where the caret already is, so typing walks forward through the file rather
+        // than snapping back to the first hit on every keystroke.
+        FindFrom(Editor.SelectionStart, forward: true, wrap: true, moveCaret: true);
+    }
+
+    private void OnMatchCaseToggled(object sender, RoutedEventArgs e) => UpdateFindStatus();
+
+    private void OnFindBoxKeyDown(object sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Escape:
+                HideFind();
+                e.Handled = true;
+                break;
+            case Key.Enter:
+                FindStep(forward: !Keyboard.Modifiers.HasFlag(ModifierKeys.Shift));
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void OnFindNext(object sender, RoutedEventArgs e) => FindStep(forward: true);
+    private void OnFindPrevious(object sender, RoutedEventArgs e) => FindStep(forward: false);
+
+    /// <summary>F3 / Shift+F3 and the two arrow buttons. Opens the bar first if it is not showing,
+    /// so F3 on a fresh window does something sensible rather than nothing.</summary>
+    private void FindStep(bool forward)
+    {
+        if (FindBar.Visibility != Visibility.Visible) { ShowFind(); return; }
+        if (FindBox.Text.Length == 0) { FindBox.Focus(); return; }
+
+        var from = forward
+            ? Editor.SelectionStart + Math.Max(Editor.SelectionLength, 1)
+            : Editor.SelectionStart - 1;
+        FindFrom(from, forward, wrap: true, moveCaret: true);
+    }
+
+    private StringComparison FindComparison =>
+        MatchCaseBox.IsChecked == true ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+
+    /// <summary>Selects the next (or previous) match and scrolls it into view.</summary>
+    private void FindFrom(int start, bool forward, bool wrap, bool moveCaret)
+    {
+        var needle = FindBox.Text;
+        if (needle.Length == 0 || _current is null) return;
+
+        var text = Editor.Text;
+        if (text.Length == 0) { FindStatus.Text = "No matches"; return; }
+
+        start = Math.Clamp(start, 0, Math.Max(text.Length - 1, 0));
+        var index = forward
+            ? text.IndexOf(needle, start, FindComparison)
+            : LastIndexOfSafe(text, needle, start);
+
+        if (index < 0 && wrap)
+        {
+            index = forward
+                ? text.IndexOf(needle, 0, FindComparison)
+                : LastIndexOfSafe(text, needle, text.Length - 1);
+        }
+
+        if (index < 0)
+        {
+            FindStatus.Text = "No matches";
+            return;
+        }
+
+        if (!moveCaret) return;
+        Editor.Select(index, needle.Length);
+        Editor.ScrollToLine(Math.Max(Editor.GetLineIndexFromCharacterIndex(index) - 2, 0));
+        UpdateFindStatus();
+    }
+
+    /// <summary>Backwards search that survives a start index past the end of the string.</summary>
+    private int LastIndexOfSafe(string text, string needle, int start)
+    {
+        if (text.Length == 0 || start < 0) return -1;
+        start = Math.Min(start, text.Length - 1);
+        return text.LastIndexOf(needle, start, start + 1, FindComparison);
+    }
+
+    /// <summary>"3 of 17" — the count is what tells you whether the setting you are looking for is
+    /// in this file at all.</summary>
+    private void UpdateFindStatus()
+    {
+        var needle = FindBox.Text;
+        if (needle.Length == 0) { FindStatus.Text = ""; return; }
+
+        var text = Editor.Text;
+        var total = 0;
+        var caretIndex = 0;
+        var at = 0;
+        while (at <= text.Length - needle.Length)
+        {
+            var hit = text.IndexOf(needle, at, FindComparison);
+            if (hit < 0) break;
+            total++;
+            if (hit <= Editor.SelectionStart) caretIndex = total;
+            at = hit + 1;
+        }
+
+        FindStatus.Text = total == 0
+            ? "No matches"
+            : $"{Math.Max(caretIndex, 1)} of {total}";
+    }
+
+    // ── in-window dialogs ────────────────────────────────────────────────────
+
+    public Task<bool> ShowConfirmAsync(string title, string message,
+        string confirmText = "Yes", string cancelText = "Cancel", bool danger = false)
+    {
+        var overlay = new DialogOverlay();
+        overlay.Configure(title, message, confirmText, cancelText, danger);
+        return ShowOverlayAsync(overlay);
+    }
+
+    public Task ShowMessageAsync(string title, string message, string okText = "OK")
+    {
+        var overlay = new DialogOverlay();
+        overlay.Configure(title, message, okText, null, false);
+        return ShowOverlayAsync(overlay);
+    }
+
+    private async Task<bool> ShowOverlayAsync(DialogOverlay overlay)
+    {
+        DialogLayer.Children.Add(overlay);
+        DialogLayer.Visibility = Visibility.Visible;
+        try { return await overlay.Result; }
+        finally
+        {
+            DialogLayer.Children.Remove(overlay);
+            if (DialogLayer.Children.Count == 0) DialogLayer.Visibility = Visibility.Collapsed;
+        }
     }
 
     // ── view models ──────────────────────────────────────────────────────────

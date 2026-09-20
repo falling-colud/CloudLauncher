@@ -382,6 +382,73 @@ public class ResourcePacksController(
         return NoContent();
     }
 
+    // ---- Icon ----
+
+    /// <summary>Sets the resource pack's icon.</summary>
+    /// <remarks>
+    /// <c>HostedResourcePack.IconBlobHash</c> and <see cref="HostedResourcePackSummary"/> have always
+    /// carried an icon; until now nothing could write one. Same shape as the mod route on purpose —
+    /// one client-side upload helper drives all three hosted kinds.
+    /// </remarks>
+    [HttpPost("{id:guid}/icon")]
+    [RequestSizeLimit(ControllerHelpers.MaxIconBytes + (1 << 16))]
+    public async Task<IActionResult> UploadIcon(Guid id, [FromForm] IFormFile file, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (pack is null) return NotFound();
+        if (pack.OwnerId != me) return Forbid();
+
+        var (hash, error) = await ControllerHelpers.TryStoreIconAsync(blobs, file, ct);
+        if (hash is null) return BadRequest(new { error });
+
+        var previous = pack.IconBlobHash;
+        pack.IconBlobHash = hash;
+        pack.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (previous is not null && previous != hash)
+            await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
+        return Ok(new { iconBlobHash = hash });
+    }
+
+    /// <summary>Serves the resource pack's icon, or 404 when it has none.</summary>
+    /// <remarks>Anonymous under the same visibility rule as the pack itself, so an &lt;Image&gt; with
+    /// no Authorization header can show a public pack's art.</remarks>
+    [AllowAnonymous]
+    [HttpGet("{id:guid}/icon")]
+    public async Task<IActionResult> GetIcon(Guid id, CancellationToken ct)
+    {
+        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (pack is null) return NotFound();
+
+        var perms = await resolver.GetAsync(pack, this.UserIdOrNull(), ct);
+        if (!perms.HasFlag(PackPermissions.View)) return NotFound();
+
+        if (string.IsNullOrEmpty(pack.IconBlobHash) || !blobs.Exists(pack.IconBlobHash)) return NotFound();
+        return File(blobs.OpenRead(pack.IconBlobHash), ControllerHelpers.IconResponseContentType);
+    }
+
+    /// <summary>Clears the resource pack's icon.</summary>
+    [HttpDelete("{id:guid}/icon")]
+    public async Task<IActionResult> DeleteIcon(Guid id, CancellationToken ct)
+    {
+        var me = this.UserId();
+        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (pack is null) return NotFound();
+        if (pack.OwnerId != me) return Forbid();
+
+        var previous = pack.IconBlobHash;
+        if (previous is null) return NoContent();
+
+        pack.IconBlobHash = null;
+        pack.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
+        return NoContent();
+    }
+
     [HttpGet("{id:guid}/files/{versionId:guid}")]
     public async Task<IActionResult> Download(Guid id, Guid versionId, CancellationToken ct)
     {

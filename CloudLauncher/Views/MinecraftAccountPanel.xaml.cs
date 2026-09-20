@@ -134,6 +134,30 @@ public partial class MinecraftAccountPanel : Page
             : "The clipboard is in use by another program.");
     }
 
+    /// <summary>Renames an offline account from the row's context menu.</summary>
+    /// <remarks>
+    /// The prompt opens with the current name in it, because a rename is almost always a correction
+    /// to what is already there rather than a fresh name typed from nothing. Cancelling, or leaving
+    /// it unchanged, does nothing at all.
+    /// </remarks>
+    private async void OnCtxRename(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (RowFromSender(sender) is not { } row) return;
+            if (!row.CanRename) { Fail(row.RenameToolTip); return; }
+
+            var name = await _shell.PromptAsync("Rename offline account",
+                "What should this account be called in Minecraft?", row.Username);
+            if (string.IsNullOrWhiteSpace(name)) return;
+            if (string.Equals(name.Trim(), row.Username, StringComparison.Ordinal)) return;
+
+            var renamed = App.State.MinecraftAccounts.RenameOffline(row.Id, name);
+            Okay($"Renamed to {renamed.Username}.");
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
     private async void OnRemoveAccount(object sender, RoutedEventArgs e)
     {
         try
@@ -205,6 +229,15 @@ public sealed class AccountRow
     public string IconGlyph { get; }
     public string? Uuid { get; }
     public bool HasUuid => !string.IsNullOrEmpty(Uuid);
+
+    /// <summary>Whether Rename applies to this account.</summary>
+    /// <remarks>Offline only. A Microsoft account's name is Mojang's and is written back from the
+    /// session on every launch, so a rename typed here would silently revert.</remarks>
+    public bool CanRename => !IsMicrosoft;
+
+    public string RenameToolTip => IsMicrosoft
+        ? "Microsoft accounts are named by Mojang — the name comes from the sign-in."
+        : "Change the username this offline account plays as";
 
     public Visibility UseButtonVisibility => IsCurrent ? Visibility.Collapsed : Visibility.Visible;
     public Visibility ActiveLabelVisibility => IsCurrent ? Visibility.Visible : Visibility.Collapsed;

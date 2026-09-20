@@ -22,6 +22,11 @@ public partial class AccountPanel : Page
     /// <summary>Cancels an in-flight profile/usage load when the page goes away.</summary>
     private readonly CancellationTokenSource _cts = new();
 
+    /// <summary>The address <c>auth/me</c> reported, or null when it told us nothing.</summary>
+    /// <remarks>Held so the resend action can use it. A server too old to send an address leaves this
+    /// null and the resend falls back to asking, which is what it always did.</remarks>
+    private string? _email;
+
     public AccountPanel(MainWindow shell)
     {
         InitializeComponent();
@@ -79,6 +84,7 @@ public partial class AccountPanel : Page
                 UsernameLabel.Text = me.Username;
                 UserIdLabel.Text = me.Id.ToString();
                 CopyIdButton.Visibility = Visibility.Visible;
+                ApplyEmail(me.Email);
                 ApplyVerifiedState(me.EmailConfirmed);
             }
             catch (OperationCanceledException) { return; }
@@ -96,6 +102,19 @@ public partial class AccountPanel : Page
         finally { if (!_cts.IsCancellationRequested) RefreshButton.IsEnabled = true; }
     }
 
+    /// <summary>Shows the registered address beside the verified pill.</summary>
+    /// <remarks>
+    /// The pill on its own said an address was unverified without saying which — unhelpful for anyone
+    /// with more than one mailbox, and the reason resending used to start by asking the user for
+    /// something the server already knew.
+    /// </remarks>
+    private void ApplyEmail(string? email)
+    {
+        _email = string.IsNullOrWhiteSpace(email) ? null : email.Trim();
+        EmailLabel.Text = _email ?? "";
+        EmailLabel.Visibility = _email is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
     private void ApplyVerifiedState(bool confirmed)
     {
         VerifiedPill.Visibility = Visibility.Visible;
@@ -104,6 +123,9 @@ public partial class AccountPanel : Page
             ? "Your email address has been confirmed."
             : "Until the address is confirmed you cannot recover this account by email.";
         ResendVerificationButton.Visibility = confirmed ? Visibility.Collapsed : Visibility.Visible;
+        ResendVerificationButton.ToolTip = _email is null
+            ? "Sends the confirmation link again to the address you registered with"
+            : $"Sends the confirmation link again to {_email}";
     }
 
     /// <summary>Paints the storage meter. An account with no quota gets the figure without a bar,
@@ -170,15 +192,21 @@ public partial class AccountPanel : Page
     {
         try
         {
-            // The profile does not carry the address, so ask for it. Typing it again is also the
-            // fix when the original sign-up address was the thing that was wrong.
-            var email = await _shell.PromptAsync("Resend verification email",
-                "Which address did you register with?");
-            if (string.IsNullOrWhiteSpace(email)) return;
+            // The profile carries the address now, so the common case is one click. The prompt is
+            // still the fallback for a server too old to send it — and it remains the way in when the
+            // sign-up address was itself the thing that was wrong.
+            var email = _email;
+            if (email is null)
+            {
+                email = await _shell.PromptAsync("Resend verification email",
+                    "Which address did you register with?");
+                if (string.IsNullOrWhiteSpace(email)) return;
+                email = email.Trim();
+            }
 
             ResendVerificationButton.IsEnabled = false;
-            await App.State.Api.ResendVerificationAsync(new ResendVerificationRequest(email.Trim()));
-            Okay($"Verification email sent to {email.Trim()}.");
+            await App.State.Api.ResendVerificationAsync(new ResendVerificationRequest(email));
+            Okay($"Verification email sent to {email}.");
         }
         catch (Exception ex) { Fail("Could not send the email: " + ex.Message); }
         finally { ResendVerificationButton.IsEnabled = true; }

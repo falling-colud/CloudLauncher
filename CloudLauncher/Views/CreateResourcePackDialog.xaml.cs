@@ -22,7 +22,7 @@ public partial class CreateResourcePackDialog : Window
 
     private async Task LoadMinecraftVersionsAsync()
     {
-        StatusLabel.Foreground = (System.Windows.Media.Brush)FindResource("TextSecondaryBrush");
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
         StatusLabel.Text = "Loading Minecraft versions...";
         UpdateCreateButton();
         try
@@ -35,7 +35,7 @@ public partial class CreateResourcePackDialog : Window
         }
         catch (Exception ex)
         {
-            StatusLabel.Foreground = (System.Windows.Media.Brush)FindResource("DangerBrush");
+            StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
             StatusLabel.Text = "Couldn't load Minecraft versions: " + ex.Message;
         }
         finally { UpdateCreateButton(); }
@@ -60,7 +60,7 @@ public partial class CreateResourcePackDialog : Window
     {
         if (!IsFormComplete())
         {
-            StatusLabel.Foreground = (System.Windows.Media.Brush)FindResource("DangerBrush");
+            StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
             StatusLabel.Text = "Fill in the name, summary, Minecraft version, and visibility.";
             UpdateCreateButton();
             return;
@@ -82,7 +82,7 @@ public partial class CreateResourcePackDialog : Window
 
         _isCreating = true;
         UpdateCreateButton();
-        StatusLabel.Foreground = (System.Windows.Media.Brush)FindResource("TextSecondaryBrush");
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
         StatusLabel.Text = "Creating...";
         Mouse.OverrideCursor = Cursors.Wait;
         try
@@ -93,12 +93,12 @@ public partial class CreateResourcePackDialog : Window
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
         {
-            StatusLabel.Foreground = (System.Windows.Media.Brush)FindResource("DangerBrush");
+            StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
             StatusLabel.Text = "Failed: hosted resource packs are not deployed on this server.";
         }
         catch (Exception ex)
         {
-            StatusLabel.Foreground = (System.Windows.Media.Brush)FindResource("DangerBrush");
+            StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
             StatusLabel.Text = "Failed: " + ex.Message;
         }
         finally

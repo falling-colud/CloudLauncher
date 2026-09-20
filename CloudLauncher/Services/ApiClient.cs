@@ -259,11 +259,15 @@ public sealed class ApiClient
 
     // ── hosted mods ──────────────────────────────────────────────────────────
 
+    /// <param name="sort">One of <see cref="ModBrowseSort"/>, or null for the server's default
+    /// (most recently updated). Trailing and optional so every existing call site is unchanged, and
+    /// a server too old to know the parameter simply ignores it and answers in its own order.</param>
     public async Task<ModBrowsePage> BrowseModsAsync(
         ModBrowseSource source, Guid? teamId = null,
         string? query = null, string? mcVersion = null, string? loader = null,
         int offset = 0, int limit = 25,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        string? sort = null)
     {
         await EnsureTokenAsync(ct);
         var qs = $"mods/browse?source={source}&offset={offset}&limit={limit}";
@@ -271,6 +275,7 @@ public sealed class ApiClient
         if (!string.IsNullOrWhiteSpace(query)) qs += $"&q={Uri.EscapeDataString(query)}";
         if (!string.IsNullOrWhiteSpace(mcVersion)) qs += $"&mcVersion={Uri.EscapeDataString(mcVersion)}";
         if (!string.IsNullOrWhiteSpace(loader)) qs += $"&loader={Uri.EscapeDataString(loader)}";
+        if (!string.IsNullOrWhiteSpace(sort)) qs += $"&sort={Uri.EscapeDataString(sort)}";
         return await ReadHostedModAsync<ModBrowsePage>(await _http.GetAsync(qs, ct), ct);
     }
 
@@ -353,6 +358,17 @@ public sealed class ApiClient
             await _http.PostAsync($"mods/{modId}/versions", form, ct), ct);
     }
 
+    /// <summary>Corrects an uploaded version's details without touching its file.</summary>
+    /// <remarks>Null fields keep whatever the server has, so a caller that only means to fix one
+    /// field cannot blank the others by omission.</remarks>
+    public async Task<HostedModVersionInfo> UpdateModVersionAsync(
+        Guid modId, Guid versionId, UpdateModVersionRequest req, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        return await ReadHostedModAsync<HostedModVersionInfo>(
+            await _http.PatchAsJsonAsync($"mods/{modId}/versions/{versionId}", req, JsonOpts, ct), ct);
+    }
+
     /// <summary>Deletes one uploaded version of a hosted mod. Deleting the last one keeps the mod.</summary>
     public async Task DeleteModVersionAsync(Guid modId, Guid versionId, CancellationToken ct = default)
     {
@@ -360,7 +376,17 @@ public sealed class ApiClient
         await EnsureHostedModSuccess(await _http.DeleteAsync($"mods/{modId}/versions/{versionId}", ct));
     }
 
-    public async Task<Stream> DownloadModVersionAsync(Guid modId, Guid versionId, CancellationToken ct = default)
+    /// <param name="progress">Reports (bytes read, total bytes) as the caller drains the returned
+    /// stream. Total is the response's Content-Length, or -1 when the server did not send one.</param>
+    /// <remarks>
+    /// The progress is measured on the way out rather than by buffering the download here: the
+    /// caller is already copying the stream into a jar on disk, and reading it twice to get a
+    /// percentage would double the memory and the time. A null reporter costs nothing — the stream
+    /// is handed back unwrapped.
+    /// </remarks>
+    public async Task<Stream> DownloadModVersionAsync(
+        Guid modId, Guid versionId, CancellationToken ct = default,
+        IProgress<(long done, long total)>? progress = null)
     {
         await EnsureTokenAsync(ct);
         var resp = await _http.GetAsync($"mods/{modId}/files/{versionId}",
@@ -373,8 +399,127 @@ public sealed class ApiClient
                 HttpStatusCode.NotFound);
         }
         await EnsureSuccessKeepBody(resp, ct); // keep the response — we stream its body to the caller
-        return await resp.Content.ReadAsStreamAsync(ct);
+        var stream = await resp.Content.ReadAsStreamAsync(ct);
+        if (progress is null) return stream;
+        return new ProgressReadStream(stream, resp.Content.Headers.ContentLength ?? -1, progress);
     }
+
+    // ── hosted icons ─────────────────────────────────────────────────────────
+
+    /// <summary>The address of a hosted mod's icon on this server.</summary>
+    /// <remarks>
+    /// Useful directly only for a public mod: the route is anonymous for those, and a WPF
+    /// <c>&lt;Image&gt;</c> binding sends no Authorization header. For anything private or shared,
+    /// use <see cref="GetModIconFileAsync"/>, which fetches the bytes with the session's token and
+    /// hands back a local file the same binding can show.
+    /// </remarks>
+    public string ModIconUrl(Guid modId) => $"{ServerUrl.TrimEnd('/')}/mods/{modId}/icon";
+
+    public string ResourcePackIconUrl(Guid packId) => $"{ServerUrl.TrimEnd('/')}/resourcepacks/{packId}/icon";
+
+    public string SharedWorldIconUrl(Guid worldId) => $"{ServerUrl.TrimEnd('/')}/worlds/{worldId}/icon";
+
+    /// <summary>Uploads a new icon for a hosted mod, replacing any current one.</summary>
+    public Task UploadModIconAsync(Guid modId, string filePath, CancellationToken ct = default) =>
+        UploadIconAsync($"mods/{modId}/icon", filePath, ct);
+
+    public Task UploadResourcePackIconAsync(Guid packId, string filePath, CancellationToken ct = default) =>
+        UploadIconAsync($"resourcepacks/{packId}/icon", filePath, ct);
+
+    public Task UploadSharedWorldIconAsync(Guid worldId, string filePath, CancellationToken ct = default) =>
+        UploadIconAsync($"worlds/{worldId}/icon", filePath, ct);
+
+    /// <summary>Clears a hosted mod's icon, putting it back to its letter tile.</summary>
+    public async Task DeleteModIconAsync(Guid modId, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureHostedModSuccess(await _http.DeleteAsync($"mods/{modId}/icon", ct));
+    }
+
+    public async Task DeleteResourcePackIconAsync(Guid packId, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureSuccess(await _http.DeleteAsync($"resourcepacks/{packId}/icon", ct));
+    }
+
+    public async Task DeleteSharedWorldIconAsync(Guid worldId, CancellationToken ct = default)
+    {
+        await EnsureTokenAsync(ct);
+        await EnsureSuccess(await _http.DeleteAsync($"worlds/{worldId}/icon", ct));
+    }
+
+    /// <summary>
+    /// A local file holding a hosted mod's icon, or null when it has none or cannot be fetched.
+    /// </summary>
+    /// <param name="iconBlobHash">The hash from the summary/detail. Null means "no icon" and answers
+    /// null without a round trip.</param>
+    /// <remarks>
+    /// <para>The icon route is authorised for anything that is not public, and a WPF image binding
+    /// cannot carry a token — so the bytes are fetched here, where the token lives, and written to a
+    /// file the binding can point at. Putting the token in the URL instead would spray a credential
+    /// through logs and proxies for the sake of a 40-pixel picture.</para>
+    /// <para>The cache is keyed by the blob hash, which is the content: a changed icon is a different
+    /// hash and therefore a different file, so there is no staleness to invalidate and no request to
+    /// repeat once an icon has been seen. A failure returns null and caches nothing, so it is retried
+    /// next time rather than remembered as "this mod has no icon".</para>
+    /// </remarks>
+    public Task<string?> GetModIconFileAsync(Guid modId, string? iconBlobHash, CancellationToken ct = default) =>
+        GetIconFileAsync($"mods/{modId}/icon", iconBlobHash, ct);
+
+    public Task<string?> GetResourcePackIconFileAsync(Guid packId, string? iconBlobHash, CancellationToken ct = default) =>
+        GetIconFileAsync($"resourcepacks/{packId}/icon", iconBlobHash, ct);
+
+    public Task<string?> GetSharedWorldIconFileAsync(Guid worldId, string? iconBlobHash, CancellationToken ct = default) =>
+        GetIconFileAsync($"worlds/{worldId}/icon", iconBlobHash, ct);
+
+    /// <summary>Where downloaded icons are kept. Content-addressed, so it never needs clearing.</summary>
+    private static string IconCacheDir => Path.Combine(AppSettings.DataRootPath, "icon-cache");
+
+    private async Task UploadIconAsync(string route, string filePath, CancellationToken ct)
+    {
+        await EnsureTokenAsync(ct);
+        using var form = new MultipartFormDataContent();
+        await using var fs = File.OpenRead(filePath);
+        var content = new StreamContent(fs);
+        content.Headers.ContentType = new(
+            Path.GetExtension(filePath).Equals(".png", StringComparison.OrdinalIgnoreCase)
+                ? "image/png"
+                : "image/jpeg");
+        form.Add(content, "file", Path.GetFileName(filePath));
+        await EnsureSuccess(await _http.PostAsync(route, form, ct));
+    }
+
+    private async Task<string?> GetIconFileAsync(string route, string? iconBlobHash, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(iconBlobHash)) return null;
+
+        // Only hex is ever a blob hash; anything else would be a path fragment, not a file name.
+        if (!iconBlobHash.All(Uri.IsHexDigit)) return null;
+        var cached = Path.Combine(IconCacheDir, iconBlobHash + ".img");
+        if (File.Exists(cached)) return cached;
+
+        try
+        {
+            await EnsureTokenAsync(ct);
+            using var resp = await _http.GetAsync(route, HttpCompletionOption.ResponseHeadersRead, ct);
+            if (!resp.IsSuccessStatusCode) return null;
+
+            Directory.CreateDirectory(IconCacheDir);
+            // Written to a temp name and moved into place so a cancelled or failed download can
+            // never leave a half-written file that later looks like a cache hit.
+            var tmp = cached + "." + Guid.NewGuid().ToString("N")[..8] + ".part";
+            await using (var src = await resp.Content.ReadAsStreamAsync(ct))
+            await using (var dst = File.Create(tmp))
+                await src.CopyToAsync(dst, ct);
+
+            try { File.Move(tmp, cached, overwrite: true); }
+            catch { try { File.Delete(tmp); } catch { } }
+            return File.Exists(cached) ? cached : null;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { return null; } // an icon is decoration: never fail the screen that wanted it
+    }
+
 
     // ── shared worlds ────────────────────────────────────────────────────────
 
@@ -1060,6 +1205,73 @@ public sealed class ApiClient
                 resp.StatusCode);
         }
         return await ReadAsync<T>(resp, ct);
+    }
+
+    /// <summary>
+    /// A pass-through read-only stream that reports (bytes read, expected total) as it is drained.
+    /// </summary>
+    /// <remarks>
+    /// <para>The mirror image of <see cref="ProgressStream"/>: uploads are measured where something
+    /// pulls bytes out of a file, downloads where the caller pulls bytes out of the response. Sitting
+    /// in the middle is what lets the progress be reported without the download being buffered
+    /// somewhere first just so it can be counted.</para>
+    /// <para><paramref name="total"/> is the response's Content-Length, or -1 when the server
+    /// chunked the body and never said how big it would be. It is passed through untouched rather
+    /// than guessed at, so a caller can tell "80 of 100 bytes" from "80 bytes of who knows" and draw
+    /// a determinate bar only in the first case.</para>
+    /// <para>Disposing disposes the wrapped response stream, because this object stands in for it
+    /// everywhere the caller would otherwise have held it directly.</para>
+    /// </remarks>
+    private sealed class ProgressReadStream(Stream inner, long total, IProgress<(long done, long total)> progress) : Stream
+    {
+        private long _read;
+
+        public override bool CanRead => inner.CanRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => total >= 0 ? total : throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => _read;
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+            Advance(inner.Read(buffer, offset, count));
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) =>
+            Advance(await inner.ReadAsync(buffer.AsMemory(offset, count), ct));
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default) =>
+            Advance(await inner.ReadAsync(buffer, ct));
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() { }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) inner.Dispose();
+            base.Dispose(disposing);
+        }
+
+        public override async ValueTask DisposeAsync()
+        {
+            await inner.DisposeAsync();
+            await base.DisposeAsync();
+        }
+
+        private int Advance(int count)
+        {
+            if (count > 0)
+            {
+                _read += count;
+                progress.Report((_read, total));
+            }
+            return count;
+        }
     }
 
     /// <summary>A pass-through read-only stream that reports how many bytes have been read out of it.</summary>

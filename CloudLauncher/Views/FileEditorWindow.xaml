@@ -5,6 +5,7 @@
         WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Surface0Brush}"
         Foreground="{DynamicResource TextPrimaryBrush}">
+    <Grid>
     <Grid Margin="0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -146,6 +147,61 @@
                     </ScrollViewer>
                 </Border>
 
+                <!-- Find bar. Ctrl+F shows it, Esc puts it away; the box at the top of the window
+                     searches file NAMES, which is a different question and was the only one the
+                     editor could answer until now. -->
+                <Border x:Name="FindBar" DockPanel.Dock="Top" Visibility="Collapsed"
+                        Background="{DynamicResource Surface2Brush}"
+                        BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                        Padding="10,6">
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Style="{StaticResource IconButton}" Content="&#xE74B;"
+                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                    Click="OnFindPrevious" ToolTip="Previous match (Shift+F3)"/>
+                            <Button Style="{StaticResource IconButton}" Content="&#xE74A;"
+                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                    Margin="4,0,0,0"
+                                    Click="OnFindNext" ToolTip="Next match (F3)"/>
+                            <Button Style="{StaticResource IconButton}" Content="&#xE8BB;"
+                                    FontFamily="{StaticResource IconFont}" FontSize="10"
+                                    Margin="10,0,0,0"
+                                    Click="OnCloseFind" ToolTip="Close the find bar (Esc)"/>
+                        </StackPanel>
+                        <TextBlock x:Name="FindStatus" DockPanel.Dock="Right"
+                                   Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                   MinWidth="110" TextAlignment="Right" Margin="10,0,10,0"/>
+                        <CheckBox x:Name="MatchCaseBox" DockPanel.Dock="Right" Content="Match case"
+                                  VerticalAlignment="Center" Margin="12,0,0,0"
+                                  Click="OnMatchCaseToggled"
+                                  ToolTip="Treat upper and lower case as different"/>
+                        <Grid>
+                            <TextBox x:Name="FindBox" Padding="26,3,7,3" VerticalContentAlignment="Center"
+                                     TextChanged="OnFindTextChanged"
+                                     KeyDown="OnFindBoxKeyDown"
+                                     ToolTip="Search the text of the open file (Ctrl+F). F3 and Shift+F3 step through the matches."/>
+                            <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="11"
+                                       Foreground="{DynamicResource TextTertiaryBrush}"
+                                       VerticalAlignment="Center" Margin="9,0,0,0"
+                                       IsHitTestVisible="False"/>
+                            <TextBlock Text="Find in this file…" Margin="26,0,0,0"
+                                       Foreground="{DynamicResource TextTertiaryBrush}"
+                                       VerticalAlignment="Center" IsHitTestVisible="False">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding Text, ElementName=FindBox}" Value="">
+                                                <Setter Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </Grid>
+                    </DockPanel>
+                </Border>
+
                 <Border DockPanel.Dock="Bottom" Background="{DynamicResource Surface1Brush}"
                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="12,6">
                     <DockPanel>
@@ -182,5 +238,10 @@
                 </Grid>
             </DockPanel>
         </Grid>
+    </Grid>
+
+        <!-- Confirmations render inside this window: it is its own top-level window, so an overlay
+             drawn on the main one would appear behind it. -->
+        <Grid x:Name="DialogLayer" Visibility="Collapsed"/>
     </Grid>
 </Window>

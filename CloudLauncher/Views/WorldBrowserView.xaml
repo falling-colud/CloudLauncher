@@ -39,10 +39,24 @@
                              ToolTip="Search worlds"/>
                 </DockPanel>
             </Border>
-            <Button Grid.Column="1" Style="{StaticResource IconButton}"
-                    Margin="6,0,0,0" Padding="8,5"
-                    Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                    ToolTip="Filters" Click="OnFiltersClick"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <ComboBox x:Name="SortBox" Width="150" Margin="6,0,0,0" MinHeight="34"
+                          SelectedIndex="0" SelectionChanged="OnSortChanged"
+                          ToolTip="Order the results">
+                    <ComboBoxItem Content="Popularity"/>
+                    <ComboBoxItem Content="Downloads"/>
+                    <ComboBoxItem Content="Last updated"/>
+                    <ComboBoxItem Content="Name"/>
+                </ComboBox>
+                <Button Style="{StaticResource IconButton}"
+                        Margin="6,0,0,0" Padding="8,5"
+                        Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        ToolTip="Filters" Click="OnFiltersClick"/>
+                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}"
+                        Margin="6,0,0,0" Padding="8,5"
+                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        ToolTip="Refresh (F5)" Click="OnRefresh"/>
+            </StackPanel>
             <Popup x:Name="FiltersPopup" PlacementTarget="{Binding ElementName=SearchBox}"
                    Placement="Top" StaysOpen="False" AllowsTransparency="True"
                    HorizontalOffset="0" VerticalOffset="-8">
@@ -112,7 +126,27 @@
                              ScrollViewer.ScrollChanged="OnResultsScroll">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="10" Background="Transparent">
+                                <Border Padding="10" Background="Transparent"
+                                        ToolTip="{Binding RowToolTip}">
+                                    <Border.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Download..." Click="OnCtxDownload">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Open project page" Click="OnCtxOpenPage">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE774;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Copy project link" Click="OnCtxCopyLink">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE71B;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="56"/>
@@ -148,9 +182,11 @@
                                             <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
                                                        Margin="0,4,0,0" Foreground="{DynamicResource TextTertiaryBrush}"/>
                                         </StackPanel>
-                                        <Button Grid.Column="2" Content="Download"
+                                        <Button Grid.Column="2" Content="{Binding DownloadLabel}"
                                                 Style="{StaticResource AccentButton}"
                                                 Click="OnDownloadRow" Tag="{Binding}"
+                                                IsEnabled="{Binding CanDownload}"
+                                                ToolTip="{Binding DownloadToolTip}"
                                                 Padding="12,5" MinHeight="30" MinWidth="0"
                                                 VerticalAlignment="Center"/>
                                     </Grid>
@@ -321,8 +357,17 @@
                             </TabItem>
                         </TabControl>
 
-                        <TextBlock Grid.Row="2" x:Name="DownloadStatus" Style="{StaticResource Caption}"
-                                   Margin="0,14,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                        <StackPanel Grid.Row="2" Margin="0,14,0,0">
+                            <DockPanel x:Name="DownloadProgressRow" Visibility="Collapsed" Margin="0,0,0,6">
+                                <Button x:Name="CancelDownloadButton" DockPanel.Dock="Right"
+                                        Content="Cancel" Click="OnCancelDownload"
+                                        Padding="10,3" MinHeight="0" Margin="10,0,0,0"/>
+                                <ProgressBar x:Name="DownloadProgress" Height="5"
+                                             Minimum="0" Maximum="1" VerticalAlignment="Center"/>
+                            </DockPanel>
+                            <TextBlock x:Name="DownloadStatus" Style="{StaticResource Caption}"
+                                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+                        </StackPanel>
                     </Grid>
                 </Grid>
             </Border>
@@ -333,7 +378,7 @@
                 Padding="22,8">
             <DockPanel>
                 <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
-                           VerticalAlignment="Center" Foreground="{DynamicResource DangerBrush}"/>
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                 <TextBlock x:Name="CountLabel" DockPanel.Dock="Right"
                            Style="{StaticResource Caption}" VerticalAlignment="Center"/>
             </DockPanel>

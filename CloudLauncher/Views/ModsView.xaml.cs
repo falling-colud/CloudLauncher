@@ -30,6 +30,15 @@ public partial class ModsView : Page
     private string _searchText = "";
     private string? _filterMcVersion;
     private string? _filterLoader;
+
+    /// <summary>How the CloudLauncher sources are ordered. One of <see cref="ModBrowseSort"/>.</summary>
+    /// <remarks>
+    /// Not persisted, unlike the Instances screen's sort: this one is a way to find something in a
+    /// list you are browsing right now, not a standing preference about your own library. It also
+    /// applies to the CloudLauncher chips only — CurseForge and Modrinth answer in the store's own
+    /// relevance order and re-sorting one page of their results would be a lie about the rest.
+    /// </remarks>
+    private string _sort = ModBrowseSort.Updated;
     private int _offset;
     private bool _isLoading;
     private bool _hasMore;
@@ -161,6 +170,7 @@ public partial class ModsView : Page
     {
         _activeChip = chip;
         ApplyChipStyles();
+        UpdateSortButtonVisibility();
         await ResetAndLoadAsync();
     }
 
@@ -403,12 +413,50 @@ public partial class ModsView : Page
     {
         var page = await App.State.Api.BrowseModsAsync(
             source, teamId, _searchText, _filterMcVersion, _filterLoader,
-            offset: _offset, limit: PageSize, ct: ct);
+            offset: _offset, limit: PageSize, ct: ct, sort: _sort);
+
+        // Icons are resolved before the rows are built so each row is complete when it appears,
+        // rather than a grey tile that pops into a picture a moment later. They are fetched together
+        // rather than one after another because a page is 25 mods, and the cache means this is a
+        // request only for icons this launcher has never seen.
+        var icons = await ResolveHostedIconsAsync(page.Items, ct);
+        if (ct.IsCancellationRequested) return 0;
+
         foreach (var mod in page.Items)
-            _rows.Add(ModBrowseRow.FromHosted(mod, (Brush)FindResource("AccentSoftBrush"), (Brush)FindResource("AccentBrush")));
+            _rows.Add(ModBrowseRow.FromHosted(
+                mod, (Brush)FindResource("AccentSoftBrush"), (Brush)FindResource("AccentBrush"),
+                icons.GetValueOrDefault(mod.Id)));
         _hasMore = _offset + page.Items.Count < page.Total;
         CountLabel.Text = page.Total == 0 ? "" : $"{Math.Min(_offset + page.Items.Count, page.Total)} of {page.Total}";
         return page.Items.Count;
+    }
+
+    /// <summary>Local file paths for the icons of a page of hosted mods, keyed by mod id.</summary>
+    /// <remarks>
+    /// A hosted mod's icon route is authorised for anything not public, and a WPF image binding
+    /// sends no token — so the bytes come through the API client, which caches them by content hash.
+    /// Mods with no icon are simply absent from the dictionary and fall back to the letter tile, and
+    /// so is any icon that could not be fetched: a picture is never worth failing a list over.
+    /// </remarks>
+    private static async Task<Dictionary<Guid, string>> ResolveHostedIconsAsync(
+        IReadOnlyList<HostedModSummary> mods, CancellationToken ct)
+    {
+        var wanted = mods.Where(m => !string.IsNullOrWhiteSpace(m.IconBlobHash)).ToList();
+        if (wanted.Count == 0) return new Dictionary<Guid, string>();
+
+        var results = new Dictionary<Guid, string>(wanted.Count);
+        try
+        {
+            var fetches = wanted
+                .Select(async m => (m.Id, Path: await App.State.Api.GetModIconFileAsync(m.Id, m.IconBlobHash, ct)))
+                .ToList();
+            foreach (var (id, path) in await Task.WhenAll(fetches))
+                if (path is not null)
+                    results[id] = path;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { AppLog.LogError("ModsView.ResolveIcons", ex); }
+        return results;
     }
 
     private void UpdateEmptyState()
@@ -502,6 +550,9 @@ public partial class ModsView : Page
                 + $" · updated {detail.UpdatedAt.LocalDateTime:d} · {detail.Visibility} · {detail.Slug}";
             SelectedIconFallback.Text = InitialFor(detail.Name);
             SetSelectedIcon(null);
+            // Fetched after the panel is painted: the letter tile is already correct, and the icon
+            // replacing it a moment later is better than holding the whole panel for a picture.
+            _ = ApplyHostedIconAsync(detail, ct);
             OpenProjectButton.Visibility = Visibility.Collapsed;
             ManageHostedButton.Visibility = detail.OwnerId == App.State.Settings.UserId
                 ? Visibility.Visible : Visibility.Collapsed;
@@ -1417,6 +1468,22 @@ public partial class ModsView : Page
         catch (Exception ex) { DownloadStatus.Text = ex.Message; }
     }
 
+    /// <summary>Swaps the detail pane's letter tile for the hosted mod's icon, once it arrives.</summary>
+    /// <remarks>The selection is re-checked before the image is assigned: clicking down a list faster
+    /// than the fetches complete would otherwise leave one mod's icon over another mod's name.</remarks>
+    private async Task ApplyHostedIconAsync(HostedModDetail detail, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(detail.IconBlobHash)) return;
+        try
+        {
+            var path = await App.State.Api.GetModIconFileAsync(detail.Id, detail.IconBlobHash, ct);
+            if (path is null || ct.IsCancellationRequested || _currentHostedMod?.Id != detail.Id) return;
+            SetSelectedIcon(path);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { AppLog.LogError("ModsView.SelectedIcon", ex); }
+    }
+
     private void SetSelectedIcon(string? iconUrl)
     {
         SelectedIconImage.Source = null;
@@ -1455,6 +1522,63 @@ public partial class ModsView : Page
         text = Regex.Replace(text, @"\n{3,}", "\n\n").Trim();
 
         return string.IsNullOrWhiteSpace(text) ? "(no overview)" : text;
+    }
+
+    // ── sorting ──────────────────────────────────────────────────────────────
+
+    private void OnSortButtonClick(object sender, RoutedEventArgs e)
+    {
+        if (SortButton.ContextMenu is null) return;
+        UpdateSortMenuState();
+        SortButton.ContextMenu.PlacementTarget = SortButton;
+        SortButton.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        SortButton.ContextMenu.IsOpen = true;
+    }
+
+    private void OnSortMenuOpened(object sender, RoutedEventArgs e) => UpdateSortMenuState();
+
+    private async void OnSortMenuItemClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if ((sender as MenuItem)?.Tag as string is not { } tag) return;
+            if (tag == _sort) { UpdateSortMenuState(); return; }
+            _sort = tag;
+            UpdateSortMenuState();
+            // The order is the server's, so a re-sort is a fresh first page rather than a shuffle of
+            // what is already loaded — otherwise "by name" would only sort the rows scrolled so far.
+            await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { AppLog.LogError("ModsView.Sort", ex); }
+    }
+
+    private void UpdateSortMenuState()
+    {
+        SortUpdatedMenuItem.IsChecked = _sort == ModBrowseSort.Updated;
+        SortCreatedMenuItem.IsChecked = _sort == ModBrowseSort.Created;
+        SortNameMenuItem.IsChecked = _sort == ModBrowseSort.Name;
+        SortButton.ToolTip = $"Sort hosted mods: {SortLabel(_sort)}";
+    }
+
+    private static string SortLabel(string sort) => sort switch
+    {
+        ModBrowseSort.Created => "Newest",
+        ModBrowseSort.Name => "Name",
+        _ => "Recently updated"
+    };
+
+    /// <summary>Hides the sort control on the store chips.</summary>
+    /// <remarks>CurseForge and Modrinth return their own relevance order for the page they were
+    /// asked for; re-ordering those 25 rows would claim to sort a result set we only hold a slice
+    /// of. The control comes back the moment a CloudLauncher chip is selected.</remarks>
+    private void UpdateSortButtonVisibility()
+    {
+        var hosted = _activeChip?.Kind is ModBrowseSourceKind.CloudLauncherPublic
+            or ModBrowseSourceKind.CloudLauncherPersonal
+            or ModBrowseSourceKind.CloudLauncherShared
+            or ModBrowseSourceKind.CloudLauncherTeam;
+        SortButton.Visibility = hosted ? Visibility.Visible : Visibility.Collapsed;
+        if (hosted) UpdateSortMenuState();
     }
 
     private static string InitialFor(string name) =>
@@ -1519,7 +1643,11 @@ public partial class ModsView : Page
             RowToolTip = string.IsNullOrWhiteSpace(mod.Description) ? mod.Name : mod.Description!
         };
 
-        public static ModBrowseRow FromHosted(HostedModSummary mod, Brush badgeBackground, Brush badgeForeground)
+        /// <param name="iconPath">A local file holding the mod's icon, or null to keep the letter
+        /// tile. A path rather than a URL because the icon route needs the session's token and an
+        /// &lt;Image&gt; binding cannot send one.</param>
+        public static ModBrowseRow FromHosted(HostedModSummary mod, Brush badgeBackground, Brush badgeForeground,
+            string? iconPath = null)
         {
             // A mod page with no uploaded jar has nothing to install: say so on the row instead of
             // letting the user pick an instance and only then meeting an error.
@@ -1530,6 +1658,7 @@ public partial class ModsView : Page
             return new ModBrowseRow
             {
                 Hosted = mod,
+                IconUrl = iconPath,
                 Name = mod.Name,
                 Summary = string.IsNullOrWhiteSpace(mod.Summary) ? "(no summary)" : mod.Summary!,
                 MetaLabel = $"by {mod.OwnerUsername}{FormatCompat(mod.McVersionsCsv, mod.LoadersCsv)}{versions}",

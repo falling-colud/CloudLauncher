@@ -26,6 +26,11 @@ public partial class ResourcePackExplorerPage : Page
 
     private string _searchText = "";
     private string? _filterMcOverride;
+    private List<string> _filterCategories = new();
+    private int _categoryGeneration;
+
+    /// <summary>0 = relevance, 1 = latest, 2 = downloads. Mapped per store when searching.</summary>
+    private int _sortMode;
 
     private bool _isLoading;
     private bool _hasMore;
@@ -131,8 +136,77 @@ public partial class ResourcePackExplorerPage : Page
     {
         _activeChip = chip;
         ApplyChipStyles();
+        // Categories belong to the store, so a chip change replaces the list and drops a selection
+        // made against the previous one.
+        _filterCategories = new();
+        await RefreshCategoryFilterAsync();
         await ResetAndLoadAsync();
     }
+
+    /// <summary>
+    /// Loads the category list of whichever store the active chip points at.
+    /// </summary>
+    /// <remarks>CurseForge and Modrinth do not share a category vocabulary, so there is nothing to
+    /// merge; the panel is simply hidden for the hosted chips, which have no categories, and for a
+    /// store that answered with nothing because it is unreachable.</remarks>
+    private async Task RefreshCategoryFilterAsync()
+    {
+        var generation = ++_categoryGeneration;
+        List<ModBrowseCategory> categories;
+        string sourceLabel;
+
+        switch (_activeChip?.Kind)
+        {
+            case RpBrowseSourceKind.CurseForge:
+                sourceLabel = "  ·  CurseForge";
+                categories = await App.State.CurseForge.GetCategoriesAsync(CurseForgeService.ClassIdResourcePacks);
+                break;
+            case RpBrowseSourceKind.Modrinth:
+                sourceLabel = "  ·  Modrinth";
+                categories = await App.State.Modrinth.GetCategoriesAsync("resourcepack");
+                break;
+            default:
+                CategoryFilterPanel.Visibility = Visibility.Collapsed;
+                _filterCategories = new();
+                return;
+        }
+
+        if (generation != _categoryGeneration) return; // a newer chip selection superseded this fetch
+
+        CategorySourceLabel.Text = sourceLabel;
+        FilterCategoryList.ItemsSource = categories
+            .Select(c => new RpExplorerCategoryItem { Label = c.Label, Value = c.Value })
+            .ToList();
+        CategoryFilterPanel.Visibility = categories.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnClearCategories(object sender, RoutedEventArgs e)
+    {
+        if (FilterCategoryList.ItemsSource is not IEnumerable<RpExplorerCategoryItem> items) return;
+        foreach (var item in items) item.IsChecked = false;
+        // Plain objects with no change notification, so rebind to clear the boxes visually.
+        var source = FilterCategoryList.ItemsSource;
+        FilterCategoryList.ItemsSource = null;
+        FilterCategoryList.ItemsSource = source;
+    }
+
+    private async void OnSortChanged(object sender, SelectionChangedEventArgs e)
+    {
+        try
+        {
+            var mode = SortBox.SelectedIndex < 0 ? 0 : SortBox.SelectedIndex;
+            if (mode == _sortMode) return;
+            _sortMode = mode;
+            if (_activeChip is not null) await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { DownloadStatus.Text = "Error: " + ex.Message; }
+    }
+
+    /// <summary>CurseForge sort fields: 2 popularity, 3 last updated, 6 total downloads.</summary>
+    private int CurseSortField() => _sortMode switch { 1 => 3, 2 => 6, _ => 2 };
+
+    /// <summary>Modrinth's index values for the same three choices.</summary>
+    private string ModrinthIndex() => _sortMode switch { 1 => "newest", 2 => "downloads", _ => "relevance" };
 
     // ── search + filters ─────────────────────────────────────────────────────
 
@@ -181,9 +255,17 @@ public partial class ResourcePackExplorerPage : Page
 
     private async void OnApplyFilters(object sender, RoutedEventArgs e)
     {
-        _filterMcOverride = string.IsNullOrWhiteSpace(FilterMcBox.Text) ? null : FilterMcBox.Text.Trim();
-        FiltersPopup.IsOpen = false;
-        await ResetAndLoadAsync();
+        try
+        {
+            _filterMcOverride = string.IsNullOrWhiteSpace(FilterMcBox.Text) ? null : FilterMcBox.Text.Trim();
+            _filterCategories = CategoryFilterPanel.Visibility == Visibility.Visible
+                                && FilterCategoryList.ItemsSource is IEnumerable<RpExplorerCategoryItem> items
+                ? items.Where(i => i.IsChecked).Select(i => i.Value).ToList()
+                : new();
+            FiltersPopup.IsOpen = false;
+            await ResetAndLoadAsync();
+        }
+        catch (Exception ex) { DownloadStatus.Text = "Error: " + ex.Message; }
     }
 
     private string EffectiveMcVersion() => _filterMcOverride ?? PackMinecraftVersion();
@@ -265,12 +347,20 @@ public partial class ResourcePackExplorerPage : Page
     private async Task<int> LoadCurseForgeAsync(CancellationToken ct)
     {
         var mc = EffectiveMcVersion();
+        var categoryIds = _filterCategories
+            .Select(v => int.TryParse(v, out var id) ? id : 0)
+            .Where(id => id > 0)
+            .ToList();
+
         var hits = await App.State.CurseForge.SearchAsync(
             _searchText,
             mc.Length > 0 ? mc : null,
             loader: null,
             limit: PageSize, offset: _offset,
-            classId: CurseForgeService.ClassIdResourcePacks, ct: ct);
+            classId: CurseForgeService.ClassIdResourcePacks,
+            sortField: CurseSortField(),
+            categoryIds: categoryIds.Count > 0 ? categoryIds : null,
+            ct: ct);
         foreach (var m in hits) _rows.Add(new ModResultRow(m));
         return hits.Count;
     }
@@ -282,7 +372,9 @@ public partial class ResourcePackExplorerPage : Page
             _searchText,
             mc.Length > 0 ? mc : null,
             loader: null,
-            limit: PageSize, offset: _offset, projectType: "resourcepack", ct: ct);
+            categories: _filterCategories.Count > 0 ? _filterCategories : null,
+            limit: PageSize, offset: _offset, projectType: "resourcepack",
+            index: ModrinthIndex(), ct: ct);
         foreach (var m in hits) _rows.Add(new ModResultRow(m));
         return hits.Count;
     }
@@ -515,6 +607,14 @@ public partial class ResourcePackExplorerPage : Page
         {
             var dest = UniqueZipPath(folder, file.Filename);
             await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, dest);
+
+            // Which listing this file came from, recorded now: a resource pack carries no id of its
+            // own once it is on disk, so without this it can never be matched back to the store and
+            // offered an update.
+            var key = ResourcePackService.Key(_pack.Id, Path.GetFileName(dest), OriginOfTarget());
+            App.State.ResourcePacks.SetProvenance(key, mod.Source, mod.Id, version.Id, version.VersionNumber);
+            App.State.ResourcePacks.Rename(key, mod.Name);
+
             DownloadStatus.Text = $"Saved to {dest}";
         }
         catch (Exception ex) { DownloadStatus.Text = "Download failed: " + ex.Message; }
@@ -543,9 +643,15 @@ public partial class ResourcePackExplorerPage : Page
         try
         {
             var dest = UniqueZipPath(folder, fileName);
-            await using var stream = await App.State.Api.DownloadResourcePackVersionAsync(hostedId, versionId);
-            await using var fs = File.Create(dest);
-            await stream.CopyToAsync(fs);
+            await using (var stream = await App.State.Api.DownloadResourcePackVersionAsync(hostedId, versionId))
+            await using (var fs = File.Create(dest))
+                await stream.CopyToAsync(fs);
+
+            // The hosting link is this pack's provenance: it is what lets the launcher recognise the
+            // zip on disk as a copy of that hosted pack later.
+            App.State.ResourcePacks.LinkHostedResourcePack(
+                ResourcePackService.Key(_pack.Id, Path.GetFileName(dest), OriginOfTarget()), hostedId);
+
             DownloadStatus.Text = $"Saved to {dest}";
         }
         catch (Exception ex) { DownloadStatus.Text = "Download failed: " + ex.Message; }
@@ -555,6 +661,14 @@ public partial class ResourcePackExplorerPage : Page
             DownloadProgress.Visibility = Visibility.Collapsed;
         }
     }
+
+    /// <summary>Which of the instance's two resourcepacks/ folders the download target combo points
+    /// at — the settings key differs between them, so a pack in local/ is not confused with a
+    /// same-named one in game/.</summary>
+    private ResourcePackOrigin OriginOfTarget() =>
+        (DownloadTargetBox.SelectedItem as ComboBoxItem)?.Content as string == "local/resourcepacks/"
+            ? ResourcePackOrigin.Local
+            : ResourcePackOrigin.Game;
 
     private string TargetFolder()
     {
@@ -776,4 +890,12 @@ public sealed class RpExplorerChipRow
     public Visibility ChipVisibility { get; set; } = Visibility.Visible;
     public Visibility IconVisibility { get; set; } = Visibility.Visible;
     public Cursor CursorHint { get; set; } = Cursors.Hand;
+}
+
+/// <summary>One checkable store category in the resource pack explorer's filter popup.</summary>
+public sealed class RpExplorerCategoryItem
+{
+    public string Label { get; init; } = "";
+    public string Value { get; init; } = "";
+    public bool IsChecked { get; set; }
 }

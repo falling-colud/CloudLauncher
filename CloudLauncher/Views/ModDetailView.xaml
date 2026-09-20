@@ -9,28 +9,60 @@
         <StackPanel Margin="22,16,22,28">
 
             <Border Style="{StaticResource ElevatedCard}" Margin="0,0,0,16" Padding="20">
-                <StackPanel>
-                    <DockPanel Margin="0,0,0,8">
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="12,0,0,0"
-                                    VerticalAlignment="Center">
-                            <Border Style="{StaticResource Pill}"
-                                    Background="{DynamicResource Surface4Brush}" VerticalAlignment="Center">
-                                <TextBlock x:Name="VisibilityLabel" Style="{StaticResource PillText}"
-                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
-                            </Border>
-                            <Button x:Name="DeleteModButton" Content="Delete mod…"
-                                    Style="{StaticResource DangerButton}" Click="OnDeleteMod"
-                                    Margin="10,0,0,0" Padding="12,5" MinWidth="0" MinHeight="0"
-                                    ToolTip="Permanently delete this mod and every version uploaded to it"/>
+                <DockPanel>
+                    <!-- Icon well. Drop a png/jpg on it, or use Change… — both land on the same
+                         upload. The letter tile underneath shows through whenever there is no icon,
+                         which is what every hosted mod used to look like. -->
+                    <Border x:Name="IconWell" DockPanel.Dock="Left" Width="64" Height="64"
+                            Margin="0,0,16,0" VerticalAlignment="Top"
+                            Background="{DynamicResource Surface3Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="10" ClipToBounds="True"
+                            AllowDrop="True" DragOver="OnIconDragOver" Drop="OnIconDrop"
+                            ToolTip="Drop a .png or .jpg here to use it as this mod's icon">
+                        <Grid>
+                            <TextBlock x:Name="IconFallback" Style="{StaticResource H1}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource TextTertiaryBrush}"/>
+                            <Image x:Name="IconImage" Stretch="UniformToFill"/>
+                        </Grid>
+                    </Border>
+
+                    <StackPanel>
+                        <DockPanel Margin="0,0,0,8">
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="12,0,0,0"
+                                        VerticalAlignment="Center">
+                                <Border Style="{StaticResource Pill}"
+                                        Background="{DynamicResource Surface4Brush}" VerticalAlignment="Center">
+                                    <TextBlock x:Name="VisibilityLabel" Style="{StaticResource PillText}"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                </Border>
+                                <Button x:Name="DeleteModButton" Content="Delete mod…"
+                                        Style="{StaticResource DangerButton}" Click="OnDeleteMod"
+                                        Margin="10,0,0,0" Padding="12,5" MinWidth="0" MinHeight="0"
+                                        ToolTip="Permanently delete this mod and every version uploaded to it"/>
+                            </StackPanel>
+                            <TextBlock x:Name="ModNameLabel" Style="{StaticResource H2}"
+                                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                        </DockPanel>
+                        <TextBlock x:Name="MetaLabel" Style="{StaticResource Muted}"/>
+                        <TextBlock x:Name="SlugLabel" Style="{StaticResource Caption}" Margin="0,2,0,0"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"
+                                   ToolTip="The mod's stable identifier on this server"/>
+
+                        <!-- Icon actions, right-aligned like every other row action on this page. -->
+                        <StackPanel x:Name="IconActions" Orientation="Horizontal" Margin="0,10,0,0"
+                                    HorizontalAlignment="Right" Visibility="Collapsed">
+                            <Button x:Name="ChangeIconButton" Content="Change icon…" Click="OnChangeIcon"
+                                    Padding="12,4" MinWidth="0" MinHeight="0" FontSize="11"
+                                    ToolTip="Pick a .png or .jpg, up to 1 MB"/>
+                            <Button x:Name="RemoveIconButton" Content="Remove" Click="OnRemoveIcon"
+                                    Style="{StaticResource SubtleButton}" Margin="8,0,0,0"
+                                    Padding="12,4" MinWidth="0" MinHeight="0" FontSize="11"
+                                    ToolTip="Go back to the letter tile"/>
                         </StackPanel>
-                        <TextBlock x:Name="ModNameLabel" Style="{StaticResource H2}"
-                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                    </DockPanel>
-                    <TextBlock x:Name="MetaLabel" Style="{StaticResource Muted}"/>
-                    <TextBlock x:Name="SlugLabel" Style="{StaticResource Caption}" Margin="0,2,0,0"
-                               Foreground="{DynamicResource TextTertiaryBrush}"
-                               ToolTip="The mod's stable identifier on this server"/>
-                </StackPanel>
+                    </StackPanel>
+                </DockPanel>
             </Border>
 
             <!-- Overview editor (owner) / viewer -->
@@ -131,6 +163,9 @@
                                             <MenuItem Header="Copy version string" Click="OnCtxCopyVersionString"/>
                                             <MenuItem Header="Copy SHA-256" Click="OnCtxCopyHash"/>
                                             <Separator Visibility="{Binding OwnerActionVisibility}"/>
+                                            <MenuItem Header="Edit details…" Click="OnCtxEditVersion"
+                                                      Visibility="{Binding OwnerActionVisibility}"
+                                                      ToolTip="Correct the version string, channel, changelog or compatibility — the file stays as it is"/>
                                             <MenuItem Header="Delete version…" Click="OnCtxDeleteVersion"
                                                       Visibility="{Binding OwnerActionVisibility}"/>
                                         </ContextMenu>

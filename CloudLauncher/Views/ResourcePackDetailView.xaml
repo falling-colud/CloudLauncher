@@ -24,6 +24,9 @@
             <Border Style="{StaticResource Card}" Margin="0,0,0,12">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Overview" Margin="0,0,0,8"/>
+                    <TextBlock Style="{StaticResource Caption}" Text="Name"/>
+                    <TextBox x:Name="NameBox" Margin="0,4,0,12" MaxLength="128"
+                             ToolTip="The name collaborators see. 1–128 characters."/>
                     <TextBlock Style="{StaticResource Caption}" Text="Summary"/>
                     <TextBox x:Name="SummaryBox" Margin="0,4,0,12" MaxLength="512"/>
                     <TextBlock Style="{StaticResource Caption}" Text="Description"/>
@@ -31,6 +34,10 @@
                              AcceptsReturn="True" TextWrapping="Wrap"
                              VerticalScrollBarVisibility="Auto"
                              MinHeight="90" MaxHeight="220" MaxLength="4096"/>
+
+                    <TextBlock Style="{StaticResource Caption}" Text="Minecraft versions"/>
+                    <TextBox x:Name="McVersionsBox" Margin="0,4,0,12" MaxLength="256"
+                             ToolTip="Comma-separated, e.g. 1.21.1, 1.21 — this is what decides which instances can install it"/>
 
                     <TextBlock Style="{StaticResource Caption}" Text="Visibility"/>
                     <ComboBox x:Name="VisibilityBox" Margin="0,4,0,12">
@@ -45,6 +52,11 @@
                         <Button x:Name="PermissionsButton" DockPanel.Dock="Right"
                                 Content="Manage collaborators..." Click="OnEditPermissions"
                                 Margin="0,0,8,0" Padding="14,5"/>
+                        <Button x:Name="DeletePackButton" DockPanel.Dock="Right"
+                                Content="Delete resource pack…" Click="OnDeletePack"
+                                Foreground="{DynamicResource DangerBrush}"
+                                Margin="0,0,8,0" Padding="14,5"
+                                ToolTip="Removes the hosted pack and every uploaded version"/>
                         <TextBlock x:Name="SaveStatus" Style="{StaticResource Caption}"
                                    VerticalAlignment="Center"/>
                     </DockPanel>
@@ -66,7 +78,27 @@
                                 <Border Padding="10" Margin="0,0,0,1"
                                         Background="{DynamicResource Surface1Brush}"
                                         BorderBrush="{DynamicResource BorderSubtleBrush}"
-                                        BorderThickness="0,0,0,1">
+                                        BorderThickness="0,0,0,1"
+                                        ToolTip="{Binding Tooltip}">
+                                    <Border.ContextMenu>
+                                        <ContextMenu Opened="OnVersionMenuOpened">
+                                            <MenuItem Header="Save as…" Click="OnCtxSaveVersion">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74E;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Copy download link" Click="OnCtxCopyVersionLink"/>
+                                            <MenuItem Header="Copy version string" Click="OnCtxCopyVersionString"/>
+                                            <Separator x:Name="VersionCtxDeleteSeparator"/>
+                                            <MenuItem x:Name="VersionCtxDelete" Header="Delete version…"
+                                                      Click="OnCtxDeleteVersion"
+                                                      Foreground="{DynamicResource DangerBrush}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>

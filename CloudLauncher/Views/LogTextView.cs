@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -9,9 +10,25 @@ using CloudLauncher.Services;
 
 namespace CloudLauncher.Views;
 
+/// <summary>How much of a log the view is showing: everything, or only the lines that matter.</summary>
+/// <remarks>Deliberately not <see cref="ThemeService.LogLevel"/> with a "minimum": that enum is
+/// ordered <c>Normal, Muted, Warning, Error</c> — Muted is quieter than Normal, not louder — so
+/// "&gt;= level" would mean nothing. These three are the questions people actually ask of a log.</remarks>
+public enum LogFilterMode
+{
+    /// <summary>Every line.</summary>
+    All,
+
+    /// <summary>Warnings and errors only — the two levels that mean something went wrong.</summary>
+    Problems,
+
+    /// <summary>Errors, stack traces and "Caused by:" only.</summary>
+    Errors
+}
+
 /// <summary>
 /// A read-only log view that colours each line by what it is — error, warning, debug noise, ordinary
-/// output — using the user's log colours.
+/// output — using the user's log colours, and can narrow itself to the lines being looked for.
 /// </summary>
 /// <remarks>
 /// <para>This replaces a plain <see cref="TextBox"/>. A TextBox can only be one colour, and in a
@@ -22,6 +39,11 @@ namespace CloudLauncher.Views;
 /// a 200,000-line log costs the same as a screenful. Lines keep a reference to the theme's brush
 /// objects rather than copies of their colours, so changing the log colours in Settings repaints an
 /// open log immediately.</para>
+/// <para>Searching is done by <em>filtering</em> rather than by hopping the caret between matches:
+/// the question being asked of a crash log is almost always "show me every line that mentions this
+/// mod", and a list of the nine matching lines answers it in one look where nine presses of F3 does
+/// not. <see cref="FilterText"/> and <see cref="FilterMode"/> combine, so "errors only" plus a mod id
+/// is one gesture.</para>
 /// </remarks>
 public sealed class LogTextView : ListBox
 {
@@ -30,10 +52,16 @@ public sealed class LogTextView : ListBox
     private const int MaxLines = 20_000;
 
     private readonly ObservableCollection<LogLine> _lines = new();
+    private readonly ICollectionView _view;
+
+    private string _filterText = "";
+    private LogFilterMode _filterMode = LogFilterMode.All;
 
     public LogTextView()
     {
-        ItemsSource = _lines;
+        _view = CollectionViewSource.GetDefaultView(_lines);
+        _view.Filter = o => Passes((LogLine)o);
+        ItemsSource = _view;
         SelectionMode = SelectionMode.Extended;
         Background = Brushes.Transparent;
         BorderThickness = new Thickness(0);
@@ -45,9 +73,55 @@ public sealed class LogTextView : ListBox
         VirtualizingStackPanel.SetVirtualizationMode(this, VirtualizationMode.Recycling);
         ItemTemplate = BuildTemplate();
         ItemContainerStyle = BuildContainerStyle();
+        ContextMenu = BuildContextMenu();
     }
 
-    /// <summary>The whole log as text — for copying, and for callers that still think in strings.</summary>
+    /// <summary>Raised whenever the counts behind <see cref="VisibleLineCount"/>,
+    /// <see cref="TotalLineCount"/> or <see cref="TrimmedLineCount"/> change, so a host can keep a
+    /// "12 of 8,431 lines" caption honest without polling.</summary>
+    public event Action? StatsChanged;
+
+    /// <summary>Substring every shown line must contain (case-insensitive). Empty shows everything.</summary>
+    public string FilterText
+    {
+        get => _filterText;
+        set
+        {
+            var next = value ?? "";
+            if (_filterText == next) return;
+            _filterText = next;
+            ApplyFilter();
+        }
+    }
+
+    /// <summary>Which levels are shown. Combines with <see cref="FilterText"/>.</summary>
+    public LogFilterMode FilterMode
+    {
+        get => _filterMode;
+        set
+        {
+            if (_filterMode == value) return;
+            _filterMode = value;
+            ApplyFilter();
+        }
+    }
+
+    /// <summary>True when either half of the filter is narrowing the view.</summary>
+    public bool IsFiltered => _filterText.Length > 0 || _filterMode != LogFilterMode.All;
+
+    /// <summary>Lines currently on screen after filtering.</summary>
+    public int VisibleLineCount => IsFiltered ? _lines.Count(Passes) : _lines.Count;
+
+    /// <summary>Lines held in memory, filtered or not.</summary>
+    public int TotalLineCount => _lines.Count;
+
+    /// <summary>How many lines have been dropped off the start of the buffer to stay under the cap.
+    /// Worth surfacing: on a very long session the beginning of the log — where the mod list and the
+    /// first failure usually are — is exactly what silently went missing.</summary>
+    public int TrimmedLineCount { get; private set; }
+
+    /// <summary>The whole log as text — for copying, and for callers that still think in strings.
+    /// Always the complete buffer, never just what the filter is showing.</summary>
     public string Text
     {
         get
@@ -59,13 +133,30 @@ public sealed class LogTextView : ListBox
         set => SetText(value);
     }
 
+    /// <summary>The lines the filter is letting through, as text. What "Copy" means when a filter
+    /// is on — copying the whole file would throw away the narrowing the user just did.</summary>
+    public string VisibleText
+    {
+        get
+        {
+            var sb = new StringBuilder();
+            foreach (var line in _lines)
+                if (Passes(line)) sb.AppendLine(line.Text);
+            return sb.ToString();
+        }
+    }
+
     public void SetText(string? text)
     {
         _lines.Clear();
-        if (string.IsNullOrEmpty(text)) return;
-        foreach (var line in text.Split('\n'))
-            Add(line.TrimEnd('\r'));
+        TrimmedLineCount = 0;
+        if (!string.IsNullOrEmpty(text))
+        {
+            foreach (var line in text.Split('\n'))
+                Add(line.TrimEnd('\r'));
+        }
         ScrollToEnd();
+        StatsChanged?.Invoke();
     }
 
     public void Append(string? text)
@@ -77,14 +168,27 @@ public sealed class LogTextView : ListBox
             if (trimmed.Length == 0 && text.EndsWith('\n')) continue;
             Add(trimmed);
         }
+        StatsChanged?.Invoke();
     }
 
-    public void Clear() => _lines.Clear();
+    public void Clear()
+    {
+        _lines.Clear();
+        TrimmedLineCount = 0;
+        StatsChanged?.Invoke();
+    }
 
     public void ScrollToEnd()
     {
-        if (_lines.Count == 0) return;
-        ScrollIntoView(_lines[^1]);
+        var last = LastVisibleLine();
+        if (last is not null) ScrollIntoView(last);
+    }
+
+    private LogLine? LastVisibleLine()
+    {
+        for (var i = _lines.Count - 1; i >= 0; i--)
+            if (Passes(_lines[i])) return _lines[i];
+        return null;
     }
 
     private void Add(string line)
@@ -92,22 +196,79 @@ public sealed class LogTextView : ListBox
         _lines.Add(new LogLine(line));
         // Trim in chunks: removing one line per append on a hot log is a lot of collection churn.
         if (_lines.Count > MaxLines + 1000)
+        {
             for (var i = 0; i < 1000; i++) _lines.RemoveAt(0);
+            TrimmedLineCount += 1000;
+        }
     }
 
-    /// <summary>Ctrl+C copies the selected lines (or everything, when nothing is selected).</summary>
+    private void ApplyFilter()
+    {
+        _view.Refresh();
+        StatsChanged?.Invoke();
+    }
+
+    private bool Passes(LogLine line)
+    {
+        if (_filterMode == LogFilterMode.Errors && line.Level != ThemeService.LogLevel.Error) return false;
+        if (_filterMode == LogFilterMode.Problems
+            && line.Level is not (ThemeService.LogLevel.Error or ThemeService.LogLevel.Warning)) return false;
+        return _filterText.Length == 0
+               || line.Text.Contains(_filterText, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Ctrl+C copies the selected lines (or everything the filter shows, when nothing is
+    /// selected), Ctrl+A selects them all.</summary>
     protected override void OnKeyDown(KeyEventArgs e)
     {
         if (e.Key == Key.C && Keyboard.Modifiers == ModifierKeys.Control)
         {
-            var selected = SelectedItems.Count > 0
-                ? SelectedItems.Cast<LogLine>().Select(l => l.Text)
-                : _lines.Select(l => l.Text);
-            ClipboardHelper.TrySetText(string.Join(Environment.NewLine, selected));
+            CopySelectionOrVisible();
             e.Handled = true;
             return;
         }
         base.OnKeyDown(e);
+    }
+
+    private void CopySelectionOrVisible()
+    {
+        var text = SelectedItems.Count > 0
+            ? string.Join(Environment.NewLine, SelectedItems.Cast<LogLine>().Select(l => l.Text))
+            : VisibleText;
+        ClipboardHelper.TrySetText(text);
+    }
+
+    /// <summary>Right-click menu. A log is read and quoted far more often than it is navigated, and
+    /// until now the only way to get a line out of here was to select it and know that Ctrl+C worked.</summary>
+    private ContextMenu BuildContextMenu()
+    {
+        var menu = new ContextMenu();
+
+        var copySelected = new MenuItem { Header = "Copy selected lines", InputGestureText = "Ctrl+C" };
+        copySelected.Click += (_, _) => CopySelectionOrVisible();
+        menu.Items.Add(copySelected);
+
+        var copyShown = new MenuItem { Header = "Copy everything shown" };
+        copyShown.Click += (_, _) => ClipboardHelper.TrySetText(VisibleText);
+        menu.Items.Add(copyShown);
+
+        var copyAll = new MenuItem { Header = "Copy the whole log" };
+        copyAll.Click += (_, _) => ClipboardHelper.TrySetText(Text);
+        menu.Items.Add(copyAll);
+
+        menu.Items.Add(new Separator());
+
+        var selectAll = new MenuItem { Header = "Select all", InputGestureText = "Ctrl+A" };
+        selectAll.Click += (_, _) => SelectAll();
+        menu.Items.Add(selectAll);
+
+        menu.Opened += (_, _) =>
+        {
+            copySelected.IsEnabled = SelectedItems.Count > 0;
+            copyShown.Visibility = IsFiltered ? Visibility.Visible : Visibility.Collapsed;
+            copyAll.Header = IsFiltered ? "Copy the whole log" : "Copy all";
+        };
+        return menu;
     }
 
     /// <summary>

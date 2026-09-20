@@ -26,16 +26,66 @@
                 </DockPanel>
                 <TextBlock x:Name="MetaLabel" Style="{StaticResource Muted}"/>
 
+                <!-- Actions live at the right edge, in the order they are reached for: play, then
+                     the copy/export group behind one menu, then the destructive one on its own. -->
                 <DockPanel Margin="0,14,0,0">
                     <Button DockPanel.Dock="Right" Style="{StaticResource PlayButton}"
-                            Click="OnPlay" Padding="14,5" MinHeight="34" MinWidth="120">
+                            Click="OnPlay" Padding="14,5" MinHeight="34" MinWidth="120"
+                            ToolTip="Launch a compatible instance with this world">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE768;" FontFamily="{StaticResource IconFont}"
                                        FontSize="11" Margin="0,0,6,0" VerticalAlignment="Center"/>
                             <TextBlock Text="Play with..." VerticalAlignment="Center" FontWeight="SemiBold"/>
                         </StackPanel>
                     </Button>
-                    <Button DockPanel.Dock="Right" Content="Open folder" Click="OnOpenFolder"/>
+                    <Button x:Name="WorldActionsButton" DockPanel.Dock="Right"
+                            Content="Actions" Click="OnWorldActionsClick"
+                            Margin="0,0,8,0" Padding="14,5" MinHeight="34"
+                            ToolTip="Duplicate, copy to another instance, export or back up this world">
+                        <Button.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Duplicate" Click="OnDuplicate">
+                                    <MenuItem.Icon>
+                                        <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <MenuItem Header="Copy to instance..." Click="OnCopyToInstance">
+                                    <MenuItem.Icon>
+                                        <TextBlock Text="&#xE8DE;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <MenuItem Header="Export as .zip..." Click="OnExportZip">
+                                    <MenuItem.Icon>
+                                        <TextBlock Text="&#xEDE1;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <Separator/>
+                                <MenuItem Header="Back up now" Click="OnBackupNow">
+                                    <MenuItem.Icon>
+                                        <TextBlock Text="&#xE8F7;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <MenuItem Header="Rename folder on disk..." Click="OnRenameFolder">
+                                    <MenuItem.Icon>
+                                        <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                            </ContextMenu>
+                        </Button.ContextMenu>
+                    </Button>
+                    <Button DockPanel.Dock="Right" Content="Delete world..."
+                            Style="{StaticResource DangerButton}" Click="OnDeleteWorld"
+                            Margin="0,0,8,0" Padding="14,5" MinHeight="34"
+                            ToolTip="Remove this save folder from disk"/>
+                    <Button DockPanel.Dock="Right" Content="Open folder" Click="OnOpenFolder"
+                            Margin="0,0,8,0"/>
+                    <ProgressBar x:Name="BusyBar" DockPanel.Dock="Left"
+                                 Width="180" Height="5" Margin="0,0,12,0"
+                                 Minimum="0" Maximum="1" VerticalAlignment="Center"
+                                 Visibility="Collapsed"/>
+                    <Button x:Name="CancelBusyButton" DockPanel.Dock="Left"
+                            Content="Cancel" Click="OnCancelBusy" Padding="10,3" MinHeight="0"
+                            VerticalAlignment="Center" Visibility="Collapsed"/>
                 </DockPanel>
             </StackPanel>
         </Border>
@@ -50,8 +100,77 @@
                                 <TextBlock Style="{StaticResource H3}" Text="Display name" Margin="0,0,0,8"/>
                                 <DockPanel>
                                     <Button DockPanel.Dock="Right" Content="Save" Click="OnSaveName"/>
-                                    <TextBox x:Name="NameBox" Margin="0,0,8,0"/>
+                                    <TextBox x:Name="NameBox" Margin="0,0,8,0"
+                                             ToolTip="The name this launcher shows. The name Minecraft shows comes from level.dat — use Rename on the Worlds page to change both."/>
                                 </DockPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Everything read out of level.dat. Seed first: copying it is the single
+                             most common reason anyone opens this panel. -->
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="World info" Margin="0,0,0,10"/>
+
+                                <DockPanel Margin="0,0,0,8">
+                                    <TextBlock Text="Seed" Style="{StaticResource Caption}" Width="130"
+                                               VerticalAlignment="Center"/>
+                                    <Button x:Name="CopySeedButton" DockPanel.Dock="Right"
+                                            Style="{StaticResource IconButton}" Click="OnCopySeed"
+                                            Content="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                            ToolTip="Copy the seed"/>
+                                    <TextBlock x:Name="SeedLabel" VerticalAlignment="Center"
+                                               FontFamily="Consolas" TextTrimming="CharacterEllipsis"
+                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                </DockPanel>
+
+                                <UniformGrid Columns="2">
+                                    <DockPanel Margin="0,0,12,6">
+                                        <TextBlock Text="Game mode" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="GameModeLabel"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                    <DockPanel Margin="0,0,0,6">
+                                        <TextBlock Text="Difficulty" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="DifficultyLabel"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                    <DockPanel Margin="0,0,12,6">
+                                        <TextBlock Text="Hardcore" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="HardcoreLabel"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                    <DockPanel Margin="0,0,0,6">
+                                        <TextBlock Text="Cheats" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="CheatsLabel"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                    <DockPanel Margin="0,0,12,6">
+                                        <TextBlock Text="Minecraft version" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="McVersionLabel"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                    <DockPanel Margin="0,0,0,6">
+                                        <TextBlock Text="Size on disk" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="SizeLabel"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                    <DockPanel Margin="0,0,12,0">
+                                        <TextBlock Text="Last played" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="LastPlayedLabel"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                    <DockPanel Margin="0,0,0,0">
+                                        <TextBlock Text="Save folder" Style="{StaticResource Caption}" Width="130"/>
+                                        <TextBlock x:Name="FolderNameLabel" TextTrimming="CharacterEllipsis"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </DockPanel>
+                                </UniformGrid>
+
+                                <TextBlock x:Name="MetaUnavailableLabel" Style="{StaticResource Muted}"
+                                           Margin="0,10,0,0" TextWrapping="Wrap"
+                                           Text="This world's level.dat could not be read, so its seed and settings are unknown. That usually means Minecraft has the world open."
+                                           Visibility="Collapsed"/>
                             </StackPanel>
                         </Border>
 
@@ -77,11 +196,26 @@
                                                 Content="Manage collaborators..."
                                                 Click="OnEditSharedWorldPermissions"
                                                 Margin="0,0,8,0" Padding="14,5"/>
+                                        <Button x:Name="DeleteHostedWorldButton" DockPanel.Dock="Right"
+                                                Content="Delete hosted world..."
+                                                Style="{StaticResource DangerButton}"
+                                                Click="OnDeleteHostedWorld"
+                                                Margin="0,0,8,0" Padding="14,5"
+                                                ToolTip="Take this world down from the server. Your local save is untouched."/>
                                         <TextBlock Style="{StaticResource H3}" Text="Hosted world"
                                                    VerticalAlignment="Center"/>
                                     </DockPanel>
                                     <TextBlock x:Name="SharedWorldStatusLabel" Style="{StaticResource Muted}"
-                                               TextWrapping="Wrap" Margin="0,0,0,12"/>
+                                               TextWrapping="Wrap" Margin="0,0,0,6"/>
+                                    <DockPanel Margin="0,0,0,12">
+                                        <Button x:Name="CancelUploadButton" DockPanel.Dock="Right"
+                                                Content="Cancel" Click="OnCancelUpload"
+                                                Padding="10,3" MinHeight="0" Margin="10,0,0,0"
+                                                Visibility="Collapsed"/>
+                                        <ProgressBar x:Name="UploadBar" Height="5"
+                                                     Minimum="0" Maximum="1" VerticalAlignment="Center"
+                                                     Visibility="Collapsed"/>
+                                    </DockPanel>
 
                                     <TextBlock Style="{StaticResource Caption}" Text="Summary"/>
                                     <TextBox x:Name="SummaryBox" Margin="0,4,0,12" MaxLength="512"
@@ -157,23 +291,57 @@
                                                     Background="{DynamicResource Surface1Brush}"
                                                     BorderBrush="{DynamicResource BorderSubtleBrush}"
                                                     BorderThickness="0,0,0,1">
-                                                <Grid>
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="*"/>
-                                                        <ColumnDefinition Width="Auto"/>
-                                                    </Grid.ColumnDefinitions>
-                                                    <StackPanel Grid.Column="0">
-                                                        <TextBlock Text="{Binding VersionString}" FontWeight="SemiBold"/>
-                                                        <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
-                                                                   Margin="0,2,0,0"/>
-                                                    </StackPanel>
-                                                    <Border Grid.Column="1" Style="{StaticResource Pill}"
+                                                <Border.ContextMenu>
+                                                    <ContextMenu>
+                                                        <MenuItem Header="Download to instance..." Click="OnDownloadVersion">
+                                                            <MenuItem.Icon>
+                                                                <TextBlock Text="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                            </MenuItem.Icon>
+                                                        </MenuItem>
+                                                        <MenuItem Header="Copy download link" Click="OnCopyVersionLink">
+                                                            <MenuItem.Icon>
+                                                                <TextBlock Text="&#xE71B;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                            </MenuItem.Icon>
+                                                        </MenuItem>
+                                                        <Separator/>
+                                                        <MenuItem Header="Delete version..." Click="OnDeleteVersion">
+                                                            <MenuItem.Icon>
+                                                                <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                                           Foreground="{DynamicResource DangerBrush}"/>
+                                                            </MenuItem.Icon>
+                                                        </MenuItem>
+                                                    </ContextMenu>
+                                                </Border.ContextMenu>
+                                                <DockPanel>
+                                                    <!-- Row actions at the right edge, in the same order as the menu. -->
+                                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                            Click="OnDeleteVersion" Tag="{Binding}"
+                                                            Content="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                            Foreground="{DynamicResource DangerBrush}"
+                                                            ToolTip="Delete this uploaded version"/>
+                                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                            Click="OnCopyVersionLink" Tag="{Binding}"
+                                                            Content="&#xE71B;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                            ToolTip="Copy this version's download link"/>
+                                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                            Click="OnDownloadVersion" Tag="{Binding}"
+                                                            Content="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                            ToolTip="Download this version into an instance"/>
+                                                    <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
                                                             Background="{DynamicResource Surface4Brush}"
-                                                            VerticalAlignment="Center" Margin="12,0,0,0">
+                                                            VerticalAlignment="Center" Margin="12,0,8,0">
                                                         <TextBlock Text="{Binding McVersionLabel}" Style="{StaticResource PillText}"
                                                                    Foreground="{DynamicResource TextSecondaryBrush}"/>
                                                     </Border>
-                                                </Grid>
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding VersionString}" FontWeight="SemiBold"/>
+                                                        <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
+                                                                   Margin="0,2,0,0"/>
+                                                        <TextBlock Text="{Binding Changelog}" Style="{StaticResource Caption}"
+                                                                   Visibility="{Binding ChangelogVisibility}"
+                                                                   TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                                    </StackPanel>
+                                                </DockPanel>
                                             </Border>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
@@ -185,6 +353,70 @@
                             </DockPanel>
                         </Border>
                     </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Backups">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <Border Style="{StaticResource Card}" Margin="0,18,0,18" Padding="0">
+                        <DockPanel>
+                            <Border DockPanel.Dock="Top"
+                                    Background="{DynamicResource Surface3Brush}"
+                                    BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                                    Padding="14,10" CornerRadius="10,10,0,0">
+                                <DockPanel>
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                            Click="OnOpenBackupsFolder"
+                                            Content="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                            ToolTip="Open the backups folder in Explorer"/>
+                                    <Button x:Name="BackupNowButton" DockPanel.Dock="Right"
+                                            Content="Back up now" Style="{StaticResource AccentButton}"
+                                            Click="OnBackupNow" Margin="0,0,8,0" Padding="10,4"/>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Backups" Style="{StaticResource H3}"/>
+                                        <TextBlock x:Name="BackupsHintLabel" Style="{StaticResource Caption}"
+                                                   Text="Snapshots of this save, kept beside the instance."
+                                                   Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </DockPanel>
+                            </Border>
+                            <TextBlock x:Name="BackupsEmptyLabel" DockPanel.Dock="Top"
+                                       Style="{StaticResource Muted}"
+                                       Text="No backups yet. Take one before a risky session — restoring puts this exact save back."
+                                       TextWrapping="Wrap" Margin="14" Visibility="Collapsed"/>
+                            <ItemsControl x:Name="BackupsList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Padding="12" Margin="0,0,0,1"
+                                                Background="{DynamicResource Surface1Brush}"
+                                                BorderBrush="{DynamicResource BorderSubtleBrush}"
+                                                BorderThickness="0,0,0,1">
+                                            <DockPanel>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                        Click="OnDeleteBackup" Tag="{Binding}"
+                                                        Content="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                        Foreground="{DynamicResource DangerBrush}"
+                                                        ToolTip="Delete this backup"/>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                        Click="OnRevealBackup" Tag="{Binding}"
+                                                        Content="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                        ToolTip="Show this backup in Explorer"/>
+                                                <Button DockPanel.Dock="Right" Content="Restore"
+                                                        Click="OnRestoreBackup" Tag="{Binding}"
+                                                        Padding="12,4" Margin="0,0,8,0"
+                                                        ToolTip="Replace the current save with this snapshot"/>
+                                                <StackPanel VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding WhenLabel}" FontWeight="SemiBold"/>
+                                                    <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
+                                                               Margin="0,2,0,0"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </DockPanel>
+                    </Border>
                 </ScrollViewer>
             </TabItem>
 

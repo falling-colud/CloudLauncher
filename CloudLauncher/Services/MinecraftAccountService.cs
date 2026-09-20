@@ -155,6 +155,49 @@ public sealed class MinecraftAccountService
         return existing;
     }
 
+    /// <summary>Renames an offline account.</summary>
+    /// <remarks>
+    /// <para>Offline only, and deliberately so: a Microsoft account's name is Mojang's, refreshed from
+    /// the session on every launch by <c>UpdateMicrosoftAccountFromSession</c>. Letting it be typed
+    /// over here would produce a name that silently reverted the next time the game started.</para>
+    /// <para>The same 3–16 character rule and case-insensitive duplicate check as
+    /// <see cref="AddOffline"/> apply, because the result has to be a name the launcher would have
+    /// accepted in the first place — renaming is not a way in through the back door.</para>
+    /// <para>Renaming the account that is currently in use does not change the selection: it is the
+    /// same account, now spelled differently.</para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">The name is the wrong length, or another offline account
+    /// already has it.</exception>
+    /// <exception cref="InvalidOperationException">The account is not an offline account.</exception>
+    public StoredMinecraftAccount RenameOffline(Guid id, string username)
+    {
+        var account = _accounts.FirstOrDefault(a => a.Id == id)
+            ?? throw new InvalidOperationException("That account is no longer in the list.");
+        if (account.Kind != MinecraftAccountKind.Offline)
+            throw new InvalidOperationException(
+                "Microsoft accounts are named by Mojang — the name comes back from the sign-in every launch.");
+
+        username = username?.Trim() ?? "";
+        if (username.Length < 3 || username.Length > 16)
+            throw new ArgumentException("Offline username must be 3 – 16 characters");
+
+        if (string.Equals(account.Username, username, StringComparison.Ordinal))
+            return account; // nothing changed — don't write the file or wake every listener up
+
+        var clash = _accounts.FirstOrDefault(a =>
+            a.Id != id &&
+            a.Kind == MinecraftAccountKind.Offline &&
+            string.Equals(a.Username, username, StringComparison.OrdinalIgnoreCase));
+        if (clash is not null)
+            throw new ArgumentException($"There is already an offline account called {clash.Username}.");
+
+        AppLog.Log("account", $"Renamed offline account: {account.Username} -> {username}");
+        account.Username = username;
+        Save();
+        AccountsChanged?.Invoke();
+        return account;
+    }
+
     /// <summary>Switch the current selection to the given account ID.</summary>
     public void Switch(Guid id)
     {

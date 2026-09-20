@@ -27,6 +27,18 @@ public partial class WorldBrowserView : Page
     private string? _filterMcVersion;
 
     private CancellationTokenSource _cts = new();
+
+    /// <summary>
+    /// Cancels a download in flight, separately from <see cref="_cts"/>.
+    /// </summary>
+    /// <remarks>Downloads used to run on the search token, so clicking another row mid-download
+    /// cancelled the download along with the detail fetch — with no message, because the cancellation
+    /// was swallowed as a normal navigation.</remarks>
+    private CancellationTokenSource? _downloadCts;
+
+    /// <summary>0 popularity, 1 downloads, 2 last updated, 3 name. Mirrors the SortBox order.</summary>
+    private int _sortMode;
+
     private bool _isLoading;
     private bool _hasMore;
     private int _offset;
@@ -40,7 +52,67 @@ public partial class WorldBrowserView : Page
         SourceStrip.ItemsSource = _chips;
         ResultsList.ItemsSource = _rows;
         WorldTabs.SelectionChanged += OnWorldTabsChanged;
-        Loaded += async (_, _) => await InitAsync();
+        Loaded += async (_, _) =>
+        {
+            await InitAsync();
+            Window.GetWindow(this)!.PreviewKeyDown += OnShellKeyDown;
+        };
+        Unloaded += (_, _) =>
+        {
+            if (Window.GetWindow(this) is Window w) w.PreviewKeyDown -= OnShellKeyDown;
+            _downloadCts?.Cancel();
+        };
+    }
+
+    /// <summary>F5 re-runs the current search, matching every other list screen.</summary>
+    private async void OnShellKeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsVisible || e.Key != Key.F5) return;
+        e.Handled = true;
+        try { await ResetAndLoadAsync(); }
+        catch (Exception ex) { SetStatus("Refresh failed: " + ex.Message, danger: true); }
+    }
+
+    private async void OnRefresh(object sender, RoutedEventArgs e)
+    {
+        try { await ResetAndLoadAsync(); }
+        catch (Exception ex) { SetStatus("Refresh failed: " + ex.Message, danger: true); }
+    }
+
+    private async void OnSortChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded) return;
+        _sortMode = Math.Max(0, SortBox.SelectedIndex);
+        try { await ResetAndLoadAsync(); }
+        catch (Exception ex) { SetStatus("Could not re-sort: " + ex.Message, danger: true); }
+    }
+
+    /// <summary>CurseForge's numeric sortField for the chosen mode. Name has no server-side
+    /// equivalent, so it falls back to popularity and is applied client-side instead.</summary>
+    private int CurseSortField() => _sortMode switch
+    {
+        1 => 6,  // TotalDownloads
+        2 => 3,  // LastUpdated
+        _ => 2   // Popularity
+    };
+
+    /// <summary>
+    /// Writes the status line in the colour that matches the message.
+    /// </summary>
+    /// <remarks>Set by resource reference rather than assignment so a theme or accent change
+    /// repaints it — an assigned brush is frozen at the moment it was resolved.</remarks>
+    private void SetStatus(string text, bool danger = false, bool success = false)
+    {
+        StatusLabel.Text = text;
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty,
+            danger ? "DangerBrush" : success ? "AccentBrush" : "TextSecondaryBrush");
+    }
+
+    private void SetDownloadStatus(string text, bool danger = false, bool success = false)
+    {
+        DownloadStatus.Text = text;
+        DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty,
+            danger ? "DangerBrush" : success ? "AccentBrush" : "TextSecondaryBrush");
     }
 
     // Render rich HTML/markdown descriptions in an embedded WebView2. Its HWND draws over
@@ -167,7 +239,7 @@ public partial class WorldBrowserView : Page
         _offset = 0;
         _rows.Clear();
         _hasMore = true;
-        StatusLabel.Text = "";
+        SetStatus("");
         EmptyState.Visibility = Visibility.Collapsed;
         CountLabel.Text = "";
         ClearDetail();
@@ -219,7 +291,7 @@ public partial class WorldBrowserView : Page
             UpdateEmpty();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { StatusLabel.Text = "Error: " + ex.Message; _hasMore = false; }
+        catch (Exception ex) { SetStatus("Error: " + ex.Message, danger: true); _hasMore = false; }
         finally { _isLoading = false; }
     }
 
@@ -242,8 +314,14 @@ public partial class WorldBrowserView : Page
         var hits = await App.State.CurseForge.SearchAsync(
             _searchText, _filterMcVersion, loader: null,
             limit: PageSize, offset: _offset,
-            classId: CurseForgeService.ClassIdWorlds, ct: ct);
-        foreach (var m in hits) _rows.Add(RowFromCurse(m));
+            classId: CurseForgeService.ClassIdWorlds,
+            sortField: CurseSortField(), ct: ct);
+        // CurseForge has no name sort, so apply it to the page we were given. Sorting a page rather
+        // than the whole result set is the honest limit of an endlessly-scrolling list.
+        var ordered = _sortMode == 3
+            ? hits.OrderBy(m => m.Name, StringComparer.CurrentCultureIgnoreCase).ToList()
+            : hits;
+        foreach (var m in ordered) _rows.Add(RowFromCurse(m));
         return hits.Count;
     }
 
@@ -251,7 +329,16 @@ public partial class WorldBrowserView : Page
     {
         var page = await App.State.Api.BrowseWorldsAsync(source, teamId, _searchText, _filterMcVersion,
             offset: _offset, limit: PageSize, ct: ct);
-        foreach (var w in page.Items) _rows.Add(RowFromCloud(w));
+        // The hosted catalog has no sort parameter, so order the page here — otherwise the sort box
+        // would silently do nothing on every CloudLauncher source.
+        IEnumerable<SharedWorldSummary> items = page.Items;
+        items = _sortMode switch
+        {
+            2 => items.OrderByDescending(w => w.UpdatedAt),
+            3 => items.OrderBy(w => w.Name, StringComparer.CurrentCultureIgnoreCase),
+            _ => items
+        };
+        foreach (var w in items) _rows.Add(RowFromCloud(w));
         _hasMore = _offset + page.Items.Count < page.Total;
         return page.Items.Count;
     }
@@ -286,29 +373,122 @@ public partial class WorldBrowserView : Page
     private async void OnDownloadRow(object sender, RoutedEventArgs e)
     {
         if (sender is not Button b || b.Tag is not WorldBrowseRow row) return;
-        await DownloadRowAsync(row, b);
+        try { await DownloadRowAsync(row, b); }
+        catch (Exception ex) { SetDownloadStatus("Download failed: " + ex.Message, danger: true); }
     }
 
     private async void OnDownloadSelectedWorld(object sender, RoutedEventArgs e)
     {
-        if (_currentRow is not null)
-            await DownloadRowAsync(_currentRow, sender as Button);
+        try
+        {
+            if (_currentRow is not null)
+                await DownloadRowAsync(_currentRow, sender as Button);
+        }
+        catch (Exception ex) { SetDownloadStatus("Download failed: " + ex.Message, danger: true); }
     }
 
     private async void OnDownloadVersion(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: WorldVersionRow row }) return;
-        if (_currentRow is null) return;
-        await DownloadRowAsync(_currentRow, sender as Button, row);
+        try
+        {
+            if (sender is not FrameworkElement { DataContext: WorldVersionRow row }) return;
+            if (_currentRow is null) return;
+            await DownloadRowAsync(_currentRow, sender as Button, row);
+        }
+        catch (Exception ex) { SetDownloadStatus("Download failed: " + ex.Message, danger: true); }
     }
 
+    // -- row context menu -----------------------------------------------------
+
+    private static WorldBrowseRow? RowFromMenu(object sender)
+    {
+        if (sender is not MenuItem mi) return null;
+        var parent = mi.Parent;
+        while (parent is MenuItem p) parent = p.Parent;
+        return parent is ContextMenu { PlacementTarget: FrameworkElement { DataContext: WorldBrowseRow row } }
+            ? row : null;
+    }
+
+    private async void OnCtxDownload(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (RowFromMenu(sender) is { } row) await DownloadRowAsync(row, null);
+        }
+        catch (Exception ex) { SetDownloadStatus("Download failed: " + ex.Message, danger: true); }
+    }
+
+    private void OnCtxOpenPage(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenu(sender)?.External is { } world) OpenUrl(BuildProjectUrl(world));
+        else SetStatus("CloudLauncher worlds have no external page.", danger: true);
+    }
+
+    private void OnCtxCopyLink(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenu(sender) is not { } row) return;
+        var url = row.External is { } world
+            ? BuildProjectUrl(world)
+            : row.Internal is { } hosted
+                ? $"{App.State.Settings.ServerUrl.TrimEnd('/')}/worlds/{hosted.Id}"
+                : null;
+        if (url is null) { SetStatus("This row has no link.", danger: true); return; }
+        var copied = Services.ClipboardHelper.TrySetText(url);
+        SetStatus(copied ? "Link copied." : "The clipboard is busy - try again.",
+                  danger: !copied, success: copied);
+    }
+
+    // -- downloading ----------------------------------------------------------
+
+    private void OnCancelDownload(object sender, RoutedEventArgs e)
+    {
+        _downloadCts?.Cancel();
+        SetDownloadStatus("Cancelling...");
+    }
+
+    private void ShowDownloadProgress(bool visible)
+    {
+        DownloadProgressRow.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        DownloadProgress.Value = 0;
+        DownloadProgress.IsIndeterminate = visible;
+    }
+
+    /// <summary>A sink for byte counts from a transfer whose total may not be known up front.</summary>
+    private IProgress<(long done, long total)> ByteProgress(string what) =>
+        new Progress<(long done, long total)>(p =>
+        {
+            if (p.total > 0)
+            {
+                DownloadProgress.IsIndeterminate = false;
+                DownloadProgress.Value = Math.Min(1.0, p.done / (double)p.total);
+                SetDownloadStatus($"{what} - {FormatSize(p.done)} of {FormatSize(p.total)}");
+            }
+            else SetDownloadStatus($"{what} - {FormatSize(p.done)}");
+        });
+
+    /// <summary>
+    /// Downloads a world and extracts it into the instance the user picks.
+    /// </summary>
+    /// <remarks>
+    /// Both halves report progress: the transfer drives a determinate bar off the known length, and
+    /// the extract runs on a worker thread through <see cref="WorldService.ImportZipAsync"/>, which
+    /// also flattens the single wrapper folder most world zips carry and refuses entries that point
+    /// outside the save. Before this, extraction ran on the dispatcher and a 300 MB adventure map
+    /// looked like a hang.
+    /// </remarks>
     private async Task DownloadRowAsync(WorldBrowseRow row, Button? button, WorldVersionRow? version = null)
     {
+        if (!row.CanDownload)
+        {
+            await AppDialog.MessageAsync(_shell, "Nothing to download", row.DownloadToolTip);
+            return;
+        }
+
         var packs = await App.State.Api.ListPacksAsync();
         if (packs.Count == 0)
         {
-            MessageBox.Show(_shell, "You have no instances yet. Create one before downloading a world.",
-                "No instance", MessageBoxButton.OK, MessageBoxImage.Information);
+            await AppDialog.MessageAsync(_shell, "No instance",
+                "You have no instances yet. Create one before downloading a world.");
             return;
         }
         var picker = new PackPickerDialog(packs,
@@ -317,55 +497,62 @@ public partial class WorldBrowserView : Page
             "Pick") { Owner = _shell };
         if (picker.ShowDialog() != true || picker.SelectedPackId is null) return;
         var packId = picker.SelectedPackId.Value;
+        var pack = packs.First(p => p.Id == packId);
+
+        _downloadCts?.Cancel();
+        _downloadCts = new CancellationTokenSource();
+        var ct = _downloadCts.Token;
 
         if (button is not null) button.IsEnabled = false;
+        ShowDownloadProgress(true);
+        string? zipPath = null;
         try
         {
-            string? zipPath = null;
             if (row.Kind == WorldBrowseRowKind.CurseForge && row.External is { } ext)
-                zipPath = await DownloadCurseZipAsync(ext, version?.ExternalVersion);
+                zipPath = await DownloadCurseZipAsync(ext, version?.ExternalVersion, ct);
             else if (row.Kind == WorldBrowseRowKind.CloudLauncher && row.Internal is { } w)
-                zipPath = await DownloadCloudZipAsync(w, version?.CloudVersion);
+                zipPath = await DownloadCloudZipAsync(w, version?.CloudVersion, ct);
 
             if (zipPath is null) throw new InvalidOperationException("Download failed.");
 
-            var savesDir = Path.Combine(App.State.Packs.GameDir(packId), "saves");
-            Directory.CreateDirectory(savesDir);
-            var folderName = SafeFolderName(row.Title);
-            var targetDir = UniqueDir(savesDir, folderName);
+            SetDownloadStatus($"Extracting into {pack.Name}...");
+            DownloadProgress.IsIndeterminate = false;
+            var extract = new Progress<double>(f => DownloadProgress.Value = f);
+            var folderName = await App.State.Worlds.ImportZipAsync(
+                zipPath, pack.Id, pack.Name, row.Title, extract, ct);
 
-            StatusLabel.Foreground = (Brush)FindResource("TextSecondaryBrush");
-            StatusLabel.Text = "Extracting…";
-            ZipFile.ExtractToDirectory(zipPath, targetDir);
-            FlattenIfSingleSubdir(targetDir);
-            try { File.Delete(zipPath); } catch { }
-            StatusLabel.Foreground = (Brush)FindResource("AccentBrush");
-            StatusLabel.Text = $"Saved to {targetDir}";
-            DownloadStatus.Foreground = (Brush)FindResource("AccentBrush");
-            DownloadStatus.Text = $"Saved to {targetDir}";
+            var landed = Path.Combine(App.State.Worlds.SavesDir(pack.Id, pack.Name), folderName);
+            SetStatus($"Saved to {landed}", success: true);
+            SetDownloadStatus($"Saved to {landed}", success: true);
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("Download cancelled.");
+            SetDownloadStatus("Download cancelled.");
         }
         catch (Exception ex)
         {
-            StatusLabel.Foreground = (Brush)FindResource("DangerBrush");
-            StatusLabel.Text = "Download failed: " + ex.Message;
-            DownloadStatus.Foreground = (Brush)FindResource("DangerBrush");
-            DownloadStatus.Text = "Download failed: " + ex.Message;
+            SetStatus("Download failed: " + ex.Message, danger: true);
+            SetDownloadStatus("Download failed: " + ex.Message, danger: true);
         }
         finally
         {
+            if (zipPath is not null) { try { File.Delete(zipPath); } catch { /* best effort */ } }
+            ShowDownloadProgress(false);
             if (button is not null) button.IsEnabled = true;
+            _downloadCts?.Dispose();
+            _downloadCts = null;
         }
     }
 
-    private async Task<string> DownloadCurseZipAsync(ModSummary mod, ModVersion? selectedVersion = null)
+    private async Task<string> DownloadCurseZipAsync(ModSummary mod, ModVersion? selectedVersion, CancellationToken ct)
     {
-        StatusLabel.Foreground = (Brush)FindResource("TextSecondaryBrush");
-        StatusLabel.Text = $"Fetching '{mod.Name}'…";
+        SetDownloadStatus($"Fetching '{mod.Name}'...");
         if (!int.TryParse(mod.Id, out var cfModId)) throw new InvalidOperationException("Bad CurseForge id.");
         var latest = selectedVersion;
         if (latest is null)
         {
-            var versions = await App.State.CurseForge.GetVersionsAsync(cfModId);
+            var versions = await App.State.CurseForge.GetVersionsAsync(cfModId, ct);
             latest = versions.OrderByDescending(v => v.DatePublished).FirstOrDefault()
                 ?? throw new InvalidOperationException("No versions available.");
         }
@@ -376,24 +563,38 @@ public partial class WorldBrowserView : Page
             throw new InvalidOperationException("Unexpected CurseForge file id format.");
         var url = await App.State.CurseForge.GetDownloadUrlAsync(cfModId, cfFileId);
         if (string.IsNullOrEmpty(url)) throw new InvalidOperationException("No download URL.");
+
         var tmp = Path.Combine(Path.GetTempPath(), $"cl-world-{Guid.NewGuid():N}.zip");
-        StatusLabel.Text = $"Downloading '{mod.Name}'…";
-        DownloadStatus.Text = StatusLabel.Text;
-        await App.State.Modrinth.DownloadFileAsync(url, tmp, null, _cts.Token);
+        SetDownloadStatus($"Downloading '{mod.Name}'...");
+        await App.State.Modrinth.DownloadFileAsync(url, tmp, ByteProgress($"Downloading '{mod.Name}'"), ct);
         return tmp;
     }
 
-    private async Task<string> DownloadCloudZipAsync(SharedWorldSummary w, SharedWorldVersionInfo? selectedVersion = null)
+    private async Task<string> DownloadCloudZipAsync(SharedWorldSummary w, SharedWorldVersionInfo? selectedVersion,
+                                                     CancellationToken ct)
     {
-        var detail = await App.State.Api.GetSharedWorldAsync(w.Id);
+        var detail = await App.State.Api.GetSharedWorldAsync(w.Id, ct);
         var version = selectedVersion ?? detail.Versions.OrderByDescending(v => v.PublishedAt).FirstOrDefault()
             ?? throw new InvalidOperationException("This world has no versions yet.");
         var tmp = Path.Combine(Path.GetTempPath(), $"cl-world-{Guid.NewGuid():N}.zip");
-        StatusLabel.Foreground = (Brush)FindResource("TextSecondaryBrush");
-        StatusLabel.Text = $"Downloading '{w.Name}'…";
-        DownloadStatus.Text = StatusLabel.Text;
-        await using var stream = await App.State.Api.DownloadSharedWorldVersionAsync(w.Id, version.Id);
-        await using (var fs = File.Create(tmp)) await stream.CopyToAsync(fs);
+        SetDownloadStatus($"Downloading '{w.Name}'...");
+
+        // Copied in chunks rather than with CopyToAsync so the bar can move: the version record
+        // already carries the total, so this is determinate from the first byte.
+        var progress = ByteProgress($"Downloading '{w.Name}'");
+        await using var stream = await App.State.Api.DownloadSharedWorldVersionAsync(w.Id, version.Id, ct);
+        await using (var fs = File.Create(tmp))
+        {
+            var buffer = new byte[81920];
+            long done = 0;
+            int read;
+            while ((read = await stream.ReadAsync(buffer, ct)) > 0)
+            {
+                await fs.WriteAsync(buffer.AsMemory(0, read), ct);
+                done += read;
+                progress.Report((done, version.FileSize));
+            }
+        }
         return tmp;
     }
 
@@ -603,43 +804,6 @@ public partial class WorldBrowserView : Page
         return string.IsNullOrWhiteSpace(text) ? "(no overview)" : text;
     }
 
-    private static string SafeFolderName(string name)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sb = new System.Text.StringBuilder(name.Length);
-        foreach (var c in name) sb.Append(Array.IndexOf(invalid, c) >= 0 ? '_' : c);
-        var s = sb.ToString().Trim();
-        if (string.IsNullOrEmpty(s)) s = "world";
-        if (s.Length > 80) s = s[..80];
-        return s;
-    }
-
-    private static string UniqueDir(string parent, string baseName)
-    {
-        var candidate = Path.Combine(parent, baseName);
-        var n = 1;
-        while (Directory.Exists(candidate)) candidate = Path.Combine(parent, $"{baseName} ({++n})");
-        return candidate;
-    }
-
-    private static void FlattenIfSingleSubdir(string dir)
-    {
-        // Many world saves zip as outerName/innerLevel.dat. If the extracted dir holds a single
-        // subfolder containing level.dat, hoist that subfolder's contents to the parent.
-        if (File.Exists(Path.Combine(dir, "level.dat"))) return;
-        var subs = Directory.GetDirectories(dir);
-        var files = Directory.GetFiles(dir);
-        if (subs.Length == 1 && files.Length == 0)
-        {
-            var sub = subs[0];
-            foreach (var f in Directory.GetFiles(sub))
-                File.Move(f, Path.Combine(dir, Path.GetFileName(f)));
-            foreach (var d in Directory.GetDirectories(sub))
-                Directory.Move(d, Path.Combine(dir, Path.GetFileName(d)));
-            Directory.Delete(sub, recursive: true);
-        }
-    }
-
     private static string InitialFor(string name) =>
         string.IsNullOrWhiteSpace(name) ? "?" : char.ToUpperInvariant(name.Trim()[0]).ToString();
 
@@ -695,6 +859,33 @@ public partial class WorldBrowserView : Page
         public string SourceBadge { get; set; } = "";
         public Brush SourceBadgeBackground { get; set; } = Brushes.Transparent;
         public Brush SourceBadgeForeground { get; set; } = Brushes.White;
+
+        /// <summary>
+        /// False for a hosted world page that has no uploaded version behind it.
+        /// </summary>
+        /// <remarks>A world can be created on the server before anything is uploaded to it, and the
+        /// Download button used to look identical on those rows and fail with "This world has no
+        /// versions yet" only after the instance picker had been filled in.</remarks>
+        public bool CanDownload => Internal is null || Internal.VersionCount > 0;
+
+        public string DownloadLabel => CanDownload ? "Download" : "No file";
+
+        public string DownloadToolTip => CanDownload
+            ? "Download this world into one of your instances"
+            : "The owner has published this world's page but has not uploaded a save to it yet.";
+
+        /// <summary>The whole row, for the cases where the description was trimmed away.</summary>
+        public string RowToolTip
+        {
+            get
+            {
+                var lines = new List<string> { Title, MetaLabel };
+                if (!string.IsNullOrWhiteSpace(Subtitle)) lines.Insert(1, Subtitle);
+                if (Internal is { } hosted)
+                    lines.Add($"{hosted.VersionCount} version{(hosted.VersionCount == 1 ? "" : "s")} uploaded");
+                return string.Join("\n", lines);
+            }
+        }
     }
 
     public sealed class WorldVersionRow

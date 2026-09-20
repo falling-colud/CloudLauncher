@@ -1,0 +1,63 @@
+﻿<UserControl x:Class="CloudLauncher.Views.ServerConsoleSetupDialog"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="22" Width="500">
+        <Border.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </Border.Effect>
+        <StackPanel>
+            <TextBlock x:Name="TitleLabel" Style="{StaticResource H2}" Text="Console settings"/>
+            <TextBlock x:Name="SubLabel" Style="{StaticResource Muted}" Margin="0,2,0,16" TextWrapping="Wrap"
+                       Text="Connects to the server's RCON port so you can run commands from here."/>
+
+            <TextBlock Text="Label (optional)" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+            <TextBox x:Name="LabelBox" Padding="8,6" Margin="0,0,0,14"
+                     ToolTip="What to call this server in the launcher. Blank uses the name from the server list."/>
+
+            <Grid Margin="0,0,0,14">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                    <TextBlock Text="RCON host" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                    <TextBox x:Name="HostBox" Padding="8,6"
+                             ToolTip="Leave blank to use the same host as the game address. Set it when RCON is only reachable on another address, e.g. through an SSH tunnel on localhost."/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Width="110">
+                    <TextBlock Text="RCON port" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                    <TextBox x:Name="PortBox" Padding="8,6"
+                             ToolTip="server.properties → rcon.port. The default is 25575."/>
+                </StackPanel>
+            </Grid>
+
+            <TextBlock Text="RCON password" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+            <PasswordBox x:Name="PasswordInput" Padding="8,6"
+                         ToolTip="server.properties → rcon.password"/>
+            <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"
+                       Foreground="{DynamicResource WarningBrush}"
+                       Text="Stored in plain text in the launcher's settings.json, alongside your CurseForge key and account tokens — and RCON itself sends it unencrypted."/>
+
+            <TextBlock Style="{StaticResource Caption}" Margin="0,10,0,0" TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextTertiaryBrush}"
+                       Text="The server needs enable-rcon=true in its server.properties, and its RCON port reachable from this PC."/>
+
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,12,0,0" TextWrapping="Wrap"
+                       Foreground="{DynamicResource TextSecondaryBrush}"/>
+
+            <Grid Margin="0,16,0,0">
+                <Button x:Name="RemoveButton" Content="Remove console" HorizontalAlignment="Left"
+                        Style="{StaticResource SubtleButton}" Click="OnRemove"
+                        Foreground="{DynamicResource DangerBrush}"
+                        ToolTip="Forget this server's RCON details"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="TestButton" Content="Test" Click="OnTest" Margin="0,0,8,0"
+                            ToolTip="Log in and run nothing — just checks the host, port and password"/>
+                    <Button Content="Cancel" Style="{StaticResource SubtleButton}" Click="OnCancel" Margin="0,0,8,0"/>
+                    <Button x:Name="SaveButton" Content="Save" Style="{StaticResource AccentButton}" Click="OnSave"/>
+                </StackPanel>
+            </Grid>
+        </StackPanel>
+    </Border>
+</UserControl>

@@ -181,6 +181,27 @@ public partial class MainWindow : Window, IDialogHost
         _ = App.State.Rules.SyncGlobalDefaultsFromServerAsync();
     }
 
+    /// <summary>Rebuilds the Instances screen from scratch, discarding whatever is on it.</summary>
+    /// <remarks>
+    /// <see cref="NavigateToPacks"/> deliberately reuses a <see cref="PackListView"/> that is already
+    /// showing, so clicking Instances while you are on Instances does not throw away your scroll
+    /// position and folder selection. That is the wrong answer when the instances folder itself has
+    /// moved: every card on that page was built from paths under the previous root. This forces the
+    /// fresh page the folder change needs, and stays out of the normal navigation path where the
+    /// reuse is the point.
+    /// </remarks>
+    /// <remarks>
+    /// Does nothing unless the Instances screen is the one on show. If the user is somewhere else,
+    /// there is nothing stale in front of them and <see cref="NavigateToPacks"/> will build a fresh
+    /// page the next time they go there anyway. It also leaves the side panel alone, so the Settings
+    /// page that asked for this refresh is still open behind the result.
+    /// </remarks>
+    public void RefreshPacks()
+    {
+        if (MainFrame.Content is not PackListView) return;
+        MainFrame.Navigate(new PackListView(this));
+    }
+
     public async Task RefreshPackTeamFoldersAsync()
     {
         if (MainFrame.Content is PackListView packs)

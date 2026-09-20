@@ -7,7 +7,7 @@
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
         </Border.Effect>
         <DockPanel>
-            <TextBlock DockPanel.Dock="Top" Style="{StaticResource H2}" Text="Upload version"/>
+            <TextBlock x:Name="TitleLabel" DockPanel.Dock="Top" Style="{StaticResource H2}" Text="Upload version"/>
             <TextBlock x:Name="SubLabel" DockPanel.Dock="Top" Style="{StaticResource Muted}" Margin="0,2,0,14"
                        TextTrimming="CharacterEllipsis"/>
 

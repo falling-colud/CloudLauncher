@@ -36,10 +36,19 @@
                                      ToolTip="Search mod name or description"/>
                         </DockPanel>
                     </Border>
-                    <Button Grid.Column="1" Style="{StaticResource IconButton}"
-                            Margin="6,0,0,0" Padding="8,5"
-                            Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                            ToolTip="Filters" Click="OnFiltersClick"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <ComboBox x:Name="SortBox" Width="126" Margin="6,0,0,0"
+                                  SelectionChanged="OnSortChanged"
+                                  ToolTip="Result order">
+                            <ComboBoxItem Content="Relevance" IsSelected="True"/>
+                            <ComboBoxItem Content="Latest"/>
+                            <ComboBoxItem Content="Downloads"/>
+                        </ComboBox>
+                        <Button Style="{StaticResource IconButton}"
+                                Margin="6,0,0,0" Padding="8,5"
+                                Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                ToolTip="Filters" Click="OnFiltersClick"/>
+                    </StackPanel>
                     <Popup x:Name="FiltersPopup" PlacementTarget="{Binding ElementName=SearchBox}"
                            Placement="Top" StaysOpen="False" AllowsTransparency="True"
                            HorizontalOffset="0" VerticalOffset="-8">
@@ -48,6 +57,33 @@
                                 CornerRadius="8" Padding="14" MinWidth="260">
                             <StackPanel>
                                 <TextBlock Style="{StaticResource H3}" Text="Filters" Margin="0,0,0,10"/>
+                                <!-- The category vocabulary belongs to whichever store the active chip
+                                     points at; the panel hides itself for the hosted chips. -->
+                                <StackPanel x:Name="CategoryFilterPanel" Visibility="Collapsed">
+                                    <Grid Margin="0,0,0,4">
+                                        <TextBlock Style="{StaticResource Caption}">
+                                            <Run Text="Categories"/><Run x:Name="CategorySourceLabel"
+                                                                         Foreground="{DynamicResource TextTertiaryBrush}"/>
+                                        </TextBlock>
+                                        <Button Content="Clear" HorizontalAlignment="Right"
+                                                Style="{StaticResource LinkButton}" FontSize="11"
+                                                Click="OnClearCategories"/>
+                                    </Grid>
+                                    <Border Background="{DynamicResource Surface1Brush}"
+                                            BorderBrush="{DynamicResource BorderBrush}"
+                                            BorderThickness="1" CornerRadius="6" MaxHeight="168" Margin="0,0,0,10">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,6">
+                                            <ItemsControl x:Name="FilterCategoryList">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <CheckBox Content="{Binding Label}" Margin="0,3"
+                                                                  IsChecked="{Binding IsChecked, Mode=TwoWay}"/>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </ScrollViewer>
+                                    </Border>
+                                </StackPanel>
                                 <TextBlock Style="{StaticResource Caption}" Text="Minecraft version"/>
                                 <TextBox x:Name="FilterMcBox" Margin="0,4,0,10"
                                          ToolTip="Leave empty to inherit from pack"/>

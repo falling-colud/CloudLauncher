@@ -39,6 +39,13 @@
                                        TextTrimming="CharacterEllipsis"
                                        ToolTip="The CloudLauncher server this launcher talks to"/>
 
+                            <!-- The address the verified pill above is talking about. Hidden when
+                                 the server did not tell us one, rather than showing a blank line. -->
+                            <TextBlock x:Name="EmailLabel" Style="{StaticResource Caption}" Margin="0,2,0,0"
+                                       Visibility="Collapsed" TextTrimming="CharacterEllipsis"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                       ToolTip="The address this account was registered with"/>
+
                             <DockPanel Margin="0,8,0,0">
                                 <Button DockPanel.Dock="Right" x:Name="CopyIdButton" Style="{StaticResource IconButton}"
                                         Content="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"

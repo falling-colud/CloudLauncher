@@ -32,9 +32,24 @@
                 <Button Style="{StaticResource IconButton}" Click="OnDownloadWorld"
                         Content="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="14"
                         ToolTip="Download a world from CurseForge or CloudLauncher"/>
-                <Button Style="{StaticResource IconButton}" Click="OnImportWorld"
+                <Button x:Name="ImportButton" Style="{StaticResource IconButton}" Click="OnImportButtonClick"
                         Content="&#xE898;" FontFamily="{StaticResource IconFont}" FontSize="14"
-                        ToolTip="Import a world from disk"/>
+                        ToolTip="Import a world from disk — a save folder or a downloaded .zip. You can also drop either onto this page.">
+                    <Button.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="Import world folder..." Click="OnImportWorldFolder">
+                                <MenuItem.Icon>
+                                    <TextBlock Text="&#xE8B7;" FontFamily="{StaticResource IconFont}" FontSize="13"/>
+                                </MenuItem.Icon>
+                            </MenuItem>
+                            <MenuItem Header="Import world .zip..." Click="OnImportWorldZip">
+                                <MenuItem.Icon>
+                                    <TextBlock Text="&#xF12B;" FontFamily="{StaticResource IconFont}" FontSize="13"/>
+                                </MenuItem.Icon>
+                            </MenuItem>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
                 <Button Style="{StaticResource IconButton}" Click="OnCreateFolder"
                         Content="&#xE8F1;" FontFamily="{StaticResource IconFont}" FontSize="14"
                         ToolTip="Create folder"/>
@@ -70,7 +85,7 @@
                         </TextBox>
                     </Grid>
                 </Border>
-                <Button Style="{StaticResource IconButton}" Click="OnRefresh"
+                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Click="OnRefresh"
                         Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
                         ToolTip="Refresh"/>
             </StackPanel>
@@ -148,7 +163,9 @@
         </Grid>
 
         <ScrollViewer Grid.Row="4" Padding="20,14,20,16" VerticalScrollBarVisibility="Auto"
-                      SizeChanged="OnWorldListContainerSizeChanged">
+                      SizeChanged="OnWorldListContainerSizeChanged"
+                      AllowDrop="True" DragOver="OnWorldListDragOver" Drop="OnWorldListDrop"
+                      anim:Animate.SmoothScroll="True">
             <Grid>
                 <ItemsControl x:Name="WorldList" HorizontalAlignment="Stretch"
                               anim:Animate.EntranceStagger="True">
@@ -165,6 +182,10 @@
                                     Background="{DynamicResource Surface2Brush}"
                                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                                     CornerRadius="10"
+                                    ToolTip="{Binding ToolTipText}"
+                                    Focusable="True"
+                                    PreviewMouseDown="OnWorldCardPreviewMouseDown"
+                                    KeyDown="OnWorldCardKeyDown"
                                     MouseLeftButtonUp="OnWorldCardClick">
                                 <Border.Style>
                                     <Style TargetType="Border">
@@ -174,23 +195,96 @@
                                                 <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
                                                 <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
                                             </Trigger>
+                                            <!-- A focused card is the target of Delete/F2/Enter, so it has to look like one. -->
+                                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                                <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                                <Setter Property="BorderThickness" Value="2"/>
+                                            </Trigger>
                                         </Style.Triggers>
                                     </Style>
                                 </Border.Style>
                                 <Border.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="Open world" Click="OnCtxEdit"/>
-                                        <MenuItem Header="Edit compatibility" Click="OnCtxEdit"/>
-                                        <MenuItem Header="Launch with..." Click="OnCtxLaunch"/>
+                                        <MenuItem Header="Open world" Click="OnCtxEdit">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8A5;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Play with..." Click="OnCtxLaunch">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE768;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Edit compatibility" Click="OnCtxEdit">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
                                         <Separator/>
-                                        <MenuItem Header="Reveal in Explorer" Click="OnCtxReveal"/>
-                                        <MenuItem Header="Rename" Click="OnCtxRename"/>
+                                        <MenuItem Header="Rename..." Click="OnCtxRename"
+                                                  InputGestureText="F2">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Duplicate" Click="OnCtxDuplicate">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Copy to instance..." Click="OnCtxCopyToInstance">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8DE;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Export as .zip..." Click="OnCtxExportZip">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xEDE1;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <Separator/>
+                                        <MenuItem Header="Back up now" Click="OnCtxBackup"
+                                                  ToolTip="Zip this save into the instance's backups folder">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8F7;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Restore from backup..." Click="OnCtxRestore">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE777;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Reveal in Explorer" Click="OnCtxReveal">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
                                         <Separator/>
                                         <MenuItem x:Name="CtxAddToFolderMenu" Header="Add to folder"
-                                                  SubmenuOpened="OnCtxAddToFolderOpened"/>
+                                                  SubmenuOpened="OnCtxAddToFolderOpened">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8F1;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
                                         <Separator/>
-                                        <MenuItem Header="Copy world key" Click="OnCtxCopyKey"/>
-                                        <MenuItem Header="Delete world..." Click="OnCtxDelete"/>
+                                        <MenuItem Header="Copy seed" Click="OnCtxCopySeed"
+                                                  IsEnabled="{Binding PlacementTarget.DataContext.HasSeed, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE71B;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Copy world key" Click="OnCtxCopyKey">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Delete world..." Click="OnCtxDelete"
+                                                  InputGestureText="Del">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                           Foreground="{DynamicResource DangerBrush}"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
                                     </ContextMenu>
                                 </Border.ContextMenu>
                                 <Grid ClipToBounds="True">
@@ -220,12 +314,26 @@
                                                 <TextBlock Text="{Binding SourcePackName}" Style="{StaticResource PillText}"
                                                            Foreground="{DynamicResource TextSecondaryBrush}"/>
                                             </Border>
-                                            <Border Background="#66000000" CornerRadius="4"
-                                                    Margin="10,0,0,10" Padding="6,2"
-                                                    HorizontalAlignment="Left" VerticalAlignment="Bottom">
-                                                <TextBlock Text="WORLD" FontSize="10" FontWeight="SemiBold"
-                                                           Foreground="White"/>
-                                            </Border>
+                                            <StackPanel Orientation="Horizontal"
+                                                        Margin="10,0,0,10"
+                                                        HorizontalAlignment="Left" VerticalAlignment="Bottom">
+                                                <Border Background="#66000000" CornerRadius="4" Padding="6,2">
+                                                    <TextBlock Text="{Binding GameModeBadge}" FontSize="10" FontWeight="SemiBold"
+                                                               Foreground="White"/>
+                                                </Border>
+                                                <Border Background="#CC7F1D1D" CornerRadius="4" Padding="6,2" Margin="5,0,0,0"
+                                                        Visibility="{Binding HardcoreVisibility}"
+                                                        ToolTip="Hardcore — one death ends this world">
+                                                    <TextBlock Text="HARDCORE" FontSize="10" FontWeight="SemiBold"
+                                                               Foreground="White"/>
+                                                </Border>
+                                                <Border Background="#66000000" CornerRadius="4" Padding="6,2" Margin="5,0,0,0"
+                                                        Visibility="{Binding CheatsVisibility}"
+                                                        ToolTip="Cheats are enabled in this world">
+                                                    <TextBlock Text="CHEATS" FontSize="10" FontWeight="SemiBold"
+                                                               Foreground="White"/>
+                                                </Border>
+                                            </StackPanel>
                                         </Grid>
                                     </Border>
 
@@ -277,7 +385,7 @@
                     <TextBlock Style="{StaticResource Muted}" HorizontalAlignment="Center"
                                Text="Launch an instance and create a world - it'll show up here."/>
                     <Button Content="Import world" Style="{StaticResource AccentButton}"
-                            Click="OnImportWorld" HorizontalAlignment="Center" Margin="0,16,0,0"/>
+                            Click="OnImportButtonClick" HorizontalAlignment="Center" Margin="0,16,0,0"/>
                 </StackPanel>
 
                 <StackPanel x:Name="EmptyFolderState" HorizontalAlignment="Center" VerticalAlignment="Center"
@@ -298,10 +406,19 @@
                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
                 Padding="24,8">
             <DockPanel>
-                <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
-                           Foreground="{DynamicResource DangerBrush}" VerticalAlignment="Center"/>
                 <TextBlock x:Name="CountLabel" DockPanel.Dock="Right" Style="{StaticResource Caption}"
                            VerticalAlignment="Center"/>
+                <Button x:Name="CancelBusyButton" DockPanel.Dock="Right"
+                        Content="Cancel" Click="OnCancelBusy"
+                        Margin="12,0,16,0" Padding="10,2" MinHeight="0"
+                        Visibility="Collapsed"
+                        ToolTip="Stop the operation in progress"/>
+                <ProgressBar x:Name="BusyBar" DockPanel.Dock="Right"
+                             Width="150" Height="5" Margin="12,0,0,0"
+                             Minimum="0" Maximum="1" VerticalAlignment="Center"
+                             Visibility="Collapsed"/>
+                <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
             </DockPanel>
         </Border>
     </Grid>

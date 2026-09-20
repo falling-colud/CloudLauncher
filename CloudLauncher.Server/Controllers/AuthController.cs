@@ -169,7 +169,10 @@ public class AuthController(
         // hard-coded `true` (which made the flag meaningless to any consumer).
         var user = await users.FindByIdAsync(id.ToString());
         if (user is null) return Unauthorized();
-        return Ok(new UserSummary(id, user.UserName ?? "", user.EmailConfirmed));
+        // The address is returned here and nowhere else: this route only ever describes the caller
+        // to themselves, so there is no one to leak it to, and without it the Account page can say
+        // an address is unverified but not which address to go and check.
+        return Ok(new UserSummary(id, user.UserName ?? "", user.EmailConfirmed, user.Email));
     }
 
     /// <summary>Changes the signed-in user's password and signs their other devices out.</summary>

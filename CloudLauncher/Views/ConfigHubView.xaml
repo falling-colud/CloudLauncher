@@ -1,20 +1,529 @@
 <Page x:Class="CloudLauncher.Views.ConfigHubView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Config &amp; scripts"
       Background="{DynamicResource Surface0Brush}">
-    <Grid>
+    <Page.Resources>
+        <!-- One chip in the kind strip. Selection is themed here rather than on the row object so a
+             live theme change repaints it; a Brush stored on the row would keep the old colour. -->
+        <Style x:Key="KindChip" TargetType="Border">
+            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="Padding" Value="12,5"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Background" Value="{DynamicResource Surface1Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="KindChipText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- The "same / differs / only here" badge on a file row. -->
+        <Style x:Key="StateBadge" TargetType="Border" BasedOn="{StaticResource Pill}">
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding StateName}" Value="Differs">
+                    <Setter Property="Background" Value="{DynamicResource WarningBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StateName}" Value="Identical">
+                    <Setter Property="Background" Value="{DynamicResource SuccessBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="StateBadgeText" TargetType="TextBlock" BasedOn="{StaticResource PillText}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding StateName}" Value="Differs">
+                    <Setter Property="Foreground" Value="White"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StateName}" Value="Identical">
+                    <Setter Property="Foreground" Value="White"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Page.Resources>
+
+    <Grid Margin="24,18,24,0">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Margin="28,24,28,12">
-            <TextBlock Style="{StaticResource H1}" Text="Config &amp; scripts"/>
-            <TextBlock x:Name="SubLabel" Style="{StaticResource Muted}"
-                       Text="Every instance's config files and KubeJS scripts, side by side."/>
-        </StackPanel>
+        <!-- Header -->
+        <DockPanel Grid.Row="0" Margin="0,0,0,14">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button Content="New file…" Click="OnNewFile" Margin="0,0,8,0" Padding="12,5"
+                        ToolTip="Create an empty config file or script in the selected instance"/>
+                <Button x:Name="SearchInFilesButton" Content="Search in files" Click="OnToggleContentSearch"
+                        Style="{StaticResource AccentButton}" Margin="0,0,8,0" Padding="12,5"
+                        ToolTip="Search inside every config and script across all instances at once"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE8DA;" FontFamily="{StaticResource IconFont}"
+                        FontSize="13" Click="OnOpenFolder" Margin="0,0,4,0"
+                        ToolTip="Open this instance's config folder in Explorer"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE72C;" FontFamily="{StaticResource IconFont}"
+                        FontSize="13" Click="OnRefresh" ToolTip="Re-scan every instance (F5)"/>
+            </StackPanel>
+            <StackPanel>
+                <TextBlock Style="{StaticResource H2}" Text="Config &amp; scripts"/>
+                <TextBlock x:Name="SubLabel" Style="{StaticResource Muted}" Margin="0,2,0,0"
+                           Text="Every instance's config files and KubeJS scripts, side by side."/>
+            </StackPanel>
+        </DockPanel>
 
-        <Grid Grid.Row="1" x:Name="ContentHost" Margin="28,0,28,16"/>
+        <!-- Filters -->
+        <Grid Grid.Row="1" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <ComboBox x:Name="PackFilterBox" Grid.Column="0" Width="230" VerticalAlignment="Center"
+                      DisplayMemberPath="Label" SelectionChanged="OnPackFilterChanged"
+                      ToolTip="Which instance's files to list. With “All instances” every file is listed once, with a badge saying how many instances have it."/>
+
+            <ItemsControl x:Name="KindStrip" Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Style="{StaticResource KindChip}" ToolTip="{Binding Hint}"
+                                MouseLeftButtonUp="OnKindChipClick" Tag="{Binding}">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Label}" Style="{StaticResource KindChipText}"/>
+                                <TextBlock Text="{Binding CountLabel}" Style="{StaticResource KindChipText}"
+                                           Margin="6,0,0,0" Opacity="0.75"/>
+                            </StackPanel>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="SortButton" Style="{StaticResource IconButton}" Click="OnSortButtonClick"
+                        Content="&#xE8CB;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        Margin="0,0,8,0" Padding="8,5" ToolTip="Sort the file list">
+                    <Button.ContextMenu>
+                        <ContextMenu Opened="OnSortMenuOpened">
+                            <MenuItem x:Name="SortNameMenuItem" Header="Name" Tag="Name"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortPathMenuItem" Header="Folder, then name" Tag="Path"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortModifiedMenuItem" Header="Last modified" Tag="Modified"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortSizeMenuItem" Header="Size" Tag="Size"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortDiffMenuItem" Header="Differences first" Tag="Diff"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <Separator/>
+                            <MenuItem x:Name="DiffersOnlyMenuItem" Header="Only files that differ across instances"
+                                      IsCheckable="True" Click="OnDiffersOnlyClick"/>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+
+                <Border x:Name="CompactSearchHost"
+                        Background="{DynamicResource Surface1Brush}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="6" MinHeight="32" Width="36">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="SearchToggleButton" Grid.Column="0"
+                                Style="{StaticResource IconButton}" Click="OnSearchToggle"
+                                Content="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                ToolTip="Filter by file name (Ctrl+F)"/>
+                        <TextBox x:Name="SearchBox" Grid.Column="1" Background="Transparent" BorderThickness="0"
+                                 VerticalAlignment="Center" Margin="0,0,10,0" Visibility="Collapsed"
+                                 TextChanged="OnSearchTextChanged"
+                                 PreviewKeyDown="OnSearchPreviewKeyDown"
+                                 LostKeyboardFocus="OnSearchLostKeyboardFocus"
+                                 ToolTip="Filter by file name or folder">
+                            <TextBox.Template>
+                                <ControlTemplate TargetType="TextBox">
+                                    <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+                                </ControlTemplate>
+                            </TextBox.Template>
+                        </TextBox>
+                    </Grid>
+                </Border>
+            </StackPanel>
+        </Grid>
+
+        <!-- Content search bar: only visible while the user is grepping file contents. -->
+        <Border x:Name="ContentSearchBar" Grid.Row="2" Visibility="Collapsed"
+                Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource AccentBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="12,8" Margin="0,0,0,12">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Text="&#xE721;" FontFamily="{StaticResource IconFont}"
+                           FontSize="13" VerticalAlignment="Center" Margin="2,0,10,0"
+                           Foreground="{DynamicResource AccentBrush}"/>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="ContentSearchGoButton" Content="Search" Style="{StaticResource AccentButton}"
+                            Click="OnRunContentSearch" Padding="14,4" Margin="8,0,0,0"/>
+                    <Button x:Name="ContentSearchCancelButton" Content="Stop" Click="OnCancelContentSearch"
+                            Padding="12,4" Margin="8,0,0,0" Visibility="Collapsed"/>
+                    <Button Style="{StaticResource IconButton}" Content="&#xE711;"
+                            FontFamily="{StaticResource IconFont}" FontSize="12" Margin="8,0,0,0"
+                            Click="OnToggleContentSearch" ToolTip="Close the content search"/>
+                </StackPanel>
+                <TextBox x:Name="ContentQueryBox" VerticalAlignment="Center" Margin="0,0,8,0"
+                         KeyDown="OnContentQueryKey"
+                         ToolTip="Text to look for inside every config and script. Case-insensitive."/>
+            </DockPanel>
+        </Border>
+
+        <!-- File list + detail -->
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="1.05*" MinWidth="380"/>
+                <ColumnDefinition Width="14"/>
+                <ColumnDefinition Width="1.35*" MinWidth="340"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- LEFT: the files -->
+            <Border Grid.Column="0" Style="{StaticResource Card}" Padding="0">
+                <Grid>
+                    <ListBox x:Name="FileList" Background="Transparent" BorderThickness="0"
+                             SelectionMode="Extended"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             anim:Animate.SmoothScroll="True"
+                             anim:Animate.EntranceStagger="True"
+                             SelectionChanged="OnFileSelected"
+                             MouseDoubleClick="OnFileDoubleClick"
+                             PreviewKeyDown="OnFileListKeyDown">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                <Setter Property="Padding" Value="0"/>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Padding="12,8" Margin="4,3" CornerRadius="8"
+                                        Background="{DynamicResource Surface2Brush}"
+                                        BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1">
+                                    <Border.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Edit" Click="OnRowEdit">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Compare across instances…" Click="OnRowCompare">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8EC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Copy to other instances…" Click="OnRowCopyTo">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Copy the whole folder to other instances…" Click="OnRowCopyFolder"/>
+                                            <Separator/>
+                                            <MenuItem Header="Pin / unpin" Click="OnRowPin">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE718;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Show in Explorer" Click="OnRowReveal">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Copy full path" Click="OnRowCopyPath"/>
+                                            <MenuItem Header="Restore a backup…" Click="OnRowRestoreBackup"/>
+                                            <Separator/>
+                                            <MenuItem Header="Rename…" Click="OnRowRename">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Delete…" Click="OnRowDelete">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                               Foreground="{DynamicResource DangerBrush}"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
+                                    <DockPanel>
+                                        <!-- Row actions live at the right edge. -->
+                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
+                                                    VerticalAlignment="Center" Margin="8,0,0,0">
+                                            <Button Style="{StaticResource IconButton}" Content="&#xE70F;"
+                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    Click="OnRowEdit" Tag="{Binding}" ToolTip="Open in the editor"/>
+                                            <Button Style="{StaticResource IconButton}" Content="&#xE8EC;"
+                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    Click="OnRowCompare" Tag="{Binding}"
+                                                    Visibility="{Binding CompareVisibility}"
+                                                    ToolTip="{Binding CompareHint}"/>
+                                            <Button Style="{StaticResource IconButton}" Content="&#xE8C8;"
+                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    Click="OnRowCopyTo" Tag="{Binding}"
+                                                    ToolTip="Copy this file into other instances"/>
+                                            <Button Style="{StaticResource IconButton}" Content="{Binding PinGlyph}"
+                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    Click="OnRowPin" Tag="{Binding}" ToolTip="{Binding PinHint}"/>
+                                        </StackPanel>
+
+                                        <Border DockPanel.Dock="Left" Width="30" Height="30" CornerRadius="8"
+                                                Background="{DynamicResource AccentSoftBrush}" Margin="0,0,10,0"
+                                                VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Glyph}" FontFamily="{StaticResource IconFont}"
+                                                       FontSize="13" Foreground="{DynamicResource AccentBrush}"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Border>
+
+                                        <StackPanel VerticalAlignment="Center">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="{Binding FileName}" FontWeight="SemiBold"
+                                                           TextTrimming="CharacterEllipsis" MaxWidth="240"
+                                                           Opacity="{Binding MissingOpacity}"/>
+                                                <Border Style="{StaticResource StateBadge}"
+                                                        Visibility="{Binding StateVisibility}"
+                                                        ToolTip="{Binding StateHint}">
+                                                    <TextBlock Text="{Binding StateLabel}"
+                                                               Style="{StaticResource StateBadgeText}"/>
+                                                </Border>
+                                                <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource IconFont}"
+                                                           FontSize="11" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource WarningBrush}"
+                                                           Visibility="{Binding ErrorVisibility}"
+                                                           ToolTip="{Binding ErrorHint}"/>
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
+                                                       Margin="0,2,0,0" TextTrimming="CharacterEllipsis"
+                                                       ToolTip="{Binding FullPathHint}"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                MaxWidth="420" Visibility="Collapsed">
+                        <TextBlock x:Name="EmptyGlyph" Text="&#xE8A5;" FontFamily="{StaticResource IconFont}"
+                                   FontSize="30" HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"/>
+                        <TextBlock x:Name="EmptyTitle" Style="{StaticResource H3}" Text="Nothing to show"
+                                   HorizontalAlignment="Center" Margin="0,12,0,6" TextAlignment="Center"/>
+                        <TextBlock x:Name="EmptyBody" Style="{StaticResource Muted}" TextWrapping="Wrap"
+                                   TextAlignment="Center"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- RIGHT: the selected file -->
+            <Border Grid.Column="2" Style="{StaticResource Card}" Padding="0">
+                <Grid>
+                    <DockPanel x:Name="DetailPanel" Margin="16,14,16,14" Visibility="Collapsed">
+                        <DockPanel DockPanel.Dock="Top">
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top"
+                                        Margin="10,0,0,0">
+                                <Button Content="Edit" Style="{StaticResource AccentButton}" Click="OnDetailEdit"
+                                        Padding="14,4" Margin="0,0,6,0"
+                                        ToolTip="Open this file in the launcher's text editor"/>
+                                <Button Style="{StaticResource IconButton}" Content="&#xE8EC;"
+                                        FontFamily="{StaticResource IconFont}" FontSize="12"
+                                        x:Name="DetailCompareButton" Click="OnDetailCompare"
+                                        ToolTip="Compare this file across instances"/>
+                                <Button Style="{StaticResource IconButton}" Content="&#xE8C8;"
+                                        FontFamily="{StaticResource IconFont}" FontSize="12"
+                                        Click="OnDetailCopyTo" ToolTip="Copy into other instances"/>
+                                <Button Style="{StaticResource IconButton}" Content="&#xE8DA;"
+                                        FontFamily="{StaticResource IconFont}" FontSize="12"
+                                        Click="OnDetailReveal" ToolTip="Show in Explorer"/>
+                                <Button Style="{StaticResource IconButton}" Content="&#xE712;"
+                                        FontFamily="{StaticResource IconFont}" FontSize="12"
+                                        Click="OnDetailMore" ToolTip="More actions">
+                                    <Button.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Copy full path" Click="OnRowCopyPath"/>
+                                            <MenuItem Header="Copy the whole folder to other instances…" Click="OnRowCopyFolder"/>
+                                            <MenuItem Header="Restore a backup…" Click="OnRowRestoreBackup"/>
+                                            <Separator/>
+                                            <MenuItem Header="Rename…" Click="OnRowRename"/>
+                                            <MenuItem Header="Delete…" Click="OnRowDelete"/>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                </Button>
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock x:Name="DetailName" Style="{StaticResource H3}"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <TextBlock x:Name="DetailPath" Style="{StaticResource Caption}" Margin="0,2,0,0"
+                                           TextWrapping="Wrap"
+                                           Foreground="{DynamicResource TextTertiaryBrush}"/>
+                                <TextBlock x:Name="DetailMeta" Style="{StaticResource Caption}" Margin="0,4,0,0"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </DockPanel>
+
+                        <!-- A KubeJS error that names this script. -->
+                        <Border x:Name="ErrorPanel" DockPanel.Dock="Top" Visibility="Collapsed" Margin="0,12,0,0"
+                                Background="{DynamicResource Surface3Brush}"
+                                BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1"
+                                CornerRadius="8" Padding="12,9">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                               Foreground="{DynamicResource WarningBrush}" VerticalAlignment="Center"/>
+                                    <TextBlock Text="KubeJS logged an error for this script"
+                                               FontWeight="SemiBold" FontSize="12" Margin="8,0,0,0"
+                                               VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <TextBlock x:Name="ErrorText" Style="{StaticResource Caption}" Margin="0,6,0,0"
+                                           TextWrapping="Wrap" FontFamily="Consolas"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Where else this file exists. -->
+                        <StackPanel DockPanel.Dock="Top" Margin="0,14,0,0">
+                            <TextBlock x:Name="CopiesHeader" Style="{StaticResource Caption}"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                       Text="ACROSS INSTANCES" FontWeight="SemiBold"/>
+                            <ItemsControl x:Name="CopiesList" Margin="0,6,0,0" MaxHeight="180">
+                                <ItemsControl.Template>
+                                    <ControlTemplate TargetType="ItemsControl">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                      anim:Animate.SmoothScroll="True">
+                                            <ItemsPresenter/>
+                                        </ScrollViewer>
+                                    </ControlTemplate>
+                                </ItemsControl.Template>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Padding="10,6" Margin="0,0,0,4" CornerRadius="6"
+                                                Background="{DynamicResource Surface2Brush}">
+                                            <DockPanel>
+                                                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
+                                                            VerticalAlignment="Center">
+                                                    <Border Style="{StaticResource Pill}" Margin="0,0,6,0"
+                                                            ToolTip="{Binding StateHint}">
+                                                        <TextBlock Text="{Binding StateLabel}"
+                                                                   Style="{StaticResource PillText}"/>
+                                                    </Border>
+                                                    <Button Style="{StaticResource IconButton}" Content="&#xE8EC;"
+                                                            FontFamily="{StaticResource IconFont}" FontSize="11"
+                                                            Click="OnCopyCompare" Tag="{Binding}"
+                                                            Visibility="{Binding CompareVisibility}"
+                                                            ToolTip="Compare with the selected instance's copy"/>
+                                                    <Button Style="{StaticResource IconButton}" Content="&#xE70F;"
+                                                            FontFamily="{StaticResource IconFont}" FontSize="11"
+                                                            Click="OnCopyEdit" Tag="{Binding}"
+                                                            ToolTip="Open this instance's copy in the editor"/>
+                                                </StackPanel>
+                                                <StackPanel VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding PackName}" FontSize="12"
+                                                               FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+
+                        <!-- Content search hits inside this file. -->
+                        <StackPanel x:Name="HitsPanel" DockPanel.Dock="Top" Margin="0,14,0,0" Visibility="Collapsed">
+                            <TextBlock x:Name="HitsHeader" Style="{StaticResource Caption}" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
+                            <ItemsControl x:Name="HitsList" Margin="0,6,0,0" MaxHeight="140">
+                                <ItemsControl.Template>
+                                    <ControlTemplate TargetType="ItemsControl">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                                      anim:Animate.SmoothScroll="True">
+                                            <ItemsPresenter/>
+                                        </ScrollViewer>
+                                    </ControlTemplate>
+                                </ItemsControl.Template>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <DockPanel Margin="0,0,0,3">
+                                            <TextBlock DockPanel.Dock="Left" Text="{Binding LineLabel}"
+                                                       Style="{StaticResource Caption}" Width="46"
+                                                       Foreground="{DynamicResource TextTertiaryBrush}"/>
+                                            <TextBlock Text="{Binding Line}" FontFamily="Consolas" FontSize="11"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                        </DockPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+
+                        <!-- Preview -->
+                        <Border Margin="0,14,0,0" CornerRadius="8" Padding="0"
+                                Background="{DynamicResource LogBackgroundBrush}"
+                                BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1">
+                            <Grid>
+                                <TextBox x:Name="PreviewBox" IsReadOnly="True" AcceptsReturn="True"
+                                         Background="Transparent" BorderThickness="0"
+                                         Foreground="{DynamicResource LogTextBrush}"
+                                         FontFamily="Consolas" FontSize="12" Padding="12,10"
+                                         VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                                         TextWrapping="NoWrap"/>
+                                <TextBlock x:Name="PreviewNote" Style="{StaticResource Caption}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           TextWrapping="Wrap" TextAlignment="Center" MaxWidth="300"
+                                           Visibility="Collapsed"/>
+                            </Grid>
+                        </Border>
+                    </DockPanel>
+
+                    <StackPanel x:Name="DetailPlaceholder" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                MaxWidth="360">
+                        <TextBlock Text="&#xE8A5;" FontFamily="{StaticResource IconFont}" FontSize="26"
+                                   HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
+                        <TextBlock Style="{StaticResource H3}" Text="Pick a file" HorizontalAlignment="Center"
+                                   Margin="0,10,0,6"/>
+                        <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" TextAlignment="Center"
+                                   Text="Select a config or script to preview it, see which other instances have it, and copy it across."/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Status line -->
+        <Grid Grid.Row="4" Margin="0,10,0,12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="StatusLabel" Grid.Column="0" Style="{StaticResource Caption}"
+                       TextWrapping="Wrap" VerticalAlignment="Center"
+                       Foreground="{DynamicResource TextSecondaryBrush}"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <ProgressBar x:Name="BusyBar" Width="140" Height="4" IsIndeterminate="True"
+                             Visibility="Collapsed" Margin="12,0,8,0"/>
+                <Button x:Name="BusyCancelButton" Content="Cancel" Click="OnCancelWork" Padding="10,3"
+                        Visibility="Collapsed"/>
+            </StackPanel>
+        </Grid>
     </Grid>
 </Page>

@@ -47,17 +47,32 @@
                 </Grid.RowDefinitions>
 
                 <DockPanel Grid.Row="0" Margin="0,0,0,12" LastChildFill="True">
-                    <Button DockPanel.Dock="Right"
-                            Content="Close"
-                            MinWidth="78"
-                            Padding="14,7"
-                            Click="OnCloseClicked"/>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button x:Name="PreviousButton"
+                                Style="{StaticResource IconButton}"
+                                Content="&#xE76B;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                ToolTip="Previous screenshot (Left arrow)"
+                                Click="OnPreviousClicked"
+                                Visibility="Collapsed"/>
+                        <Button x:Name="NextButton"
+                                Style="{StaticResource IconButton}"
+                                Content="&#xE76C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                ToolTip="Next screenshot (Right arrow)"
+                                Click="OnNextClicked"
+                                Margin="4,0,12,0"
+                                Visibility="Collapsed"/>
+                        <Button Content="Close"
+                                MinWidth="78"
+                                Padding="14,7"
+                                Click="OnCloseClicked"/>
+                    </StackPanel>
                     <StackPanel Margin="0,0,14,0">
                         <TextBlock x:Name="TitleText"
                                    Style="{StaticResource H2}"
                                    Text="Screenshot"
                                    TextTrimming="CharacterEllipsis"/>
-                        <TextBlock Text="Press Esc or click outside the image to close."
+                        <TextBlock x:Name="HintText"
+                                   Text="Press Esc or click outside the image to close."
                                    Style="{StaticResource Caption}"
                                    Margin="0,3,0,0"/>
                     </StackPanel>
@@ -84,12 +99,27 @@
                     </Grid>
                 </Border>
 
+                <!-- Actions at the right edge, captions filling the rest — the same shape as every
+                     other footer in the app. -->
                 <DockPanel Grid.Row="2" Margin="0,12,0,0" LastChildFill="True">
-                    <Button DockPanel.Dock="Right"
-                            Content="Open in browser"
-                            Margin="12,0,0,0"
-                            Padding="14,7"
-                            Click="OnOpenInBrowserClicked"/>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="12,0,0,0">
+                        <Button x:Name="CopyImageButton"
+                                Content="Copy image"
+                                Padding="14,7"
+                                Margin="0,0,8,0"
+                                ToolTip="Put the picture on the clipboard, ready to paste"
+                                Click="OnCopyImageClicked"/>
+                        <Button x:Name="SaveCopyButton"
+                                Content="Save a copy…"
+                                Padding="14,7"
+                                Margin="0,0,8,0"
+                                ToolTip="Write a copy of this image somewhere else"
+                                Click="OnSaveCopyClicked"/>
+                        <Button x:Name="OpenExternallyButton"
+                                Content="Open in browser"
+                                Padding="14,7"
+                                Click="OnOpenExternallyClicked"/>
+                    </StackPanel>
                     <TextBlock x:Name="UrlText"
                                Style="{StaticResource Caption}"
                                VerticalAlignment="Center"

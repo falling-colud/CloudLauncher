@@ -19,10 +19,46 @@
                         <TextBlock x:Name="SourcePackLabel" Style="{StaticResource PillText}"
                                    Foreground="{DynamicResource TextSecondaryBrush}"/>
                     </Border>
+                    <!-- pack.png: the pack's own identity, rather than the first letter of a
+                         file name the author never chose. -->
+                    <Border DockPanel.Dock="Left" Width="44" Height="44" Margin="0,0,12,0"
+                            Background="{DynamicResource Surface3Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="8" ClipToBounds="True" VerticalAlignment="Top">
+                        <Grid>
+                            <TextBlock x:Name="PackInitialLabel" Style="{StaticResource H3}"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Image x:Name="PackIconImage" Stretch="UniformToFill"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Grid>
+                    </Border>
                     <TextBlock x:Name="PackNameLabel" Style="{StaticResource H2}"
-                               TextTrimming="CharacterEllipsis"/>
+                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                 </DockPanel>
                 <TextBlock x:Name="MetaLabel" Style="{StaticResource Muted}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <Border x:Name="EnabledPill" Style="{StaticResource Pill}"
+                            Background="{DynamicResource AccentSoftBrush}" Margin="0,0,6,0"
+                            Visibility="Collapsed"
+                            ToolTip="Listed in this instance's options.txt — the game loads it">
+                        <TextBlock x:Name="EnabledPillText" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource AccentBrush}"/>
+                    </Border>
+                    <Border x:Name="FormatPill" Style="{StaticResource Pill}"
+                            Background="{DynamicResource Surface4Brush}" Margin="0,0,6,0"
+                            Visibility="Collapsed"
+                            ToolTip="The pack format the author declared in pack.mcmeta — Minecraft warns when it does not match the game version">
+                        <TextBlock x:Name="FormatPillText" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </Border>
+                    <Border x:Name="KindPill" Style="{StaticResource Pill}"
+                            Background="{DynamicResource Surface4Brush}"
+                            Visibility="Collapsed">
+                        <TextBlock x:Name="KindPillText" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </Border>
+                </StackPanel>
 
                 <DockPanel Margin="0,14,0,0">
                     <Button DockPanel.Dock="Right" Content="Open file location" Click="OnOpenFolder"/>
@@ -104,6 +140,11 @@
                                 <TextBlock Style="{StaticResource H3}" Text="Local file" Margin="0,0,0,8"/>
                                 <TextBlock x:Name="FilePathLabel" Style="{StaticResource Muted}"
                                            TextWrapping="Wrap" Margin="0,0,0,10"/>
+                                <TextBlock Style="{StaticResource Caption}" Text="What the pack says about itself"
+                                           x:Name="PackDescriptionCaption" Visibility="Collapsed"/>
+                                <TextBlock x:Name="PackDescriptionLabel" Style="{StaticResource Body}"
+                                           TextWrapping="Wrap" Margin="0,4,0,10"
+                                           Visibility="Collapsed"/>
                                 <Button Content="Reveal in Explorer" HorizontalAlignment="Left" Click="OnOpenFolder"/>
                             </StackPanel>
                         </Border>
@@ -145,7 +186,25 @@
                                             <Border Padding="12" Margin="0,0,0,1"
                                                     Background="{DynamicResource Surface1Brush}"
                                                     BorderBrush="{DynamicResource BorderSubtleBrush}"
-                                                    BorderThickness="0,0,0,1">
+                                                    BorderThickness="0,0,0,1"
+                                                    ToolTip="{Binding Tooltip}">
+                                                <Border.ContextMenu>
+                                                    <ContextMenu>
+                                                        <MenuItem Header="Save as…" Click="OnCtxSaveVersion">
+                                                            <MenuItem.Icon>
+                                                                <TextBlock Text="&#xE74E;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                            </MenuItem.Icon>
+                                                        </MenuItem>
+                                                        <MenuItem Header="Copy download link" Click="OnCtxCopyVersionLink"/>
+                                                        <Separator/>
+                                                        <MenuItem Header="Delete version…" Click="OnCtxDeleteVersion"
+                                                                  Foreground="{DynamicResource DangerBrush}">
+                                                            <MenuItem.Icon>
+                                                                <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                            </MenuItem.Icon>
+                                                        </MenuItem>
+                                                    </ContextMenu>
+                                                </Border.ContextMenu>
                                                 <Grid>
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*"/>

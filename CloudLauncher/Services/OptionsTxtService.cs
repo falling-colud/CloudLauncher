@@ -124,6 +124,144 @@ public static class OptionsTxtService
         File.WriteAllLines(path, existing);
     }
 
+    // ── the resource pack stack ──────────────────────────────────────────────
+
+    /// <summary>options.txt key holding the ordered list of enabled resource packs.</summary>
+    private const string ResourcePacksKey = "resourcePacks";
+
+    /// <summary>The built-in pack. Always present, always the bottom of the stack.</summary>
+    public const string VanillaEntry = "vanilla";
+
+    /// <summary>
+    /// The enabled resource packs, in the file's own order — <b>lowest priority first</b>.
+    /// </summary>
+    /// <remarks>
+    /// Minecraft keeps them as a one-line JSON array: <c>resourcePacks:["vanilla","file/Foo.zip"]</c>.
+    /// The order is load order, so the LAST element is applied last and therefore wins; the in-game
+    /// screen shows that same stack upside down, highest priority at the top. Entries are
+    /// <c>file/&lt;name&gt;</c> on 1.13+ and a bare <c>&lt;name&gt;</c> on older versions, and both are
+    /// returned verbatim: rewriting someone's 1.12 instance into the modern spelling would turn every
+    /// enabled pack off. An absent file or key gives an empty list, which reads the same as
+    /// "nothing but vanilla" and is the right answer either way.
+    /// <para>
+    /// Note that the game loads options.txt once at startup and rewrites it wholesale on exit, so a
+    /// change written underneath a running instance is discarded when that instance closes. Callers
+    /// check <c>App.State.Instances.IsBusy</c> first, the same rule the rest of the launcher follows
+    /// for files inside a pack.
+    /// </para>
+    /// </remarks>
+    public static List<string> ReadResourcePacks(string gameDir)
+    {
+        var path = Path.Combine(gameDir, "options.txt");
+        if (!File.Exists(path)) return new();
+
+        try
+        {
+            foreach (var line in File.ReadAllLines(path))
+            {
+                if (!line.StartsWith(ResourcePacksKey + ":", StringComparison.Ordinal)) continue;
+                return ParseJsonArray(line[(ResourcePacksKey.Length + 1)..].Trim());
+            }
+        }
+        catch { /* unreadable options.txt behaves as "not configured" */ }
+        return new();
+    }
+
+    /// <summary>
+    /// Rewrite the <c>resourcePacks</c> line, leaving every other line — including
+    /// <c>incompatibleResourcePacks</c>, which the game maintains itself — exactly as it was.
+    /// </summary>
+    /// <param name="entries">The stack in file order, lowest priority first. "vanilla" is forced to
+    /// the front if the caller left it out, because a stack without it loads no base textures.</param>
+    public static void WriteResourcePacks(string gameDir, IReadOnlyList<string> entries)
+    {
+        var ordered = new List<string>();
+        if (!entries.Any(e => string.Equals(e, VanillaEntry, StringComparison.Ordinal)))
+            ordered.Add(VanillaEntry);
+        ordered.AddRange(entries);
+
+        SetOption(gameDir, ResourcePacksKey, FormatJsonArray(ordered));
+    }
+
+    /// <summary>
+    /// True when this instance's options.txt spells its entries <c>file/Name.zip</c>, the 1.13+ form.
+    /// </summary>
+    /// <remarks>Decided from what is already in the file rather than from the pack's Minecraft version,
+    /// because the file is the thing the game actually parses. With nothing to go on — a fresh
+    /// instance, or one with only "vanilla" enabled — the modern form is assumed, which is correct for
+    /// every version this launcher installs by default.</remarks>
+    public static bool UsesFilePrefix(string gameDir)
+    {
+        var existing = ReadResourcePacks(gameDir);
+        var named = existing.Where(e => !string.Equals(e, VanillaEntry, StringComparison.Ordinal)).ToList();
+        if (named.Count == 0) return true;
+        return named.Any(e => e.StartsWith("file/", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>The file name inside an options.txt entry, with any <c>file/</c> prefix removed.</summary>
+    public static string EntryFileName(string entry) =>
+        entry.StartsWith("file/", StringComparison.OrdinalIgnoreCase) ? entry["file/".Length..] : entry;
+
+    /// <summary>Parses the JSON string array Minecraft writes, tolerating hand-edited whitespace.</summary>
+    private static List<string> ParseJsonArray(string value)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(value)) return result;
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(value);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array) return result;
+            foreach (var item in doc.RootElement.EnumerateArray())
+                if (item.ValueKind == System.Text.Json.JsonValueKind.String && item.GetString() is { } s)
+                    result.Add(s);
+            return result;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // A truncated or hand-mangled line still tells us which packs were meant to be on, and
+            // reading them out is far better than silently presenting the instance as "nothing enabled"
+            // and then overwriting the line with that.
+            foreach (System.Text.RegularExpressions.Match m in
+                     System.Text.RegularExpressions.Regex.Matches(value, "\"((?:[^\"\\\\]|\\\\.)*)\""))
+                result.Add(m.Groups[1].Value.Replace("\\\"", "\"").Replace("\\\\", "\\"));
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Writes the array the way the game does: <c>["a","b"]</c>, no spaces.
+    /// </summary>
+    /// <remarks>Hand-rolled rather than run through JsonSerializer so that non-ASCII pack names stay
+    /// readable instead of turning into \u escapes — options.txt is UTF-8 and the game reads both, but
+    /// a user who opens the file should recognise their own pack names.</remarks>
+    private static string FormatJsonArray(IReadOnlyList<string> entries)
+    {
+        var sb = new System.Text.StringBuilder("[");
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (i > 0) sb.Append(',');
+            sb.Append('"');
+            foreach (var ch in entries[i])
+            {
+                switch (ch)
+                {
+                    case '"': sb.Append("\\\""); break;
+                    case '\\': sb.Append("\\\\"); break;
+                    case '\n': sb.Append("\\n"); break;
+                    case '\r': sb.Append("\\r"); break;
+                    case '\t': sb.Append("\\t"); break;
+                    default:
+                        if (char.IsControl(ch)) sb.Append("\\u").Append(((int)ch).ToString("x4", CultureInfo.InvariantCulture));
+                        else sb.Append(ch);
+                        break;
+                }
+            }
+            sb.Append('"');
+        }
+        return sb.Append(']').ToString();
+    }
+
     private static Dictionary<string, string> BuildManagedMap(McDefaults d)
     {
         var inv = CultureInfo.InvariantCulture;

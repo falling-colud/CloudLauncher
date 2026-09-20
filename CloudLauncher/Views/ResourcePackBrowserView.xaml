@@ -39,10 +39,23 @@
                              ToolTip="Search resource packs"/>
                 </DockPanel>
             </Border>
-            <Button Grid.Column="1" Style="{StaticResource IconButton}"
-                    Margin="6,0,0,0" Padding="8,5"
-                    Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                    ToolTip="Filters" Click="OnFiltersClick"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <ComboBox x:Name="SortBox" Width="130" Margin="6,0,0,0"
+                          SelectionChanged="OnSortChanged"
+                          ToolTip="Result order">
+                    <ComboBoxItem Content="Relevance" IsSelected="True"/>
+                    <ComboBoxItem Content="Latest"/>
+                    <ComboBoxItem Content="Downloads"/>
+                </ComboBox>
+                <Button Style="{StaticResource IconButton}"
+                        Margin="6,0,0,0" Padding="8,5"
+                        Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        ToolTip="Filters" Click="OnFiltersClick"/>
+                <Button Style="{StaticResource IconButton}"
+                        Margin="4,0,0,0" Padding="8,5"
+                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        ToolTip="Refresh (F5)" Click="OnRefresh"/>
+            </StackPanel>
             <Popup x:Name="FiltersPopup" PlacementTarget="{Binding ElementName=SearchBox}"
                    Placement="Top" StaysOpen="False" AllowsTransparency="True"
                    HorizontalOffset="0" VerticalOffset="-8">
@@ -51,6 +64,33 @@
                         CornerRadius="8" Padding="14" MinWidth="240">
                     <StackPanel>
                         <TextBlock Style="{StaticResource H3}" Text="Filters" Margin="0,0,0,10"/>
+                        <!-- Categories come from whichever store the active chip points at, so the
+                             list is the store's own and the labels match its site. -->
+                        <StackPanel x:Name="CategoryFilterPanel" Visibility="Collapsed">
+                            <Grid Margin="0,0,0,4">
+                                <TextBlock Style="{StaticResource Caption}">
+                                    <Run Text="Categories"/><Run x:Name="CategorySourceLabel"
+                                                                 Foreground="{DynamicResource TextTertiaryBrush}"/>
+                                </TextBlock>
+                                <Button Content="Clear" HorizontalAlignment="Right"
+                                        Style="{StaticResource LinkButton}" FontSize="11"
+                                        Click="OnClearCategories"/>
+                            </Grid>
+                            <Border Background="{DynamicResource Surface1Brush}"
+                                    BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="1" CornerRadius="6" MaxHeight="168" Margin="0,0,0,10">
+                                <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,6">
+                                    <ItemsControl x:Name="FilterCategoryList">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <CheckBox Content="{Binding Label}" Margin="0,3"
+                                                          IsChecked="{Binding IsChecked, Mode=TwoWay}"/>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </ScrollViewer>
+                            </Border>
+                        </StackPanel>
                         <TextBlock Style="{StaticResource Caption}" Text="Minecraft version"/>
                         <TextBox x:Name="FilterMcBox" Margin="0,4,0,10"
                                  ToolTip="e.g. 1.20.1 — leave empty for any"/>
@@ -148,11 +188,25 @@
                                             <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
                                                        Margin="0,4,0,0" Foreground="{DynamicResource TextTertiaryBrush}"/>
                                         </StackPanel>
-                                        <Button Grid.Column="2" Content="Download"
-                                                Style="{StaticResource AccentButton}"
+                                        <!-- Right-edge action, and it says so when a pack of this name
+                                             is already installed: a second click otherwise writes a
+                                             duplicate zip that fights the first in the same stack. -->
+                                        <Button Grid.Column="2" Content="{Binding DownloadLabel}"
                                                 Click="OnDownloadRow" Tag="{Binding}"
                                                 Padding="12,5" MinHeight="30" MinWidth="0"
-                                                VerticalAlignment="Center"/>
+                                                VerticalAlignment="Center"
+                                                ToolTip="{Binding DownloadTooltip}">
+                                            <Button.Style>
+                                                <Style TargetType="Button" BasedOn="{StaticResource AccentButton}">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsInstalled}" Value="True">
+                                                            <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+                                                            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Button.Style>
+                                        </Button>
                                     </Grid>
                                 </Border>
                             </DataTemplate>

@@ -2,6 +2,7 @@
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:local="clr-namespace:CloudLauncher.Views"
+      xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Instance"
       Background="{DynamicResource Surface0Brush}">
     <Grid>
@@ -168,10 +169,10 @@
                             ToolTip="Download the latest version from the server"
                             Visibility="Collapsed" Margin="0,0,10,10">
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="&#xE777;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                            <TextBlock x:Name="UpdateButtonGlyph" Text="&#xE777;" FontFamily="{StaticResource IconFont}" FontSize="13"
                                        Margin="0,0,8,0" VerticalAlignment="Center"
                                        Foreground="{DynamicResource AccentBrush}"/>
-                            <TextBlock Text="Update available" VerticalAlignment="Center"
+                            <TextBlock x:Name="UpdateButtonText" Text="Update available" VerticalAlignment="Center"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource AccentBrush}"/>
                         </StackPanel>
@@ -382,8 +383,8 @@
                                    Text="No screenshots yet. Press F2 in Minecraft to capture one."
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
                                    TextWrapping="Wrap" TextAlignment="Center"/>
-                        <ScrollViewer VerticalScrollBarVisibility="Auto">
-                            <ItemsControl x:Name="PackScreenshotList">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" anim:Animate.SmoothScroll="True">
+                            <ItemsControl x:Name="PackScreenshotList" anim:Animate.EntranceStagger="True">
                                 <ItemsControl.ItemsPanel>
                                     <ItemsPanelTemplate>
                                         <WrapPanel/>
@@ -392,13 +393,59 @@
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Border Width="230" Margin="0,0,12,12" Style="{StaticResource Card}" Padding="8"
-                                                Cursor="Hand" ToolTip="Open screenshot"
+                                                Cursor="Hand" ToolTip="{Binding ToolTipText}"
+                                                anim:Animate.HoverLift="True"
                                                 MouseLeftButtonUp="OnOpenPackScreenshot">
+                                            <Border.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Open" Click="OnScreenshotOpen">
+                                                        <MenuItem.Icon>
+                                                            <TextBlock Text="&#xE8B9;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                        </MenuItem.Icon>
+                                                    </MenuItem>
+                                                    <MenuItem Header="Copy image" Click="OnScreenshotCopyImage"
+                                                              ToolTip="Put the picture itself on the clipboard, ready to paste into Discord">
+                                                        <MenuItem.Icon>
+                                                            <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                        </MenuItem.Icon>
+                                                    </MenuItem>
+                                                    <MenuItem Header="Copy file path" Click="OnScreenshotCopyPath"/>
+                                                    <Separator/>
+                                                    <MenuItem Header="Reveal in Explorer" Click="OnScreenshotReveal">
+                                                        <MenuItem.Icon>
+                                                            <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                        </MenuItem.Icon>
+                                                    </MenuItem>
+                                                    <MenuItem Header="Set as instance image" Click="OnScreenshotSetAsIcon"
+                                                              IsEnabled="{Binding CanSetAsIcon}"
+                                                              ToolTip="Use this screenshot as the instance's cover art">
+                                                        <MenuItem.Icon>
+                                                            <TextBlock Text="&#xEB9F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                        </MenuItem.Icon>
+                                                    </MenuItem>
+                                                    <MenuItem Header="Rename…" Click="OnScreenshotRename">
+                                                        <MenuItem.Icon>
+                                                            <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                        </MenuItem.Icon>
+                                                    </MenuItem>
+                                                    <Separator/>
+                                                    <MenuItem Header="Delete…" Click="OnScreenshotDelete"
+                                                              Foreground="{DynamicResource DangerBrush}">
+                                                        <MenuItem.Icon>
+                                                            <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                                       Foreground="{DynamicResource DangerBrush}"/>
+                                                        </MenuItem.Icon>
+                                                    </MenuItem>
+                                                </ContextMenu>
+                                            </Border.ContextMenu>
                                             <StackPanel>
                                                 <Border Height="124" Background="{DynamicResource Surface0Brush}"
                                                         BorderBrush="{DynamicResource BorderBrush}"
                                                         BorderThickness="1" CornerRadius="6" ClipToBounds="True">
-                                                    <Image Source="{Binding ImageUrl}" Stretch="UniformToFill"/>
+                                                    <!-- Thumbnail, not ImageUrl: binding the file straight to the Image
+                                                         decoded every 4K capture at full size for a 230px card. -->
+                                                    <Image Source="{Binding Thumbnail}" Stretch="UniformToFill"
+                                                           RenderOptions.BitmapScalingMode="HighQuality"/>
                                                 </Border>
                                                 <TextBlock Text="{Binding Title}" Style="{StaticResource Caption}"
                                                            FontWeight="SemiBold" Margin="0,6,0,0"
@@ -493,9 +540,9 @@
                                 <Button x:Name="UploadButton" Style="{StaticResource AccentButton}"
                                         Click="OnUpload">
                                     <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="&#xE898;" FontFamily="{StaticResource IconFont}"
+                                        <TextBlock x:Name="UploadButtonGlyph" Text="&#xE898;" FontFamily="{StaticResource IconFont}"
                                                    FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
-                                        <TextBlock Text="Upload to server" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                                        <TextBlock x:Name="UploadButtonText" Text="Upload to server" VerticalAlignment="Center" FontWeight="SemiBold"/>
                                     </StackPanel>
                                 </Button>
                             </StackPanel>
@@ -552,14 +599,37 @@
                                 <local:FolderView x:Name="GameView" Margin="6">
                                     <local:FolderView.ContextMenu>
                                         <ContextMenu>
-                                            <MenuItem Header="Edit file" Click="OnEditSelectedGameFile"/>
+                                            <MenuItem Header="Edit file" Click="OnEditSelectedGameFile">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
                                             <MenuItem Header="Copy to shared"   Click="OnMoveGameToShared"/>
                                             <Separator/>
                                             <MenuItem Header="Add rule: → shared"  Click="OnQuickRuleShared"/>
                                             <MenuItem Header="Add rule: ignored"   Click="OnQuickRuleIgnored"/>
                                             <MenuItem Header="Add rule for parent folder" Click="OnQuickRuleFolder"/>
                                             <Separator/>
-                                            <MenuItem Header="Reveal in Explorer" Click="OnRevealGame"/>
+                                            <MenuItem Header="New folder…" Click="OnGameNewFolder">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8F4;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Rename…" InputGestureText="F2" Click="OnGameRename"/>
+                                            <MenuItem Header="Copy full path" Click="OnGameCopyPath"/>
+                                            <MenuItem Header="Reveal in Explorer" Click="OnRevealGame">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <Separator/>
+                                            <MenuItem Header="Delete…" InputGestureText="Del" Click="OnGameDelete"
+                                                      Foreground="{DynamicResource DangerBrush}">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                               Foreground="{DynamicResource DangerBrush}"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
                                         </ContextMenu>
                                     </local:FolderView.ContextMenu>
                                 </local:FolderView>
@@ -595,9 +665,30 @@
                                 <local:FolderView x:Name="SharedView" Margin="6">
                                     <local:FolderView.ContextMenu>
                                         <ContextMenu>
-                                            <MenuItem Header="Remove from shared" Click="OnMoveSharedToGame"/>
+                                            <MenuItem Header="Remove from shared" Click="OnMoveSharedToGame"
+                                                      ToolTip="Stop uploading this file. It stays on this PC."/>
+                                            <MenuItem Header="Edit file" Click="OnEditSelectedSharedFile">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
                                             <Separator/>
-                                            <MenuItem Header="Reveal in Explorer" Click="OnRevealShared"/>
+                                            <MenuItem Header="Rename…" InputGestureText="F2" Click="OnSharedRename"/>
+                                            <MenuItem Header="Copy full path" Click="OnSharedCopyPath"/>
+                                            <MenuItem Header="Reveal in Explorer" Click="OnRevealShared">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <Separator/>
+                                            <MenuItem Header="Delete from disk…" InputGestureText="Del" Click="OnSharedDelete"
+                                                      Foreground="{DynamicResource DangerBrush}"
+                                                      ToolTip="Deletes the file itself, not just its shared rule">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                               Foreground="{DynamicResource DangerBrush}"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
                                         </ContextMenu>
                                     </local:FolderView.ContextMenu>
                                 </local:FolderView>
@@ -804,9 +895,29 @@
                 <DockPanel Margin="0,0,0,0">
                     <Border DockPanel.Dock="Top" Style="{StaticResource Card}" Padding="14,10" Margin="0,0,0,12">
                         <DockPanel>
-                            <TextBlock DockPanel.Dock="Left" Text="Logs" VerticalAlignment="Center"
-                                       FontWeight="SemiBold"/>
-                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <StackPanel DockPanel.Dock="Left" VerticalAlignment="Center" Margin="0,0,14,0">
+                                <TextBlock Text="Logs" FontWeight="SemiBold"/>
+                                <TextBlock x:Name="LogsCountLabel" Style="{StaticResource Caption}"/>
+                            </StackPanel>
+                            <!-- Actions live at the right edge, the way every other header in the app
+                                 puts them. -->
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="CopyLogButton" Click="OnCopyLog" Margin="0,0,8,0"
+                                        ToolTip="Copy what is shown — with a filter on, that is the filtered lines only">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}"
+                                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Copy" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                                <Button x:Name="SaveLogButton" Click="OnSaveLogAs" Margin="0,0,8,0"
+                                        ToolTip="Save this log to a file you can attach to a bug report">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE74E;" FontFamily="{StaticResource IconFont}"
+                                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                        <TextBlock Text="Save as…" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
                                 <Button Click="OnOpenLogsFolder" Margin="0,0,8,0">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}"
@@ -816,10 +927,48 @@
                                 </Button>
                                 <Button Click="OnRefreshLogs" Style="{StaticResource IconButton}"
                                         Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                                        ToolTip="Refresh logs"/>
+                                        ToolTip="Refresh logs (F5)"/>
                             </StackPanel>
-                            <TextBlock x:Name="LogsCountLabel" Style="{StaticResource Caption}"
-                                       VerticalAlignment="Center" Margin="14,0,0,0"/>
+                            <!-- Find + level. A modded crash log is twenty thousand lines and the one
+                                 that matters is already classified by colour; this is the same
+                                 classification, used to hide the rest. -->
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                <Grid Width="220">
+                                    <TextBox x:Name="LogFilterBox" Padding="26,3,7,3"
+                                             VerticalContentAlignment="Center"
+                                             TextChanged="OnLogFilterChanged"
+                                             KeyDown="OnLogFilterKeyDown"
+                                             ToolTip="Show only lines containing this text. Esc clears it."/>
+                                    <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="11"
+                                               Foreground="{DynamicResource TextTertiaryBrush}"
+                                               VerticalAlignment="Center" Margin="9,0,0,0"
+                                               IsHitTestVisible="False"/>
+                                    <TextBlock Text="Find in this log…" Margin="26,0,0,0"
+                                               Foreground="{DynamicResource TextTertiaryBrush}"
+                                               VerticalAlignment="Center" IsHitTestVisible="False">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Setter Property="Visibility" Value="Collapsed"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Text, ElementName=LogFilterBox}" Value="">
+                                                        <Setter Property="Visibility" Value="Visible"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </Grid>
+                                <ComboBox x:Name="LogLevelBox" Width="150" Margin="8,0,0,0"
+                                          SelectionChanged="OnLogLevelChanged"
+                                          ToolTip="Narrow the log to the lines that report a problem">
+                                    <ComboBoxItem Content="All lines" IsSelected="True"/>
+                                    <ComboBoxItem Content="Warnings + errors"/>
+                                    <ComboBoxItem Content="Errors only"/>
+                                </ComboBox>
+                                <TextBlock x:Name="LogLinesLabel" Style="{StaticResource Caption}"
+                                           VerticalAlignment="Center" Margin="10,0,10,0"
+                                           TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
                         </DockPanel>
                     </Border>
                     <Grid>
@@ -830,20 +979,93 @@
 
                         <Border Grid.Column="0" Style="{StaticResource Card}" Padding="0" Margin="0,0,12,0">
                             <ListBox x:Name="LogsList" SelectionChanged="OnLogsSelected"
+                                     PreviewMouseRightButtonDown="OnLogsListRightButtonDown"
                                      Background="Transparent" BorderThickness="0">
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                        <Setter Property="ToolTip" Value="{Binding ToolTipText}"/>
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Open in the editor" Click="OnLogOpenInEditor">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Copy contents" Click="OnLogCopyContents">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <MenuItem Header="Copy path" Click="OnLogCopyPath"/>
+                                        <Separator/>
+                                        <MenuItem Header="Reveal in Explorer" Click="OnLogReveal">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                        <Separator/>
+                                        <MenuItem Header="Delete…" Click="OnLogDelete"
+                                                  Foreground="{DynamicResource DangerBrush}">
+                                            <MenuItem.Icon>
+                                                <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                           Foreground="{DynamicResource DangerBrush}"/>
+                                            </MenuItem.Icon>
+                                        </MenuItem>
+                                    </ContextMenu>
+                                </ListBox.ContextMenu>
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <DockPanel Margin="2,4">
+                                            <!-- Icon colours come from triggers on the row's kind rather
+                                                 than from brushes captured in the row object: a captured
+                                                 brush is a snapshot and would survive a theme change. -->
                                             <Border DockPanel.Dock="Left" Width="22" Height="22"
-                                                    Background="{Binding IconBackground}"
                                                     CornerRadius="4" Margin="0,0,8,0">
+                                                <Border.Style>
+                                                    <Style TargetType="Border">
+                                                        <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Kind}" Value="Launcher">
+                                                                <Setter Property="Background" Value="{DynamicResource Surface4Brush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Kind}" Value="Sync">
+                                                                <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Kind}" Value="CrashReport">
+                                                                <Setter Property="Background" Value="{DynamicResource DangerBrush}"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
                                                 <TextBlock Text="{Binding IconGlyph}" FontFamily="{StaticResource IconFont}"
-                                                           FontSize="11" Foreground="{Binding IconForeground}"
-                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                           FontSize="11"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Kind}" Value="Launcher">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding Kind}" Value="Sync">
+                                                                    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+                                                                </DataTrigger>
+                                                                <DataTrigger Binding="{Binding Kind}" Value="CrashReport">
+                                                                    <Setter Property="Foreground" Value="White"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
                                             </Border>
                                             <StackPanel>
-                                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="12"/>
-                                                <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"/>
+                                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="12"
+                                                           TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
+                                                           TextTrimming="CharacterEllipsis"/>
                                             </StackPanel>
                                         </DockPanel>
                                     </DataTemplate>

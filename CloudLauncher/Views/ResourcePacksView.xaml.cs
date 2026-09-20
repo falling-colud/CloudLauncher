@@ -33,6 +33,9 @@ public partial class ResourcePacksView : Page
     private ResourcePackSortMode _sortMode;
     private string? _activeFolder;
 
+    private ResourcePackScannerRowVm? _focusedRow;
+    private HashSet<string> _installedNames = new(StringComparer.OrdinalIgnoreCase);
+
     private ModSummary? _selExternal;
     private HostedResourcePackDetail? _selHostedDetail;
     private string? _projectUrl;
@@ -64,11 +67,15 @@ public partial class ResourcePacksView : Page
         {
             await InitializeChipsAsync();
             Window.GetWindow(this)!.PreviewKeyDown += GlobalKeys;
+            // The chips and folder chips are painted in code, so they would keep the old accent after
+            // a theme change until the screen was navigated away from and back.
+            ThemeService.Changed += OnThemeChanged;
         };
         Unloaded += (_, _) =>
         {
             if (Window.GetWindow(this) is Window w)
                 w.PreviewKeyDown -= GlobalKeys;
+            ThemeService.Changed -= OnThemeChanged;
             _cts.Cancel();
         };
     }
@@ -208,11 +215,17 @@ public partial class ResourcePacksView : Page
             if (dlg.ShowDialog() != true || dlg.SelectedPackId is not Guid gid) return;
             var target = _packs.First(z => z.Id == gid);
 
-            Directory.CreateDirectory(RpFolder(target));
-            var dest = Bump(RpFolder(target), Path.GetFileName(ofd.FileName));
-            File.Copy(ofd.FileName, dest, overwrite: false);
-            Okay($"Copied into {target.Name}");
+            Okay($"Copying into {target.Name}…");
+            var source = ofd.FileName;
+            var dest = await Task.Run(() =>
+            {
+                var dir = RpFolder(target);
+                var path = Bump(dir, Path.GetFileName(source));
+                File.Copy(source, path, overwrite: false);
+                return path;
+            });
             await RefreshInstalledAsync();
+            Okay($"Copied {Path.GetFileName(dest)} into {target.Name} — turn it on from that instance's Resources tab.");
         }
         catch (Exception ex) { Fail(ex.Message); }
     }
@@ -250,16 +263,24 @@ public partial class ResourcePacksView : Page
         await BrowseRestartAsync();
     }
 
+    /// <summary>Success/idle text. The brush is a resource REFERENCE, not a copy, so recolouring the
+    /// accent in Settings repaints the line that is already on screen.</summary>
     private void Okay(string m)
     {
-        StatusLabel.Foreground = (Brush)FindResource("AccentBrush");
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
         StatusLabel.Text = m;
     }
 
     private void Fail(string m)
     {
-        StatusLabel.Foreground = (Brush)FindResource("DangerBrush");
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
         StatusLabel.Text = m;
+    }
+
+    private void OnThemeChanged()
+    {
+        ChipPaint();
+        RebuildFolders();
     }
 
     // Compact search ------------------------------------------------------------
@@ -328,13 +349,40 @@ public partial class ResourcePacksView : Page
             return;
         }
 
-        if (e.Key != Key.F5) return;
+        if (e.Key == Key.F5)
+        {
+            e.Handled = true;
+            if (_activeChipVm?.Kind == BrowseKind.Installed)
+                await RefreshInstalledAsync();
+            else
+                await BrowseRestartAsync();
+            return;
+        }
 
-        e.Handled = true;
-        if (_activeChipVm?.Kind == BrowseKind.Installed)
-            await RefreshInstalledAsync();
-        else
-            await BrowseRestartAsync();
+        // The card grid has no keyboard focus of its own, so these act on the last card the user
+        // clicked or right-clicked — which is the card they are looking at.
+        if (_activeChipVm?.Kind != BrowseKind.Installed || _focusedRow is null) return;
+        if (SearchBox.IsKeyboardFocusWithin) return;
+
+        try
+        {
+            switch (e.Key)
+            {
+                case Key.Delete:
+                    e.Handled = true;
+                    await DeleteRowAsync(_focusedRow);
+                    break;
+                case Key.F2:
+                    e.Handled = true;
+                    RenameDisplayName(_focusedRow);
+                    break;
+                case Key.Enter:
+                    e.Handled = true;
+                    _shell.OpenLocalResourcePackDetail(_focusedRow.Key, _focusedRow.DisplayName);
+                    break;
+            }
+        }
+        catch (Exception ex) { Fail(ex.Message); }
     }
 
     // Installed library ---------------------------------------------------------
@@ -345,10 +393,31 @@ public partial class ResourcePacksView : Page
         {
             _packs = await App.State.Api.ListPacksAsync();
 
-            var discovered = App.State.ResourcePacks.ScanAll(_packs);
+            // Scanning walks every instance's resourcepacks/ folder and opens each zip for its
+            // pack.png — seconds of work on a big library, and none of it belongs on the UI thread.
+            var packs = _packs;
+            var discovered = await Task.Run(() =>
+                App.State.ResourcePacks.ScanAll(packs)
+                    .Select(info => (info, meta: ResourcePackService.ReadMeta(info.FilePath, info.IsFolder)))
+                    .ToList());
+
             _scanRows.Clear();
-            foreach (var pack in discovered)
-                _scanRows.Add(new ResourcePackScannerRowVm(pack, _packs));
+            foreach (var (info, meta) in discovered)
+                _scanRows.Add(new ResourcePackScannerRowVm(info, meta));
+
+            // What the browse side needs to know to say "Installed" instead of offering a duplicate.
+            _installedNames = discovered
+                .SelectMany(d => new[]
+                {
+                    d.info.DisplayName,
+                    System.IO.Path.GetFileNameWithoutExtension(d.info.FileName)
+                })
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            MarkInstalledBrowseRows();
+
+            if (_focusedRow is not null)
+                _focusedRow = _scanRows.FirstOrDefault(r => r.Key == _focusedRow.Key);
 
             RebuildFolders();
             FilterInstalledUi();
@@ -356,6 +425,17 @@ public partial class ResourcePacksView : Page
             CountLabel.Text = $"{discovered.Count} scanned";
         }
         catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    /// <summary>Re-evaluates the "already installed" flag on whatever browse results are loaded.
+    /// Run after a scan and after every install, so the button on the row the user just used flips
+    /// without a re-search.</summary>
+    private void MarkInstalledBrowseRows()
+    {
+        var changed = false;
+        foreach (var row in _browseRows)
+            changed |= row.ApplyInstalled(_installedNames.Contains(row.Name));
+        if (changed) ResultsList.Items.Refresh();
     }
 
     private void RebuildFolders()
@@ -405,9 +485,21 @@ public partial class ResourcePacksView : Page
 
         var q = SearchBox.Text.Trim().ToLowerInvariant();
         if (q.Length > 0)
-            seq = seq.Where(r =>
-                r.DisplayName.ToLowerInvariant().Contains(q)
-                || r.SourcePack.ToLowerInvariant().Contains(q));
+        {
+            // "on" / "off" / "local" are the three questions this screen gets asked most: which packs
+            // are actually loading, which are dead weight, and which are not shared with the instance.
+            seq = q switch
+            {
+                "on" => seq.Where(r => r.Enabled),
+                "off" => seq.Where(r => !r.Enabled),
+                "local" => seq.Where(r => r.IsLocal),
+                _ => seq.Where(r =>
+                    r.DisplayName.ToLowerInvariant().Contains(q)
+                    || r.SourcePack.ToLowerInvariant().Contains(q)
+                    || r.FileName.ToLowerInvariant().Contains(q)
+                    || (r.PackDescription?.ToLowerInvariant().Contains(q) ?? false))
+            };
+        }
 
         seq = Sorted(seq);
         var list = seq.ToList();
@@ -533,19 +625,30 @@ public partial class ResourcePacksView : Page
         RebuildFolders(); FilterInstalledUi();
     }
 
-    private void OnFolderDelete(object sender, RoutedEventArgs e)
+    private async void OnFolderDelete(object sender, RoutedEventArgs e)
     {
-        var row = FolderCtx(sender); if (row == null || string.IsNullOrEmpty(row.Id)) return;
+        try
+        {
+            var row = FolderCtx(sender);
+            if (row == null || string.IsNullOrEmpty(row.Id)) return;
 
-        if (MessageBox.Show(_shell, $"Delete folder '{row.Id}'?",
-                "Delete folder", MessageBoxButton.YesNo, MessageBoxImage.Question)
-            != MessageBoxResult.Yes) return;
+            var count = App.State.Settings.ResourcePackFolders.TryGetValue(row.Id, out var members) ? members.Count : 0;
+            if (!await AppDialog.ConfirmAsync(_shell,
+                    "Delete folder",
+                    $"Delete the folder '{row.Id}'?"
+                    + (count > 0 ? $"\n\nThe {count} pack(s) filed in it stay on disk — only the grouping goes." : ""),
+                    "Delete folder", "Cancel", danger: true))
+                return;
 
-        App.State.Settings.DeleteResourcePackFolder(row.Id);
-        if (_activeFolder == row.Id) _activeFolder = null;
-        App.State.Settings.Save();
+            App.State.Settings.DeleteResourcePackFolder(row.Id);
+            if (_activeFolder == row.Id) _activeFolder = null;
+            App.State.Settings.Save();
 
-        RebuildFolders(); FilterInstalledUi();
+            RebuildFolders();
+            FilterInstalledUi();
+            Okay($"Deleted folder '{row.Id}'.");
+        }
+        catch (Exception ex) { Fail(ex.Message); }
     }
 
     private ResourcePackScannerRowVm? ScannerFromCtx(object sender) =>
@@ -566,8 +669,17 @@ public partial class ResourcePacksView : Page
 
     private void OnRpCardClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: ResourcePackScannerRowVm rr })
-            _shell.OpenLocalResourcePackDetail(rr.Key, rr.DisplayName);
+        if (sender is not FrameworkElement { DataContext: ResourcePackScannerRowVm rr }) return;
+        _focusedRow = rr;
+        _shell.OpenLocalResourcePackDetail(rr.Key, rr.DisplayName);
+    }
+
+    /// <summary>Remembers which card a context menu belongs to, so the Delete and F2 keys act on the
+    /// card the user last touched rather than on nothing.</summary>
+    private void OnCardMenuOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender is ContextMenu { PlacementTarget: FrameworkElement { DataContext: ResourcePackScannerRowVm row } })
+            _focusedRow = row;
     }
 
     private void OnCtxEdit(object sender, RoutedEventArgs e)
@@ -578,50 +690,200 @@ public partial class ResourcePacksView : Page
 
     private void OnCtxReveal(object sender, RoutedEventArgs e)
     {
-        if (ScannerFromCtx(sender)?.Path is string p && File.Exists(p))
-            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,{p}") { UseShellExecute = true });
-    }
-
-    private void OnCtxRename(object sender, RoutedEventArgs e) => OnCtxEdit(sender, e);
-
-    private void OnCtxCopyInstance(object sender, RoutedEventArgs e)
-    {
-        var row = ScannerFromCtx(sender); if (row == null) return;
-        var allow = App.State.ResourcePacks.CompatiblePacks(row.Info, _packs);
-        if (!allow.Any()) { Fail("No compatible packs flagged."); return; }
-
-        var pick = new PackPickerDialog(allow, "Destination", "", "Pick") { Owner = _shell };
-        if (pick.ShowDialog() != true || pick.SelectedPackId is not Guid gid) return;
+        if (ScannerFromCtx(sender) is not ResourcePackScannerRowVm row) return;
+        if (!File.Exists(row.Path) && !Directory.Exists(row.Path)) { Fail("That file is no longer there."); return; }
         try
         {
-            var tgt = allow.First(pk => pk.Id == gid);
-            File.Copy(row.Path!, Bump(RpFolder(tgt), Path.GetFileName(row.Path)!), overwrite: false);
-            Okay($"Copied to {tgt.Name}");
+            Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + row.Path + "\"") { UseShellExecute = true });
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    /// <summary>
+    /// Renames the label the launcher shows for a pack.
+    /// </summary>
+    /// <remarks>This used to open the detail page instead, so nothing in the app could rename a pack
+    /// from the grid at all. The file on disk keeps its name — "Rename file on disk…" is the other,
+    /// riskier half, and it is deliberately a separate command.</remarks>
+    private void OnCtxRename(object sender, RoutedEventArgs e)
+    {
+        var row = ScannerFromCtx(sender) ?? _focusedRow;
+        if (row is not null) RenameDisplayName(row);
+    }
+
+    private void RenameDisplayName(ResourcePackScannerRowVm row)
+    {
+        var dlg = new SimpleInputDialog("Rename resource pack", "Display name", row.DisplayName) { Owner = _shell };
+        if (dlg.ShowDialog() != true) return;
+
+        var name = (dlg.Result ?? "").Trim();
+        if (name.Length == 0) { Fail("Name cannot be empty."); return; }
+
+        App.State.ResourcePacks.Rename(row.Key, name);
+        _ = RefreshInstalledAsync();
+        Okay("Renamed to " + name + ".");
+    }
+
+    /// <summary>
+    /// Renames the zip (or pack folder) itself, carrying the launcher's entry and the instance's
+    /// options.txt line across with it.
+    /// </summary>
+    /// <remarks>The settings key contains the file name, so without the re-key the pack would come
+    /// back as a stranger: no display name, no folder membership, no hosting link. And because
+    /// options.txt lists packs by file name, a pack that was enabled has to be renamed there too or
+    /// it silently switches itself off.</remarks>
+    private async void OnCtxRenameFile(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var row = ScannerFromCtx(sender) ?? _focusedRow;
+            if (row is null) return;
+
+            var dlg = new SimpleInputDialog("Rename file on disk", "File name", row.FileName) { Owner = _shell };
+            if (dlg.ShowDialog() != true) return;
+
+            var wanted = ResourcePackService.SanitizeFileName(dlg.Result ?? "", row.IsFolder);
+            if (string.Equals(wanted, row.FileName, StringComparison.Ordinal)) return;
+            if (row.Enabled && !await ConfirmStackWriteAsync(row)) return;
+
+            var info = row.Info;
+            await Task.Run(() => App.State.ResourcePacks.RenameFileOnDisk(info, wanted));
+            await RefreshInstalledAsync();
+            Okay("Renamed to " + wanted + ".");
+        }
+        catch (Exception ex) { Fail("Rename failed: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// Turns a pack on or off for the instance it is installed in, by rewriting that instance's
+    /// options.txt resource pack stack.
+    /// </summary>
+    /// <remarks>A newly enabled pack goes on top of the stack — the position the game itself gives
+    /// one you select, and the only one where a freshly installed texture pack is actually visible.
+    /// Ordering within the stack is done on the instance's own Resources tab, which has the room for
+    /// it; this is the one-click "is it on" the card grid needs.</remarks>
+    private async void OnCtxToggleEnabled(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var row = ScannerFromCtx(sender) ?? _focusedRow;
+            if (row is null) return;
+            if (!await ConfirmStackWriteAsync(row)) return;
+
+            var turnOn = !row.Enabled;
+            App.State.ResourcePacks.SetEnabled(row.Info.SourcePackId, row.Info.SourcePackName, row.FileName, turnOn);
+            await RefreshInstalledAsync();
+            Okay(turnOn
+                ? row.DisplayName + " is on — top of " + row.SourcePackName + "'s stack."
+                : row.DisplayName + " is off in " + row.SourcePackName + ".");
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    /// <summary>Minecraft reads options.txt at startup and rewrites it from memory on exit, so a
+    /// change made under a running instance is thrown away when that instance closes.</summary>
+    private async Task<bool> ConfirmStackWriteAsync(ResourcePackScannerRowVm row)
+    {
+        if (!App.State.Instances.IsBusy(row.Info.SourcePackId)) return true;
+        return await AppDialog.ConfirmAsync(_shell,
+            "Minecraft is running",
+            row.SourcePackName + " is open. Minecraft rewrites options.txt when it closes, so this "
+            + "change would be lost. Do it anyway?",
+            "Do it anyway", "Cancel", danger: true);
+    }
+
+    private async void OnCardCopyTo(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (sender is FrameworkElement { DataContext: ResourcePackScannerRowVm row })
+                await CopyToInstanceAsync(row);
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    private async void OnCtxCopyInstance(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (ScannerFromCtx(sender) is ResourcePackScannerRowVm row)
+                await CopyToInstanceAsync(row);
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    private async Task CopyToInstanceAsync(ResourcePackScannerRowVm row)
+    {
+        if (!_packs.Any()) _packs = await App.State.Api.ListPacksAsync();
+
+        var allow = App.State.ResourcePacks.CompatiblePacks(row.Info, _packs)
+            .Where(p => p.Id != row.Info.SourcePackId)
+            .ToList();
+        if (!allow.Any())
+        {
+            Fail("No other instance is flagged compatible — set that on the pack's Compatibility tab.");
+            return;
+        }
+
+        var pick = new PackPickerDialog(allow, "Copy resource pack", row.DisplayName, "Copy") { Owner = _shell };
+        if (pick.ShowDialog() != true || pick.SelectedPackId is not Guid gid) return;
+
+        var target = allow.First(pk => pk.Id == gid);
+        Okay("Copying to " + target.Name + "…");
+        try
+        {
+            var sourcePath = row.Path;
+            var fileName = row.FileName;
+            var isFolder = row.IsFolder;
+            await Task.Run(() =>
+            {
+                var dir = RpFolder(target);
+                var dest = BumpPath(dir, fileName, isFolder);
+                if (isFolder) CopyDirectory(sourcePath, dest);
+                else File.Copy(sourcePath, dest, overwrite: false);
+            });
+
+            // The copy is a new pack in another instance, and this grid shows every instance — so it
+            // has to be rebuilt. Saying "Copied" and showing nothing new was the old behaviour here.
+            await RefreshInstalledAsync();
+            Okay("Copied to " + target.Name);
         }
         catch (Exception ex) { Fail(ex.Message); }
     }
 
     private void OnCtxCopyKey(object sender, RoutedEventArgs e)
     {
-        if (ScannerFromCtx(sender)?.Key is string ky)
-        {
-            if (Services.ClipboardHelper.TrySetText(ky))
-                Okay("Copied key.");
-        }
+        if (ScannerFromCtx(sender)?.Key is string ky && Services.ClipboardHelper.TrySetText(ky))
+            Okay("Copied key.");
     }
 
     private async void OnCtxDelete(object sender, RoutedEventArgs e)
     {
-        var row = ScannerFromCtx(sender); if (row == null) return;
-        if (MessageBox.Show(_shell, $"Permanently delete {row.DisplayName}?", "Delete resource pack", MessageBoxButton.YesNo, MessageBoxImage.Warning)
-            != MessageBoxResult.Yes) return;
         try
         {
-            File.Delete(row.Path!);
-            App.State.Settings.ResourcePacks.Remove(row.Key);
-            foreach (var set in App.State.Settings.ResourcePackFolders.Values) set.Remove(row.Key);
+            var row = ScannerFromCtx(sender) ?? _focusedRow;
+            if (row is not null) await DeleteRowAsync(row);
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    private async Task DeleteRowAsync(ResourcePackScannerRowVm row)
+    {
+        var what = row.IsFolder ? "pack folder" : "zip";
+        if (!await AppDialog.ConfirmAsync(_shell,
+                "Delete resource pack",
+                "Permanently delete the " + what + " '" + row.FileName + "' from " + row.SourcePackName + "?"
+                + (row.Enabled ? "\n\nIt is turned on, so it will be removed from that instance's stack too." : ""),
+                "Delete", "Cancel", danger: true))
+            return;
+
+        try
+        {
+            var info = row.Info;
+            await Task.Run(() => App.State.ResourcePacks.DeleteFromDisk(info));
             App.State.Settings.Save();
             await RefreshInstalledAsync();
+            Okay("Deleted " + row.FileName + ".");
         }
         catch (Exception ex) { Fail(ex.Message); }
     }
@@ -670,15 +932,188 @@ public partial class ResourcePacksView : Page
         return dir;
     }
 
-    private static string Bump(string dir, string name)
+    private static string Bump(string dir, string name) => BumpPath(dir, name, isFolder: false);
+
+    /// <summary>A destination path in <paramref name="dir"/> that collides with nothing, for a zip or
+    /// for an unpacked pack folder.</summary>
+    private static string BumpPath(string dir, string name, bool isFolder)
     {
-        var clean = string.IsNullOrWhiteSpace(Path.GetExtension(name)) ? name + ".zip" : Path.GetFileName(name);
-        var candidate = Path.Combine(dir, Path.GetFileName(clean));
-        var stem = Path.GetFileNameWithoutExtension(candidate);
-        var suffix = ".zip";
+        var clean = ResourcePackService.SanitizeFileName(Path.GetFileName(name), isFolder);
+        var candidate = Path.Combine(dir, clean);
+        var stem = isFolder ? clean : Path.GetFileNameWithoutExtension(clean);
+        var suffix = isFolder ? "" : ".zip";
+
         var n = 2;
-        while (File.Exists(candidate)) candidate = Path.Combine(dir, $"{stem}-{n++}{suffix}");
+        while (File.Exists(candidate) || Directory.Exists(candidate))
+            candidate = Path.Combine(dir, $"{stem}-{n++}{suffix}");
         return candidate;
+    }
+
+    private static void CopyDirectory(string source, string dest)
+    {
+        Directory.CreateDirectory(dest);
+        foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(dir.Replace(source, dest, StringComparison.Ordinal));
+        foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
+            File.Copy(file, file.Replace(source, dest, StringComparison.Ordinal), overwrite: true);
+    }
+
+    // ── drag & drop onto the installed grid ──────────────────────────────────
+
+    private void OnInstalledDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = DroppedPacks(e).Count > 0 ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Dropping pack zips here asks which instance they belong to, then copies them in.
+    /// </summary>
+    /// <remarks>This grid spans every instance, so unlike the per-instance Resources tab it cannot
+    /// guess a destination — the picker is the drop target's missing half, not an extra step.</remarks>
+    private async void OnInstalledDrop(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        try
+        {
+            var files = DroppedPacks(e);
+            if (files.Count == 0) return;
+
+            if (!_packs.Any()) _packs = await App.State.Api.ListPacksAsync();
+            if (!_packs.Any()) { Fail("Create an instance first."); return; }
+
+            var dlg = new PackPickerDialog(_packs, "Install resource packs",
+                files.Count == 1 ? Path.GetFileName(files[0]) : $"{files.Count} packs", "Copy")
+            { Owner = _shell };
+            if (dlg.ShowDialog() != true || dlg.SelectedPackId is not Guid gid) return;
+
+            var target = _packs.First(z => z.Id == gid);
+            Okay($"Copying into {target.Name}…");
+            await Task.Run(() =>
+            {
+                var dir = RpFolder(target);
+                foreach (var source in files)
+                {
+                    var isFolder = Directory.Exists(source);
+                    var dest = BumpPath(dir, Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar)), isFolder);
+                    if (isFolder) CopyDirectory(source, dest);
+                    else File.Copy(source, dest);
+                }
+            });
+
+            await RefreshInstalledAsync();
+            Okay($"Copied {files.Count} pack(s) into {target.Name}.");
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    /// <summary>The resource packs in a drag payload: zips, and folders holding a pack.mcmeta.
+    /// Anything else is ignored rather than copied into resourcepacks/.</summary>
+    private static List<string> DroppedPacks(DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return new();
+        return (e.Data.GetData(DataFormats.FileDrop) as string[] ?? Array.Empty<string>())
+            .Where(f => (File.Exists(f) && f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                        || (Directory.Exists(f) && File.Exists(Path.Combine(f, "pack.mcmeta"))))
+            .ToList();
+    }
+
+    // ── browse-row context menu ──────────────────────────────────────────────
+
+    private static RpBrowseRowVm? BrowseRowFrom(object sender)
+    {
+        DependencyObject? p = sender as DependencyObject;
+        while (p is MenuItem m) p = m.Parent as MenuItem ?? m.Parent;
+        return p is ContextMenu { PlacementTarget: FrameworkElement fx } && fx.DataContext is RpBrowseRowVm row
+            ? row
+            : null;
+    }
+
+    /// <summary>Shows only what this row can actually do: hosting actions for a hosted pack, and
+    /// delete only for a pack this user owns.</summary>
+    private void OnBrowseMenuOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ContextMenu menu) return;
+        var row = (menu.PlacementTarget as FrameworkElement)?.DataContext as RpBrowseRowVm;
+        if (row is null) { menu.IsOpen = false; return; }
+
+        var hosted = row.Hosted;
+        var isOwner = hosted is not null && hosted.OwnerId == App.State.Settings.UserId;
+
+        foreach (var item in menu.Items.OfType<FrameworkElement>())
+        {
+            var visible = item.Name switch
+            {
+                "BrowseCtxManage" => isOwner,
+                "BrowseCtxOpenPage" => row.External is not null,
+                "BrowseCtxCopyUrl" => row.External is not null,
+                "BrowseCtxDelete" or "BrowseCtxDeleteSeparator" => isOwner,
+                _ => true
+            };
+            item.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    private async void OnCtxBrowseInstall(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (BrowseRowFrom(sender) is RpBrowseRowVm row) await InstallRowAsync(row);
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    private void OnCtxBrowseManage(object sender, RoutedEventArgs e)
+    {
+        if (BrowseRowFrom(sender)?.Hosted is HostedResourcePackSummary hs)
+            _shell.OpenResourcePackDetail(hs.Id, hs.Name);
+    }
+
+    private void OnCtxBrowseOpenPage(object sender, RoutedEventArgs e)
+    {
+        if (BrowseRowFrom(sender)?.External is ModSummary m)
+            Process.Start(new ProcessStartInfo(BuildUrl(m)) { UseShellExecute = true });
+    }
+
+    private void OnCtxBrowseCopyUrl(object sender, RoutedEventArgs e)
+    {
+        if (BrowseRowFrom(sender)?.External is ModSummary m && Services.ClipboardHelper.TrySetText(BuildUrl(m)))
+            Okay("Project URL copied.");
+    }
+
+    /// <summary>
+    /// Deletes a hosted resource pack the signed-in user owns.
+    /// </summary>
+    /// <remarks>Also clears the link from any installed zip that pointed at it, so the local pack
+    /// does not keep claiming to be published to something that no longer exists.</remarks>
+    private async void OnCtxBrowseDelete(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (BrowseRowFrom(sender)?.Hosted is not HostedResourcePackSummary hs) return;
+            if (hs.OwnerId != App.State.Settings.UserId) return;
+
+            if (!await AppDialog.ConfirmAsync(_shell,
+                    "Delete hosted resource pack",
+                    $"Delete '{hs.Name}' and all of its uploaded versions from hosting?\n\n"
+                    + "Anyone you shared it with loses access. Copies already installed in an instance are untouched.",
+                    "Delete", "Cancel", danger: true))
+                return;
+
+            await App.State.Api.DeleteResourcePackAsync(hs.Id);
+
+            var relinked = false;
+            foreach (var entry in App.State.Settings.ResourcePacks.Values.Where(v => v.HostedResourcePackId == hs.Id))
+            {
+                entry.HostedResourcePackId = null;
+                relinked = true;
+            }
+            if (relinked) App.State.Settings.Save();
+
+            await BrowseRestartAsync();
+            Okay($"Deleted '{hs.Name}'.");
+        }
+        catch (Exception ex) { Fail("Delete failed: " + ex.Message); }
     }
 
     // Browse --------------------------------------------------------------------
@@ -735,7 +1170,13 @@ public partial class ResourcePacksView : Page
                 _ => Task.FromResult(0)
             });
 
+            // Advance the paging offset, or every scroll-to-bottom re-requests page one and the list
+            // fills with duplicates of the first 25 results.
+            _off += added;
 
+            // Newly-arrived rows have to be checked against the installed library too, or only the
+            // first page ever says "Installed".
+            MarkInstalledBrowseRows();
             BrowseEmptyBanner();
         }
         catch (OperationCanceledException)
@@ -1012,11 +1453,27 @@ public partial class ResourcePacksView : Page
 
         DownloadProgress.Visibility = Visibility.Collapsed;
 
-        Directory.CreateDirectory(RpFolder(target));
-
-        File.Copy(tmp, Bump(RpFolder(target), ver.FileName), overwrite: false);
+        var dest = Bump(RpFolder(target), ver.FileName);
+        File.Copy(tmp, dest, overwrite: false);
         try { File.Delete(tmp); } catch { /* best effort */ }
+
+        RecordHostedProvenance(target.Id, Path.GetFileName(dest), detail);
+
+        await RefreshInstalledAsync();
         Okay($"Installed into {target.Name}");
+    }
+
+    /// <summary>
+    /// Remembers that this zip is a copy of a hosted pack, and names it after that pack.
+    /// </summary>
+    /// <remarks>A resource pack carries no identity of its own once it is on disk, so unless this is
+    /// written at install time the launcher can never tell that the file and the hosted pack are the
+    /// same thing — which is what an update check needs.</remarks>
+    private static void RecordHostedProvenance(Guid targetPackId, string fileName, HostedResourcePackDetail detail)
+    {
+        var key = ResourcePackService.Key(targetPackId, fileName);
+        App.State.ResourcePacks.LinkHostedResourcePack(key, detail.Id);
+        App.State.ResourcePacks.Rename(key, detail.Name);
     }
 
     private static IEnumerable<PackSummary> HostedMcMatches(List<PackSummary> packs, string? csvOrNull)
@@ -1086,11 +1543,17 @@ public partial class ResourcePacksView : Page
 
         DownloadProgress.Visibility = Visibility.Collapsed;
 
-        Directory.CreateDirectory(RpFolder(target));
-
-        File.Copy(tmpPath, Bump(RpFolder(target), filePrimary.Filename ?? "rp.zip"), overwrite: false);
+        var dest = Bump(RpFolder(target), filePrimary.Filename ?? "rp.zip");
+        File.Copy(tmpPath, dest, overwrite: false);
         try { File.Delete(tmpPath); } catch { /* */ }
 
+        // Which listing this file came from, recorded now because nothing inside the zip says so
+        // later. Without it an installed pack can never be offered an update.
+        var key = ResourcePackService.Key(target.Id, Path.GetFileName(dest));
+        App.State.ResourcePacks.SetProvenance(key, mod.Source, mod.Id, choice.Id, choice.VersionNumber);
+        App.State.ResourcePacks.Rename(key, mod.Name);
+
+        await RefreshInstalledAsync();
         Okay($"Installed {filePrimary.Filename} → {target.Name}");
     }
 
@@ -1187,17 +1650,25 @@ public sealed class ResourcePackChipVm
     public Cursor CursorHint { get; init; } = Cursors.Hand;
 }
 
+/// <summary>One installed resource pack on the card grid.</summary>
+/// <remarks>Holds no brushes from the theme dictionary: the only brush here is the cover gradient,
+/// which is generated from the pack's own name and so survives a theme change unchanged.</remarks>
 public sealed class ResourcePackScannerRowVm
 {
     private readonly string _compatSummary;
 
-    public ResourcePackScannerRowVm(ResourcePackInfo rp, IEnumerable<PackSummary>? _ = null)
+    public ResourcePackScannerRowVm(ResourcePackInfo rp, ResourcePackMeta? meta = null)
     {
         Info = rp;
         Displays = rp.DisplayName;
         SourcePack = rp.SourcePackName;
         Modified = rp.LastModified;
         Bytes = rp.SizeBytes;
+
+        meta ??= ResourcePackMeta.Empty;
+        IconSource = meta.Icon;
+        PackDescription = meta.Description;
+        PackFormat = meta.PackFormat;
 
         _compatSummary = rp.CompatibleWithAll
             ? "All instances enabled"
@@ -1207,6 +1678,9 @@ public sealed class ResourcePackScannerRowVm
     public ResourcePackInfo Info { get; }
     public string Key => Info.Key;
     public string Path => Info.FilePath;
+    public string FileName => Info.FileName;
+    public bool IsFolder => Info.IsFolder;
+    public bool IsLocal => Info.IsLocal;
     public DateTimeOffset Modified { get; }
     public string DisplayName => Displays;
 
@@ -1214,6 +1688,29 @@ public sealed class ResourcePackScannerRowVm
     public readonly string SourcePack;
 
     public long Bytes { get; }
+
+    /// <summary>pack.png, or null for a pack that ships none — the card falls back to its letter.</summary>
+    public ImageSource? IconSource { get; }
+
+    /// <summary>The description from pack.mcmeta, flattened to plain text.</summary>
+    public string? PackDescription { get; }
+
+    public int? PackFormat { get; }
+
+    /// <summary>True when this pack is listed in its instance's options.txt, i.e. the game loads it.</summary>
+    public bool Enabled => Info.Enabled;
+
+    public string EnabledLabel => Info.Priority > 0 ? $"ON · #{Info.Priority}" : "ON";
+
+    public Visibility EnabledVisibility => Enabled ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>"FOLDER" for an unpacked pack, "LOCAL" for one in the unsynced folder, else the
+    /// plain label — the cover has room for exactly one of these.</summary>
+    public string KindLabel => IsFolder ? "PACK FOLDER" : IsLocal ? "LOCAL" : "RESOURCE PACK";
+
+    public string ToggleMenuHeader => Enabled
+        ? $"Turn off in {SourcePack}"
+        : $"Turn on in {SourcePack}";
 
     public string MetaLabel =>
         $"{Modified.LocalDateTime:g} • {PrettySize()}";
@@ -1223,6 +1720,21 @@ public sealed class ResourcePackScannerRowVm
     public string SourcePackName => SourcePack;
 
     public string SizeLabel => PrettySize();
+
+    /// <summary>Everything the card cannot fit: what the pack says about itself, and where it sits.</summary>
+    public string CardTooltip
+    {
+        get
+        {
+            var lines = new List<string> { DisplayName, FileName };
+            lines.Add(Enabled
+                ? $"On in {SourcePack} · priority {Info.Priority} (higher overrides lower)"
+                : $"Off in {SourcePack} — the game is not loading it");
+            if (PackFormat is int pf) lines.Add($"pack_format {pf}");
+            if (!string.IsNullOrWhiteSpace(PackDescription)) lines.Add(PackDescription!);
+            return string.Join("\n", lines);
+        }
+    }
 
     string PrettySize()
     {
@@ -1295,7 +1807,32 @@ public sealed class RpBrowseRowVm
     public Brush SourceBadgeBackground { get; init; } = Brushes.Black;
     public Brush SourceBadgeForeground { get; init; } = Brushes.White;
 
+    /// <summary>True once a pack of this name is already sitting in one of the instances.</summary>
+    /// <remarks>Clicking Install a second time used to write Name-2.zip and leave two copies of the
+    /// same pack fighting in one stack, with nothing on screen to warn anybody.</remarks>
+    public bool IsInstalled { get; private set; }
+
+    /// <summary>Installing again is still allowed — that is how you replace a bad download — so the
+    /// button changes what it says rather than switching itself off.</summary>
     public bool IsInstallable => true;
+
+    public string InstallLabel => IsInstalled ? "Installed" : "Install";
+
+    public string InstallTooltip => IsInstalled
+        ? "Already installed — click to install another copy"
+        : "Install into one of your instances";
+
+    public string RowTooltip => string.Join("\n", new[] { Name, Summary, MetaLabel }
+        .Where(x => !string.IsNullOrWhiteSpace(x)));
+
+    /// <summary>Returns true when the flag actually changed, so the caller only refreshes the list
+    /// when there is something new to paint.</summary>
+    public bool ApplyInstalled(bool installed)
+    {
+        if (IsInstalled == installed) return false;
+        IsInstalled = installed;
+        return true;
+    }
 
     public static RpBrowseRowVm FromExternal(ModSummary m, Brush badgeBackground)
         => new()
