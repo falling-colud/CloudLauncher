@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -17,6 +17,7 @@ namespace CloudLauncher.Services;
 public sealed class ModMetadataService
 {
     private readonly PackFolderService _packs;
+    private readonly AppSettings _settings;
     private readonly Dictionary<Guid, PackModMetadata> _cache = new();
     private readonly object _lock = new();
 
@@ -26,7 +27,7 @@ public sealed class ModMetadataService
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    public ModMetadataService(PackFolderService packs) { _packs = packs; }
+    public ModMetadataService(PackFolderService packs, AppSettings settings) { _packs = packs; _settings = settings; }
 
     // ── key derivation ───────────────────────────────────────────────────────
 
@@ -77,6 +78,7 @@ public sealed class ModMetadataService
                 try
                 {
                     doc = JsonSerializer.Deserialize<PackModMetadata>(File.ReadAllText(path), JsonOpts) ?? new();
+                    Migrate(doc);
                 }
                 catch { doc = new PackModMetadata(); }
             }
@@ -151,6 +153,14 @@ public sealed class ModMetadataService
 
     public void SetMeta(Guid packId, IReadOnlyList<string> candidateKeys, ModMeta meta)
     {
+        StoreMeta(packId, candidateKeys, meta);
+        Save(packId);
+    }
+
+    /// <summary>The <see cref="SetMeta"/> body without the write, so bulk edits can do one save at
+    /// the end instead of one per mod.</summary>
+    private void StoreMeta(Guid packId, IReadOnlyList<string> candidateKeys, ModMeta meta)
+    {
         if (candidateKeys.Count == 0) return;
         if (ApplyLibraryCategory(meta) && meta.IsLibrary) AddCategory(packId, LibraryCategory);
         var doc = Load(packId);
@@ -164,7 +174,6 @@ public sealed class ModMetadataService
             if (meta.IsDefault) doc.Mods.Remove(primary);
             else doc.Mods[primary] = meta;
         }
-        Save(packId);
     }
 
     // ── categories & advanced settings ─────────────────────────────────────────
@@ -201,6 +210,192 @@ public sealed class ModMetadataService
         return cat;
     }
 
+    /// <summary>
+    /// Moves a category to a new slot. Position in <see cref="PackModMetadata.Categories"/> *is* the
+    /// display order — every surface renders them in stored order rather than alphabetically — so
+    /// this is the whole of "reorder".
+    /// </summary>
+    /// <param name="newIndex">Index in the list as it stands right now (before the move). Shifting
+    /// for the removal is handled here so callers can just say "put it where that one is".</param>
+    public void MoveCategory(Guid packId, string name, int newIndex)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            var from = doc.Categories.FindIndex(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (from < 0) return;
+
+            var target = Math.Clamp(newIndex, 0, doc.Categories.Count);
+            if (from < target) target--;              // pulling it out shifts everything after it left
+            if (target == from) return;
+
+            var cat = doc.Categories[from];
+            doc.Categories.RemoveAt(from);
+            doc.Categories.Insert(Math.Clamp(target, 0, doc.Categories.Count), cat);
+        }
+        Save(packId);
+    }
+
+    /// <summary>The saved <c>#RRGGBB</c> for a category, or null if it has none.</summary>
+    public string? CategoryColor(Guid packId, string name)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            return doc.Categories
+                .FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase))?.Color;
+        }
+    }
+
+    /// <summary>Sets (or clears, with null) a category's colour. Applies to the built-in Library
+    /// category too — colour is presentation only, so there's nothing to protect there.</summary>
+    public void SetCategoryColor(Guid packId, string name, string? color)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            var cat = doc.Categories.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (cat is null) return;
+            cat.Color = color;
+        }
+        Save(packId);
+    }
+
+    /// <summary>Adds every mod in <paramref name="mods"/> to a category, or removes them all from it.
+    /// One pass and one write, rather than a save per mod.</summary>
+    public int SetMembership(Guid packId, IEnumerable<PackMod> mods, string category, bool member)
+    {
+        // The Library category and the IsLibrary flag are two views of the same thing. Adding a mod
+        // to "Library" therefore drives the flag, and StoreMeta's ApplyLibraryCategory keeps the
+        // category list in step — so managing Library by membership stays consistent with the flag
+        // set from a mod's options menu.
+        var isLibrary = string.Equals(category, LibraryCategory, StringComparison.OrdinalIgnoreCase);
+        var changed = 0;
+        foreach (var mod in mods)
+        {
+            var meta = GetMeta(packId, mod.CandidateKeys);
+            var has = isLibrary
+                ? meta.IsLibrary
+                : meta.Categories.Any(c => string.Equals(c, category, StringComparison.OrdinalIgnoreCase));
+            if (member == has) continue;
+
+            if (isLibrary) meta.IsLibrary = member;
+            else if (member) meta.Categories.Add(category);
+            else meta.Categories.RemoveAll(c => string.Equals(c, category, StringComparison.OrdinalIgnoreCase));
+
+            StoreMeta(packId, mod.CandidateKeys, meta);
+            mod.Meta = meta;   // re-point the view model at the stored flags and refresh its bindings
+            changed++;
+        }
+        if (changed > 0) Save(packId);
+        return changed;
+    }
+
+    // ── importing categories from another instance ───────────────────────────
+
+    /// <summary>What an import would do, so it can be shown before it happens.</summary>
+    /// <param name="NewCategories">Categories the source has and this pack does not.</param>
+    /// <param name="SharedCategories">Categories both already have.</param>
+    /// <param name="Assignments">Mod in this pack -> the categories the source puts it in.</param>
+    /// <param name="UnmatchedSourceMods">Mods the source categorises that are not installed here.</param>
+    public sealed record CategoryImportPlan(
+        IReadOnlyList<CustomCategory> NewCategories,
+        IReadOnlyList<string> SharedCategories,
+        IReadOnlyList<(PackMod Mod, IReadOnlyList<string> Categories)> Assignments,
+        int UnmatchedSourceMods)
+    {
+        public int TaggedMods => Assignments.Count;
+        public bool IsEmpty => NewCategories.Count == 0 && Assignments.Count == 0;
+    }
+
+    /// <summary>
+    /// Works out what copying <paramref name="sourcePackId"/>'s categories onto
+    /// <paramref name="targetMods"/> would produce, without changing anything.
+    /// </summary>
+    /// <remarks>
+    /// Mods match across instances by their stored key, which is the store's project id
+    /// (<c>modrinth:AANobbMI</c>) for anything identified and the file name otherwise — the same
+    /// key the flags are saved under, so a mod tagged "Performance" in one pack is recognised as
+    /// the same mod in another even at a different version. Mods the source does not know about
+    /// are left exactly as they are: this adds, it never clears.
+    /// </remarks>
+    public CategoryImportPlan PlanCategoryImport(Guid sourcePackId, Guid targetPackId, IReadOnlyList<PackMod> targetMods)
+    {
+        var source = Load(sourcePackId);
+        var target = Load(targetPackId);
+
+        List<CustomCategory> sourceCats;
+        Dictionary<string, ModMeta> sourceMods;
+        HashSet<string> targetCatNames;
+        lock (_lock)
+        {
+            sourceCats = source.Categories.ToList();
+            sourceMods = new Dictionary<string, ModMeta>(source.Mods, StringComparer.OrdinalIgnoreCase);
+            targetCatNames = new HashSet<string>(target.Categories.Select(c => c.Name), StringComparer.OrdinalIgnoreCase);
+        }
+
+        // The built-in Library category is managed from the IsLibrary flag in each pack, so it is
+        // never imported as a category of its own.
+        var importable = sourceCats.Where(c => !c.Builtin).ToList();
+        var newCats = importable.Where(c => !targetCatNames.Contains(c.Name)).ToList();
+        var shared = importable.Where(c => targetCatNames.Contains(c.Name)).Select(c => c.Name).ToList();
+
+        var assignments = new List<(PackMod, IReadOnlyList<string>)>();
+        var matchedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var mod in targetMods)
+        {
+            var from = FirstMatch(sourceMods, mod.CandidateKeys, matchedKeys);
+            if (from is null) continue;
+            var wanted = from.Categories
+                .Where(c => !string.Equals(c, LibraryCategory, StringComparison.OrdinalIgnoreCase))
+                .Where(c => !mod.Meta.Categories.Contains(c, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (wanted.Count > 0) assignments.Add((mod, wanted));
+        }
+
+        var categorisedInSource = sourceMods.Count(kv =>
+            kv.Value.Categories.Any(c => !string.Equals(c, LibraryCategory, StringComparison.OrdinalIgnoreCase)));
+        var unmatched = Math.Max(0, categorisedInSource - matchedKeys.Count);
+
+        return new CategoryImportPlan(newCats, shared, assignments, unmatched);
+    }
+
+    private static ModMeta? FirstMatch(Dictionary<string, ModMeta> sourceMods, IReadOnlyList<string> keys, HashSet<string> matched)
+    {
+        foreach (var key in keys)
+        {
+            if (!sourceMods.TryGetValue(key, out var meta)) continue;
+            if (meta.Categories.Any(c => !string.Equals(c, LibraryCategory, StringComparison.OrdinalIgnoreCase)))
+                matched.Add(key);
+            return meta;
+        }
+        return null;
+    }
+
+    /// <summary>Applies a plan from <see cref="PlanCategoryImport"/>: adds the missing categories
+    /// (keeping the source's colours and order) and tags the matching mods. One write at the end.</summary>
+    public void ApplyCategoryImport(Guid targetPackId, CategoryImportPlan plan)
+    {
+        var doc = Load(targetPackId);
+        lock (_lock)
+        {
+            foreach (var cat in plan.NewCategories)
+                doc.Categories.Add(new CustomCategory { Name = cat.Name, Color = cat.Color });
+        }
+
+        foreach (var (mod, categories) in plan.Assignments)
+        {
+            var meta = GetMeta(targetPackId, mod.CandidateKeys);
+            foreach (var category in categories)
+                if (!meta.Categories.Contains(category, StringComparer.OrdinalIgnoreCase))
+                    meta.Categories.Add(category);
+            StoreMeta(targetPackId, mod.CandidateKeys, meta);
+            mod.Meta = meta;
+        }
+        Save(targetPackId);
+    }
+
     public void RemoveCategory(Guid packId, string name)
     {
         var doc = Load(packId);
@@ -212,6 +407,7 @@ public sealed class ModMetadataService
             foreach (var meta in doc.Mods.Values)
                 meta.Categories.RemoveAll(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
             RemoveCategoryLayout(doc, name);
+            RemoveCollapsed(doc, name);
         }
         Save(packId);
     }
@@ -231,11 +427,20 @@ public sealed class ModMetadataService
             if (cat is not null && target is null) cat.Name = newName;   // straight rename
             else if (cat is not null) doc.Categories.Remove(cat);        // merge into existing target
 
+            // Folded-shut state follows the name, so renaming a collapsed category does not
+            // silently pop it open.
+            if (doc.CollapsedCategories.RemoveAll(c => string.Equals(c, oldName, StringComparison.OrdinalIgnoreCase)) > 0)
+                Add(doc.CollapsedCategories, newName);
+
             foreach (var meta in doc.Mods.Values)
             {
-                var hadNew = meta.Categories.Any(c => string.Equals(c, newName, StringComparison.OrdinalIgnoreCase));
-                meta.Categories.RemoveAll(c => string.Equals(c, oldName, StringComparison.OrdinalIgnoreCase));
-                if (!hadNew && !meta.Categories.Contains(newName)) meta.Categories.Add(newName);
+                // Only mods that were actually IN the old category move to the new one. (This used to
+                // add newName to every mod carrying any flag at all, which silently dumped unrelated
+                // mods into a category every time one was renamed.)
+                var wasMember = meta.Categories.RemoveAll(c => string.Equals(c, oldName, StringComparison.OrdinalIgnoreCase)) > 0;
+                if (!wasMember) continue;
+                if (!meta.Categories.Any(c => string.Equals(c, newName, StringComparison.OrdinalIgnoreCase)))
+                    meta.Categories.Add(newName);
             }
 
             // carry the cluster's saved position to the new name (unless the target already has one)
@@ -266,6 +471,44 @@ public sealed class ModMetadataService
     public ModAdvancedSettings Advanced(Guid packId) => Load(packId).Advanced;
 
     public void SaveAdvanced(Guid packId) => Save(packId);
+
+    /// <summary>The release channel this pack's downloads and update checks follow: its own setting,
+    /// else the launcher-wide default. A mod's own <see cref="ModMeta.UpdateChannel"/> beats both —
+    /// <see cref="PackMod.EffectiveUpdateChannel"/> applies that last step.</summary>
+    public string EffectiveUpdateChannel(Guid packId) =>
+        ModUpdateChannel.Normalize(Advanced(packId).UpdateChannel) ?? LauncherUpdateChannel;
+
+    /// <summary>The launcher-wide channel every pack without one of its own follows.</summary>
+    public string LauncherUpdateChannel =>
+        ModUpdateChannel.Normalize(_settings.ModVersionChannel) ?? ModUpdateChannel.Alpha;
+
+    /// <summary>Brings an older mods.json up to <see cref="PackModMetadata.CurrentVersion"/>.
+    /// Version 1 had no way to say "follow the launcher default", so its pack channel was written as
+    /// "release" whether or not anyone chose it; that is read as unset. A pack deliberately moved to
+    /// beta or alpha said something the default never could, so it is kept.</summary>
+    private static void Migrate(PackModMetadata doc)
+    {
+        if (doc.Version >= PackModMetadata.CurrentVersion) return;
+        if (ModUpdateChannel.Normalize(doc.Advanced.UpdateChannel) == ModUpdateChannel.Release)
+            doc.Advanced.UpdateChannel = null;
+        doc.Version = PackModMetadata.CurrentVersion;
+    }
+
+    /// <summary>Applies one edit to several mods' flags and writes the file once. Used by the modpack
+    /// importers to stamp every downloaded jar with the store it came from.</summary>
+    public void EditMany(Guid packId, IEnumerable<IReadOnlyList<string>> candidateKeySets, Action<ModMeta> apply)
+    {
+        var any = false;
+        foreach (var keys in candidateKeySets)
+        {
+            if (keys.Count == 0) continue;
+            var meta = GetMeta(packId, keys);
+            apply(meta);
+            StoreMeta(packId, keys, meta);
+            any = true;
+        }
+        if (any) Save(packId);
+    }
 
     // ── custom graph layout ────────────────────────────────────────────────────
 
@@ -304,6 +547,56 @@ public sealed class ModMetadataService
         lock (_lock) { doc.CategoryLayout[key] = new[] { x, y }; }
         Save(packId);
     }
+
+    // ── collapsed categories (Graph view, category mode) ─────────────────────
+
+    /// <summary>True when this category is folded shut in the graph.</summary>
+    public bool IsCategoryCollapsed(Guid packId, string name)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+            return doc.CollapsedCategories.Any(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public void SetCategoryCollapsed(Guid packId, string name, bool collapsed)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            var changed = collapsed
+                ? Add(doc.CollapsedCategories, name)
+                : doc.CollapsedCategories.RemoveAll(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase)) > 0;
+            if (!changed) return;
+        }
+        Save(packId);
+    }
+
+    /// <summary>Folds or unfolds several at once — one write for a "collapse all".</summary>
+    public void SetCategoriesCollapsed(Guid packId, IEnumerable<string> names, bool collapsed)
+    {
+        var doc = Load(packId);
+        var changed = false;
+        lock (_lock)
+        {
+            foreach (var name in names)
+            {
+                changed |= collapsed
+                    ? Add(doc.CollapsedCategories, name)
+                    : doc.CollapsedCategories.RemoveAll(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase)) > 0;
+            }
+        }
+        if (changed) Save(packId);
+    }
+
+    private static bool Add(List<string> list, string name)
+    {
+        if (list.Any(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase))) return false;
+        list.Add(name);
+        return true;
+    }
+
+    private static void RemoveCollapsed(PackModMetadata doc, string name) =>
+        doc.CollapsedCategories.RemoveAll(c => string.Equals(c, name, StringComparison.OrdinalIgnoreCase));
 
     private static void RemoveCategoryLayout(PackModMetadata doc, string name)
     {

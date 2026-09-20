@@ -11,23 +11,44 @@ namespace CloudLauncher.Server.Controllers;
 [ApiController]
 [Authorize]
 [Route("packs")]
-public class PacksController(AppDbContext db, PackPermissionResolver resolver) : ControllerBase
+public class PacksController(AppDbContext db, PackPermissionResolver resolver, IConfiguration config) : ControllerBase
 {
+    /// <summary>
+    /// Packs every signed-in user sees in their list without having to find and subscribe to them,
+    /// configured as a comma-separated list of pack ids in <c>AutoListPackIds</c> (settings or the
+    /// <c>AutoListPackIds</c> environment variable). Empty by default, so this changes nothing until set.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately an explicit id list rather than "every public pack": public means "anyone MAY use
+    /// this", which is not the same as "everyone should have it in their list" - auto-listing all public
+    /// packs would push every test and side pack onto every account. The pack still needs its own
+    /// Public visibility for the permission resolver to grant View/Download; this only decides whether it
+    /// shows up unprompted.
+    /// </remarks>
+    private IReadOnlyList<Guid> AutoListPackIds() =>
+        (config["AutoListPackIds"] ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(s => Guid.TryParse(s, out var g) ? g : Guid.Empty)
+            .Where(g => g != Guid.Empty)
+            .ToList();
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<PackSummary>>> List(CancellationToken ct)
     {
         var me = this.UserId();
 
-        // Only packs the user has an explicit relationship with: owner, collaborator,
-        // or member of a team the pack is shared with. Pure-public packs are excluded
-        // from the master list and must be subscribed via the pack browser.
+        // What is in your library: packs you own, packs you added (PackListings), and the handful in
+        // AutoListPackIds that every account gets. Being a collaborator or a team member is NOT
+        // enough — that grants access, and access is not the same as "put this in my list". Someone
+        // sharing a pack with you should not fill your instances; you find it under "Shared with me"
+        // in the browser and add it when you want it. Everything else stays reachable there.
+        var autoListed = AutoListPackIds();
         var packs = await db.Packs
             .AsNoTracking()
             .Include(p => p.Owner)
             .Where(p =>
                 p.OwnerId == me
-                || db.PackCollaborators.Any(c => c.PackId == p.Id && c.UserId == me)
-                || db.PackTeams.Any(pt => pt.PackId == p.Id && db.TeamMembers.Any(tm => tm.TeamId == pt.TeamId && tm.UserId == me)))
+                || autoListed.Contains(p.Id)
+                || db.PackListings.Any(l => l.PackId == p.Id && l.UserId == me))
             .ToListAsync(ct);
 
         var result = new List<PackSummary>(packs.Count);
@@ -114,9 +135,12 @@ public class PacksController(AppDbContext db, PackPermissionResolver resolver) :
         if (pack.Visibility != PackVisibility.Public && !existingPerms.HasFlag(PackPermissions.View))
             return Forbid();
 
+        // A public pack you found yourself needs a grant to read it; a pack already shared with you
+        // has one, and must not be downgraded to ReadOnly by adding it to your list.
         var existing = await db.PackCollaborators
             .FirstOrDefaultAsync(c => c.PackId == id && c.UserId == me, ct);
-        if (existing is null)
+        var changed = false;
+        if (existing is null && !existingPerms.HasFlag(PackPermissions.View))
         {
             db.PackCollaborators.Add(new PackCollaborator
             {
@@ -124,8 +148,17 @@ public class PacksController(AppDbContext db, PackPermissionResolver resolver) :
                 UserId = me,
                 Permissions = PackPermissions.ReadOnly
             });
-            await db.SaveChangesAsync(ct);
+            changed = true;
         }
+
+        // The listing is the part that actually puts it in the user's instances.
+        var listed = await db.PackListings.AnyAsync(l => l.PackId == id && l.UserId == me, ct);
+        if (!listed)
+        {
+            db.PackListings.Add(new PackListing { PackId = id, UserId = me });
+            changed = true;
+        }
+        if (changed) await db.SaveChangesAsync(ct);
 
         // Reuse the permissions already resolved above (the only possible change is the
         // ReadOnly grant we may have just added) instead of re-running the collaborator/team
@@ -143,12 +176,21 @@ public class PacksController(AppDbContext db, PackPermissionResolver resolver) :
         if (pack.OwnerId == me)
             return BadRequest(new { error = "Owners cannot unsubscribe; delete the pack instead" });
 
-        var row = await db.PackCollaborators
+        var listing = await db.PackListings.FirstOrDefaultAsync(l => l.PackId == id && l.UserId == me, ct);
+        var self = await db.PackCollaborators
             .FirstOrDefaultAsync(c => c.PackId == id && c.UserId == me, ct);
-        if (row is null)
-            return NotFound(new { error = "You are not subscribed to this pack" });
 
-        db.PackCollaborators.Remove(row);
+        if (listing is null && self is null)
+            return NotFound(new { error = "This pack is not in your list" });
+
+        if (listing is not null) db.PackListings.Remove(listing);
+
+        // Only give up access that was self-granted by adding a public pack. A ReadOnly row on a
+        // pack that is NOT public came from the owner sharing it — removing the pack from your list
+        // must not throw that away, or re-adding it later would be impossible.
+        if (self is { Permissions: PackPermissions.ReadOnly } && pack.Visibility == PackVisibility.Public)
+            db.PackCollaborators.Remove(self);
+
         await db.SaveChangesAsync(ct);
         return NoContent();
     }

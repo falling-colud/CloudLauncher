@@ -1,10 +1,10 @@
-<Window x:Class="CloudLauncher.Views.ModpackImportProgressDialog"
+﻿<Window x:Class="CloudLauncher.Views.ModpackImportProgressDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Importing modpack" Height="400" Width="560"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        Background="{StaticResource Surface1Brush}"
-        Foreground="{StaticResource TextPrimaryBrush}">
+        Background="{DynamicResource Surface1Brush}"
+        Foreground="{DynamicResource TextPrimaryBrush}">
     <Grid Margin="22">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -17,7 +17,7 @@
         <TextBlock Grid.Row="0" Style="{StaticResource H2}" Text="Import modpack" Margin="0,0,0,8"/>
         <DockPanel Grid.Row="1" Margin="0,0,0,12">
             <TextBlock DockPanel.Dock="Left" Text="Instance name" VerticalAlignment="Center" Width="100"
-                       Foreground="{StaticResource TextSecondaryBrush}"/>
+                       Foreground="{DynamicResource TextSecondaryBrush}"/>
             <TextBox x:Name="NameBox"/>
         </DockPanel>
         <StackPanel Grid.Row="2" Margin="0,0,0,12">
@@ -31,7 +31,7 @@
                            Margin="0,0,12,0"/>
                 <TextBlock x:Name="OverallProgressPercent" Grid.Column="1"
                            Style="{StaticResource Caption}"
-                           Foreground="{StaticResource AccentBrush}"/>
+                           Foreground="{DynamicResource AccentBrush}"/>
             </Grid>
             <ProgressBar x:Name="Progress" Height="6" IsIndeterminate="True"/>
             <Grid x:Name="CurrentProgressHeader" Margin="0,8,0,6" Visibility="Collapsed">
@@ -40,7 +40,7 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock x:Name="CurrentProgressLabel" Style="{StaticResource Caption}"
-                           Foreground="{StaticResource TextTertiaryBrush}"
+                           Foreground="{DynamicResource TextTertiaryBrush}"
                            TextTrimming="CharacterEllipsis" Margin="0,0,12,0"/>
                 <TextBlock x:Name="CurrentProgressPercent" Grid.Column="1"
                            Style="{StaticResource Caption}"/>
@@ -48,13 +48,13 @@
             <ProgressBar x:Name="CurrentProgress" Height="4" Visibility="Collapsed"/>
         </StackPanel>
 
-        <Border Grid.Row="3" Background="{StaticResource Surface0Brush}"
-                BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+        <Border Grid.Row="3" Background="{DynamicResource Surface0Brush}"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                 CornerRadius="6">
             <TextBox x:Name="LogBox" IsReadOnly="True" AcceptsReturn="True"
                      Background="Transparent" BorderThickness="0"
                      TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                     Foreground="{StaticResource TextSecondaryBrush}"
+                     Foreground="{DynamicResource TextSecondaryBrush}"
                      FontFamily="{StaticResource MonoFont}" FontSize="11"/>
         </Border>
 

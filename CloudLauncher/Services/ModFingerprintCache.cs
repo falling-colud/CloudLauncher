@@ -60,6 +60,7 @@ public sealed class ModFingerprintCache
                 if (entry.CurseForgeFingerprint != 0)
                     _curseForgeByFingerprint.TryAdd(entry.CurseForgeFingerprint, (entry.Match.Mod, entry.Match.Version));
             }
+            IndexStoreMatches(entry);
             return true;
         }
         catch
@@ -114,6 +115,55 @@ public sealed class ModFingerprintCache
             _modrinthBySha[entry.Sha512] = (mod, version);
         if (entry.CurseForgeFingerprint != 0)
             _curseForgeByFingerprint[entry.CurseForgeFingerprint] = (mod, version);
+    }
+
+    /// <summary>Records the identity a jar resolved to on each store. A store that came back empty
+    /// leaves what was known before: a failed lookup is not evidence the jar is missing there.</summary>
+    public void StoreStoreMatches(string path,
+        (ModSummary Mod, ModVersion Version)? modrinth,
+        (ModSummary Mod, ModVersion Version)? curseForge)
+    {
+        if (modrinth is null && curseForge is null) return;
+        path = NormalizePath(path);
+        ModFingerprintCacheEntry? entry;
+        lock (_lock)
+        {
+            if (!_entries.TryGetValue(path, out entry)) return;
+            if (modrinth is { } m && m.Mod.Source == ModSource.Modrinth)
+                entry.ModrinthMatch = new CachedModMatch { Mod = m.Mod, Version = m.Version };
+            if (curseForge is { } c && c.Mod.Source == ModSource.CurseForge)
+                entry.CurseForgeMatch = new CachedModMatch { Mod = c.Mod, Version = c.Version };
+            _dirty = true;
+        }
+        IndexStoreMatches(entry);
+    }
+
+    /// <summary>Both stores' cached identities for a jar (either may be null). False when the jar has
+    /// no valid cache entry or no identity on either store. Older entries that only carry the single
+    /// <see cref="ModFingerprintCacheEntry.Match"/> contribute it to the store it came from.</summary>
+    public bool TryGetCachedMatches(string path,
+        out (ModSummary Mod, ModVersion Version)? modrinth,
+        out (ModSummary Mod, ModVersion Version)? curseForge)
+    {
+        modrinth = null;
+        curseForge = null;
+        if (!TryGet(path, out var entry)) return false;
+
+        var mr = entry.ModrinthMatch ?? (entry.Match?.Mod.Source == ModSource.Modrinth ? entry.Match : null);
+        var cf = entry.CurseForgeMatch ?? (entry.Match?.Mod.Source == ModSource.CurseForge ? entry.Match : null);
+        if (mr is not null) modrinth = (mr.Mod, mr.Version);
+        if (cf is not null) curseForge = (cf.Mod, cf.Version);
+        return mr is not null || cf is not null;
+    }
+
+    /// <summary>Makes the per-store identities answer hash lookups, so a jar known on both stores
+    /// resolves from cache on both instead of re-asking the store it wasn't primarily cached under.</summary>
+    private void IndexStoreMatches(ModFingerprintCacheEntry entry)
+    {
+        if (entry.ModrinthMatch is { } mr && !string.IsNullOrEmpty(entry.Sha512))
+            _modrinthBySha[entry.Sha512] = (mr.Mod, mr.Version);
+        if (entry.CurseForgeMatch is { } cf && entry.CurseForgeFingerprint != 0)
+            _curseForgeByFingerprint[entry.CurseForgeFingerprint] = (cf.Mod, cf.Version);
     }
 
     public bool TryGetCachedMatch(string path, out ModSummary mod, out ModVersion version)
@@ -173,7 +223,9 @@ public sealed class ModFingerprintCache
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_cachePath)!);
-            File.WriteAllText(_cachePath, JsonSerializer.Serialize(snapshot, JsonOpts));
+            var tmp = _cachePath + ".tmp";
+            File.WriteAllText(tmp, JsonSerializer.Serialize(snapshot, JsonOpts));
+            File.Move(tmp, _cachePath, overwrite: true);
         }
         catch { /* best-effort */ }
     }
@@ -230,6 +282,7 @@ public sealed class ModFingerprintCache
                         _modrinthBySha.TryAdd(entry.Sha512, (entry.Match.Mod, entry.Match.Version));
                     if (entry.CurseForgeFingerprint != 0 && entry.Match is not null)
                         _curseForgeByFingerprint.TryAdd(entry.CurseForgeFingerprint, (entry.Match.Mod, entry.Match.Version));
+                    IndexStoreMatches(entry);
                 }
             }
         }
@@ -251,6 +304,12 @@ public sealed class ModFingerprintCacheEntry
     public string Sha512 { get; set; } = "";
     public long CurseForgeFingerprint { get; set; }
     public CachedModMatch? Match { get; set; }
+
+    /// <summary>The jar's Modrinth identity, when known (a jar published on both stores has both).</summary>
+    public CachedModMatch? ModrinthMatch { get; set; }
+
+    /// <summary>The jar's CurseForge identity, when known.</summary>
+    public CachedModMatch? CurseForgeMatch { get; set; }
 }
 
 public sealed class CachedModMatch

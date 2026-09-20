@@ -64,6 +64,25 @@ public class PackCollaborator
     public PackPermissions Permissions { get; set; }
 }
 
+/// <summary>
+/// A pack a user has chosen to keep in their instance list.
+/// </summary>
+/// <remarks>
+/// Being able to open a pack and wanting it in your library are two different things. Access comes
+/// from ownership, a collaborator grant or a team; this table is the user's own decision to add it.
+/// Without the distinction, the moment someone shared a pack with you it appeared in your instances
+/// unasked — and removing it meant deleting the collaborator row, i.e. throwing away the access the
+/// owner had given you.
+/// </remarks>
+public class PackListing
+{
+    public Guid PackId { get; set; }
+    public Pack Pack { get; set; } = null!;
+    public Guid UserId { get; set; }
+    public AppUser User { get; set; } = null!;
+    public DateTimeOffset AddedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public class Team
 {
     public Guid Id { get; set; } = Guid.NewGuid();

@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -173,19 +173,43 @@ public partial class ModsView : Page
         Keyboard.ClearFocus();
     }
 
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => _searchText = SearchBox.Text;
+    // Search as you type (see ModExplorerPage): reload a moment after typing stops; Enter is immediate.
+    private System.Windows.Threading.DispatcherTimer? _searchTimer;
+    private string _lastSearched = "";
+
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        _searchText = SearchBox.Text;
+        if (_searchTimer is null)
+        {
+            _searchTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+            _searchTimer.Tick += async (_, _) =>
+            {
+                _searchTimer.Stop();
+                if (_activeChip is null || string.Equals(_searchText.Trim(), _lastSearched, StringComparison.Ordinal)) return;
+                _lastSearched = _searchText.Trim();
+                await ResetAndLoadAsync();
+            };
+        }
+        _searchTimer.Stop();
+        _searchTimer.Start();
+    }
 
     private async void OnSearchPreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Enter)
         {
             e.Handled = true;
+            _searchTimer?.Stop();
+            _lastSearched = _searchText.Trim();
             await ResetAndLoadAsync();
         }
         else if (e.Key == Key.Escape)
         {
             SearchBox.Text = "";
             _searchText = "";
+            _searchTimer?.Stop();
+            _lastSearched = "";
             CollapseSearch();
             await ResetAndLoadAsync();
             e.Handled = true;
@@ -381,7 +405,7 @@ public partial class ModsView : Page
         OverviewBrowser.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void ShowOverview(string? content) => OverviewBrowser.Show(content);
+    private void ShowOverview(string? content, bool isMarkdown = false) => OverviewBrowser.Show(content, isMarkdown);
 
     private async Task LoadHostedModDetailAsync(Guid modId)
     {
@@ -411,7 +435,7 @@ public partial class ModsView : Page
             InstallSelectedButton.IsEnabled = detail.Versions.Count > 0;
 
             ModTabs.SelectedIndex = 0;
-            ShowOverview(detail.Description ?? detail.Summary);
+            ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
             ScreenshotsEmptyText.Text = "Hosted mod screenshots are managed from the mod's detail page when supported by the server.";
             ScreenshotsEmptyText.Visibility = Visibility.Visible;
             ScreenshotList.ItemsSource = null;
@@ -464,7 +488,7 @@ public partial class ModsView : Page
             var detail = mod.Source == ModSource.CurseForge
                 ? await App.State.CurseForge.GetProjectDetailAsync(int.TryParse(mod.Id, out var cid) ? cid : 0, ct)
                 : await App.State.Modrinth.GetProjectDetailAsync(mod.Id, ct);
-            ShowOverview(detail.Description ?? mod.Description);
+            ShowOverview(detail.Description ?? mod.Description, detail.IsMarkdown);
             ShowScreenshots(detail.Screenshots);
             ConfigureLinks(detail.Links with { WebsiteUrl = detail.Links.WebsiteUrl ?? _currentProjectUrl });
 
@@ -881,27 +905,23 @@ public partial class ModsView : Page
             : await App.State.Modrinth.GetVersionsAsync(mod.Id, mc, loader, ct);
     }
 
-    private static ModVersion? PickBestVersion(IEnumerable<ModVersion> versions, PackSummary pack)
-    {
-        var compatible = versions
-            .Where(v => MatchesPack(v, pack))
-            .OrderByDescending(v => v.DatePublished)
-            .ToList();
-        return compatible.FirstOrDefault(v => string.Equals(v.ReleaseChannel, "release", StringComparison.OrdinalIgnoreCase))
-            ?? compatible.FirstOrDefault();
-    }
+    private static ModVersion? PickBestVersion(IEnumerable<ModVersion> versions, PackSummary pack) =>
+        ModUpdateChannel.PickNewest(
+            versions.Where(v => MatchesPack(v, pack)),
+            App.State.ModMetadata.EffectiveUpdateChannel(pack.Id),
+            v => v.ReleaseChannel,
+            v => v.DatePublished);
 
     private static HostedModVersionInfo? PickBestVersion(
         IEnumerable<HostedModVersionInfo> versions,
         PackSummary pack,
         HostedModDetail mod)
     {
-        var compatible = versions
-            .Where(v => MatchesPack(v, pack, mod))
-            .OrderByDescending(v => v.PublishedAt)
-            .ToList();
-        return compatible.FirstOrDefault(v => string.Equals(v.ReleaseChannel, "release", StringComparison.OrdinalIgnoreCase))
-            ?? compatible.FirstOrDefault();
+        return ModUpdateChannel.PickNewest(
+            versions.Where(v => MatchesPack(v, pack, mod)),
+            App.State.ModMetadata.EffectiveUpdateChannel(pack.Id),
+            v => v.ReleaseChannel,
+            v => v.PublishedAt);
     }
 
     private static bool MatchesFilters(ModVersion version, string? mc, string? loader) =>

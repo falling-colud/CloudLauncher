@@ -38,7 +38,8 @@ public class AuthController(
         {
             UserName = req.Username.Trim(),
             Email = req.Email.Trim(),
-            EmailConfirmed = false,
+            // Email verification is disabled: accounts are usable immediately.
+            EmailConfirmed = true,
             IsAdmin = isAdmin
         };
 
@@ -46,13 +47,9 @@ public class AuthController(
         if (!result.Succeeded)
             return BadRequest(new { error = string.Join("; ", result.Errors.Select(e => e.Description)) });
 
-        var code = await users.GenerateEmailConfirmationTokenAsync(user);
-        var link = BuildConfirmLink(user.Id, code);
-        await emailSender.SendEmailConfirmationAsync(user, link, ct);
-
         return Ok(new RegisterPendingResponse(
-            RequiresEmailVerification: true,
-            Message: "Account created. Check your email for a confirmation link before signing in."));
+            RequiresEmailVerification: false,
+            Message: "Account created. You can sign in now."));
     }
 
     [HttpPost("login")]
@@ -62,9 +59,6 @@ public class AuthController(
         var user = await users.FindByNameAsync(req.Username);
         if (user is null || !await users.CheckPasswordAsync(user, req.Password))
             return Unauthorized(new { error = "Invalid username or password" });
-
-        if (!user.EmailConfirmed)
-            return Unauthorized(new { error = "Please verify your email before signing in." });
 
         // First-run bootstrap only: promote the configured bootstrap user if (and only if) the
         // system still has no admin. Once an admin exists this is inert — it is not a standing

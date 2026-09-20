@@ -44,6 +44,11 @@ public partial class App : Application
             AppLog.LogError("Task", args.Exception);
             args.SetObserved();
         };
+
+        // The user's colours, before the first window is shown, so nothing renders in the stock
+        // palette and then repaints. Applied after the handlers above are in place, and swallowing
+        // its own errors, because a colour must never be the reason the launcher does not open.
+        ThemeService.Apply(State.Settings.Theme);
     }
 
     /// <summary>

@@ -11,6 +11,35 @@ namespace CloudLauncher.Views;
 public static class RichDescriptionHelper
 {
     private static readonly ConditionalWeakTable<WebBrowser, object> Configured = new();
+
+    /// <summary>What each live browser is showing, so a colour change can re-render it: the HTML is
+    /// generated with the theme's colours baked in and cannot be repainted in place.</summary>
+    private static readonly ConditionalWeakTable<WebBrowser, ShownContent> LastShown = new();
+
+    private sealed record ShownContent(string? Content, bool IsMarkdown, RichDescriptionOptions? Options);
+
+    private static bool _themeHooked;
+
+    private static void HookTheme()
+    {
+        if (_themeHooked) return;
+        _themeHooked = true;
+        Services.ThemeService.Changed += () =>
+        {
+            var app = Application.Current;
+            if (app is null) return;
+            app.Dispatcher.BeginInvoke(() =>
+            {
+                // ConditionalWeakTable enumerates what is still alive; a browser that has gone away
+                // simply is not there any more.
+                foreach (var (browser, shown) in LastShown)
+                {
+                    try { Show(browser, shown.Content, shown.IsMarkdown, shown.Options); }
+                    catch { /* a closed page mid-navigation is not worth a crash */ }
+                }
+            });
+        };
+    }
     private static readonly ConditionalWeakTable<FrameworkElement, WebBrowser> HostBrowsers = new();
     private static readonly ConditionalWeakTable<WebBrowser, RichDescriptionOptions> BrowserOptions = new();
     private static readonly ConditionalWeakTable<WebBrowser, DescriptionCommandScriptHost> CommandHosts = new();
@@ -18,6 +47,9 @@ public static class RichDescriptionHelper
     public static void Show(WebBrowser browser, string? content, bool isMarkdown = false, RichDescriptionOptions? options = null)
     {
         EnsureConfigured(browser);
+        HookTheme();
+        LastShown.Remove(browser);
+        LastShown.Add(browser, new ShownContent(content, isMarkdown, options));
         BrowserOptions.Remove(browser);
         if (options is not null)
             BrowserOptions.Add(browser, options);
@@ -173,7 +205,9 @@ public static class RichDescriptionHelper
                     doc.body.style.margin = "0";
                     doc.body.style.padding = "0";
                     doc.body.style.height = "100%";
-                    try { doc.body.style.zoom = 1.35; } catch { /* IE */ }
+                    // Match the read-only viewer: DPI is handled by FEATURE_96DPI_PIXEL, so no
+                    // extra zoom is needed. A zoom > 1 here just oversizes the editor text.
+                    try { doc.body.style.zoom = 1.0; } catch { /* IE */ }
                     return;
                 }
 

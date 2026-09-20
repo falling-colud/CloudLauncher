@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using CloudLauncher.Shared;
 
@@ -6,7 +6,24 @@ namespace CloudLauncher.Services;
 
 public sealed class AppSettings
 {
-    public string ServerUrl { get; set; } = "http://130.61.131.193:5000";
+    /// <summary>
+    /// Where the launcher talks to its server. The default moved to the HTTPS name in 1.3.0;
+    /// <see cref="MigrateServerUrl"/> carries settings written by older builds over to it.
+    /// </summary>
+    public string ServerUrl { get; set; } = DefaultServerUrl;
+
+    /// <summary>The address every new install uses: a real name over TLS, not an IP and a port.</summary>
+    public const string DefaultServerUrl = "https://launcher.crispythedev.duckdns.org";
+
+    /// <summary>Addresses earlier builds shipped with. A settings file still pointing at one of these
+    /// is moved to <see cref="DefaultServerUrl"/> on load — the plain-HTTP endpoint keeps working, but
+    /// nobody should still be sending their tokens over it.</summary>
+    private static readonly string[] LegacyServerUrls =
+    [
+        "http://130.61.131.193:5000",
+        "https://130.61.131.193:5000",
+        "http://130.61.131.193:5000/",
+    ];
     public string? RefreshToken { get; set; }
     public string? AccessToken { get; set; }
     public DateTimeOffset? AccessTokenExpiresAt { get; set; }
@@ -20,11 +37,71 @@ public sealed class AppSettings
     /// <summary>Per-pack max RAM override (MB). Empty/missing means "use default".</summary>
     public Dictionary<Guid, int> PackMaxRamMb { get; set; } = new();
 
+    /// <summary>
+    /// Per-pack extra JVM arguments, appended after CmlLib's stock GC flags. Whitespace-separated,
+    /// e.g. "-Dvoxy.geometryBufferSizeOverrideMB=1280". Missing entry = none.
+    /// </summary>
+    public Dictionary<Guid, string> PackJvmArgs { get; set; } = new();
+
     /// <summary>Per-pack auto-update preference. True = always update before launch.</summary>
     public Dictionary<Guid, bool> PackAutoUpdate { get; set; } = new();
 
+    /// <summary>
+    /// Java executable used for every pack that has no override of its own. Empty/missing means
+    /// automatic: the launcher picks (and if needed downloads) the Java major the pack's Minecraft
+    /// version wants.
+    /// </summary>
+    public string? DefaultJavaPath { get; set; }
+
+    /// <summary>Per-pack Java executable override (full path to java.exe). Missing entry = use
+    /// <see cref="DefaultJavaPath"/>, else automatic.</summary>
+    public Dictionary<Guid, string> PackJavaPath { get; set; } = new();
+
+    /// <summary>The Java executable a pack should launch with, or null for automatic selection.
+    /// A stored path that no longer exists is ignored rather than failing the launch.</summary>
+    public string? GetJavaPathFor(Guid packId)
+    {
+        if (PackJavaPath.TryGetValue(packId, out var own) && !string.IsNullOrWhiteSpace(own) && File.Exists(own))
+            return own;
+        return !string.IsNullOrWhiteSpace(DefaultJavaPath) && File.Exists(DefaultJavaPath) ? DefaultJavaPath : null;
+    }
+
+    public void SetJavaPathFor(Guid packId, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) PackJavaPath.Remove(packId);
+        else PackJavaPath[packId] = path.Trim();
+    }
+
+    /// <summary>
+    /// Extra game/-relative paths that never leave this machine on upload and are never touched by a
+    /// download, on top of <see cref="PrivateAssetPolicy.BuiltIn"/>. Rule syntax ("config/foo/" = whole
+    /// folder). Applies to every pack: the point is that a private asset stays private no matter which
+    /// pack it is copied into.
+    /// </summary>
+    public List<string> PrivatePathPatterns { get; set; } = new();
+
+    /// <summary>
+    /// Whether "auto-update before launch" is on for a pack the user has never toggled it for.
+    /// </summary>
+    /// <remarks>
+    /// A shared pack you do NOT own is maintained by someone else, so tracking their updates is what
+    /// you actually want: someone who downloads a modpack should get its fixes without having to know
+    /// a setting exists. A pack you DO own defaults off - you are the source of truth for it, and
+    /// pulling the server copy over your working directory before every launch would overwrite local
+    /// changes you have not uploaded yet. Once the checkbox is touched the stored value always wins.
+    /// </remarks>
+    public bool GetAutoUpdateFor(Guid packId, bool isShared, Guid ownerId) =>
+        PackAutoUpdate.TryGetValue(packId, out var stored) ? stored : (isShared && ownerId != UserId);
+
     /// <summary>Per-pack auto-apply-rules preference. Missing entry = ON by default.</summary>
     public Dictionary<Guid, bool> PackAutoApplyRules { get; set; } = new();
+
+    /// <summary>
+    /// Per-pack "Low mode": turn the heavy visual settings down before launch so the pack runs on a modest machine.
+    /// Missing entry = ON by default, because a first-time player is exactly the one who cannot afford the full
+    /// settings and has no idea which of four hundred mods is costing them the frames.
+    /// </summary>
+    public Dictionary<Guid, bool> PackLowMode { get; set; } = new();
 
     /// <summary>
     /// When true, launcher-started games are embedded in CloudLauncher's custom host
@@ -32,7 +109,42 @@ public sealed class AppSettings
     /// false, Minecraft opens in its own native window and the launcher just tracks the
     /// process.
     /// </summary>
-    public bool UseCustomGameWindow { get; set; } = true;
+    /// <remarks>Off by default since 1.1.10: the embedded host window is the launcher's own feature
+    /// and a first-time player is better served by Minecraft behaving exactly as it does everywhere
+    /// else. Anyone who wants the play-time bar and the side panel turns it back on in Settings; the
+    /// stored value of anyone who already had it on is untouched, because this default only applies
+    /// when the key is absent from settings.json.</remarks>
+    public bool UseCustomGameWindow { get; set; } = false;
+
+    /// <summary>Set once <see cref="ApplyCustomGameWindowDefault"/> has run for this profile.</summary>
+    public bool CustomGameWindowDefaultApplied { get; set; }
+
+    /// <summary>
+    /// Turns the custom game window off once, for profiles written before it stopped being the
+    /// default.
+    /// </summary>
+    /// <remarks>
+    /// The default flipped to off in 1.1.10, but a default only applies when the key is absent — a
+    /// settings.json from an earlier build carries <c>true</c> forever, so those installs kept
+    /// hosting Minecraft in the launcher's window long after new ones stopped. This clears that
+    /// once. The flag means it never runs again, so turning it back on in Settings sticks.
+    /// </remarks>
+    public void ApplyCustomGameWindowDefault()
+    {
+        if (CustomGameWindowDefaultApplied) return;
+        CustomGameWindowDefaultApplied = true;
+        UseCustomGameWindow = false;
+        try { Save(); } catch { /* read-only profile: the in-memory value is still right */ }
+    }
+
+    /// <summary>
+    /// Id of the pack every new install starts subscribed to, and whether that has been done.
+    /// </summary>
+    /// <remarks>Seeded once, not enforced: the flag is set even when the subscribe fails, and
+    /// leaving the pack afterwards must stick rather than being undone on the next launch.</remarks>
+    public static readonly Guid DefaultPackId = Guid.Parse("9dc74fcc-8baf-4a33-8eec-8e985ca309f3");
+
+    public bool DefaultPackSeeded { get; set; }
 
     /// <summary>Default state for the pack page inside the custom Minecraft window.</summary>
     public bool MinecraftWindowPackPageCollapsedByDefault { get; set; } = false;
@@ -53,6 +165,77 @@ public sealed class AppSettings
     public WorldSortMode WorldSortMode { get; set; } = WorldSortMode.Modified;
 
     public ResourcePackSortMode ResourcePackSortMode { get; set; } = ResourcePackSortMode.Modified;
+
+    // ── mod list view (a pack's Mods Management → List view) ──────────────────
+
+    /// <summary>Which column the List view sorts by. Sticky across sessions.</summary>
+    public ModListSortMode ModListSortMode { get; set; } = ModListSortMode.Priority;
+
+    /// <summary>True when the List view sort runs against its natural direction.</summary>
+    public bool ModListSortReversed { get; set; }
+
+    /// <summary>List view "Hide disabled" filter. Sticky across sessions.</summary>
+    public bool ModListHideDisabled { get; set; }
+
+    /// <summary>List view store filter. Sticky across sessions. ("Only updates" deliberately is not:
+    /// it is a triage filter, and reopening the launcher to an apparently empty pack is alarming.)</summary>
+    public ModListSourceFilter ModListSourceFilter { get; set; } = ModListSourceFilter.All;
+
+    /// <summary>
+    /// How wide a List view row's name/version block may get before the row's buttons start, in
+    /// device-independent pixels. The row itself still spans the list; capping this is what keeps the
+    /// Options button a short hop from the mod's name on a wide monitor instead of a screen away.
+    /// </summary>
+    public double ModRowContentWidth { get; set; } = 620;
+
+    /// <summary>Bounds for <see cref="ModRowContentWidth"/>, and the value a stored nonsense clamps to.</summary>
+    public const double MinModRowContentWidth = 360, MaxModRowContentWidth = 2000;
+
+    public double EffectiveModRowContentWidth =>
+        double.IsFinite(ModRowContentWidth)
+            ? Math.Clamp(ModRowContentWidth, MinModRowContentWidth, MaxModRowContentWidth)
+            : 620;
+
+    /// <summary>
+    /// Which release channel a mod download or update follows when the pack has no channel of its own:
+    /// "alpha" = the latest version whatever its channel, "beta" = releases and betas, "release" =
+    /// stable releases only. See <see cref="ModUpdateChannel"/>.
+    /// </summary>
+    /// <remarks>Alpha by default: "give me the newest file" is what people mean by an update, and a
+    /// pack (Mods Management → Advanced) or a single mod (right-click → Update channel) can still be
+    /// pinned to release.</remarks>
+    public string ModVersionChannel { get; set; } = ModUpdateChannel.Alpha;
+
+    // ── downloads ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// How many mod files the launcher downloads at the same time — during "Update all", a browse-page
+    /// download with dependencies, and a modpack install.
+    /// </summary>
+    /// <remarks>Three by default. One at a time is slower than the connection allows; past a handful the
+    /// bottleneck moves to the stores, which answer a burst from one address with 403s and 429s
+    /// (see <see cref="ApiClient"/>), so the ceiling is deliberately 9 rather than "as many as you like".</remarks>
+    public int ModDownloadConcurrency { get; set; } = 3;
+
+    public const int MinModDownloadConcurrency = 1, MaxModDownloadConcurrency = 9;
+
+    /// <summary>The concurrency actually used, with a stored nonsense clamped into range.</summary>
+    public int EffectiveModDownloadConcurrency =>
+        Math.Clamp(ModDownloadConcurrency, MinModDownloadConcurrency, MaxModDownloadConcurrency);
+
+    /// <summary>
+    /// The user's own CurseForge API key. Empty means "use the server's shared key", which is what
+    /// almost everyone does; a personal key gives its owner their own quota, so a busy evening on the
+    /// shared one (CurseForge answers a burst from the server's single address with 403s) stops being
+    /// their problem. Sent per request to the launcher's proxy and never stored server-side.
+    /// </summary>
+    public string? CurseForgeApiKey { get; set; }
+
+    /// <summary>Colours for the launcher chrome and the log views.</summary>
+    public ThemeSettings Theme { get; set; } = new();
+
+    /// <summary>Text files the built-in editor has been told to keep open across sessions, newest first.</summary>
+    public List<string> RecentEditedFiles { get; set; } = new();
 
     /// <summary>Local usage stats for ordering and display. These are intentionally per-device.</summary>
     // ConcurrentDictionary: mutated from background threads (play time recorded on the process-exit
@@ -277,12 +460,66 @@ public sealed class AppSettings
     }
 
     public int GetMaxRamFor(Guid packId) =>
-        PackMaxRamMb.TryGetValue(packId, out var v) ? v : DefaultMaxRamMb;
+        PackMaxRamMb.TryGetValue(packId, out var v) ? v : RecommendedRamMb();
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetPhysicallyInstalledSystemMemory(out long totalMemoryInKilobytes);
+
+    private static int _recommendedRamMb;
+
+    /// <summary>
+    /// How much RAM to give a pack the user has never set a value for, chosen from the machine's
+    /// INSTALLED memory.
+    /// </summary>
+    /// <remarks>
+    /// 8 GB machine gets 6 GB, 16 GB gets 10 GB, 32 GB or more gets 16 GB - the headroom deliberately
+    /// grows with the total, because Windows, the GPU driver and a browser need a roughly fixed slice
+    /// on a small machine but Minecraft itself stops benefiting past ~16 GB. Under 8 GB we take half
+    /// and leave the rest, which is the most that can be spared without swapping.
+    ///
+    /// GetPhysicallyInstalledSystemMemory is used rather than GlobalMemoryStatusEx because the latter
+    /// reports memory VISIBLE to the OS - hardware-reserved slices make an 8 GB machine read as ~7.9 GB
+    /// and fall through a naive >= 8 GB test. This reports the installed total, so the thresholds mean
+    /// what they say. If the call fails we fall back to the old fixed default rather than guess.
+    /// </remarks>
+    public static int RecommendedRamMb()
+    {
+        if (_recommendedRamMb != 0) return _recommendedRamMb;
+        int chosen;
+        try
+        {
+            if (GetPhysicallyInstalledSystemMemory(out var kb) && kb > 0)
+            {
+                long installedMb = kb / 1024;
+                chosen = installedMb switch
+                {
+                    >= 32L * 1024 => 16384,
+                    >= 16L * 1024 => 10240,
+                    >= 8L * 1024 => 6144,
+                    _ => (int)Math.Max(2048, Math.Min(4096, installedMb / 2)),
+                };
+            }
+            else chosen = 4096;
+        }
+        catch { chosen = 4096; }
+        _recommendedRamMb = chosen;
+        return chosen;
+    }
 
     public void SetMaxRamFor(Guid packId, int? mb)
     {
         if (mb is null) PackMaxRamMb.Remove(packId);
         else PackMaxRamMb[packId] = mb.Value;
+    }
+
+    public string GetJvmArgsFor(Guid packId) =>
+        PackJvmArgs.TryGetValue(packId, out var v) ? v : "";
+
+    public void SetJvmArgsFor(Guid packId, string? args)
+    {
+        if (string.IsNullOrWhiteSpace(args)) PackJvmArgs.Remove(packId);
+        else PackJvmArgs[packId] = args.Trim();
     }
 
     /// <summary>
@@ -305,6 +542,10 @@ public sealed class AppSettings
         "CloudLauncher",
         Environment.GetEnvironmentVariable("CL_PROFILE") is { Length: > 0 } p ? p : "default");
 
+    /// <summary>The per-profile data folder (settings, caches). Public so other small stores can sit
+    /// beside settings.json rather than inventing their own location.</summary>
+    public static string DataRootPath => DataRoot;
+
     private static readonly string SettingsPath = Path.Combine(DataRoot, "settings.json");
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
@@ -314,7 +555,12 @@ public sealed class AppSettings
         try
         {
             if (File.Exists(SettingsPath))
-                return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), JsonOpts) ?? new();
+            {
+                var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), JsonOpts) ?? new();
+                loaded.MigrateServerUrl();
+                loaded.ApplyCustomGameWindowDefault();
+                return loaded;
+            }
         }
         catch { /* corrupt — use defaults */ }
         return new AppSettings();
@@ -350,8 +596,49 @@ public sealed class AppSettings
         }
     }
 
+    /// <summary>
+    /// Moves a settings file that still names the old <c>http://IP:port</c> endpoint onto the HTTPS
+    /// name. Both reach the same server, so nothing else has to change — but an existing install
+    /// would otherwise keep sending its bearer token in clear text forever. A ServerUrl the user set
+    /// themselves is left exactly as it is.
+    /// </summary>
+    public void MigrateServerUrl()
+    {
+        var current = (ServerUrl ?? "").Trim();
+        if (current.Length == 0)
+        {
+            ServerUrl = DefaultServerUrl;
+            return;
+        }
+        if (!LegacyServerUrls.Any(u => string.Equals(u.TrimEnd('/'), current.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)))
+            return;
+        ServerUrl = DefaultServerUrl;
+        try { Save(); } catch { /* read-only profile: the in-memory value still points at the right place */ }
+    }
+
     public bool IsLoggedIn => !string.IsNullOrEmpty(AccessToken) && !string.IsNullOrEmpty(RefreshToken);
 
+}
+
+/// <summary>List view sort columns, in the order the Sort box lists them.</summary>
+public enum ModListSortMode
+{
+    Priority = 0,
+    Name = 1,
+    AddDate = 2,
+    UpdateDate = 3,
+    Status = 4,
+    ContentSize = 5,
+    Category = 6
+}
+
+/// <summary>List view store filter, in the order the filter box lists them.</summary>
+public enum ModListSourceFilter
+{
+    All = 0,
+    CurseForge = 1,
+    Modrinth = 2,
+    External = 3
 }
 
 public enum PackSortMode
@@ -384,6 +671,45 @@ public sealed class PackUsageStats
     public int PlayCount { get; set; }
     public long TotalPlayTimeSeconds { get; set; }
     public DateTimeOffset? LastPlayedAt { get; set; }
+}
+
+/// <summary>
+/// The user's colours. Everything here is optional: a null field means "derive it", which is how a
+/// two-colour choice (accent + surface) produces a whole coherent palette — see
+/// <see cref="ThemeService"/>. Stored as <c>#RRGGBB</c> strings so a settings.json stays readable
+/// and a bad value degrades to the default instead of breaking the launcher.
+/// </summary>
+public sealed class ThemeSettings
+{
+    /// <summary>Which preset the colours came from, for showing the right entry in the picker.
+    /// Cleared as soon as a colour is changed by hand.</summary>
+    public string? PresetName { get; set; }
+
+    /// <summary>Primary action colour: Play, focus rings, the rail indicator, links.</summary>
+    public string? Accent { get; set; }
+
+    /// <summary>The deepest background. Its brightness decides whether the theme is light or dark.</summary>
+    public string? Surface { get; set; }
+
+    public string? Danger { get; set; }
+    public string? Success { get; set; }
+    public string? Warning { get; set; }
+
+    // Log view — null means "derive from the surface/accent above".
+    public string? LogBackground { get; set; }
+    public string? LogText { get; set; }
+    public string? LogMuted { get; set; }
+    public string? LogAccent { get; set; }
+    public string? LogWarning { get; set; }
+    public string? LogError { get; set; }
+
+    /// <summary>True when nothing has been customised, so the picker can show "Default".</summary>
+    public bool IsDefault =>
+        Accent is null && Surface is null && Danger is null && Success is null && Warning is null
+        && LogBackground is null && LogText is null && LogMuted is null && LogAccent is null
+        && LogWarning is null && LogError is null;
+
+    public ThemeSettings Clone() => (ThemeSettings)MemberwiseClone();
 }
 
 /// <summary>
@@ -468,4 +794,5 @@ public sealed class McDefaults
     public string KeyDrop      { get; set; } = "key.keyboard.q";
     public string KeyAttack    { get; set; } = "key.mouse.left";
     public string KeyUse       { get; set; } = "key.mouse.right";
+    public string KeyTogglePerspective { get; set; } = "key.keyboard.f5";
 }

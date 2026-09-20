@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CloudLauncher.Server.Data;
+using CloudLauncher.Server.Net;
 using CloudLauncher.Shared;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -10,7 +11,7 @@ namespace CloudLauncher.Server.Controllers;
 /// <summary>Launcher-wide settings stored in the database so every client sees the
 /// same values. Secret keys are never returned — admins see only "is set" flags.</summary>
 [ApiController]
-public class SettingsController(AppDbContext db) : ControllerBase
+public class SettingsController(AppDbContext db, UpstreamGuard upstreamGuard) : ControllerBase
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -45,6 +46,7 @@ public class SettingsController(AppDbContext db) : ControllerBase
 
         s.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+        upstreamGuard.InvalidateKeys(); // the proxy caches the keys for a minute
 
         return Ok(new GlobalSettingsView(
             !string.IsNullOrEmpty(s.CurseForgeApiKey),

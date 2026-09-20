@@ -1,8 +1,8 @@
-<Page x:Class="CloudLauncher.Views.AccountPanel"
+﻿<Page x:Class="CloudLauncher.Views.AccountPanel"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Title="Account"
-      Background="{StaticResource Surface0Brush}">
+      Background="{DynamicResource Surface0Brush}">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="18">
 
@@ -10,11 +10,11 @@
             <Border Style="{StaticResource Card}" Margin="0,0,0,16">
                 <DockPanel>
                     <Border DockPanel.Dock="Left" Width="56" Height="56" CornerRadius="28"
-                            Background="{StaticResource AccentSoftBrush}" VerticalAlignment="Center"
+                            Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center"
                             Margin="0,0,16,0">
                         <TextBlock x:Name="ProfileInitial" Text="?" FontSize="24" FontWeight="SemiBold"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                                   Foreground="{StaticResource AccentBrush}"/>
+                                   Foreground="{DynamicResource AccentBrush}"/>
                     </Border>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock x:Name="UsernameLabel" Style="{StaticResource H2}" Text="Signed out"
@@ -35,7 +35,7 @@
                                 Click="OnManageMcAccount"/>
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock x:Name="McAccountLine" Text="(loading)"
-                                       Foreground="{StaticResource TextPrimaryBrush}"/>
+                                       Foreground="{DynamicResource TextPrimaryBrush}"/>
                             <TextBlock x:Name="McAccountKind" Style="{StaticResource Caption}" Text=""/>
                         </StackPanel>
                     </DockPanel>

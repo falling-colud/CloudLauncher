@@ -1,7 +1,11 @@
 [Unit]
 Description=CloudLauncher API
 After=network.target docker.service
-Requires=docker.service
+# Wants, not Requires: if docker fails at boot, Requires marks this unit
+# dependency-failed and it never retries (that outage happened 2026-08-23).
+# The server retries its DB connection, so starting before docker is safe.
+Wants=docker.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -12,8 +16,8 @@ EnvironmentFile=/home/opc/everything/cloud/cloudlauncher/cloudlauncher.env
 Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=DOTNET_PRINT_TELEMETRY_MESSAGE=false
 ExecStart=/home/opc/everything/cloud/cloudlauncher/server/CloudLauncher.Server
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=10
 StandardOutput=append:/home/opc/everything/cloud/cloudlauncher/logs/server.log
 StandardError=append:/home/opc/everything/cloud/cloudlauncher/logs/server.err.log
 LimitNOFILE=65536

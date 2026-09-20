@@ -67,6 +67,7 @@ public partial class PackDetailView : Page
         WorldsList.ItemsSource = _worldRows;
         PackScreenshotList.ItemsSource = _packScreenshotRows;
         GameView.FilesDropped   += OnFilesDropped;
+        GameView.FileActivated  += OpenInEditor;   // double-click a file -> built-in editor
         SharedView.FilesDropped += OnFilesDropped;
         ProgressHub.ProgressChanged += OnHeroProgressChanged;
         ProgressHub.ProgressCleared += OnHeroProgressCleared;
@@ -501,6 +502,52 @@ public partial class PackDetailView : Page
 
     private void OnRefreshLogs(object sender, RoutedEventArgs e) => RefreshLogsList();
 
+    /// <summary>Opens the instance's game folder — the one that holds mods/, config/, saves/ and
+    /// kubejs/ — in Explorer.</summary>
+    private void OnOpenPackFolder(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dir = App.State.Packs.GameDir(_packId);
+            Directory.CreateDirectory(dir);
+            Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not open the folder: " + ex.Message; }
+    }
+
+    /// <summary>Opens the built-in editor on this instance's files (configs, scripts, server lists).</summary>
+    private void OnEditPackFiles(object sender, RoutedEventArgs e)
+    {
+        try { FileEditorWindow.Open(Window.GetWindow(this), _packId, _pack?.Name ?? "Instance"); }
+        catch (Exception ex) { StatusLabel.Text = "Could not open the editor: " + ex.Message; }
+    }
+
+    /// <summary>Files tab: "Edit" on the selected file, and double-clicking one, both land here.</summary>
+    private void OnEditSelectedGameFile(object sender, RoutedEventArgs e)
+    {
+        var selected = GameView.GetSelectedFiles().FirstOrDefault();
+        if (selected is null) { StatusLabel.Text = "Select a file to edit."; return; }
+        OpenInEditor(selected);
+    }
+
+    private void OpenInEditor(string relativePath)
+    {
+        try
+        {
+            var full = Path.Combine(App.State.Packs.GameDir(_packId),
+                relativePath.Replace('/', Path.DirectorySeparatorChar));
+            if (!File.Exists(full)) { StatusLabel.Text = "That file is no longer there."; return; }
+            if (TextFileService.IsKnownBinary(full))
+            {
+                // A jar or an image is not something this editor can help with; hand it to Windows.
+                Process.Start(new ProcessStartInfo { FileName = full, UseShellExecute = true });
+                return;
+            }
+            FileEditorWindow.OpenFileFor(Window.GetWindow(this), _packId, _pack?.Name ?? "Instance", full);
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not open that file: " + ex.Message; }
+    }
+
     private void OnOpenLogsFolder(object sender, RoutedEventArgs e)
     {
         var dir = Path.Combine(App.State.Packs.GameDir(_packId), "logs");
@@ -513,15 +560,14 @@ public partial class PackDetailView : Page
         // Unsubscribe launcher-log tailing whenever the selection changes
         AppLog.MessageAppended -= OnLauncherLogAppended;
 
-        if (LogsList.SelectedItem is not LogRow row) { LogContent.Text = ""; return; }
+        if (LogsList.SelectedItem is not LogRow row) { LogContent.Clear(); return; }
         if (row.IsLauncherLog)
         {
-            LogContent.Text = AppLog.Buffer;
-            LogContent.ScrollToEnd();
+            LogContent.SetText(AppLog.Buffer);
             AppLog.MessageAppended += OnLauncherLogAppended;
             return;
         }
-        if (row.IsSyncLog) { LogContent.Text = LogBox.Text; return; }
+        if (row.IsSyncLog) { LogContent.SetText(LogBox.Text); return; }
         try
         {
             string text;
@@ -540,23 +586,23 @@ public partial class PackDetailView : Page
             }
             const int maxChars = 200_000;
             if (text.Length > maxChars) text = "[…older lines trimmed…]\n" + text.Substring(text.Length - maxChars);
-            LogContent.Text = text;
+            LogContent.SetText(text);
         }
-        catch (Exception ex) { LogContent.Text = "Could not read log: " + ex.Message; }
+        catch (Exception ex) { LogContent.SetText("Could not read log: " + ex.Message); }
     }
 
     /// <summary>Mirror the hidden LogBox into the Logs tab if the user is viewing the sync log.</summary>
     private void OnLogBoxTextChanged(object sender, TextChangedEventArgs e)
     {
         if (LogsList.SelectedItem is LogRow row && row.IsSyncLog)
-            LogContent.Text = LogBox.Text;
+            LogContent.SetText(LogBox.Text);
     }
 
     /// <summary>Live-append a launcher-log line to the content view (only when that entry is selected).</summary>
     private void OnLauncherLogAppended(string line)
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(() => OnLauncherLogAppended(line)); return; }
-        AppendCapped(LogContent, line + Environment.NewLine);
+        LogContent.Append(line);
         LogContent.ScrollToEnd();
     }
 
@@ -724,6 +770,8 @@ public partial class PackDetailView : Page
             VisibilityBox.SelectedIndex = (int)pack.Visibility;
             IsSharedBox.IsChecked = pack.IsShared;
 
+            ApplyLoaderCard(pack);
+
             // File routing is only useful once the pack is hosted on the server.
             FilesTab.Visibility   = _isOwner && pack.IsShared ? Visibility.Visible : Visibility.Collapsed;
             SharingOptionsPanel.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
@@ -733,7 +781,16 @@ public partial class PackDetailView : Page
             var ram = App.State.Settings.GetMaxRamFor(pack.Id);
             RamSlider.Value = ram;
             RamValueLabel.Text = $"{ram} MB";
-            AutoUpdateBox.IsChecked = App.State.Settings.PackAutoUpdate.TryGetValue(pack.Id, out var u) && u;
+            JvmArgsBox.Text = App.State.Settings.GetJvmArgsFor(pack.Id);
+            _ = LoadJavaChoicesAsync(pack);
+            AutoUpdateBox.IsChecked = App.State.Settings.GetAutoUpdateFor(pack.Id, pack.IsShared, pack.OwnerId);
+            // Auto-update only makes sense for a copy you consume rather than maintain. For the owner
+            // (or anyone granted upload rights) pulling the server copy before every launch would
+            // overwrite the local work they are about to upload, so the option is not offered at all
+            // rather than offered-and-dangerous.
+            var canEditPack = pack.OwnerId == App.State.Settings.UserId
+                              || pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
+            AutoUpdateCard.Visibility = canEditPack ? Visibility.Collapsed : Visibility.Visible;
             PackPageCollapsedBox.SelectedIndex =
                 App.State.Settings.GetMinecraftWindowPackPageCollapsedOverride(pack.Id) switch
                 {
@@ -1529,6 +1586,77 @@ public partial class PackDetailView : Page
         App.State.Settings.Save();
     }
 
+    private void OnJvmArgsCommit(object sender, RoutedEventArgs e) => SaveJvmArgs();
+
+    private void OnJvmArgsKeyUp(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) SaveJvmArgs();
+    }
+
+    private void SaveJvmArgs()
+    {
+        if (_suppressEvents || _pack is null) return;
+        App.State.Settings.SetJvmArgsFor(_pack.Id, JvmArgsBox.Text);
+        App.State.Settings.Save();
+    }
+
+    // ── Java runtime picker ──────────────────────────────────────────────────
+
+    private List<JavaChoice> _javaChoices = new();
+    private bool _javaLoading;
+
+    private async Task LoadJavaChoicesAsync(PackDetail pack)
+    {
+        _javaLoading = true;
+        try
+        {
+            var required = LaunchService.RequiredJavaMajorFor(pack.MinecraftVersion);
+            var launcherDefault = App.State.Settings.DefaultJavaPath;
+            var autoLabel = string.IsNullOrWhiteSpace(launcherDefault) || !File.Exists(launcherDefault)
+                ? $"Automatic  ·  Java {required} for Minecraft {pack.MinecraftVersion}"
+                : $"Launcher default  ·  {launcherDefault}";
+            var choices = await JavaPicker.BuildChoicesAsync(autoLabel);
+            if (_pack?.Id != pack.Id) return;
+            _javaChoices = choices;
+            App.State.Settings.PackJavaPath.TryGetValue(pack.Id, out var current);
+            JavaPicker.Apply(JavaBox, _javaChoices, current);
+            UpdateJavaHint();
+        }
+        catch (Exception ex) { JavaHint.Text = "Could not list Java installations: " + ex.Message; }
+        finally { _javaLoading = false; }
+    }
+
+    private void OnJavaChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_javaLoading || _suppressEvents || _pack is null) return;
+        if (JavaBox.SelectedItem is not JavaChoice choice) return;
+
+        if (choice.Kind == JavaChoiceKind.Browse)
+        {
+            var picked = JavaPicker.Browse(Window.GetWindow(this));
+            if (picked is not null)
+            {
+                App.State.Settings.SetJavaPathFor(_pack.Id, picked);
+                App.State.Settings.Save();
+            }
+            _ = LoadJavaChoicesAsync(_pack); // re-list (and re-select) either way
+            return;
+        }
+
+        App.State.Settings.SetJavaPathFor(_pack.Id, choice.Path);
+        App.State.Settings.Save();
+        UpdateJavaHint();
+    }
+
+    private void UpdateJavaHint()
+    {
+        if (_pack is null) return;
+        var path = App.State.Settings.GetJavaPathFor(_pack.Id);
+        JavaHint.Text = path is null
+            ? "Launches with the Java version this Minecraft release needs, downloaded automatically when it is missing. Applies on the next launch."
+            : $"Launches with {path}. Applies on the next launch.";
+    }
+
     private void OnAutoUpdateToggled(object sender, RoutedEventArgs e)
     {
         if (_suppressEvents || _pack is null) return;
@@ -1710,6 +1838,152 @@ public partial class PackDetailView : Page
             _                  => $"Added rule for {count} item(s)."
         };
         _ = RefreshFileListsAsync(runAutoApply: false);
+    }
+
+    // ── mod loader ──────────────────────────────────────────────────────────
+
+    /// <summary>Token for the in-flight loader-version fetch, so a fast loader switch can't
+    /// have a slow earlier response overwrite the list for the loader now selected.</summary>
+    private CancellationTokenSource? _loaderVersionCts;
+
+    /// <summary>The list refresh kicked off by the last <see cref="ApplyLoaderCard"/>, so a save can
+    /// wait for it before writing its confirmation into the same status line.</summary>
+    private Task? _loaderVersionRefresh;
+
+    private void ApplyLoaderCard(PackDetail pack)
+    {
+        // Only the owner may change this (the server rejects everyone else), and an empty
+        // instance has no Minecraft version to pick builds for.
+        var editable = _isOwner && !pack.IsEmpty && !string.IsNullOrEmpty(pack.MinecraftVersion);
+        LoaderCard.Visibility = editable ? Visibility.Visible : Visibility.Collapsed;
+        if (!editable) return;
+
+        LoaderMcVersionLabel.Text = pack.MinecraftVersion;
+        foreach (ComboBoxItem item in PackLoaderBox.Items)
+            if (item.Tag as string == pack.Loader.ToString())
+                PackLoaderBox.SelectedItem = item;
+
+        LoaderStatusLabel.Text = "";
+        ApplyLoaderButton.IsEnabled = false;
+        _loaderVersionRefresh = RefreshPackLoaderVersionsAsync(pack.LoaderVersion);
+    }
+
+    private LoaderKind SelectedPackLoader() =>
+        PackLoaderBox.SelectedItem is ComboBoxItem item && item.Tag is string tag
+        && Enum.TryParse<LoaderKind>(tag, out var kind)
+            ? kind
+            : LoaderKind.None;
+
+    /// <summary>Fills the version list for the selected loader, preselecting <paramref name="preferred"/> when it's still offered.</summary>
+    private async Task RefreshPackLoaderVersionsAsync(string? preferred)
+    {
+        if (_pack is null || string.IsNullOrEmpty(_pack.MinecraftVersion)) return;
+        var loader = SelectedPackLoader();
+
+        _loaderVersionCts?.Cancel();
+        var cts = _loaderVersionCts = new CancellationTokenSource();
+
+        PackLoaderVersionBox.ItemsSource = null;
+        PackLoaderVersionRow.IsEnabled = loader != LoaderKind.None;
+        if (loader == LoaderKind.None)
+        {
+            UpdateApplyLoaderState();
+            return;
+        }
+
+        LoaderStatusLabel.Text = "Loading builds…";
+        try
+        {
+            var versions = await App.State.Versions.ListLoaderVersionsAsync(loader, _pack.MinecraftVersion, cts.Token);
+            if (cts.IsCancellationRequested) return;
+
+            PackLoaderVersionBox.ItemsSource = versions;
+            if (versions.Count == 0)
+            {
+                LoaderStatusLabel.Text = $"{loader} publishes no builds for Minecraft {_pack.MinecraftVersion}.";
+            }
+            else
+            {
+                // Keep the current build selected when it's still on offer, so opening the card
+                // and pressing Apply can't silently move the instance to the newest build.
+                var index = preferred is null ? -1 : versions.IndexOf(preferred);
+                PackLoaderVersionBox.SelectedIndex = index >= 0 ? index : 0;
+                LoaderStatusLabel.Text = "";
+            }
+        }
+        catch (OperationCanceledException) { /* superseded by a newer selection */ }
+        catch (Exception ex)
+        {
+            if (!cts.IsCancellationRequested)
+                LoaderStatusLabel.Text = "Couldn't load builds: " + ex.Message;
+        }
+        finally
+        {
+            if (!cts.IsCancellationRequested) UpdateApplyLoaderState();
+        }
+    }
+
+    /// <summary>Apply is offered only when the pending choice is complete and differs from what's saved.</summary>
+    private void UpdateApplyLoaderState()
+    {
+        if (_pack is null) { ApplyLoaderButton.IsEnabled = false; return; }
+        var loader = SelectedPackLoader();
+        var version = PackLoaderVersionBox.SelectedItem as string;
+
+        var complete = loader == LoaderKind.None || !string.IsNullOrEmpty(version);
+        var changed = loader != _pack.Loader
+                      || (loader != LoaderKind.None && version != _pack.LoaderVersion);
+        ApplyLoaderButton.IsEnabled = complete && changed;
+    }
+
+    private async void OnPackLoaderChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressEvents || _pack is null) return;
+        // Returning to the saved loader should offer its saved build back, not the newest one.
+        var preferred = SelectedPackLoader() == _pack.Loader ? _pack.LoaderVersion : null;
+        await RefreshPackLoaderVersionsAsync(preferred);
+    }
+
+    private void OnPackLoaderVersionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressEvents || _pack is null) return;
+        UpdateApplyLoaderState();
+    }
+
+    private async void OnApplyLoaderChange(object sender, RoutedEventArgs e)
+    {
+        if (_suppressEvents || _pack is null) return;
+        var loader = SelectedPackLoader();
+        var version = loader == LoaderKind.None ? null : PackLoaderVersionBox.SelectedItem as string;
+        if (loader != LoaderKind.None && string.IsNullOrEmpty(version))
+        {
+            LoaderStatusLabel.Text = "Pick a build first.";
+            return;
+        }
+
+        ApplyLoaderButton.IsEnabled = false;
+        LoaderStatusLabel.Text = "Saving…";
+        try
+        {
+            // The server leaves a field alone when it arrives null, so clearing the build for a
+            // vanilla instance has to be sent as an empty string rather than null.
+            var updated = await App.State.Api.UpdatePackAsync(
+                _pack.Id,
+                new UpdatePackRequest(null, null, null, null, null, null, loader, version ?? ""));
+            _shell.AddOrUpdatePackList(updated); // keep the instance card's subtitle in step
+            await ReloadAsync();
+            // The reload repopulates the build list and clears this status line when it lands,
+            // so wait it out before confirming or the confirmation gets wiped a moment later.
+            if (_loaderVersionRefresh is { } refresh) await refresh;
+            LoaderStatusLabel.Text = loader == LoaderKind.None
+                ? "Now vanilla — takes effect next launch."
+                : $"Now {loader} {version} — installs on next launch.";
+        }
+        catch (Exception ex)
+        {
+            LoaderStatusLabel.Text = "Save failed: " + ex.Message;
+            UpdateApplyLoaderState();
+        }
     }
 
     // ── sharing tab ─────────────────────────────────────────────────────────
@@ -1948,7 +2222,7 @@ public partial class PackDetailView : Page
             { result.Add(rel); continue; }
 
             var match = App.State.Rules.Match(rel, rules);
-            if (match.IsAutoShared)
+            if (match.IsAutoShared && !PrivateAssetPolicy.IsPrivate(rel, App.State.Settings))
                 result.Add(rel);
         }
         return result;
@@ -1995,7 +2269,7 @@ public partial class PackDetailView : Page
 
         StatusLabel.Text = "Checking Java...";
         LaunchButton.IsEnabled = false;
-        var (javaOk, javaMsg) = await LaunchService.CheckJavaAsync(_pack.MinecraftVersion);
+        var (javaOk, javaMsg) = await LaunchService.CheckJavaAsync(_pack.MinecraftVersion, App.State.Settings.GetJavaPathFor(_pack.Id));
         UpdateLaunchButtonState();
         if (!javaOk)
         {
@@ -2077,13 +2351,31 @@ public partial class PackDetailView : Page
     {
         if (_pack is null) return;
         LogBox.Text = "";
-        var log = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
+        var log = new Progress<string>(line =>
+        {
+            AppendCapped(LogBox, line + Environment.NewLine);
+            StatusLabel.Text = line.Length > 120 ? line[..120] + "…" : line;
+        });
         StartServerButton.IsEnabled = false;
+        StatusLabel.Text = "Preparing server…";
         try
         {
-            var proc = await App.State.Launcher.StartLocalServerAsync(_pack, log);
+            // Mods marked "Client only" in Modpack Management stay off the server. The inventory's
+            // fast pass reads identities from cache and runs off the UI thread.
+            IReadOnlyCollection<string>? clientOnly = null;
+            try
+            {
+                var mods = await App.State.ModInventory.LoadAsync(_pack.Id, _pack.IsShared);
+                clientOnly = mods.Where(m => m.Side == ModSide.Client).Select(m => m.FileName).ToList();
+            }
+            catch { /* no flags readable: mirror every enabled mod, as before */ }
+
+            // All the slow work (mirroring the pack, installers, Java) runs off the UI thread inside
+            // StartLocalServerAsync; this handler only feeds the log and flips the button.
+            var proc = await App.State.Launcher.StartLocalServerAsync(_pack, log, clientOnly);
             LogBox.AppendText($"Server started, PID {proc.Id}. A console window should appear.{Environment.NewLine}");
             LogBox.AppendText("Players connect on port 25565." + Environment.NewLine);
+            StatusLabel.Text = $"Server started (PID {proc.Id}) — see its console window. Logs tab has the setup log.";
         }
         catch (Exception ex)
         {

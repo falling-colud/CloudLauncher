@@ -338,6 +338,12 @@ public static class Animate
     public static bool GetSmoothScroll(DependencyObject o) => (bool)o.GetValue(SmoothScrollProperty);
     public static void SetSmoothScroll(DependencyObject o, bool v) => o.SetValue(SmoothScrollProperty, v);
 
+    private const double EaseMs = 260;
+
+    /// <summary>How far the real offset may drift from the one we last asked for before we
+    /// stop calling the move ours. A pixel of slack covers layout rounding.</summary>
+    private const double ForeignMovePx = 1.0;
+
     // The live target we're easing toward, and whether an ease is in flight.
     private static readonly DependencyProperty TargetOffsetProperty =
         DependencyProperty.RegisterAttached("TargetOffset", typeof(double), typeof(Animate),
@@ -346,21 +352,48 @@ public static class Animate
         DependencyProperty.RegisterAttached("IsScrolling", typeof(bool), typeof(Animate),
             new PropertyMetadata(false));
 
+    // The offset the ease last asked for. If VerticalOffset comes back as something else,
+    // the viewer moved behind our back and we are no longer the one driving.
+    private static readonly DependencyProperty LastWrittenProperty =
+        DependencyProperty.RegisterAttached("LastWritten", typeof(double), typeof(Animate),
+            new PropertyMetadata(double.NaN));
+
+    // Bumped per ease so a superseded animation's Completed can't tear down a newer one.
+    private static readonly DependencyProperty EaseGenerationProperty =
+        DependencyProperty.RegisterAttached("EaseGeneration", typeof(int), typeof(Animate),
+            new PropertyMetadata(0));
+
     // Proxy DP whose changed-callback drives the actual scroll position.
     private static readonly DependencyProperty AnimatedOffsetProperty =
         DependencyProperty.RegisterAttached("AnimatedOffset", typeof(double), typeof(Animate),
             new PropertyMetadata(0d, OnAnimatedOffsetChanged));
 
+    private static double ClampOffset(double v, double max) => v < 0 ? 0 : v > max ? max : v;
+
     private static void OnAnimatedOffsetChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
-        if (d is ScrollViewer sv) sv.ScrollToVerticalOffset((double)e.NewValue);
+        if (d is not ScrollViewer sv) return;
+        // Clamp against the extent as it is *now*, not as it was when the ease started:
+        // the browsers page more results in mid-scroll, and a virtualising panel keeps
+        // re-estimating its extent as rows of different heights realise.
+        double v = ClampOffset((double)e.NewValue, sv.ScrollableHeight);
+        sv.SetValue(LastWrittenProperty, v);
+        sv.ScrollToVerticalOffset(v);
     }
 
     private static void OnSmoothScrollChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is not ScrollViewer sv) return;
-        if ((bool)e.NewValue) sv.PreviewMouseWheel += Scroll_PreviewWheel;
-        else                  sv.PreviewMouseWheel -= Scroll_PreviewWheel;
+        if ((bool)e.NewValue)
+        {
+            sv.PreviewMouseWheel += Scroll_PreviewWheel;
+            sv.ScrollChanged     += Scroll_Changed;
+        }
+        else
+        {
+            sv.PreviewMouseWheel -= Scroll_PreviewWheel;
+            sv.ScrollChanged     -= Scroll_Changed;
+        }
     }
 
     private static void Scroll_PreviewWheel(object sender, System.Windows.Input.MouseWheelEventArgs e)
@@ -381,22 +414,82 @@ public static class Animate
         e.Handled = true;
 
         bool animating = (bool)sv.GetValue(IsScrollingProperty);
+        double last = (double)sv.GetValue(LastWrittenProperty);
+
+        // Stack this notch on the target we're already heading for, so a fast flick covers
+        // the whole distance instead of restarting from the middle of the last ease.
         double basis = animating ? (double)sv.GetValue(TargetOffsetProperty) : sv.VerticalOffset;
         if (double.IsNaN(basis)) basis = sv.VerticalOffset;
 
-        double target = Math.Max(0, Math.Min(sv.ScrollableHeight, basis - e.Delta));
+        // Start from the offset we last wrote while an ease is running: VerticalOffset
+        // trails it by a layout pass, and starting from a trailing value steps backwards.
+        double from = animating && !double.IsNaN(last) ? last : sv.VerticalOffset;
+
+        BeginEase(sv, from, ClampOffset(basis - e.Delta, sv.ScrollableHeight));
+    }
+
+    private static void BeginEase(ScrollViewer sv, double from, double target)
+    {
         sv.SetValue(TargetOffsetProperty, target);
         sv.SetValue(IsScrollingProperty, true);
 
-        sv.SetValue(AnimatedOffsetProperty, sv.VerticalOffset);
-        var anim = new DoubleAnimation(target, TimeSpan.FromMilliseconds(260)) { EasingFunction = EaseOut };
+        int gen = (int)sv.GetValue(EaseGenerationProperty) + 1;
+        sv.SetValue(EaseGenerationProperty, gen);
+
+        // From is explicit on purpose. Left implicit, WPF hands the new animation whatever
+        // value the previous one froze at — animations hold their end value — so anything
+        // that moved the viewer in between (a scrollbar drag, a keyboard page, a focus
+        // BringIntoView, the panel re-anchoring after a load-more) made the next wheel
+        // notch snap back to that stale offset before easing. That was the twitch.
+        var anim = new DoubleAnimation(from, target, TimeSpan.FromMilliseconds(EaseMs)) { EasingFunction = EaseOut };
         anim.Completed += (_, __) =>
         {
-            // Only clear the in-flight flag if no newer tick changed the target.
-            if ((double)sv.GetValue(TargetOffsetProperty) == target)
-                sv.SetValue(IsScrollingProperty, false);
+            if ((int)sv.GetValue(EaseGenerationProperty) == gen) StopEase(sv, target);
         };
         sv.BeginAnimation(AnimatedOffsetProperty, anim);
+    }
+
+    /// <summary>Hand the offset back to the ScrollViewer. Parks the base value on
+    /// <paramref name="park"/> first: the running animation still masks it, so dropping the
+    /// animation afterwards reveals the same number and moves nothing.</summary>
+    private static void StopEase(ScrollViewer sv, double park)
+    {
+        sv.SetValue(EaseGenerationProperty, (int)sv.GetValue(EaseGenerationProperty) + 1);
+        sv.SetValue(AnimatedOffsetProperty, park);
+        sv.BeginAnimation(AnimatedOffsetProperty, null);
+        sv.SetValue(IsScrollingProperty, false);
+        sv.SetValue(TargetOffsetProperty, double.NaN);
+    }
+
+    private static void Scroll_Changed(object sender, ScrollChangedEventArgs e)
+    {
+        // ScrollChanged bubbles; only act on the viewer that actually moved.
+        if (sender is not ScrollViewer sv || !ReferenceEquals(e.OriginalSource, sv)) return;
+        if (e.VerticalChange == 0 && e.ExtentHeightChange == 0 && e.ViewportHeightChange == 0) return;
+
+        double last = (double)sv.GetValue(LastWrittenProperty);
+        if (!(bool)sv.GetValue(IsScrollingProperty) || double.IsNaN(last))
+        {
+            sv.SetValue(LastWrittenProperty, sv.VerticalOffset);   // idle: stay in step with reality
+            return;
+        }
+
+        double drift = sv.VerticalOffset - last;
+        if (Math.Abs(drift) <= ForeignMovePx) return;              // that move was ours
+        sv.SetValue(LastWrittenProperty, sv.VerticalOffset);
+
+        double target = (double)sv.GetValue(TargetOffsetProperty);
+        if (double.IsNaN(target)) { StopEase(sv, sv.VerticalOffset); return; }
+
+        if (e.ExtentHeightChange != 0 || e.ViewportHeightChange != 0)
+            // Content changed size under the ease and the viewer got re-anchored. Keep
+            // going, but carry the target along by the same shift so we finish the notch
+            // the user asked for instead of driving to an offset the old extent implied.
+            BeginEase(sv, sv.VerticalOffset, ClampOffset(target + drift, sv.ScrollableHeight));
+        else
+            // Somebody else owns the offset now — a drag, a key, a BringIntoView, a
+            // touch pan. Get out of their way instead of fighting for it every frame.
+            StopEase(sv, sv.VerticalOffset);
     }
 
     private static bool DefersToInner(ScrollViewer outer, DependencyObject? src)

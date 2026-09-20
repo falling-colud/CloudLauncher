@@ -64,10 +64,18 @@ public sealed record ModMediaItem(
     string? Title,
     string? Description);
 
+/// <summary>One selectable category in the mod-browse filter. <see cref="Label"/> is shown to the
+/// user; <see cref="Value"/> is what the store's search wants — a Modrinth category slug, or a
+/// CurseForge numeric category id.</summary>
+public sealed record ModBrowseCategory(string Label, string Value);
+
 public sealed record ModProjectDetail(
     string? Description,
     ModProjectLinks Links,
-    IReadOnlyList<ModMediaItem> Screenshots);
+    IReadOnlyList<ModMediaItem> Screenshots,
+    // Modrinth ships Markdown; CurseForge ships HTML. The viewer renders accordingly instead of
+    // guessing from the content (a Markdown body that embeds one HTML tag used to be misread as HTML).
+    bool IsMarkdown = false);
 
 public sealed record InstalledMod(
     string FilePath,
@@ -110,7 +118,7 @@ public sealed class ModrinthService
         string query,
         string? mcVersion = null,
         string? loader = null,
-        string? category = null,
+        IReadOnlyList<string>? categories = null,
         int limit = 30,
         int offset = 0,
         string projectType = "mod",
@@ -123,13 +131,58 @@ public sealed class ModrinthService
             facets.Add([$"versions:{mcVersion}"]);
         if (!string.IsNullOrEmpty(loader))
             facets.Add([$"categories:{loader.ToLowerInvariant()}"]);
-        if (!string.IsNullOrEmpty(category))
-            facets.Add([$"categories:{category}"]);
+        // Each category is its own facet group, so results must carry ALL of them (AND) — matching
+        // how selecting several categories narrows on the Modrinth site.
+        if (categories is not null)
+            foreach (var c in categories)
+                if (!string.IsNullOrWhiteSpace(c))
+                    facets.Add([$"categories:{c}"]);
 
         var facetsJson = JsonSerializer.Serialize(facets);
         var path = $"search?query={Uri.EscapeDataString(query)}&facets={Uri.EscapeDataString(facetsJson)}&limit={limit}&offset={offset}&index={index}";
-        var resp = await ProxyGetJsonAsync<SearchResponse>(path, ct);
+        // Throws on failure: a refused search (rate limited, Modrinth down) used to read as "No results".
+        var resp = await ProxyGetJsonStrictAsync<SearchResponse>(path, "search", ct);
         return resp?.Hits?.Select(ToSummary).ToList() ?? new();
+    }
+
+    private List<ModBrowseCategory>? _categoryCache;
+
+    /// <summary>Modrinth's category tags for the given project type (mod / resourcepack / …), cached
+    /// for the session. The header categories only — loaders and resolutions are filtered out — so
+    /// the filter offers the same list the Modrinth site shows under "Categories".</summary>
+    public async Task<List<ModBrowseCategory>> GetCategoriesAsync(string projectType = "mod", CancellationToken ct = default)
+    {
+        if (_categoryCache is { } cached) return cached;
+        try
+        {
+            var tags = await ProxyGetJsonAsync<List<CategoryTag>>("tag/category", ct);
+            var list = (tags ?? new())
+                .Where(t => !string.IsNullOrWhiteSpace(t.Name)
+                            && string.Equals(t.ProjectType, projectType, StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(t.Header, "categories", StringComparison.OrdinalIgnoreCase))
+                .Select(t => t.Name!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .Select(n => new ModBrowseCategory(Prettify(n), n))
+                .ToList();
+            _categoryCache = list;
+            return list;
+        }
+        catch { return new(); }
+    }
+
+    /// <summary>"worldgen" → "Worldgen", "game-mechanics" → "Game mechanics".</summary>
+    private static string Prettify(string slug)
+    {
+        var spaced = slug.Replace('-', ' ').Replace('_', ' ').Trim();
+        return spaced.Length == 0 ? slug : char.ToUpperInvariant(spaced[0]) + spaced[1..];
+    }
+
+    private sealed class CategoryTag
+    {
+        [JsonPropertyName("name")] public string? Name { get; set; }
+        [JsonPropertyName("project_type")] public string? ProjectType { get; set; }
+        [JsonPropertyName("header")] public string? Header { get; set; }
     }
 
     // ── project detail ────────────────────────────────────────────────────────
@@ -164,7 +217,8 @@ public sealed class ModrinthService
                 .Where(g => !string.IsNullOrWhiteSpace(g.Url))
                 .Select(g => new ModMediaItem(g.Url, g.Url, g.Title, g.Description))
                 .ToList()
-                ?? new List<ModMediaItem>());
+                ?? new List<ModMediaItem>(),
+            IsMarkdown: true); // Modrinth project bodies are Markdown
     }
 
     // ── versions ─────────────────────────────────────────────────────────────
@@ -183,6 +237,91 @@ public sealed class ModrinthService
 
         var resp = await ProxyGetJsonAsync<List<VersionResponse>>(path, ct);
         return resp?.Select(ToVersion).ToList() ?? new();
+    }
+
+    /// <summary>A project's versions — all of them, or only those for a Minecraft version and loader
+    /// (filtered by Modrinth, so it's one small page). Changelogs are left out to keep the list small;
+    /// <see cref="GetVersionChangelogAsync"/> fetches one on demand. Unlike <see cref="GetVersionsAsync"/>
+    /// this throws when the store says no (a 429, an outage), so a caller that caches the answer never
+    /// caches "no versions" for a mod that merely could not be asked right now.</summary>
+    public async Task<List<ModVersion>> GetVersionsStrictAsync(string projectId, string? mcVersion = null,
+        string? loader = null, CancellationToken ct = default)
+    {
+        var query = new List<string> { "include_changelog=false" };
+        if (!string.IsNullOrEmpty(mcVersion))
+            query.Add("game_versions=" + Uri.EscapeDataString(JsonSerializer.Serialize(new[] { mcVersion })));
+        if (!string.IsNullOrEmpty(loader))
+            query.Add("loaders=" + Uri.EscapeDataString(JsonSerializer.Serialize(new[] { loader.ToLowerInvariant() })));
+        var list = await ProxyGetJsonStrictAsync<List<VersionResponse>>(
+            $"project/{projectId}/version?{string.Join("&", query)}", "version list", ct);
+        return list?.Select(ToVersion).ToList() ?? new();
+    }
+
+    /// <summary>One version's changelog (Markdown), for the update review.</summary>
+    public async Task<string?> GetVersionChangelogAsync(string versionId, CancellationToken ct = default)
+    {
+        var version = await ProxyGetJsonStrictAsync<VersionResponse>($"version/{versionId}", "changelog", ct);
+        return version?.Changelog;
+    }
+
+    private async Task<T?> ProxyGetJsonStrictAsync<T>(string pathAndQuery, string operation, CancellationToken ct)
+    {
+        using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Get, pathAndQuery, null, ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new HttpRequestException(
+                $"Modrinth {operation} failed: {await DescribeFailureAsync(resp, ct)}", null, resp.StatusCode);
+        return await resp.Content.ReadFromJsonAsync<T>(Json, ct);
+    }
+
+    /// <summary>A readable reason for a failed Modrinth call. The launcher server explains its own
+    /// refusals (rate limiting) as <c>{"error": sentence, "code": ...}</c>; Modrinth itself answers
+    /// <c>{"error": code, "description": sentence}</c>.</summary>
+    private static async Task<string> DescribeFailureAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        try
+        {
+            var body = (await resp.Content.ReadAsStringAsync(ct)).TrimStart();
+            if (body.StartsWith('{'))
+            {
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("code", out _) && root.TryGetProperty("error", out var serverError)
+                    && serverError.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(serverError.GetString()))
+                    return serverError.GetString()!;
+                if (root.TryGetProperty("description", out var description)
+                    && description.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(description.GetString()))
+                    return description.GetString()!;
+            }
+        }
+        catch { /* fall through to the status */ }
+
+        return resp.StatusCode switch
+        {
+            HttpStatusCode.TooManyRequests =>
+                "Modrinth is rate-limiting the launcher server (too many requests). Wait a minute and try again.",
+            HttpStatusCode.NotFound => "the project no longer exists on Modrinth.",
+            _ => $"{(int)resp.StatusCode} {resp.ReasonPhrase}"
+        };
+    }
+
+    /// <summary>Several projects in one round trip (<c>GET /projects?ids=[...]</c>), keyed by id. Unknown
+    /// ids are absent. Used wherever a whole pack is identified at once.</summary>
+    public async Task<Dictionary<string, ModSummary>> GetProjectsAsync(IEnumerable<string> ids, CancellationToken ct = default)
+    {
+        var result = new Dictionary<string, ModSummary>(StringComparer.OrdinalIgnoreCase);
+        var distinct = ids.Where(i => !string.IsNullOrWhiteSpace(i)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var chunk in distinct.Chunk(50))
+        {
+            var idsJson = JsonSerializer.Serialize(chunk);
+            var list = await ProxyGetJsonAsync<List<ProjectResponse>>($"projects?ids={Uri.EscapeDataString(idsJson)}", ct);
+            foreach (var p in list ?? new())
+            {
+                var summary = ToSummaryFromProject(p);
+                result[p.Id] = summary;
+                if (!string.IsNullOrEmpty(p.Slug)) result[p.Slug] = summary;
+            }
+        }
+        return result;
     }
 
     public async Task<(ModSummary Mod, ModVersion Version)?> GetVersionWithProjectAsync(string versionId, CancellationToken ct = default)
@@ -205,17 +344,36 @@ public sealed class ModrinthService
         var body = new { hashes, algorithm = "sha512" };
         var content = JsonContent.Create(body, options: Json);
         using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Post, "version_files", content, ct);
-        if (!resp.IsSuccessStatusCode) return new();
+        // Throw rather than return "no matches" — see the note on CurseForge's fingerprint match.
+        // A failed lookup and a genuinely unmatched hash must not look alike, or installed mods
+        // silently present themselves as not installed.
+        resp.EnsureSuccessStatusCode();
 
         var result = new Dictionary<string, (ModSummary, ModVersion)>();
-        using var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-        foreach (var prop in doc.RootElement.EnumerateObject())
+        var matched = new List<(string Hash, VersionResponse Version)>();
+        using (var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct))
         {
-            var ver = JsonSerializer.Deserialize<VersionResponse>(prop.Value.GetRawText(), Json);
-            if (ver is null) continue;
-            var project = await GetProjectAsync(ver.ProjectId, ct);
-            if (project is null) continue;
-            result[prop.Name] = (project, ToVersion(ver));
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                var ver = JsonSerializer.Deserialize<VersionResponse>(prop.Value.GetRawText(), Json);
+                if (ver is not null) matched.Add((prop.Name, ver));
+            }
+        }
+
+        // One batched project lookup for every match; anything the batch missed is fetched singly so
+        // a partial answer never loses a match.
+        Dictionary<string, ModSummary> projects;
+        try { projects = await GetProjectsAsync(matched.Select(m => m.Version.ProjectId), ct); }
+        catch { projects = new(StringComparer.OrdinalIgnoreCase); }
+
+        foreach (var (hash, ver) in matched)
+        {
+            if (!projects.TryGetValue(ver.ProjectId, out var project))
+            {
+                project = await GetProjectAsync(ver.ProjectId, ct);
+                if (project is null) continue;
+            }
+            result[hash] = (project, ToVersion(ver));
         }
         return result;
     }

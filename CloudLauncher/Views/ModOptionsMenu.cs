@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -26,6 +26,9 @@ public sealed class ModOptionsContext
     public Action<IReadOnlyList<PackMod>>? OnDelete { get; init; }
     public Action<PackMod>? OnReveal { get; init; }
     public Action<IReadOnlyList<PackMod>, bool>? OnSetEnabled { get; init; }
+    /// <summary>Raised after an edit that changes which versions count as an update (the channel or
+    /// the followed store), so the view re-runs the update check for those mods.</summary>
+    public Action<IReadOnlyList<PackMod>>? OnRecheckUpdates { get; init; }
 }
 
 /// <summary>
@@ -38,7 +41,10 @@ public static class ModOptionsMenu
     private const int IcGlobe = 0xE774, IcEnable = 0xE73E, IcDisable = 0xE711, IcRefresh = 0xE72C, IcHistory = 0xE81C;
     private const int IcPage = 0xE7C3, IcTesting = 0xEC7A, IcSide = 0xE772;
     private const int IcFlag = 0xE7C1, IcTag = 0xE8EC, IcLink = 0xE71B, IcLibrary = 0xE8F1, IcAdd = 0xE710;
-    private const int IcWarn = 0xE7BA, IcFolder = 0xE8B7, IcDelete = 0xE74D;
+    private const int IcWarn = 0xE7BA, IcFolder = 0xE8B7, IcDelete = 0xE74D, IcNote = 0xE70B;
+    private const int IcLock = 0xE72E;
+    private const int IcChannel = 0xE8AB; // "Switch" — which release channel updates come from
+    private const int IcSize = 0xE9D9; // "BarChart" — mirrors the three-bar meter on the cards
 
     public static ContextMenu Build(PackMod mod, ModOptionsContext ctx) => Build(new[] { mod }, ctx);
 
@@ -60,6 +66,11 @@ public static class ModOptionsMenu
         if (!multi && primary.PageUrl is not null)
             menu.Items.Add(Item("Open website", () => OpenUrl(primary.PageUrl!), Glyph(IcGlobe)));
 
+        // ── Note ── one free-text note per mod, so this stays single-target.
+        if (!multi)
+            menu.Items.Add(Item(primary.HasNote ? "Edit note…" : "Add note…",
+                () => OpenNote(primary, ctx), Glyph(IcNote), gesture: primary.HasNote ? "✓" : null));
+
         // ── Enable / Disable ──
         if (ctx.OnSetEnabled is not null)
         {
@@ -79,13 +90,44 @@ public static class ModOptionsMenu
         // ── Updates ──
         if (ctx.OnUpdate is not null)
         {
-            var any = targets.Any(t => t.HasUpdate);
+            // The gesture text carries how much of the selection the lock is holding back, so
+            // "nothing happened" after Update all is explained before it's clicked, not after.
+            var updatable = targets.Count(t => t.HasUpdate);
+            var held = targets.Count(t => t.HasUpdate && t.Meta.UpdateLocked);
             menu.Items.Add(Item(multi ? "Update all to newest" : "Update to newest",
                 () => ctx.OnUpdate!.Invoke(targets), Glyph(IcRefresh),
-                gesture: any ? "available" : null, enabled: any));
+                gesture: updatable == 0     ? null
+                       : held == 0          ? "available"
+                       : held == updatable  ? "locked"
+                       :                      $"{updatable - held} of {updatable}",
+                enabled: updatable > 0));
         }
         if (!multi && ctx.OnUpdateToVersion is not null)
             menu.Items.Add(Item("Update to version…", () => ctx.OnUpdateToVersion!.Invoke(primary), Glyph(IcHistory)));
+        // Kept beside the update actions it governs rather than down in the flag list.
+        menu.Items.Add(FlagToggle("Lock updates", targets, ctx,
+            m => m.UpdateLocked, (m, v) => m.UpdateLocked = v, Glyph(IcLock)));
+
+        // ── Update channel ── release only / + beta / + alpha, per mod, or follow the pack.
+        var sameChannel = targets.All(t => string.Equals(t.Meta.UpdateChannel, primary.Meta.UpdateChannel, StringComparison.OrdinalIgnoreCase));
+        var channel = Parent("Update channel", Glyph(IcChannel),
+            !sameChannel ? "mixed" : primary.Meta.UpdateChannel is null ? null : ModUpdateChannel.Label(primary.Meta.UpdateChannel));
+        var packDefaultItem = Radio($"Pack default ({ModUpdateChannel.Label(primary.DefaultUpdateChannel)})",
+            targets.All(t => t.Meta.UpdateChannel is null),
+            () => { ApplyAll(targets, ctx, m => m.UpdateChannel = null); ctx.OnRecheckUpdates?.Invoke(targets); });
+        packDefaultItem.ToolTip = "Follow the pack's channel (Modpack Management → Advanced), which itself can follow Settings → Mods";
+        channel.Items.Add(packDefaultItem);
+        channel.Items.Add(new Separator());
+        foreach (var ch in ModUpdateChannel.All)
+        {
+            var value = ch;
+            var item = Radio(ModUpdateChannel.Label(value),
+                targets.All(t => string.Equals(t.Meta.UpdateChannel, value, StringComparison.OrdinalIgnoreCase)),
+                () => { ApplyAll(targets, ctx, m => m.UpdateChannel = value); ctx.OnRecheckUpdates?.Invoke(targets); });
+            item.ToolTip = ModUpdateChannel.Describe(value);
+            channel.Items.Add(item);
+        }
+        menu.Items.Add(channel);
 
         menu.Items.Add(new Separator());
 
@@ -102,6 +144,20 @@ public static class ModOptionsMenu
         prio.Items.Add(new Separator());
         prio.Items.Add(Item("Custom…", () => { _ = SetCustomPriorityAsync(targets, ctx); }));
         menu.Items.Add(prio);
+
+        // ── Content size ── how much the mod brings, as opposed to how much you care about it.
+        var sameSize = targets.All(t => t.Meta.ContentSize == primary.Meta.ContentSize);
+        var size = Parent("Content size", Glyph(IcSize),
+            !sameSize ? "mixed" : primary.Meta.ContentSize != 0 ? ModContentSize.Label(primary.Meta.ContentSize) : null);
+        for (var s = 0; s <= ModContentSize.Max; s++)
+        {
+            var sv = s;
+            var item = Radio(s == 0 ? "Unset" : ModContentSize.Label(s), targets.All(t => t.Meta.ContentSize == sv),
+                () => ApplyAll(targets, ctx, m => m.ContentSize = sv));
+            item.ToolTip = ModContentSize.Describe(s);
+            size.Items.Add(item);
+        }
+        menu.Items.Add(size);
 
         // ── Category ──
         var cats = Parent("Category", Glyph(IcTag),
@@ -150,16 +206,27 @@ public static class ModOptionsMenu
         side.Items.Add(Radio("Server only",     targets.All(t => t.Meta.Side == ModSide.Server), () => ApplyAll(targets, ctx, m => m.Side = ModSide.Server)));
         menu.Items.Add(side);
 
-        // ── Store (single mod, only when the jar is listed on both) — pick which listing this mod
-        //    follows for its label, page link and update checks. Fixes a jar that flipped to Modrinth. ──
-        if (!multi && primary.Modrinth is not null && primary.CurseForge is not null)
+        // ── Store (only when a target is listed on both) — pick which listing the mod follows for its
+        //    label, page link and update checks: its own choice, or the pack-wide default from the
+        //    Advanced tab (which a CurseForge import sets to CurseForge). ──
+        if (targets.Any(t => t.IsCrossListed))
         {
+            var samePref = targets.All(t => t.Meta.PreferredSource == primary.Meta.PreferredSource);
             var store = Parent("Store", Glyph(IcGlobe),
-                primary.PrimarySource == ModSource.CurseForge ? "CurseForge" : "Modrinth");
-            store.Items.Add(Radio("Modrinth",   primary.Meta.PreferredSource != ModSource.CurseForge,
-                () => ApplyAll(targets, ctx, m => m.PreferredSource = ModSource.Modrinth)));
-            store.Items.Add(Radio("CurseForge", primary.Meta.PreferredSource == ModSource.CurseForge,
-                () => ApplyAll(targets, ctx, m => m.PreferredSource = ModSource.CurseForge)));
+                !samePref ? "mixed" : multi ? null : primary.PrimarySource == ModSource.CurseForge ? "CurseForge" : "Modrinth");
+            var packDefault = primary.DefaultSource switch
+            {
+                ModSource.CurseForge => "CurseForge",
+                ModSource.Modrinth => "Modrinth",
+                _ => "Modrinth first"
+            };
+            store.Items.Add(Radio($"Pack default ({packDefault})", targets.All(t => t.Meta.PreferredSource is null),
+                () => { ApplyAll(targets, ctx, m => m.PreferredSource = null); ctx.OnRecheckUpdates?.Invoke(targets); }));
+            store.Items.Add(new Separator());
+            store.Items.Add(Radio("CurseForge", targets.All(t => t.Meta.PreferredSource == ModSource.CurseForge),
+                () => { ApplyAll(targets, ctx, m => m.PreferredSource = ModSource.CurseForge); ctx.OnRecheckUpdates?.Invoke(targets); }));
+            store.Items.Add(Radio("Modrinth", targets.All(t => t.Meta.PreferredSource == ModSource.Modrinth),
+                () => { ApplyAll(targets, ctx, m => m.PreferredSource = ModSource.Modrinth); ctx.OnRecheckUpdates?.Invoke(targets); }));
             menu.Items.Add(store);
         }
 
@@ -196,6 +263,17 @@ public static class ModOptionsMenu
                 () => ctx.OnDelete!.Invoke(targets), Glyph(IcDelete)));
 
         return menu;
+    }
+
+    // ── note ────────────────────────────────────────────────────────────────────
+
+    /// <summary>Opens the note popup once the menu has actually gone away — opening it inline would
+    /// put the popup behind the (topmost) closing menu and lose keyboard focus to it.</summary>
+    private static void OpenNote(PackMod mod, ModOptionsContext ctx)
+    {
+        Application.Current.Dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Background,
+            new Action(() => ModNotePopup.Show(null, mod, ctx.PackId, ctx.Inventory, ctx.OnChanged)));
     }
 
     // ── dependencies submenu (single mod) ───────────────────────────────────────
@@ -325,6 +403,7 @@ public static class ModOptionsMenu
         var newName = input.Trim();
         if (string.Equals(newName, oldName, StringComparison.OrdinalIgnoreCase)) return;
         ctx.Inventory.Metadata.RenameCategory(ctx.PackId, oldName, newName);
+        App.State.ModPlans.RenameCategoryReferences(ctx.PackId, oldName, newName); // keep board group cards pointed at it
         ctx.OnChanged?.Invoke();
     }
 

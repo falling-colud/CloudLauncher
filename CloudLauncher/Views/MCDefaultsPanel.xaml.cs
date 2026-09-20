@@ -48,6 +48,7 @@ public partial class MCDefaultsPanel : Page
             KeyDrop.Bound      = d.KeyDrop;
             KeyAttack.Bound    = d.KeyAttack;
             KeyUse.Bound       = d.KeyUse;
+            KeyTogglePerspective.Bound = d.KeyTogglePerspective;
         }
         finally { _suppress = false; }
         UpdateLabels();
@@ -98,6 +99,7 @@ public partial class MCDefaultsPanel : Page
         d.KeyDrop      = KeyDrop.Bound;
         d.KeyAttack    = KeyAttack.Bound;
         d.KeyUse       = KeyUse.Bound;
+        d.KeyTogglePerspective = KeyTogglePerspective.Bound;
 
         App.State.Settings.Save();
         StatusLabel.Text = "Defaults saved.";

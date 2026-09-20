@@ -98,7 +98,9 @@ public partial class PackBrowserView : Page
 
         if (_currentRow?.Internal?.Id == packId)
         {
-            DownloadSelectedButton.Visibility = Visibility.Collapsed;
+            DownloadSelectedButton.Content = _currentRow.ActionLabel;
+            DownloadSelectedButton.Visibility = _currentRow.ActionVisibility;
+            AddedHint.Text = _currentRow.StateHint;
             if (VersionsGrid.ItemsSource is List<PackVersionRow> rows)
                 VersionsGrid.ItemsSource = rows.Select(v => v with { ActionVisibility = Visibility.Collapsed }).ToList();
         }
@@ -152,19 +154,43 @@ public partial class PackBrowserView : Page
         await ResetAndLoadAsync();
     }
 
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => _searchText = SearchBox.Text;
+    // Search as you type (see ModExplorerPage): reload a moment after typing stops; Enter is immediate.
+    private System.Windows.Threading.DispatcherTimer? _searchTimer;
+    private string _lastSearched = "";
+
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        _searchText = SearchBox.Text;
+        if (_searchTimer is null)
+        {
+            _searchTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+            _searchTimer.Tick += async (_, _) =>
+            {
+                _searchTimer.Stop();
+                if (_activeChip is null || string.Equals(_searchText.Trim(), _lastSearched, StringComparison.Ordinal)) return;
+                _lastSearched = _searchText.Trim();
+                await ResetAndLoadAsync();
+            };
+        }
+        _searchTimer.Stop();
+        _searchTimer.Start();
+    }
 
     private async void OnSearchKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Enter)
         {
             e.Handled = true;
+            _searchTimer?.Stop();
+            _lastSearched = _searchText.Trim();
             await ResetAndLoadAsync();
         }
         else if (e.Key == Key.Escape)
         {
             SearchBox.Text = "";
             _searchText = "";
+            _searchTimer?.Stop();
+            _lastSearched = "";
             await ResetAndLoadAsync();
         }
     }
@@ -365,6 +391,7 @@ public partial class PackBrowserView : Page
         DownloadStatus.Text = "";
         DownloadSelectedButton.Content = row.ActionLabel;
         DownloadSelectedButton.Visibility = row.ActionVisibility;
+        AddedHint.Text = row.StateHint;
         PackTabs.SelectedIndex = 0;
         OverviewBrowser.Visibility = Visibility.Visible;
         OverviewBrowser.Show("Loading…");
@@ -400,7 +427,9 @@ public partial class PackBrowserView : Page
             : await App.State.Modrinth.GetProjectDetailAsync(mod.Id, ct);
 
         _cachedDescription = detail.Description ?? mod.Description;
-        _descriptionIsMarkdown = mod.Source == ModSource.Modrinth && !PackText.LooksLikeHtml(_cachedDescription);
+        // Trust the source's declared format instead of sniffing: a Modrinth body that embeds one
+        // HTML tag used to be misread as HTML, which rendered the whole Markdown page as raw text.
+        _descriptionIsMarkdown = detail.IsMarkdown;
         ShowOverviewDescription(_cachedDescription, _descriptionIsMarkdown);
         ShowScreenshots(detail.Screenshots);
         ConfigureLinks(detail.Links with { WebsiteUrl = detail.Links.WebsiteUrl ?? _currentProjectUrl });
@@ -516,7 +545,11 @@ public partial class PackBrowserView : Page
     private async Task DownloadRowAsync(PackBrowseRow row, Button? button)
     {
         if (row.Kind == PackBrowseRowKind.Internal && row.Internal is { } internalPack && IsInternalPackAdded(internalPack.Id))
+        {
+            // Already yours: take them to it, where Play and Download live.
+            _shell.OpenPackDetail(internalPack.Id, internalPack.Name);
             return;
+        }
 
         if (button is not null) button.IsEnabled = false;
         try
@@ -730,10 +763,22 @@ public partial class PackBrowserView : Page
 
     private bool IsInternalPackAdded(Guid packId) => _addedPackIds.Contains(packId);
 
+    /// <summary>
+    /// What the button on a CloudLauncher pack says. A pack that is already in your instances used to
+    /// get no button at all, which reads as "this one cannot be downloaded" — it is the opposite: it
+    /// is already yours, and its files are fetched from its instance page. So it says Open and goes
+    /// there.
+    /// </summary>
+    /// <remarks>A pack shared with you is in your instance list the moment the owner adds you, before
+    /// you have downloaded a single file — which is exactly when someone goes looking for a download
+    /// button in the browser.</remarks>
     private void ApplyInternalActionState(PackBrowseRow row)
     {
         if (row.Internal is not { } pack) return;
-        row.ActionVisibility = IsInternalPackAdded(pack.Id) ? Visibility.Collapsed : Visibility.Visible;
+        var added = IsInternalPackAdded(pack.Id);
+        row.ActionVisibility = Visibility.Visible;
+        row.ActionLabel = added ? "Open" : "Add";
+        row.StateHint = added ? "Already in your instances — open it to download its files" : "";
     }
 
     // ── view-models ──────────────────────────────────────────────────────────
@@ -777,6 +822,9 @@ public partial class PackBrowserView : Page
         public Brush SourceBadgeForeground { get; set; } = Brushes.White;
         public string ActionLabel { get; set; } = "Download";
         public Visibility ActionVisibility { get; set; } = Visibility.Visible;
+
+        /// <summary>Why the button says what it says, for the detail panel.</summary>
+        public string StateHint { get; set; } = "";
     }
 
     public sealed record PackVersionRow

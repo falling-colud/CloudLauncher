@@ -83,7 +83,7 @@ public partial class ResourcePacksView : Page
         OverviewBrowser.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void ShowOverview(string? content) => OverviewBrowser.Show(content);
+    private void ShowOverview(string? content, bool isMarkdown = false) => OverviewBrowser.Show(content, isMarkdown);
 
     private async Task InitializeChipsAsync()
     {
@@ -835,7 +835,7 @@ public partial class ResourcePacksView : Page
             ? await App.State.CurseForge.GetProjectDetailAsync(int.TryParse(mod.Id, out var cid) ? cid : 0)
             : await App.State.Modrinth.GetProjectDetailAsync(mod.Id);
 
-        ShowOverview(detail.Description ?? mod.Description);
+        ShowOverview(detail.Description ?? mod.Description, detail.IsMarkdown);
         WireScreens(detail.Screenshots);
         _projectUrl = BuildUrl(mod);
 
@@ -869,7 +869,7 @@ public partial class ResourcePacksView : Page
 
         _selHostedDetail = detail;
 
-        ShowOverview(detail.Description ?? detail.Summary);
+        ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
         ScreenshotsEmptyText.Text = "Hosted packs do not expose gallery screenshots here.";
         ScreenshotList.ItemsSource = Array.Empty<object>();
         ScreenshotsEmptyText.Visibility = Visibility.Visible;

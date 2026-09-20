@@ -1,7 +1,8 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using CloudLauncher.Services;
 
 namespace CloudLauncher.Views;
@@ -31,6 +32,14 @@ public partial class SettingsPanel : Page
             LauncherScaleLabel.Text = $"{UiScale.Launcher * 100:0}%";
             ModScaleSlider.Value = UiScale.ModList;
             ModScaleLabel.Text = $"{UiScale.ModList * 100:0}%";
+            ModChannelBox.SelectedIndex = ModUpdateChannel.Normalize(s.ModVersionChannel) switch
+            {
+                ModUpdateChannel.Beta => 1,
+                ModUpdateChannel.Release => 2,
+                _ => 0
+            };
+            ModRowWidthSlider.Value = s.EffectiveModRowContentWidth;
+            ModRowWidthLabel.Text = $"{(int)ModRowWidthSlider.Value} px";
             UseCustomGameWindowBox.IsChecked = s.UseCustomGameWindow;
             CustomGameWindowOptions.IsEnabled = s.UseCustomGameWindow;
             MinecraftWindowKey.Bound = s.MinecraftWindowToggleKey;
@@ -40,11 +49,251 @@ public partial class SettingsPanel : Page
             MinecraftWindowKeyHint.Text =
                 $"{LauncherKeybinds.PrettyName(s.MinecraftWindowToggleKey)} collapses bars; "
                 + $"{LauncherKeybinds.PrettyName(s.MinecraftWindowFullscreenKey)} toggles borderless fullscreen.";
+            ConcurrencySlider.Value = s.EffectiveModDownloadConcurrency;
+            ConcurrencyLabel.Text = ConcurrencyText((int)ConcurrencySlider.Value);
+            CurseForgeKeyBox.Password = s.CurseForgeApiKey ?? "";
+            RefreshCurseForgeKeyHint();
+            RefreshThemeControls();
             PacksFolderLabel.Text = s.PacksRoot;
             RuntimeFolderLabel.Text = AppSettings.RuntimeRoot;
             VersionLabel.Text = $"Installed version {AppVersion.CurrentString}.";
         }
         finally { _suppress = false; }
+        _ = LoadDefaultJavaChoicesAsync();
+    }
+
+    // ── mods ─────────────────────────────────────────────────────────────────
+
+    /// <summary>The channel every instance without one of its own follows, for downloads and for
+    /// update checks. Packs and single mods can still override it.</summary>
+    private void OnModChannelChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppress) return;
+        App.State.Settings.ModVersionChannel = ModChannelBox.SelectedIndex switch
+        {
+            1 => ModUpdateChannel.Beta,
+            2 => ModUpdateChannel.Release,
+            _ => ModUpdateChannel.Alpha
+        };
+        App.State.Settings.Save();
+    }
+
+    private void OnModRowWidthChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (ModRowWidthLabel is not null) ModRowWidthLabel.Text = $"{(int)ModRowWidthSlider.Value} px";
+        if (_suppress) return;
+        App.State.Settings.ModRowContentWidth = ModRowWidthSlider.Value;
+        App.State.Settings.Save();
+    }
+
+    // ── downloads ────────────────────────────────────────────────────────────
+
+    private static string ConcurrencyText(int value) =>
+        value == 1 ? "1 file" : $"{value} files";
+
+    private void OnConcurrencyChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (ConcurrencyLabel is not null) ConcurrencyLabel.Text = ConcurrencyText((int)ConcurrencySlider.Value);
+        if (_suppress) return;
+        App.State.Settings.ModDownloadConcurrency = (int)ConcurrencySlider.Value;
+        App.State.Settings.Save();
+    }
+
+    // ── mod stores ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Stores the user's own CurseForge key. It is kept in this machine's settings.json and sent with
+    /// each proxied request; the server uses it for that request and does not keep it.
+    /// </summary>
+    private void OnCurseForgeKeyChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppress) return;
+        var key = CurseForgeKeyBox.Password.Trim();
+        App.State.Settings.CurseForgeApiKey = key.Length == 0 ? null : key;
+        App.State.Settings.Save();
+        RefreshCurseForgeKeyHint();
+    }
+
+    private void RefreshCurseForgeKeyHint()
+    {
+        var key = App.State.Settings.CurseForgeApiKey;
+        CurseForgeKeyHint.Text = key is { Length: > 0 }
+            ? $"Using your own key ({key.Length} characters). Clear the box to go back to the shared one."
+            : "Using the launcher's shared key. Set your own if CurseForge searches or updates keep being refused when several people are using the launcher at once.";
+    }
+
+    private void OnOpenCurseForgeConsole(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "https://console.curseforge.com/?#/api-keys",
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not open the browser: " + ex.Message; }
+    }
+
+    // ── changelog ────────────────────────────────────────────────────────────
+
+    /// <summary>Opens the release notes for every published version. Sits next to Check for updates
+    /// because "what changed?" and "is there an update?" are the same trip.</summary>
+    private async void OnOpenChangelog(object sender, RoutedEventArgs e)
+    {
+        try { await ChangelogDialog.ShowAsync(_shell); }
+        catch (Exception ex) { StatusLabel.Text = "Could not open the changelog: " + ex.Message; }
+    }
+
+    // ── colours ──────────────────────────────────────────────────────────────
+
+    private void RefreshThemeControls()
+    {
+        var theme = App.State.Settings.Theme;
+        if (ThemePresetBox.ItemsSource is null) ThemePresetBox.ItemsSource = ThemeService.Presets;
+        ThemePresetBox.SelectedItem = ThemeService.Presets.FirstOrDefault(p => p.Name == theme.PresetName);
+
+        PaintSwatch(AccentSwatch, theme.Accent ?? ThemeService.Default.Accent);
+        PaintSwatch(SurfaceSwatch, theme.Surface ?? ThemeService.Default.Surface);
+        PaintSwatch(LogBgSwatch, theme.LogBackground, "LogBackgroundBrush");
+        PaintSwatch(LogTextSwatch, theme.LogText, "LogTextBrush");
+        PaintSwatch(LogWarnSwatch, theme.LogWarning, "LogWarningBrush");
+        PaintSwatch(LogErrorSwatch, theme.LogError, "LogErrorBrush");
+
+        ThemeHint.Text = theme.IsDefault
+            ? "Using the default colours."
+            : "Custom colours. Reset puts everything back.";
+    }
+
+    /// <summary>Shows a colour on a swatch button — the stored value, or, when it is unset, whatever
+    /// the theme currently derives (so an unset swatch still shows what you will get).</summary>
+    private static void PaintSwatch(Button button, string? hex, string? fallbackResourceKey = null)
+    {
+        Brush brush;
+        if (ThemeService.TryParse(hex) is { } color) brush = new SolidColorBrush(color);
+        else if (fallbackResourceKey is not null && Application.Current.Resources[fallbackResourceKey] is Brush existing)
+            brush = existing;
+        else brush = Brushes.Transparent;
+        button.Background = brush;
+        button.BorderBrush = (Brush)Application.Current.Resources["BorderStrongBrush"];
+        button.BorderThickness = new Thickness(1);
+    }
+
+    private void OnThemePresetChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppress) return;
+        if (ThemePresetBox.SelectedItem is not ThemeService.Preset preset) return;
+        var theme = App.State.Settings.Theme;
+        theme.PresetName = preset.Name;
+        theme.Accent = preset.Accent;
+        theme.Surface = preset.Surface;
+        // A preset re-derives the log colours rather than keeping the previous theme's overrides,
+        // which is what "pick a preset" means to anyone choosing one.
+        theme.LogBackground = theme.LogText = theme.LogMuted = theme.LogWarning = theme.LogError = null;
+        theme.LogAccent = preset.LogAccent;
+        ApplyThemeChange();
+    }
+
+    private async void OnPickAccent(object sender, RoutedEventArgs e) =>
+        await PickAsync("Accent colour", App.State.Settings.Theme.Accent ?? ThemeService.Default.Accent,
+            hex => App.State.Settings.Theme.Accent = hex ?? ThemeService.Default.Accent);
+
+    private async void OnPickSurface(object sender, RoutedEventArgs e) =>
+        await PickAsync("Background colour", App.State.Settings.Theme.Surface ?? ThemeService.Default.Surface,
+            hex => App.State.Settings.Theme.Surface = hex ?? ThemeService.Default.Surface);
+
+    private async void OnPickLogBackground(object sender, RoutedEventArgs e) =>
+        await PickAsync("Log background", App.State.Settings.Theme.LogBackground,
+            hex => App.State.Settings.Theme.LogBackground = hex);
+
+    private async void OnPickLogText(object sender, RoutedEventArgs e) =>
+        await PickAsync("Log text", App.State.Settings.Theme.LogText,
+            hex => App.State.Settings.Theme.LogText = hex);
+
+    private async void OnPickLogWarning(object sender, RoutedEventArgs e) =>
+        await PickAsync("Log warnings", App.State.Settings.Theme.LogWarning,
+            hex => App.State.Settings.Theme.LogWarning = hex);
+
+    private async void OnPickLogError(object sender, RoutedEventArgs e) =>
+        await PickAsync("Log errors", App.State.Settings.Theme.LogError,
+            hex => App.State.Settings.Theme.LogError = hex);
+
+    /// <summary>Runs the shared colour picker and applies the result. "No colour" clears the override,
+    /// which for a log colour means "derive it again".</summary>
+    private async Task PickAsync(string title, string? initial, Action<string?> assign)
+    {
+        var choice = await ColorPickerDialog.ShowAsync(_shell, title, initial,
+            ThemeService.Presets.Select(p => p.Accent));
+        if (choice is null) return;
+        assign(choice.Value.Hex);
+        // Once a colour is set by hand it is no longer that preset.
+        App.State.Settings.Theme.PresetName = null;
+        ApplyThemeChange();
+    }
+
+    private void OnResetTheme(object sender, RoutedEventArgs e)
+    {
+        App.State.Settings.Theme = new ThemeSettings();
+        ApplyThemeChange();
+    }
+
+    /// <summary>Saves, repaints the whole application, and re-reads the controls so unset swatches
+    /// show the newly derived colours.</summary>
+    private void ApplyThemeChange()
+    {
+        App.State.Settings.Save();
+        ThemeService.Apply(App.State.Settings.Theme);
+        _suppress = true;
+        try { RefreshThemeControls(); }
+        finally { _suppress = false; }
+    }
+
+    // ── default Java ─────────────────────────────────────────────────────────
+
+    private bool _javaLoading;
+
+    private async Task LoadDefaultJavaChoicesAsync()
+    {
+        _javaLoading = true;
+        try
+        {
+            var choices = await JavaPicker.BuildChoicesAsync("Automatic  ·  the Java each Minecraft version needs (recommended)");
+            JavaPicker.Apply(DefaultJavaBox, choices, App.State.Settings.DefaultJavaPath);
+            UpdateDefaultJavaHint();
+        }
+        catch (Exception ex) { DefaultJavaHint.Text = "Could not list Java installations: " + ex.Message; }
+        finally { _javaLoading = false; }
+    }
+
+    private void OnDefaultJavaChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_javaLoading || _suppress) return;
+        if (DefaultJavaBox.SelectedItem is not JavaChoice choice) return;
+
+        if (choice.Kind == JavaChoiceKind.Browse)
+        {
+            var picked = JavaPicker.Browse(_shell);
+            if (picked is not null)
+            {
+                App.State.Settings.DefaultJavaPath = picked;
+                App.State.Settings.Save();
+            }
+            _ = LoadDefaultJavaChoicesAsync();
+            return;
+        }
+
+        App.State.Settings.DefaultJavaPath = choice.Path;
+        App.State.Settings.Save();
+        UpdateDefaultJavaHint();
+        StatusLabel.Text = choice.Path is null ? "Java is chosen automatically per instance." : "Default Java saved.";
+    }
+
+    private void UpdateDefaultJavaHint()
+    {
+        var path = App.State.Settings.DefaultJavaPath;
+        DefaultJavaHint.Text = string.IsNullOrWhiteSpace(path)
+            ? "Each instance launches with the Java its Minecraft version needs (Java 8, 17 or 21), downloaded on demand."
+            : $"Instances without their own choice launch with {path}.";
     }
 
     private async void OnCheckForUpdates(object sender, RoutedEventArgs e)

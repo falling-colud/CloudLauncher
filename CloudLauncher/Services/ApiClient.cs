@@ -151,11 +151,36 @@ public sealed class ApiClient
 
     // ── packs ────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The user's instances. A server that answers is authoritative and its answer replaces the
+    /// cached copy; a server that cannot answer (restarting database, no network) falls back to the
+    /// last list it did give, with <see cref="PackListStale"/> set so the UI can say so. An expired
+    /// session still throws — that needs the login screen, not stale data.
+    /// </summary>
     public async Task<List<PackSummary>> ListPacksAsync(CancellationToken ct = default)
     {
         await EnsureTokenAsync(ct);
-        return await ReadAsync<List<PackSummary>>(await _http.GetAsync("packs", ct), ct);
+        try
+        {
+            var packs = await ReadAsync<List<PackSummary>>(await _http.GetAsync("packs", ct), ct);
+            PackListCache.Save(packs);
+            PackListStale = null;
+            return packs;
+        }
+        catch (SessionExpiredException) { throw; }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            var cached = PackListCache.Load();
+            if (cached is null) throw;
+            PackListStale = ex.Message;
+            AppLog.Log("packs", $"Instance list unavailable ({ex.Message}); showing the last known {cached.Count}.");
+            return cached;
+        }
     }
+
+    /// <summary>Why the last instance list came from the cache, or null when it came from the server.</summary>
+    public string? PackListStale { get; private set; }
 
     public async Task<PackBrowsePage> BrowsePacksAsync(
         PackBrowseSource source, Guid? teamId = null,
@@ -650,14 +675,134 @@ public sealed class ApiClient
     /// <summary>Send a request through the server-side mod-platform proxy. The server
     /// attaches the admin's API key; clients never see it. <paramref name="pathAndQuery"/>
     /// is the upstream-relative path (no leading slash), e.g. "mods/search?gameId=432".</summary>
+    // ── upstream pacing ──────────────────────────────────────────────────────
+    // Every store call from every launcher leaves the server from ONE address, so the stores' rate
+    // limits are shared by all users at once. Each client therefore keeps its own calls to a modest,
+    // steady trickle (a few in flight, spaced out), and when a store does say "too many" it backs the
+    // whole platform off for the requested time instead of letting the next hundred calls pile in.
+    private const int MaxInFlightPerPlatform = 3;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PlatformPace> _pace =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Minimum gap between two sends to a platform from this client. Modrinth allows 300 a
+    /// minute per address (shared by everyone behind the server), so ~4.5/s; CurseForge publishes no
+    /// figure but blocked bursts around 8/s, so ~6/s.</summary>
+    private static TimeSpan SpacingFor(string platform) => platform.ToLowerInvariant() switch
+    {
+        "modrinth" => TimeSpan.FromMilliseconds(220),
+        _ => TimeSpan.FromMilliseconds(170)
+    };
+
+    private sealed class PlatformPace(TimeSpan spacing)
+    {
+        private TimeSpan MinSpacing { get; } = spacing;
+        public readonly SemaphoreSlim Gate = new(MaxInFlightPerPlatform, MaxInFlightPerPlatform);
+        public readonly object Lock = new();
+        public DateTimeOffset NextSlot = DateTimeOffset.MinValue;
+        public DateTimeOffset BackoffUntil = DateTimeOffset.MinValue;
+
+        /// <summary>Reserves the next send slot and returns how long to wait for it.</summary>
+        public TimeSpan Reserve()
+        {
+            lock (Lock)
+            {
+                var now = DateTimeOffset.UtcNow;
+                var earliest = NextSlot > BackoffUntil ? NextSlot : BackoffUntil;
+                var slot = earliest > now ? earliest : now;
+                NextSlot = slot + MinSpacing;
+                return slot - now;
+            }
+        }
+
+        public void BackOff(TimeSpan delay)
+        {
+            lock (Lock)
+            {
+                var until = DateTimeOffset.UtcNow + delay;
+                if (until > BackoffUntil) BackoffUntil = until;
+            }
+        }
+    }
+
+    /// <summary>Header the proxy reads a caller-supplied CurseForge key from.</summary>
+    public const string OwnCurseForgeKeyHeader = "X-CloudLauncher-CF-Key";
+
+    /// <summary>
+    /// Sends the user's own CurseForge key with the request when they have set one, so the server
+    /// proxies the call under that key instead of the shared one.
+    /// </summary>
+    /// <remarks>
+    /// The shared key is one key for every launcher: an evening where several packs are each checking
+    /// a few hundred mods is answered with fast 403s that read as "the API key was rejected". A
+    /// personal key gives its owner their own quota. It is sent per request and never stored on the
+    /// server. It rides a header rather than the query string so it stays out of access logs, and is
+    /// withheld entirely when ServerUrl is plain http to somewhere other than this machine - a key is
+    /// exactly the kind of secret not worth putting on the wire in clear.
+    /// </remarks>
+    private void AttachOwnKey(HttpRequestMessage req, string platform)
+    {
+        if (!platform.Equals("curseforge", StringComparison.OrdinalIgnoreCase)) return;
+        if (_settings.CurseForgeApiKey is not { Length: > 0 } key) return;
+        var baseUri = _http.BaseAddress;
+        if (baseUri is not null && baseUri.Scheme != Uri.UriSchemeHttps && !IsLoopback(baseUri)) return;
+        req.Headers.TryAddWithoutValidation(OwnCurseForgeKeyHeader, key.Trim());
+    }
+
+    private static bool IsLoopback(Uri uri) =>
+        uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase);
+
     public async Task<HttpResponseMessage> ProxyAsync(
         string platform, HttpMethod method, string pathAndQuery,
         HttpContent? body = null, CancellationToken ct = default)
     {
         await EnsureTokenAsync(ct);
-        using var req = new HttpRequestMessage(method, $"proxy/{platform}/{pathAndQuery.TrimStart('/')}")
-            { Content = body };
-        return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        var pace = _pace.GetOrAdd(platform, p => new PlatformPace(SpacingFor(p)));
+        var url = $"proxy/{platform}/{pathAndQuery.TrimStart('/')}";
+
+        // A request message disposes its content, so a body that may need re-sending is buffered once.
+        byte[]? bodyBytes = null;
+        System.Net.Http.Headers.MediaTypeHeaderValue? bodyType = null;
+        if (body is not null)
+        {
+            bodyBytes = await body.ReadAsByteArrayAsync(ct);
+            bodyType = body.Headers.ContentType;
+        }
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var wait = pace.Reserve();
+            if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+
+            await pace.Gate.WaitAsync(ct);
+            HttpResponseMessage resp;
+            try
+            {
+                using var req = new HttpRequestMessage(method, url);
+                AttachOwnKey(req, platform);
+                if (bodyBytes is not null)
+                {
+                    var content = new ByteArrayContent(bodyBytes);
+                    content.Headers.ContentType = bodyType ?? new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
+                    req.Content = content;
+                }
+                resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+            }
+            finally { pace.Gate.Release(); }
+
+            if (resp.StatusCode != HttpStatusCode.TooManyRequests || attempt >= 3)
+                return resp;
+
+            // Honour Retry-After when the store sends one; otherwise back off exponentially (2, 4, 8 s).
+            var delay = resp.Headers.RetryAfter?.Delta
+                        ?? (resp.Headers.RetryAfter?.Date is { } at ? at - DateTimeOffset.UtcNow : (TimeSpan?)null)
+                        ?? TimeSpan.FromSeconds(2 * Math.Pow(2, attempt));
+            if (delay < TimeSpan.FromSeconds(1)) delay = TimeSpan.FromSeconds(1);
+            if (delay > TimeSpan.FromSeconds(20)) delay = TimeSpan.FromSeconds(20);
+            pace.BackOff(delay);
+            resp.Dispose();
+            AppLog.Log("proxy", $"{platform} answered 429 for {pathAndQuery}; pausing {delay.TotalSeconds:0}s (attempt {attempt + 1}).");
+            await Task.Delay(delay, ct);
+        }
     }
 
     // ── sync ─────────────────────────────────────────────────────────────────
@@ -697,6 +842,21 @@ public sealed class ApiClient
     }
 
     // ── launcher self-update ─────────────────────────────────────────────────
+
+    /// <summary>Every published launcher release, newest first — the changelog shown in Settings.
+    /// Anonymous, and an older server that does not know the endpoint simply has no changelog.</summary>
+    public async Task<IReadOnlyList<LauncherReleaseInfo>> GetLauncherReleasesAsync(CancellationToken ct = default)
+    {
+        var resp = await _http.GetAsync("launcher/releases", ct);
+        if (resp.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound)
+        {
+            resp.Dispose();
+            // Fall back to the one release we can always ask for, so the dialog still says something.
+            var latest = await GetLatestLauncherAsync(ct);
+            return latest is null ? Array.Empty<LauncherReleaseInfo>() : new[] { latest };
+        }
+        return await ReadAsync<List<LauncherReleaseInfo>>(resp, ct);
+    }
 
     /// <summary>Latest published launcher build, or null if none has been uploaded yet.
     /// Anonymous — works even before the user logs in.</summary>

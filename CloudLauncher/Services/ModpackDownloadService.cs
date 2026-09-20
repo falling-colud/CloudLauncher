@@ -88,6 +88,37 @@ public sealed class ModpackDownloadService(
         return pack;
     }
 
+    /// <summary>
+    /// Subscribes a brand-new install to the pack it ships for, exactly once.
+    /// </summary>
+    /// <remarks>
+    /// This is a seed, not a policy: the "done" flag is written whether or not the subscribe
+    /// succeeded, so a player who later leaves the pack stays left instead of having it reappear on
+    /// every launch, and a server that is down at first launch costs one attempt rather than an
+    /// error on every start. Failures are swallowed for the same reason - a pack that cannot be
+    /// fetched must not stop the pack list from loading.
+    /// </remarks>
+    public async Task<PackSummary?> EnsureDefaultPackAsync(CancellationToken ct = default)
+    {
+        if (settings.DefaultPackSeeded) return null;
+        settings.DefaultPackSeeded = true;
+        settings.Save();
+        try
+        {
+            var pack = await api.SubscribePackAsync(AppSettings.DefaultPackId, ct);
+            settings.UnhidePack(pack.Id);
+            packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
+            NotifyPackAdded(pack);
+            if (pack.IsShared && pack.EffectivePermissions.HasFlag(PackPermissions.Download))
+                await TryDownloadSharedContentAsync(pack.Id, ct);
+            return pack;
+        }
+        catch
+        {
+            return null;   // already subscribed, offline, or no access - not worth surfacing
+        }
+    }
+
     private async Task TryDownloadSharedContentAsync(Guid packId, CancellationToken ct)
     {
         try
@@ -121,7 +152,7 @@ public sealed class ModpackDownloadService(
             var file = version.Files.FirstOrDefault(f => f.IsPrimary) ?? version.Files.FirstOrDefault()
                        ?? throw new InvalidOperationException("No downloadable file found.");
 
-            file = await ResolveDownloadFileAsync(mod, version, file);
+            file = await ResolveDownloadFileAsync(mod, version, file, ct);
             if (string.IsNullOrWhiteSpace(file.DownloadUrl))
                 throw new InvalidOperationException("No download URL.");
 
@@ -305,23 +336,29 @@ public sealed class ModpackDownloadService(
         return latest;
     }
 
-    private async Task<ModVersionFile> ResolveDownloadFileAsync(ModSummary mod, ModVersion version, ModVersionFile file)
+    private async Task<ModVersionFile> ResolveDownloadFileAsync(
+        ModSummary mod, ModVersion version, ModVersionFile file, CancellationToken ct)
     {
         if (version.Source != ModSource.CurseForge)
             return file;
 
+        var named = string.IsNullOrWhiteSpace(file.Filename) ? file with { Filename = "modpack.zip" } : file;
+
+        // The version listing already carries a download URL for everything CurseForge lets us
+        // fetch, so only ask /download-url when it didn't. Calling it regardless spends a second
+        // API request that can fail on its own — a CDN block, or an author who opted out of
+        // third-party distribution — and fails the download while holding a URL that works.
+        if (!string.IsNullOrWhiteSpace(named.DownloadUrl))
+            return named;
+
         if (!CurseForgeService.TryParseFileIds(mod, version, out var modId, out var fileId))
             throw new InvalidOperationException("Could not determine the CurseForge file to download.");
 
-        var url = await curseforge.GetDownloadUrlAsync(modId, fileId);
+        var url = await curseforge.GetDownloadUrlAsync(modId, fileId, ct);
         if (string.IsNullOrWhiteSpace(url))
             throw new InvalidOperationException("CurseForge did not return a download URL.");
 
-        return file with
-        {
-            DownloadUrl = url,
-            Filename = string.IsNullOrWhiteSpace(file.Filename) ? "modpack.zip" : file.Filename
-        };
+        return named with { DownloadUrl = url };
     }
 
     private static void ValidateDownloadedArchive(string path)

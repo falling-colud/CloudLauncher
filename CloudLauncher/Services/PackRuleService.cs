@@ -193,6 +193,12 @@ public sealed class PackRuleService
         return (exact ? 1_000_000 : 0) + prefixLen * 1_000 + literalChars;
     }
 
+    /// <summary>Public form of the rule matcher so other policies (see <see cref="PrivateAssetPolicy"/>)
+    /// use exactly the pattern semantics the rules editor documents: trailing <c>/</c> = whole folder,
+    /// no wildcard = exact path, otherwise a glob.</summary>
+    public static bool PatternMatches(string relativePath, string pattern) =>
+        Matches(relativePath.Replace('\\', '/'), pattern);
+
     private static bool Matches(string path, string pattern)
     {
         if (string.IsNullOrEmpty(pattern)) return false;

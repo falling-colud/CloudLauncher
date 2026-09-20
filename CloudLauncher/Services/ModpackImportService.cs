@@ -26,8 +26,40 @@ public sealed class ModpackImportService(
         PropertyNameCaseInsensitive = true
     };
     private PackAssetService? _assets;
+    private ModMetadataService? _metadata;
+
+    /// <summary>
+    /// How many files an import downloads at once - the user's download concurrency
+    /// (Settings -> Downloads), which also governs "Update all" and the mod browser.
+    /// </summary>
+    /// <remarks>Installing a 400-mod pack one file at a time is almost all waiting: each file is a
+    /// round trip to a CDN for something usually under a megabyte. The per-file progress bar only
+    /// means anything when one file is in flight, so with several it reports the batch instead.</remarks>
+    private int DownloadConcurrency => _settings?.EffectiveModDownloadConcurrency ?? 3;
+
+    private AppSettings? _settings;
+
+    public void SetSettings(AppSettings settings) => _settings = settings;
 
     public void SetPackAssets(PackAssetService assets) => _assets = assets;
+    public void SetModMetadata(ModMetadataService metadata) => _metadata = metadata;
+
+    /// <summary>Records which store a modpack came from as the pack-wide default, so a mod that is
+    /// listed on both stores keeps that store's identity (label, page link, update checks) instead of
+    /// flipping to Modrinth. Only fills a blank: a preference the user already set is kept.</summary>
+    private void RecordPackSource(Guid packId, ModSource source, IProgress<string>? log)
+    {
+        if (_metadata is null) return;
+        try
+        {
+            var advanced = _metadata.Advanced(packId);
+            if (advanced.PreferredSource is not null) return;
+            advanced.PreferredSource = source;
+            _metadata.SaveAdvanced(packId);
+            log?.Report($"Mods in this pack follow {source} by default (Modpack Management → Advanced).");
+        }
+        catch { /* metadata is a convenience; the import itself is what matters */ }
+    }
 
     /// <summary>Resolves <paramref name="relative"/> under <paramref name="root"/>, returning
     /// the absolute path only when it stays inside the root. Imported modpacks are untrusted
@@ -128,64 +160,62 @@ public sealed class ModpackImportService(
         var modsDir = Path.Combine(gameDir, "mods");
         Directory.CreateDirectory(modsDir);
 
-        // Download required files
+        // Download required files, several at a time.
         var files = index.Files ?? new();
-        for (int i = 0; i < files.Count; i++)
+        var mrCompleted = 0;
+        using var mrGate = new SemaphoreSlim(DownloadConcurrency, DownloadConcurrency);
+        await Task.WhenAll(files.Select(async (f, i) =>
         {
-            var f = files[i];
             var fileIndex = i;
             var fileCount = files.Count;
+            var solo = DownloadConcurrency == 1 || fileCount == 1;
             ct.ThrowIfCancellationRequested();
             var dest = SafeResolveUnderRoot(gameDir, f.Path.Replace('/', Path.DirectorySeparatorChar));
-            if (dest is null) { log?.Report($"  WARNING: skipping file outside pack folder: {f.Path}"); continue; }
+            if (dest is null) { log?.Report($"  WARNING: skipping file outside pack folder: {f.Path}"); return; }
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
             var fileName = Path.GetFileName(f.Path);
-            var label = $"Downloading {fileIndex + 1}/{fileCount}: {fileName}";
             if (File.Exists(dest))
             {
                 log?.Report($"  Skip (exists): {f.Path}");
-                progress?.Report(new ImportProgress(
-                    fileCount == 0 ? 1 : (double)(fileIndex + 1) / fileCount,
-                    $"Skipped {fileIndex + 1}/{fileCount}: {fileName}",
-                    1,
-                    fileName));
-                continue;
+                ReportBatch(progress, Interlocked.Increment(ref mrCompleted), fileCount, $"Skipped {fileName}", solo);
+                return;
             }
 
-            log?.Report($"  [{fileIndex + 1}/{fileCount}] {Path.GetFileName(f.Path)}");
-            progress?.Report(new ImportProgress(
-                fileCount == 0 ? 1 : (double)fileIndex / fileCount,
-                label,
-                -1,
-                fileName));
-            var downloaded = false;
-            foreach (var url in f.Downloads ?? Enumerable.Empty<string>())
+            await mrGate.WaitAsync(ct);
+            try
             {
-                try
+                var label = $"Downloading {fileName}";
+                log?.Report($"  [{fileIndex + 1}/{fileCount}] {fileName}");
+                var downloaded = false;
+                foreach (var url in f.Downloads ?? Enumerable.Empty<string>())
                 {
-                    var fileProgress = new Progress<(long done, long total)>(p =>
+                    try
                     {
-                        if (p.total <= 0) return;
-                        var current = Math.Min(1.0, p.done / (double)p.total);
-                        progress?.Report(new ImportProgress(
-                            fileCount == 0 ? 1 : (fileIndex + current) / fileCount,
-                            label,
-                            current,
-                            fileName));
-                    });
-                    await modrinth.DownloadFileAsync(url, dest, fileProgress, ct);
-                    progress?.Report(new ImportProgress(
-                        fileCount == 0 ? 1 : (double)(fileIndex + 1) / fileCount,
-                        label,
-                        1,
-                        fileName));
-                    downloaded = true;
-                    break;
+                        // A single-file import still gets a real per-file bar; a parallel batch
+                        // reports the batch, because there is no one "current" file to show.
+                        var fileProgress = solo
+                            ? new Progress<(long done, long total)>(p =>
+                            {
+                                if (p.total <= 0) return;
+                                var current = Math.Min(1.0, p.done / (double)p.total);
+                                progress?.Report(new ImportProgress(
+                                    fileCount == 0 ? 1 : (mrCompleted + current) / fileCount, label, current, fileName));
+                            })
+                            : null;
+                        await modrinth.DownloadFileAsync(url, dest, fileProgress, ct);
+                        downloaded = true;
+                        break;
+                    }
+                    catch { /* try next URL */ }
                 }
-                catch { /* try next URL */ }
+                if (!downloaded) log?.Report($"  WARNING: could not download {f.Path}");
             }
-            if (!downloaded) log?.Report($"  WARNING: could not download {f.Path}");
-        }
+            finally
+            {
+                mrGate.Release();
+                ReportBatch(progress, Interlocked.Increment(ref mrCompleted), fileCount, fileName, solo);
+            }
+        }));
 
         // Copy overrides/ folder
         var overridesEntry = zip.Entries
@@ -205,6 +235,7 @@ public sealed class ModpackImportService(
             entry.ExtractToFile(dest, overwrite: true);
         }
 
+        RecordPackSource(pack.Id, ModSource.Modrinth, log);
         log?.Report($"Import complete: {pack.Name}");
         progress?.Report(new ImportProgress(1, $"Import complete: {pack.Name}"));
         await SaveImportAssetsAsync(pack.Id, metadata, ct);
@@ -296,53 +327,59 @@ public sealed class ModpackImportService(
         var modsDir = Path.Combine(gameDir, "mods");
         Directory.CreateDirectory(modsDir);
 
-        // Resolve and download mods via CurseForge API
+        // Resolve and download mods via CurseForge API. The manifest's files and mods are looked up in
+        // batches first (two calls per fifty mods) — one call per mod, three times over, is what used
+        // to get the launcher server rate-limited halfway through a big pack.
         var files = manifest.Files ?? new();
-        for (int i = 0; i < files.Count; i++)
+        progress?.Report(new ImportProgress(-1, $"Resolving {files.Count} mods on CurseForge…"));
+        Dictionary<int, ModVersion> knownFiles;
+        Dictionary<int, ModSummary> knownMods;
+        try { knownFiles = await curseforge.GetFilesAsync(files.Select(f => f.FileId), ct); }
+        catch (Exception ex) { log?.Report($"  WARNING: batch file lookup failed ({ex.Message}); resolving one by one."); knownFiles = new(); }
+        try { knownMods = await curseforge.GetModsAsync(files.Select(f => f.ProjectId), ct); }
+        catch (Exception ex) { log?.Report($"  WARNING: batch mod lookup failed ({ex.Message}); resolving one by one."); knownMods = new(); }
+
+        var cfCompleted = 0;
+        using var cfGate = new SemaphoreSlim(DownloadConcurrency, DownloadConcurrency);
+        await Task.WhenAll(files.Select(async (f, i) =>
         {
             ct.ThrowIfCancellationRequested();
-            var f = files[i];
             var fileIndex = i;
             var fileCount = files.Count;
-            log?.Report($"  [{fileIndex + 1}/{fileCount}] Resolving mod {f.ProjectId}:{f.FileId}...");
-            progress?.Report(new ImportProgress(
-                fileCount == 0 ? 1 : (double)fileIndex / fileCount,
-                $"Resolving {fileIndex + 1}/{fileCount}: {f.ProjectId}:{f.FileId}",
-                -1,
-                "Resolving download"));
+            var solo = DownloadConcurrency == 1 || fileCount == 1;
+            await cfGate.WaitAsync(ct);
             try
             {
-                var url = await curseforge.GetDownloadUrlAsync(f.ProjectId, f.FileId, ct);
-                if (url is null) { log?.Report($"  WARNING: no download URL for {f.ProjectId}:{f.FileId}"); continue; }
+                log?.Report($"  [{fileIndex + 1}/{fileCount}] Resolving mod {f.ProjectId}:{f.FileId}...");
+                knownFiles.TryGetValue(f.FileId, out var knownVersion);
+                var url = knownVersion?.Files.FirstOrDefault()?.DownloadUrl;
+                if (string.IsNullOrWhiteSpace(url))
+                    url = await curseforge.GetDownloadUrlAsync(f.ProjectId, f.FileId, ct);
+                if (url is null) { log?.Report($"  WARNING: no download URL for {f.ProjectId}:{f.FileId}"); return; }
                 var filename = Path.GetFileName(new Uri(url).LocalPath);
                 var dest = Path.Combine(modsDir, filename);
                 log?.Report($"  Downloading {filename}...");
-                var label = $"Downloading {fileIndex + 1}/{fileCount}: {filename}";
-                progress?.Report(new ImportProgress(
-                    fileCount == 0 ? 1 : (double)fileIndex / fileCount,
-                    label,
-                    -1,
-                    filename));
-                var fileProgress = new Progress<(long done, long total)>(p =>
-                {
-                    if (p.total <= 0) return;
-                    var current = Math.Min(1.0, p.done / (double)p.total);
-                    progress?.Report(new ImportProgress(
-                        fileCount == 0 ? 1 : (fileIndex + current) / fileCount,
-                        label,
-                        current,
-                        filename));
-                });
+                var label = $"Downloading {filename}";
+                var fileProgress = solo
+                    ? new Progress<(long done, long total)>(p =>
+                    {
+                        if (p.total <= 0) return;
+                        var current = Math.Min(1.0, p.done / (double)p.total);
+                        progress?.Report(new ImportProgress(
+                            fileCount == 0 ? 1 : (cfCompleted + current) / fileCount, label, current, filename));
+                    })
+                    : null;
                 await modrinth.DownloadFileAsync(url, dest, fileProgress, ct);
-                await RememberCurseForgeMatchAsync(dest, f.ProjectId, f.FileId, ct);
-                progress?.Report(new ImportProgress(
-                    fileCount == 0 ? 1 : (double)(fileIndex + 1) / fileCount,
-                    label,
-                    1,
-                    filename));
+                knownMods.TryGetValue(f.ProjectId, out var knownMod);
+                await RememberCurseForgeMatchAsync(dest, f.ProjectId, f.FileId, knownMod, knownVersion, ct);
             }
             catch (Exception ex) { log?.Report($"  WARNING: {ex.Message}"); }
-        }
+            finally
+            {
+                cfGate.Release();
+                ReportBatch(progress, Interlocked.Increment(ref cfCompleted), files.Count, "mods", solo);
+            }
+        }));
 
         // Copy overrides
         var prefix = (manifest.Overrides ?? "overrides") + "/";
@@ -361,18 +398,33 @@ public sealed class ModpackImportService(
             entry.ExtractToFile(dest, overwrite: true);
         }
 
+        RecordPackSource(pack.Id, ModSource.CurseForge, log);
         log?.Report($"Import complete: {pack.Name}");
         progress?.Report(new ImportProgress(1, $"Import complete: {pack.Name}"));
         await SaveImportAssetsAsync(pack.Id, metadata, ct);
         return pack;
     }
 
-    private async Task RememberCurseForgeMatchAsync(string path, int projectId, int fileId, CancellationToken ct)
+    /// <summary>Progress for a batch of downloads running together: the count is the honest number,
+    /// and the per-file bar is left indeterminate because several files are moving at once.</summary>
+    private static void ReportBatch(IProgress<ImportProgress>? progress, int completed, int total, string current, bool solo)
+    {
+        if (progress is null) return;
+        var fraction = total == 0 ? 1 : Math.Min(1.0, (double)completed / total);
+        progress.Report(new ImportProgress(
+            fraction,
+            $"Downloaded {completed}/{total}" + (solo ? $": {current}" : ""),
+            solo ? 1 : -1,
+            current));
+    }
+
+    private async Task RememberCurseForgeMatchAsync(
+        string path, int projectId, int fileId, ModSummary? mod, ModVersion? version, CancellationToken ct)
     {
         try
         {
-            var mod = await curseforge.GetModAsync(projectId, ct);
-            var version = await curseforge.GetVersionAsync(projectId, fileId, ct);
+            mod ??= await curseforge.GetModAsync(projectId, ct);
+            version ??= await curseforge.GetVersionAsync(projectId, fileId, ct);
             if (mod is null || version is null) return;
 
             var (sha512, curseForgeFingerprint) = ModFingerprintCache.ComputeHashes(path);

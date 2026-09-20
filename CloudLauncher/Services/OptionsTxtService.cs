@@ -44,6 +44,7 @@ public static class OptionsTxtService
         sb.AppendLine($"key_key.drop:{d.KeyDrop}");
         sb.AppendLine($"key_key.attack:{d.KeyAttack}");
         sb.AppendLine($"key_key.use:{d.KeyUse}");
+        sb.AppendLine($"key_key.togglePerspective:{d.KeyTogglePerspective}");
 
         File.WriteAllText(path, sb.ToString());
     }
@@ -152,6 +153,7 @@ public static class OptionsTxtService
             ["key_key.drop"]            = d.KeyDrop,
             ["key_key.attack"]          = d.KeyAttack,
             ["key_key.use"]             = d.KeyUse,
+            ["key_key.togglePerspective"] = d.KeyTogglePerspective,
         };
     }
 }

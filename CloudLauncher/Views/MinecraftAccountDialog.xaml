@@ -1,10 +1,10 @@
-<Window x:Class="CloudLauncher.Views.MinecraftAccountDialog"
+﻿<Window x:Class="CloudLauncher.Views.MinecraftAccountDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Minecraft account" Height="380" Width="480"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        Background="{StaticResource Surface1Brush}"
-        Foreground="{StaticResource TextPrimaryBrush}">
+        Background="{DynamicResource Surface1Brush}"
+        Foreground="{DynamicResource TextPrimaryBrush}">
     <Grid Margin="22">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -22,10 +22,10 @@
             <StackPanel>
                 <DockPanel>
                     <Border DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
-                            Background="{StaticResource AccentSoftBrush}" Margin="0,0,12,0">
+                            Background="{DynamicResource AccentSoftBrush}" Margin="0,0,12,0">
                         <TextBlock Text="&#xE748;" FontFamily="{StaticResource IconFont}" FontSize="16"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                                   Foreground="{StaticResource AccentBrush}"/>
+                                   Foreground="{DynamicResource AccentBrush}"/>
                     </Border>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="Microsoft account" FontWeight="SemiBold"/>
@@ -43,10 +43,10 @@
             <StackPanel>
                 <DockPanel>
                     <Border DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
-                            Background="{StaticResource Surface4Brush}" Margin="0,0,12,0">
+                            Background="{DynamicResource Surface4Brush}" Margin="0,0,12,0">
                         <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}" FontSize="16"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                                   Foreground="{StaticResource TextSecondaryBrush}"/>
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
                     </Border>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="Offline play" FontWeight="SemiBold"/>

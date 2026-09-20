@@ -1,0 +1,308 @@
+using System.Collections.Concurrent;
+using System.Net;
+
+namespace CloudLauncher.Server.Net;
+
+/// <summary>
+/// One way to reach an upstream mod-platform API. Either a different address to send *to*
+/// (<see cref="BaseUrl"/> — a relay you control that forwards to the real API) or a different
+/// address to send *from* (<see cref="HttpProxy"/> — an outbound proxy), or both.
+/// Configured under "Upstream:{platform}"; see deploy/UPSTREAM-ROUTING.md.
+/// </summary>
+public sealed class UpstreamRoute
+{
+    /// <summary>Label used in logs and admin-facing errors. Defaults to the hosts involved.</summary>
+    public string? Name { get; set; }
+
+    /// <summary>Relay base URL replacing the platform's own, e.g. "https://cf-relay.example.net/v1".
+    /// A relay terminates TLS, so it sees the API key — only point this at a host you control.</summary>
+    public string? BaseUrl { get; set; }
+
+    /// <summary>Outbound HTTP proxy, e.g. "http://10.0.0.5:3128". TLS stays end-to-end to the real
+    /// API through CONNECT, so the proxy never sees the API key — prefer this over a relay.
+    /// Credentials may be embedded ("http://user:pass@host:3128") or given separately below.</summary>
+    public string? HttpProxy { get; set; }
+
+    public string? ProxyUser { get; set; }
+    public string? ProxyPassword { get; set; }
+
+    /// <summary>Extra request headers, for a relay that wants its own auth token.</summary>
+    public Dictionary<string, string> Headers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+/// <summary>Bound from the "Upstream" configuration section. Empty by default, which reproduces
+/// the original behaviour exactly: one direct route per platform.</summary>
+public sealed class UpstreamRoutingOptions
+{
+    /// <summary>Try the platform's own API directly first. Leave this on unless this server's
+    /// address is permanently blocked — a working direct route is faster and keeps the API key
+    /// off any relay. Turning it off means "skip the platform's own API when I have given you
+    /// somewhere else to go": a platform with no alternate route configured keeps its direct route
+    /// either way, so switching this off for a blocked CurseForge cannot quietly take Modrinth
+    /// offline with it.</summary>
+    public bool UseDirect { get; set; } = true;
+
+    /// <summary>How long a route stays out of rotation after being blocked before it is tried
+    /// again. Keeps a dead route from costing every request a wasted round trip, without making
+    /// the block permanent — CurseForge unblocking the address heals itself within one window.</summary>
+    public int BlockCooldownMinutes { get; set; } = 10;
+
+    public List<UpstreamRoute> CurseForge { get; set; } = new();
+    public List<UpstreamRoute> Modrinth { get; set; } = new();
+
+    public IReadOnlyList<UpstreamRoute> For(string platform) => platform.ToLowerInvariant() switch
+    {
+        "curseforge" => CurseForge,
+        "modrinth"   => Modrinth,
+        _            => Array.Empty<UpstreamRoute>()
+    };
+}
+
+/// <summary>A validated, ready-to-use route with its defaults filled in.</summary>
+public sealed class ResolvedRoute
+{
+    public required string Platform { get; init; }
+    public required int Index { get; init; }
+    public required string Name { get; init; }
+    public required string BaseUrl { get; init; }
+    public string? HttpProxy { get; init; }
+    public string? ProxyUser { get; init; }
+    public string? ProxyPassword { get; init; }
+    public IReadOnlyDictionary<string, string> Headers { get; init; } =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>True for the platform's own API reached with no proxy in between.</summary>
+    public required bool IsDirect { get; init; }
+
+    /// <summary>Named <see cref="HttpClient"/> backing this route. Each route needs its own client
+    /// because the outbound proxy lives on the handler, which a client cannot change per request.</summary>
+    public string ClientName => $"upstream:{Platform}:{Index}";
+
+    public override string ToString() => Name;
+}
+
+/// <summary>The full set of routes per platform, built once at startup so registration and
+/// request handling agree on client names.</summary>
+public sealed class UpstreamRoutingPlan
+{
+    private static readonly Dictionary<string, string> DirectBaseUrls = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["curseforge"] = "https://api.curseforge.com/v1",
+        ["modrinth"]   = "https://api.modrinth.com/v2"
+    };
+
+    private readonly Dictionary<string, IReadOnlyList<ResolvedRoute>> _byPlatform;
+
+    public IReadOnlyList<ResolvedRoute> All { get; }
+    public TimeSpan BlockCooldown { get; }
+
+    private UpstreamRoutingPlan(Dictionary<string, IReadOnlyList<ResolvedRoute>> byPlatform, TimeSpan cooldown)
+    {
+        _byPlatform = byPlatform;
+        BlockCooldown = cooldown;
+        All = byPlatform.Values.SelectMany(r => r).ToList();
+    }
+
+    /// <summary>Routes for a platform in configured order, or empty for an unknown platform.</summary>
+    public IReadOnlyList<ResolvedRoute> For(string platform) =>
+        _byPlatform.TryGetValue(platform, out var routes) ? routes : Array.Empty<ResolvedRoute>();
+
+    public static UpstreamRoutingPlan Build(UpstreamRoutingOptions options)
+    {
+        var byPlatform = new Dictionary<string, IReadOnlyList<ResolvedRoute>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (platform, directBaseUrl) in DirectBaseUrls)
+        {
+            var configured = options.For(platform);
+            var routes = new List<ResolvedRoute>();
+
+            // Dropping the direct route only makes sense where an alternate exists; otherwise the
+            // platform would have nowhere to go at all.
+            if (options.UseDirect || configured.Count == 0)
+                routes.Add(new ResolvedRoute
+                {
+                    Platform = platform,
+                    Index = 0,
+                    Name = "direct",
+                    BaseUrl = directBaseUrl,
+                    IsDirect = true
+                });
+
+            foreach (var route in configured)
+                routes.Add(Resolve(platform, routes.Count, route, directBaseUrl));
+
+            byPlatform[platform] = routes;
+        }
+
+        var minutes = options.BlockCooldownMinutes > 0 ? options.BlockCooldownMinutes : 10;
+        return new UpstreamRoutingPlan(byPlatform, TimeSpan.FromMinutes(minutes));
+    }
+
+    private static ResolvedRoute Resolve(string platform, int index, UpstreamRoute route, string directBaseUrl)
+    {
+        var where = $"Upstream:{platform}:{index}";
+
+        if (string.IsNullOrWhiteSpace(route.BaseUrl) && string.IsNullOrWhiteSpace(route.HttpProxy))
+            throw new InvalidOperationException(
+                $"{where} sets neither BaseUrl nor HttpProxy, so it is not a route to anywhere. " +
+                "Give it a relay BaseUrl, an outbound HttpProxy, or remove it.");
+
+        var baseUrl = string.IsNullOrWhiteSpace(route.BaseUrl)
+            ? directBaseUrl
+            : ParseHttpUri($"{where}:BaseUrl", route.BaseUrl).ToString().TrimEnd('/');
+
+        string? proxyAddress = null;
+        var proxyUser = route.ProxyUser;
+        var proxyPassword = route.ProxyPassword;
+
+        if (!string.IsNullOrWhiteSpace(route.HttpProxy))
+        {
+            var proxyUri = ParseHttpUri($"{where}:HttpProxy", route.HttpProxy);
+            // Credentials embedded in the URL ("http://user:pass@host:3128") are the form every
+            // proxy vendor hands out, but WebProxy ignores that part — lift it out here instead.
+            if (!string.IsNullOrEmpty(proxyUri.UserInfo))
+            {
+                var parts = proxyUri.UserInfo.Split(':', 2);
+                proxyUser ??= Uri.UnescapeDataString(parts[0]);
+                proxyPassword ??= parts.Length > 1 ? Uri.UnescapeDataString(parts[1]) : null;
+                proxyAddress = new UriBuilder(proxyUri) { UserName = "", Password = "" }.Uri.ToString();
+            }
+            else
+            {
+                proxyAddress = proxyUri.ToString();
+            }
+        }
+
+        return new ResolvedRoute
+        {
+            Platform = platform,
+            Index = index,
+            Name = route.Name is { Length: > 0 } n ? n : DescribeRoute(route.BaseUrl, proxyAddress),
+            BaseUrl = baseUrl,
+            HttpProxy = proxyAddress,
+            ProxyUser = proxyUser,
+            ProxyPassword = proxyPassword,
+            Headers = new Dictionary<string, string>(route.Headers, StringComparer.OrdinalIgnoreCase),
+            IsDirect = false
+        };
+    }
+
+    private static string DescribeRoute(string? baseUrl, string? proxyAddress)
+    {
+        var relayHost = baseUrl is { Length: > 0 } b ? new Uri(b).Host : null;
+        var proxyHost = proxyAddress is { Length: > 0 } p ? new Uri(p).Host : null;
+        return (relayHost, proxyHost) switch
+        {
+            (not null, not null) => $"{relayHost} via {proxyHost}",
+            (not null, null)     => relayHost,
+            (null, not null)     => $"direct via {proxyHost}",
+            _                    => "unnamed"
+        };
+    }
+
+    private static Uri ParseHttpUri(string where, string? value)
+    {
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            throw new InvalidOperationException(
+                $"{where} must be an absolute http(s) URL, but is '{value}'.");
+        return uri;
+    }
+}
+
+/// <summary>
+/// Picks which route to use for an upstream call and remembers which ones are refusing traffic.
+///
+/// The point is failover: when CurseForge's CDN blocks this server's address, the proxy retries the
+/// same call through a configured relay or outbound proxy instead of surfacing the block to users.
+/// A blocked route is parked for a cooldown so it costs at most one wasted round trip per window,
+/// and is retried afterwards so the address being unblocked heals without a redeploy.
+/// </summary>
+public sealed class UpstreamRouter(
+    UpstreamRoutingPlan plan,
+    IHttpClientFactory factory,
+    ILogger<UpstreamRouter> log)
+{
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _blockedUntil = new();
+
+    /// <summary>Routes to try, best first: healthy ones in configured order, then any in cooldown.
+    /// Cooling routes are kept as last resorts rather than dropped, so a dead relay can still fall
+    /// back to a route that is merely suspect.</summary>
+    public IReadOnlyList<ResolvedRoute> RoutesFor(string platform)
+    {
+        var all = plan.For(platform);
+        if (all.Count < 2) return all;
+
+        var now = DateTimeOffset.UtcNow;
+        var healthy = new List<ResolvedRoute>(all.Count);
+        var cooling = new List<ResolvedRoute>();
+        foreach (var route in all)
+            (IsCooling(route, now) ? cooling : healthy).Add(route);
+
+        if (cooling.Count == 0) return all;
+        healthy.AddRange(cooling);
+        return healthy;
+    }
+
+    public HttpClient ClientFor(ResolvedRoute route) => factory.CreateClient(route.ClientName);
+
+    public void MarkBlocked(ResolvedRoute route, string reason)
+    {
+        var until = DateTimeOffset.UtcNow + plan.BlockCooldown;
+        _blockedUntil[route.ClientName] = until;
+        log.LogWarning(
+            "Upstream route '{Route}' for {Platform} is not usable ({Reason}). Skipping it until {Until:u}.",
+            route.Name, route.Platform, reason, until);
+    }
+
+    /// <summary>Called when a route returns something the API itself produced — including a 404 or a
+    /// rejected key, which still prove the request got through.</summary>
+    public void MarkHealthy(ResolvedRoute route)
+    {
+        if (_blockedUntil.TryRemove(route.ClientName, out _))
+            log.LogInformation(
+                "Upstream route '{Route}' for {Platform} is reachable again.", route.Name, route.Platform);
+    }
+
+    private bool IsCooling(ResolvedRoute route, DateTimeOffset now) =>
+        _blockedUntil.TryGetValue(route.ClientName, out var until) && until > now;
+}
+
+public static class UpstreamRoutingServiceCollectionExtensions
+{
+    /// <summary>Binds "Upstream", validates it, and registers one named HttpClient per route.
+    /// Bad routing config throws here, at startup, rather than surfacing as a confusing runtime
+    /// failure once someone actually browses mods.</summary>
+    public static IServiceCollection AddUpstreamRouting(this IServiceCollection services, IConfiguration config)
+    {
+        var options = config.GetSection("Upstream").Get<UpstreamRoutingOptions>() ?? new UpstreamRoutingOptions();
+        var plan = UpstreamRoutingPlan.Build(options);
+
+        services.AddSingleton(plan);
+        services.AddSingleton<UpstreamRouter>();
+
+        foreach (var route in plan.All)
+        {
+            var builder = services.AddHttpClient(route.ClientName, c => c.Timeout = TimeSpan.FromMinutes(2));
+            if (route.HttpProxy is null) continue;
+
+            // The proxy lives on the handler, which is why each egress needs its own named client.
+            // Handler lifetime is left to IHttpClientFactory so DNS changes are still picked up.
+            builder.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                Proxy = BuildWebProxy(route),
+                UseProxy = true
+            });
+        }
+
+        return services;
+    }
+
+    private static WebProxy BuildWebProxy(ResolvedRoute route)
+    {
+        var proxy = new WebProxy(route.HttpProxy!) { BypassProxyOnLocal = false };
+        if (!string.IsNullOrEmpty(route.ProxyUser))
+            proxy.Credentials = new NetworkCredential(route.ProxyUser, route.ProxyPassword ?? "");
+        return proxy;
+    }
+}

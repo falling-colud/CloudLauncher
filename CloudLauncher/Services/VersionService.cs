@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
 
@@ -129,6 +130,39 @@ public sealed class VersionService
             foreach (var list in grouped.Values) list.Reverse(); // newest first
             return grouped;
         });
+
+    // ---------- any loader ----------
+
+    /// <summary>
+    /// Builds of <paramref name="loader"/> published for <paramref name="mcVersion"/>, newest first.
+    /// Empty when that loader publishes nothing for that Minecraft version (or for
+    /// <see cref="LoaderKind.None"/>). Returns a fresh list, so callers may bind or sort it
+    /// without disturbing the shared version cache.
+    /// </summary>
+    public async Task<List<string>> ListLoaderVersionsAsync(
+        LoaderKind loader, string mcVersion, CancellationToken ct = default)
+    {
+        switch (loader)
+        {
+            case LoaderKind.Fabric:
+                return [.. await ListFabricLoaderVersionsAsync(mcVersion, ct)];
+
+            case LoaderKind.Forge:
+            {
+                var byMc = await ListForgeVersionsByMinecraftAsync(ct);
+                return byMc.TryGetValue(mcVersion, out var forge) ? [.. forge] : [];
+            }
+
+            case LoaderKind.NeoForge:
+            {
+                var all = await ListNeoForgeVersionsAsync(ct);
+                return all.Where(v => NeoForgeVersionForMinecraft(v) == mcVersion).ToList();
+            }
+
+            default:
+                return [];
+        }
+    }
 
     // ---------- JSON DTOs (private) ----------
 

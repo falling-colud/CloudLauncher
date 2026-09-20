@@ -11,7 +11,8 @@ namespace CloudLauncher.Views;
 
 /// <summary>
 /// The Graph sub-tab. Lays installed mods out on a zoomable, pannable canvas — clustered by
-/// category (grid boxes), by dependency layer (barycenter-ordered to reduce crossings), or as a
+/// category (grid boxes), by dependency layer (barycenter-ordered to reduce crossings), as
+/// dependency circles (each library in the middle of a wheel of the mods that need it), or as a
 /// free custom layout where nodes can be dragged and their positions are saved to the pack.
 /// Dependency edges are drawn as curved, directional (arrow-headed) links behind the nodes.
 /// </summary>
@@ -23,6 +24,10 @@ public partial class ModGraphView : UserControl
     private const double VGap = 22;
     private const double Origin = 24;
 
+    /// <summary>Horizontal space between two content-size bands inside a category cluster, with the
+    /// dividing rule down the middle of it.</summary>
+    private const double BandDividerGap = 26;
+
     private static readonly Brush EdgeBrush = Frozen(Color.FromArgb(160, 0x6B, 0x76, 0x88));
     private static readonly Brush ArrowBrush = Frozen(Color.FromArgb(225, 0x93, 0x9E, 0xB2));
     private static Brush Frozen(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
@@ -32,6 +37,7 @@ public partial class ModGraphView : UserControl
     private Window? _owner;
     private Action<PackMod>? _onOpenMod;
     private Action? _onReload;
+    private Action? _onModsChanged; // lightweight "flags changed" signal (marks other views stale)
 
     private readonly Dictionary<PackMod, Rect> _rect = new();
     private readonly Dictionary<PackMod, Border> _nodeEls = new();
@@ -64,6 +70,8 @@ public partial class ModGraphView : UserControl
         public Border Box = null!;
         public Border Header = null!;
         public readonly List<(PackMod mod, Border node)> Nodes = new();
+        /// <summary>Vertical rules between the cluster's content-size bands; they move with it.</summary>
+        public readonly List<UIElement> Dividers = new();
         public double X, Y, W, H;
     }
 
@@ -74,16 +82,18 @@ public partial class ModGraphView : UserControl
     }
 
     private bool IsCategoryMode => ClusterBox.SelectedIndex == 0;
-    private bool IsCustomMode => ClusterBox.SelectedIndex == 2;
+    private bool IsCirclesMode => ClusterBox.SelectedIndex == 2;
+    private bool IsCustomMode => ClusterBox.SelectedIndex == 3;
 
     public void Load(Guid packId, IReadOnlyList<PackMod> mods, Window? owner,
-        Action<PackMod>? onOpenMod = null, Action? onReload = null)
+        Action<PackMod>? onOpenMod = null, Action? onReload = null, Action? onModsChanged = null)
     {
         _packId = packId;
         _mods = mods;
         _owner = owner;
         _onOpenMod = onOpenMod;
         _onReload = onReload;
+        _onModsChanged = onModsChanged;
         ShowLines.IsChecked = App.State.ModMetadata.Advanced(packId).ShowDependencyLines;
         // Fit only the first time we lay this pack out; later data refreshes keep the user's view.
         var first = !_everLaidOut;
@@ -106,7 +116,9 @@ public partial class ModGraphView : UserControl
             ? "Drag nodes to arrange · scroll to zoom · drag background to pan"
             : IsCategoryMode
                 ? "Drag a category header to move it · right-click it to rename · scroll to zoom"
-                : "Scroll to zoom · drag background to pan";
+                : IsCirclesMode
+                    ? "Each dependency sits in the middle of the mods that need it · scroll to zoom · drag background to pan"
+                    : "Scroll to zoom · drag background to pan";
 
         if (_mods.Count == 0)
         {
@@ -118,7 +130,8 @@ public partial class ModGraphView : UserControl
         var size = ClusterBox.SelectedIndex switch
         {
             1 => LayoutDependencies(),
-            2 => LayoutCustom(),
+            2 => LayoutCircles(),
+            3 => LayoutCustom(),
             _ => LayoutCategories()
         };
 
@@ -129,6 +142,8 @@ public partial class ModGraphView : UserControl
         GraphCanvas.Width = Math.Max(size.w, 50);
         GraphCanvas.Height = Math.Max(size.h, 50);
         GraphStatus.Text = $"{_mods.Count} mod(s)";
+
+        RefreshCollapseButton();
 
         // Only recentre on a full (re)layout — never on a mod edit, so the user's view is preserved.
         if (refit) { _userInteracted = false; TryFit(); }
@@ -145,8 +160,17 @@ public partial class ModGraphView : UserControl
             list.Add(m);
         }
 
+        // Clusters follow the order set on the Categories page; anything not declared there trails
+        // after, and "Uncategorized" always sits last.
+        var declared = App.State.ModMetadata.Categories(_packId).Select(c => c.Name).ToList();
+        int Rank(string key)
+        {
+            var i = declared.FindIndex(n => string.Equals(n, key, StringComparison.OrdinalIgnoreCase));
+            return i < 0 ? int.MaxValue : i;
+        }
+
         var ordered = groups.Keys.Where(k => !string.Equals(k, "Uncategorized", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+            .OrderBy(Rank).ThenBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
         if (groups.Keys.Any(k => string.Equals(k, "Uncategorized", StringComparison.OrdinalIgnoreCase)))
             ordered.Add("Uncategorized");
 
@@ -154,12 +178,58 @@ public partial class ModGraphView : UserControl
         double flowX = Origin, maxRight = 0, maxBottom = 0;
         foreach (var key in ordered)
         {
-            var nodes = groups[key].OrderByDescending(z => z.Priority)
-                .ThenBy(z => z.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
-            var n = nodes.Count;
-            var cols = Math.Clamp((int)Math.Ceiling(Math.Sqrt(n)), 1, 4);
-            var rows = (int)Math.Ceiling(n / (double)cols);
-            var cw = cols * NodeW + (cols - 1) * HGap;
+            var n = groups[key].Count;
+
+            // A folded category keeps its header (and its place in the flow) and nothing else. Its
+            // mods are simply not placed, which also drops their dependency lines: DrawEdges only
+            // draws between nodes that have a rectangle.
+            if (App.State.ModMetadata.IsCategoryCollapsed(_packId, key))
+            {
+                var collapsedW = Math.Clamp(120 + key.Length * 7.5, 190, 340);
+                var collapsedH = headerH + 10;
+                double cbx, cby;
+                if (App.State.ModMetadata.TryGetCategoryPosition(_packId, key, out var csx, out var csy))
+                {
+                    cbx = csx; cby = csy;
+                }
+                else
+                {
+                    cbx = flowX; cby = Origin;
+                    flowX += collapsedW + clusterGap;
+                }
+
+                var collapsed = new ClusterVisual { Key = key, X = cbx, Y = cby, W = collapsedW, H = collapsedH };
+                collapsed.Box = AddClusterBox(cbx, cby, collapsedW, collapsedH);
+                var collapsedTint = AccentPalette.Brush(App.State.ModMetadata.CategoryColor(_packId, key), Res("TextSecondaryBrush"));
+                collapsed.Header = AddHeader(key, cbx, cby, collapsedW, headerH, innerPad, collapsed, collapsedTint,
+                    memberCount: n, isCollapsed: true);
+                _clusters.Add(collapsed);
+                maxRight = Math.Max(maxRight, cbx + collapsedW);
+                maxBottom = Math.Max(maxBottom, cby + collapsedH);
+                continue;
+            }
+
+            // Inside a cluster the mods are split into content-size bands — largest on the left —
+            // each band its own block of columns with a vertical rule between them. The bands are
+            // self-identifying from the meter on each node, so no extra labels are needed.
+            var bands = groups[key]
+                .GroupBy(z => z.ContentSize)
+                .OrderByDescending(g => g.Key)
+                .Select(g => g.OrderByDescending(z => z.Priority)
+                              .ThenBy(z => z.DisplayName, StringComparer.OrdinalIgnoreCase).ToList())
+                .ToList();
+
+            // One shared column height across bands keeps the cluster rectangular instead of ragged.
+            var rowsPerCol = Math.Clamp((int)Math.Ceiling(Math.Sqrt(n)), 1, 6);
+            var bandCols = bands.Select(b => (int)Math.Ceiling(b.Count / (double)rowsPerCol)).ToList();
+            var rows = bands.Max(b => Math.Min(b.Count, rowsPerCol));
+
+            var cw = 0.0;
+            for (var b = 0; b < bands.Count; b++)
+            {
+                cw += bandCols[b] * NodeW + (bandCols[b] - 1) * HGap;
+                if (b < bands.Count - 1) cw += BandDividerGap;
+            }
             var ch = rows * NodeH + (rows - 1) * VGap;
             var boxW = cw + innerPad * 2;
             var boxH = headerH + ch + innerPad * 2;
@@ -177,14 +247,28 @@ public partial class ModGraphView : UserControl
 
             var cv = new ClusterVisual { Key = key, X = bx, Y = by, W = boxW, H = boxH };
             cv.Box = AddClusterBox(bx, by, boxW, boxH);
-            cv.Header = AddHeader(key, bx, by, boxW, headerH, innerPad, cv);
+            // The colour set on the Categories page, so a category looks the same wherever it shows up.
+            var tint = AccentPalette.Brush(App.State.ModMetadata.CategoryColor(_packId, key), Res("TextSecondaryBrush"));
+            cv.Header = AddHeader(key, bx, by, boxW, headerH, innerPad, cv, tint,
+                memberCount: n, isCollapsed: false);
 
-            for (var i = 0; i < n; i++)
+            var x = bx + innerPad;
+            var top = by + headerH;
+            for (var b = 0; b < bands.Count; b++)
             {
-                int r = i / cols, c = i % cols;
-                var nx = bx + innerPad + c * (NodeW + HGap);
-                var ny = by + headerH + r * (NodeH + VGap);
-                cv.Nodes.Add((nodes[i], Place(nodes[i], nx, ny)));
+                var band = bands[b];
+                for (var i = 0; i < band.Count; i++)
+                {
+                    int c = i / rowsPerCol, r = i % rowsPerCol;   // fill down a column, then across
+                    var nx = x + c * (NodeW + HGap);
+                    var ny = top + r * (NodeH + VGap);
+                    cv.Nodes.Add((band[i], Place(band[i], nx, ny)));
+                }
+
+                x += bandCols[b] * NodeW + (bandCols[b] - 1) * HGap;
+                if (b == bands.Count - 1) continue;
+                cv.Dividers.Add(AddBandDivider(x + BandDividerGap / 2, top, ch));
+                x += BandDividerGap;
             }
 
             _clusters.Add(cv);
@@ -251,6 +335,170 @@ public partial class ModGraphView : UserControl
                 Place(lay[i], startX + i * (NodeW + HGap), y);
         }
         return (Origin * 2 + fullW, Origin * 2 + (maxLayer + 1) * rowH);
+    }
+
+    /// <summary>
+    /// Radial dependency clusters. Every mod that something else needs becomes the hub of a wheel,
+    /// with the mods that need it on rings around it — the dependency group sits right next to its
+    /// dependents instead of being strung out along the layered rows of the Dependencies layout. A
+    /// mod that needs several hubs lives in the wheel of the one with the most dependents; its
+    /// other lines simply cross wheels. Hubs never sit on someone else's ring (they have a wheel of
+    /// their own, however small), and mods with no dependency relationship at all are gathered in a
+    /// plain block at the end. Wheels are shelf-packed into a roughly square area so the whole thing
+    /// fits the viewport at a readable zoom.
+    /// </summary>
+    private (double w, double h) LayoutCircles()
+    {
+        const double slot = NodeW + 16;      // arc length reserved per node on a ring
+        const double ringGap = NodeW + 20;   // rings must clear a node's WIDTH, since nodes are wide and axis-aligned
+        // A ring node near the horizontal sits beside the hub at the same height, so the first ring has to
+        // clear a full node WIDTH (184) plus a margin, not just a height — at 170 the nodes at 3 and 9
+        // o'clock overlapped the hub.
+        const double firstRadius = 205;
+        const double wheelPad = 26;
+        const double wheelGap = 46;
+
+        var graph = ModGraph.Build(_mods);
+        var hubs = _mods.Where(m => graph.DependentsOf(m).Count > 0)
+            .OrderByDescending(m => graph.DependentsOf(m).Count)
+            .ThenBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var hubSet = new HashSet<PackMod>(hubs);
+        var assigned = new HashSet<PackMod>();
+
+        // Build the wheels: hub + rings of members, radius growing with the member count.
+        var wheels = new List<(PackMod hub, List<List<PackMod>> rings, double radius)>();
+        foreach (var hub in hubs)
+        {
+            var members = graph.DependentsOf(hub)
+                .Where(d => !hubSet.Contains(d) && !assigned.Contains(d))
+                .OrderBy(d => d.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            foreach (var m in members) assigned.Add(m);
+
+            var rings = new List<List<PackMod>>();
+            var r = firstRadius;
+            var remaining = members;
+            while (remaining.Count > 0)
+            {
+                var cap = Math.Max(3, (int)Math.Floor(2 * Math.PI * r / slot));
+                rings.Add(remaining.Take(cap).ToList());
+                remaining = remaining.Skip(cap).ToList();
+                r += ringGap;
+            }
+            var outer = rings.Count == 0 ? 0 : firstRadius + (rings.Count - 1) * ringGap;
+            // Bounding radius: the outermost ring plus half a node so no node pokes out of the disc.
+            var radius = rings.Count == 0 ? NodeW / 2 + 8 : outer + NodeW / 2 + wheelPad;
+            wheels.Add((hub, rings, radius));
+        }
+
+        // Shelf-pack the wheels, biggest first, into a roughly square area.
+        var totalArea = wheels.Sum(w => 4 * w.radius * w.radius);
+        var largest = wheels.Count == 0 ? 0 : wheels.Max(w => 2 * w.radius);
+        var rowLimit = Math.Max(largest, Math.Sqrt(totalArea) * 1.15);
+        double x = Origin, y = Origin, rowH = 0, maxRight = 0, maxBottom = 0;
+        foreach (var (hub, rings, radius) in wheels.OrderByDescending(w => w.radius))
+        {
+            var d = 2 * radius;
+            if (x > Origin && x + d > Origin + rowLimit)
+            {
+                x = Origin;
+                y += rowH + wheelGap;
+                rowH = 0;
+            }
+            var cx = x + radius;
+            var cy = y + radius;
+            AddWheelDisc(cx, cy, radius, rings.Count > 0);
+            for (var k = 0; k < rings.Count; k++)
+                AddWheelRing(cx, cy, firstRadius + k * ringGap);
+
+            // Hub in the middle, members around it; alternate rings start half a step round so
+            // the spokes don't line up into a single crowded column.
+            Place(hub, cx - NodeW / 2, cy - NodeH / 2);
+            for (var k = 0; k < rings.Count; k++)
+            {
+                var ring = rings[k];
+                var r = firstRadius + k * ringGap;
+                var step = 2 * Math.PI / ring.Count;
+                var start = -Math.PI / 2 + (k % 2 == 1 ? step / 2 : 0);
+                for (var i = 0; i < ring.Count; i++)
+                {
+                    var a = start + i * step;
+                    Place(ring[i], cx + r * Math.Cos(a) - NodeW / 2, cy + r * Math.Sin(a) - NodeH / 2);
+                }
+            }
+
+            x += d + wheelGap;
+            rowH = Math.Max(rowH, d);
+            maxRight = Math.Max(maxRight, cx + radius);
+            maxBottom = Math.Max(maxBottom, cy + radius);
+        }
+        if (wheels.Count > 0) y += rowH + wheelGap;
+
+        // Everything that neither needs nor is needed by another installed mod: a plain grid block.
+        var singles = _mods.Where(m => !hubSet.Contains(m) && !assigned.Contains(m))
+            .OrderByDescending(m => m.Priority)
+            .ThenBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (singles.Count > 0)
+        {
+            const double innerPad = 12, headerH = 28;
+            var blockW = Math.Max(rowLimit, NodeW + innerPad * 2);
+            var cols = Math.Max(1, (int)((blockW - innerPad * 2 + HGap) / (NodeW + HGap)));
+            cols = Math.Min(cols, singles.Count);
+            var rows = (int)Math.Ceiling(singles.Count / (double)cols);
+            var boxW = cols * NodeW + (cols - 1) * HGap + innerPad * 2;
+            var boxH = headerH + rows * NodeH + (rows - 1) * VGap + innerPad * 2;
+            AddClusterBox(Origin, y, boxW, boxH);
+            var label = new TextBlock
+            {
+                Text = "No dependencies", FontWeight = FontWeights.SemiBold, FontSize = 12,
+                Foreground = Res("TextSecondaryBrush"), IsHitTestVisible = false
+            };
+            Canvas.SetLeft(label, Origin + innerPad);
+            Canvas.SetTop(label, y + 6);
+            Panel.SetZIndex(label, 2);
+            GraphCanvas.Children.Add(label);
+            for (var i = 0; i < singles.Count; i++)
+            {
+                int c = i % cols, rr = i / cols;
+                Place(singles[i], Origin + innerPad + c * (NodeW + HGap), y + headerH + rr * (NodeH + VGap));
+            }
+            maxRight = Math.Max(maxRight, Origin + boxW);
+            maxBottom = Math.Max(maxBottom, y + boxH);
+        }
+
+        return (maxRight + Origin, maxBottom + Origin);
+    }
+
+    /// <summary>The faint disc behind a wheel, so a dependency group reads as one shape.</summary>
+    private void AddWheelDisc(double cx, double cy, double radius, bool hasRings)
+    {
+        var disc = new Ellipse
+        {
+            Width = radius * 2, Height = radius * 2,
+            Fill = Res("Surface2Brush"), Stroke = Res("BorderSubtleBrush"), StrokeThickness = 1,
+            Opacity = hasRings ? 0.6 : 0.35, IsHitTestVisible = false
+        };
+        Canvas.SetLeft(disc, cx - radius);
+        Canvas.SetTop(disc, cy - radius);
+        Panel.SetZIndex(disc, -1);
+        GraphCanvas.Children.Add(disc);
+    }
+
+    /// <summary>A thin guide circle through a ring's node centres.</summary>
+    private void AddWheelRing(double cx, double cy, double radius)
+    {
+        var ring = new Ellipse
+        {
+            Width = radius * 2, Height = radius * 2,
+            Stroke = Res("BorderStrongBrush"), StrokeThickness = 1, StrokeDashArray = new DoubleCollection { 4, 6 },
+            Opacity = 0.5, IsHitTestVisible = false
+        };
+        Canvas.SetLeft(ring, cx - radius);
+        Canvas.SetTop(ring, cy - radius);
+        Panel.SetZIndex(ring, 0);
+        GraphCanvas.Children.Add(ring);
     }
 
     private (double w, double h) LayoutCustom()
@@ -391,22 +639,88 @@ public partial class ModGraphView : UserControl
         return box;
     }
 
-    /// <summary>A category cluster's header strip — the grab handle: left-drag moves the whole cluster,
-    /// right-click renames the category.</summary>
-    private Border AddHeader(string text, double x, double y, double w, double headerH, double pad, ClusterVisual cv)
+    /// <summary>The vertical rule separating two content-size bands inside a cluster.</summary>
+    private Rectangle AddBandDivider(double x, double y, double h)
     {
+        var rule = new Rectangle
+        {
+            Width = 1,
+            Height = h,
+            Fill = Res("BorderStrongBrush"),
+            Opacity = 0.75,
+            IsHitTestVisible = false
+        };
+        Canvas.SetLeft(rule, x);
+        Canvas.SetTop(rule, y);
+        Panel.SetZIndex(rule, 0); // above the cluster box (-1), below the nodes (1)
+        GraphCanvas.Children.Add(rule);
+        return rule;
+    }
+
+    /// <summary>A category cluster's header strip — the grab handle and the fold control: the caret
+    /// collapses the category, left-drag moves the whole cluster, double-click folds it, right-click
+    /// renames it.</summary>
+    private Border AddHeader(string text, double x, double y, double w, double headerH, double pad,
+        ClusterVisual cv, Brush? tint = null, int memberCount = 0, bool isCollapsed = false)
+    {
+        var foreground = tint ?? Res("TextSecondaryBrush");
+
+        // ▸ when folded, ▾ when open — the same affordance as every tree in the app.
+        var caret = new TextBlock
+        {
+            Text = isCollapsed ? "\uE76C" : "\uE70D",
+            FontFamily = (FontFamily)Application.Current.FindResource("IconFont"),
+            FontSize = 9,
+            Foreground = foreground,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(pad, 3, 6, 0),
+            Cursor = Cursors.Hand,
+            ToolTip = new ToolTip { Content = isCollapsed ? "Expand this category" : "Collapse this category" }
+        };
+        // Handle the press, not just the click: the header underneath starts a drag on mouse-down,
+        // and a caret that moved the cluster instead of folding it would be maddening.
+        caret.MouseLeftButtonDown += (_, e) => e.Handled = true;
+        caret.MouseLeftButtonUp += (_, e) => { e.Handled = true; ToggleCategoryCollapsed(cv.Key); };
+
+        var title = new TextBlock
+        {
+            Text = text, FontWeight = FontWeights.SemiBold, FontSize = 12,
+            Foreground = foreground, VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(0, 3, 6, 0)
+        };
+
+        // The count is what makes a folded category still informative.
+        var count = new TextBlock
+        {
+            Text = memberCount > 0 ? memberCount.ToString() : "",
+            FontSize = 11,
+            Foreground = Res("TextTertiaryBrush"),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 3, pad, 0)
+        };
+
+        var row = new Grid();
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(caret, 0);
+        Grid.SetColumn(title, 1);
+        Grid.SetColumn(count, 2);
+        row.Children.Add(caret);
+        row.Children.Add(title);
+        row.Children.Add(count);
+
         var header = new Border
         {
             Width = w, Height = headerH, Background = Brushes.Transparent, Cursor = Cursors.SizeAll,
-            ToolTip = new ToolTip { Content = "Drag to move · right-click to rename" },
-            Child = new TextBlock
-            {
-                Text = text, FontWeight = FontWeights.SemiBold, FontSize = 12,
-                Foreground = Res("TextSecondaryBrush"), VerticalAlignment = VerticalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis, Margin = new Thickness(pad, 4, pad, 0)
-            }
+            ToolTip = new ToolTip { Content = "Drag to move · double-click to fold · right-click to rename" },
+            Child = row
         };
-        header.MouseLeftButtonDown += (_, e) => OnClusterDown(cv, e);
+        header.MouseLeftButtonDown += (_, e) =>
+        {
+            if (e.ClickCount >= 2) { e.Handled = true; ToggleCategoryCollapsed(cv.Key); return; }
+            OnClusterDown(cv, e);
+        };
         header.MouseMove += OnClusterMove;
         header.MouseLeftButtonUp += OnClusterUp;
         header.MouseRightButtonUp += (_, e) => { e.Handled = true; _ = RenameCategoryAsync(cv.Key); };
@@ -460,11 +774,7 @@ public partial class ModGraphView : UserControl
             Foreground = Res("TextSecondaryBrush"),
             HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
         });
-        if (!string.IsNullOrEmpty(m.IconUrl))
-        {
-            try { iconGrid.Children.Add(new Image { Source = new BitmapImage(new Uri(m.IconUrl!)), Stretch = Stretch.UniformToFill }); }
-            catch { }
-        }
+        if (ModIconCache.Image(m.IconUrl, 28) is { } icon) iconGrid.Children.Add(icon);
         iconHost.Child = iconGrid;
         Grid.SetColumn(iconHost, 0);
         grid.Children.Add(iconHost);
@@ -482,6 +792,32 @@ public partial class ModGraphView : UserControl
         });
         Grid.SetColumn(text, 1);
         grid.Children.Add(text);
+
+        // Same markers as the list and the planning board, so a noted or sized mod is recognisable
+        // anywhere. Both share one column so they can't overlap.
+        if (m.HasNote || m.ContentSize > 0)
+        {
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var markers = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(6, 9, 0, 0)
+            };
+            markers.Children.Add(new ContentSizeMeter { Size = m.ContentSize, VerticalAlignment = VerticalAlignment.Center });
+            if (m.HasNote)
+                markers.Children.Add(new TextBlock
+                {
+                    Text = char.ConvertFromUtf32(0xE70B),
+                    FontFamily = (FontFamily)FindResource("IconFont"),
+                    FontSize = 11,
+                    Foreground = Res("AccentBrush"),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(m.ContentSize > 0 ? 5 : 0, 0, 0, 0)
+                });
+            Grid.SetColumn(markers, 2);
+            grid.Children.Add(markers);
+        }
 
         border.Child = grid;
         border.MouseLeftButtonDown += (_, e) => OnNodeDown(border, m, e);
@@ -583,6 +919,11 @@ public partial class ModGraphView : UserControl
         cv.X = nx; cv.Y = ny;
         Canvas.SetLeft(cv.Box, nx); Canvas.SetTop(cv.Box, ny);
         Canvas.SetLeft(cv.Header, nx); Canvas.SetTop(cv.Header, ny);
+        foreach (var rule in cv.Dividers)
+        {
+            Canvas.SetLeft(rule, Canvas.GetLeft(rule) + dx);
+            Canvas.SetTop(rule, Canvas.GetTop(rule) + dy);
+        }
         foreach (var (mod, node) in cv.Nodes)
         {
             double nl = Canvas.GetLeft(node) + dx, nt = Canvas.GetTop(node) + dy;
@@ -592,6 +933,48 @@ public partial class ModGraphView : UserControl
         // grow the canvas so a cluster dragged past the edge isn't clipped (and Fit still includes it)
         GraphCanvas.Width = Math.Max(GraphCanvas.Width, nx + cv.W + Origin);
         GraphCanvas.Height = Math.Max(GraphCanvas.Height, ny + cv.H + Origin);
+    }
+
+    // ── folding categories (Categories mode) ─────────────────────────────────
+
+    /// <summary>
+    /// Folds or unfolds one category and relays out. The state lives with the pack, so it survives
+    /// switching tabs, reopening the launcher, and syncs to whoever else works on the pack.
+    /// </summary>
+    private void ToggleCategoryCollapsed(string key)
+    {
+        // Mid-drag the header may still have the mouse; drop the drag so the relayout is not fighting it.
+        _dragCluster = null;
+        var collapsed = App.State.ModMetadata.IsCategoryCollapsed(_packId, key);
+        App.State.ModMetadata.SetCategoryCollapsed(_packId, key, !collapsed);
+        Rebuild(refit: false);
+    }
+
+    /// <summary>Folds every category at once, or opens them all when they already are folded.</summary>
+    private void OnCollapseAll(object sender, RoutedEventArgs e)
+    {
+        var keys = CategoryKeys();
+        if (keys.Count == 0) return;
+        var collapse = keys.Any(k => !App.State.ModMetadata.IsCategoryCollapsed(_packId, k));
+        App.State.ModMetadata.SetCategoriesCollapsed(_packId, keys, collapse);
+        Rebuild(refit: false);
+    }
+
+    /// <summary>Every category the graph currently shows a cluster for, including "Uncategorized".</summary>
+    private List<string> CategoryKeys() =>
+        _mods.Select(m => m.Meta.Categories.FirstOrDefault() ?? "Uncategorized")
+             .Distinct(StringComparer.OrdinalIgnoreCase)
+             .ToList();
+
+    /// <summary>Keeps the Collapse-all button in step with the mode and with what is folded.</summary>
+    private void RefreshCollapseButton()
+    {
+        if (CollapseAllButton is null) return;
+        CollapseAllButton.Visibility = IsCategoryMode ? Visibility.Visible : Visibility.Collapsed;
+        if (!IsCategoryMode) return;
+        var keys = CategoryKeys();
+        var anyOpen = keys.Any(k => !App.State.ModMetadata.IsCategoryCollapsed(_packId, k));
+        CollapseAllButton.Content = anyOpen ? "Collapse all" : "Expand all";
     }
 
     private async Task RenameCategoryAsync(string oldName)
@@ -614,6 +997,7 @@ public partial class ModGraphView : UserControl
         if (string.Equals(newName, oldName, StringComparison.OrdinalIgnoreCase)) return;
 
         App.State.ModMetadata.RenameCategory(_packId, oldName, newName);
+        App.State.ModPlans.RenameCategoryReferences(_packId, oldName, newName); // keep board group cards pointed at it
         Rebuild(refit: false); // List view picks the rename up on its next tab switch
     }
 
@@ -659,6 +1043,47 @@ public partial class ModGraphView : UserControl
         ZoomT.ScaleX = ZoomT.ScaleY = newS;
         PanT.X = m.X - newS * cx;
         PanT.Y = m.Y - newS * cy;
+    }
+
+    /// <summary>Right-click on empty graph background — the pack-level actions, plus the toolbar
+    /// controls so they're reachable without travelling back up to the top of the page. Right-clicks
+    /// on a node or a cluster header are handled there and never reach this.</summary>
+    private void OnViewportRightClick(object sender, MouseButtonEventArgs e)
+    {
+        var menu = new ContextMenu { PlacementTarget = Viewport };
+        menu.Items.Add(ModCategoryMenu.Build(_packId, _mods, _owner as MainWindow,
+            onChanged: () => Rebuild(refit: false)));
+
+        menu.Items.Add(new Separator());
+        var cluster = new MenuItem { Header = "Cluster by" };
+        void ClusterMode(string header, int index) =>
+            cluster.Items.Add(Action(header, () => ClusterBox.SelectedIndex = index,
+                gesture: ClusterBox.SelectedIndex == index ? "✓" : null));
+        ClusterMode("Categories", 0);
+        ClusterMode("Dependencies", 1);
+        ClusterMode("Dependency circles", 2);
+        ClusterMode("Custom layout", 3);
+        menu.Items.Add(cluster);
+
+        menu.Items.Add(Action("Dependency lines", () =>
+        {
+            ShowLines.IsChecked = ShowLines.IsChecked != true;
+            SetLinesVisible(ShowLines.IsChecked == true);
+        }, gesture: ShowLines.IsChecked == true ? "✓" : null));
+
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Action("Fit to view", () => { _userInteracted = false; FitToView(); }));
+        menu.Items.Add(Action("Re-scan mods folder", () => _onReload?.Invoke(), enabled: _onReload is not null));
+        menu.IsOpen = true;
+        e.Handled = true;
+    }
+
+    private static MenuItem Action(string header, Action onClick, string? gesture = null, bool enabled = true)
+    {
+        var mi = new MenuItem { Header = header, IsEnabled = enabled };
+        if (gesture is not null) mi.InputGestureText = gesture;
+        mi.Click += (_, _) => onClick();
+        return mi;
     }
 
     private void OnZoomIn(object sender, RoutedEventArgs e) => ZoomAtCenter(1.2);
@@ -724,6 +1149,11 @@ public partial class ModGraphView : UserControl
             mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber);
         if (chosen is null) { GraphStatus.Text = ""; return; }
 
+        if (mod.Meta.UpdateLocked && !await AppDialog.ConfirmAsync(host, "Mod is locked",
+                $"{mod.DisplayName} is locked to its current version.\n\nChange it anyway? It stays locked afterwards.",
+                "Change anyway", "Keep locked"))
+        { GraphStatus.Text = ""; return; }
+
         GraphStatus.Text = $"Installing {chosen.VersionNumber}…";
         try
         {
@@ -752,7 +1182,7 @@ public partial class ModGraphView : UserControl
             Inventory = App.State.ModInventory,
             Owner = _owner,
             AllMods = _mods,
-            OnChanged = () => Rebuild(refit: false),
+            OnChanged = () => { Rebuild(refit: false); _onModsChanged?.Invoke(); },
             OnOpenPage = OpenPage,
             OnSetEnabled = (list, en) => { foreach (var mm in list) App.State.ModInventory.SetEnabled(mm, en); Rebuild(refit: false); },
             OnUpdateToVersion = UpdateNodeToVersion,

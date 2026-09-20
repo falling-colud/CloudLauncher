@@ -41,6 +41,10 @@ public partial class FolderView : UserControl
     /// <summary>Raised when the selection changes.</summary>
     public event EventHandler? SelectionChanged;
 
+    /// <summary>Raised when a file (not a folder) is double-clicked. Carries the path relative to
+    /// <see cref="Root"/>.</summary>
+    public event Action<string>? FileActivated;
+
     /// <summary>Fired when files have been dropped onto this FolderView from another one.
     /// Subscriber should perform the move (the source root tells you where files came from).</summary>
     public event Action<string /*sourceRoot*/, string /*destRoot*/, IReadOnlyList<string> /*relPaths*/>? FilesDropped;
@@ -132,11 +136,16 @@ public partial class FolderView : UserControl
 
     private void OnDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (FileList.SelectedItem is FolderEntry { IsFolder: true } entry)
+        if (FileList.SelectedItem is not FolderEntry entry) return;
+        if (entry.IsFolder)
         {
             _current = entry.RelativePath;
             _ = NavigateAsync();
+            return;
         }
+        // Double-clicking a file is how everyone expects to open it. What "open" means is the
+        // host's business (the pack page sends it to the built-in editor).
+        FileActivated?.Invoke(entry.RelativePath);
     }
 
     private void OnUp(object sender, RoutedEventArgs e)

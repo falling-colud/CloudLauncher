@@ -1,0 +1,71 @@
+<UserControl x:Class="CloudLauncher.Views.ChangelogDialog"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="22" Width="720" Height="620">
+        <Border.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </Border.Effect>
+        <DockPanel>
+            <TextBlock DockPanel.Dock="Top" Style="{StaticResource H2}" Text="What's new"/>
+            <TextBlock x:Name="SubLabel" DockPanel.Dock="Top" Style="{StaticResource Muted}"
+                       Margin="0,2,0,12" TextWrapping="Wrap"/>
+
+            <Grid DockPanel.Dock="Bottom" Margin="0,14,0,0">
+                <TextBlock x:Name="FooterNote" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextTertiaryBrush}"
+                           TextTrimming="CharacterEllipsis" Margin="0,0,120,0"/>
+                <Button Content="Close" Style="{StaticResource AccentButton}" HorizontalAlignment="Right"
+                        Click="OnClose" Padding="16,5"/>
+            </Grid>
+
+            <Border Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="8">
+                <Grid>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="4">
+                        <ItemsControl x:Name="ReleaseList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Margin="8,8,8,4" Padding="14,12" CornerRadius="8"
+                                            Background="{DynamicResource Surface2Brush}"
+                                            BorderBrush="{Binding BorderBrushForState}" BorderThickness="1">
+                                        <StackPanel>
+                                            <DockPanel Margin="0,0,0,8">
+                                                <TextBlock DockPanel.Dock="Right" Text="{Binding DateLabel}"
+                                                           Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="{Binding VersionLabel}" FontWeight="SemiBold"
+                                                               FontSize="14" VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                    <Border Style="{StaticResource Pill}" Margin="10,0,0,0"
+                                                            Background="{DynamicResource AccentBrush}"
+                                                            Visibility="{Binding InstalledVisibility}">
+                                                        <TextBlock Text="INSTALLED" Style="{StaticResource PillText}"
+                                                                   Foreground="White"/>
+                                                    </Border>
+                                                    <Border Style="{StaticResource Pill}" Margin="10,0,0,0"
+                                                            Visibility="{Binding NewerVisibility}"
+                                                            ToolTip="Newer than the version you are running">
+                                                        <TextBlock Text="AVAILABLE" Style="{StaticResource PillText}"/>
+                                                    </Border>
+                                                </StackPanel>
+                                            </DockPanel>
+                                            <TextBlock Text="{Binding Notes}" TextWrapping="Wrap"
+                                                       Foreground="{DynamicResource TextSecondaryBrush}"
+                                                       LineHeight="19" FontSize="12.5"/>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <TextBlock x:Name="StatusLabel" Style="{StaticResource Muted}"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               TextWrapping="Wrap" MaxWidth="380" TextAlignment="Center"
+                               Text="Loading…"/>
+                </Grid>
+            </Border>
+        </DockPanel>
+    </Border>
+</UserControl>

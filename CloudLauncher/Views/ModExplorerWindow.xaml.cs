@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Diagnostics;
 using System.Net;
 using System.Text.RegularExpressions;
@@ -42,7 +42,7 @@ public partial class ModExplorerWindow : Window
         OverviewBrowser.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void ShowOverview(string? content) => OverviewBrowser.Show(content);
+    private void ShowOverview(string? content, bool isMarkdown = false) => OverviewBrowser.Show(content, isMarkdown);
 
     // ── search ────────────────────────────────────────────────────────────────
 
@@ -119,7 +119,7 @@ public partial class ModExplorerWindow : Window
             var detail = mod.Source == ModSource.CurseForge
                 ? await App.State.CurseForge.GetProjectDetailAsync(int.TryParse(mod.Id, out var cid) ? cid : 0, ct)
                 : await App.State.Modrinth.GetProjectDetailAsync(mod.Id, ct);
-            ShowOverview(detail.Description ?? mod.Description);
+            ShowOverview(detail.Description ?? mod.Description, detail.IsMarkdown);
             ShowScreenshots(detail.Screenshots);
             ConfigureLinks(detail.Links with { WebsiteUrl = detail.Links.WebsiteUrl ?? BuildProjectUrl(mod) });
 
@@ -230,7 +230,8 @@ public partial class ModExplorerWindow : Window
                 PackMinecraftVersion(),
                 PackLoaderTag(),
                 App.State.Modrinth,
-                App.State.CurseForge);
+                App.State.CurseForge,
+                PackChannel());
             if (downloads.Count == 0)
             {
                 DownloadStatus.Text = "No downloadable file found.";
@@ -312,11 +313,13 @@ public partial class ModExplorerWindow : Window
 
         var mc = PackMinecraftVersion();
         var loader = PackLoaderTag();
-        var compatible = versions.Where(v => MatchesFilters(v, mc, loader)).ToList();
-        return compatible.FirstOrDefault(v => string.Equals(v.ReleaseChannel, "release", StringComparison.OrdinalIgnoreCase))
-            ?? compatible.FirstOrDefault()
-            ?? null;
+        var compatible = versions.Where(v => MatchesFilters(v, mc, loader));
+        return ModUpdateChannel.PickNewest(compatible, PackChannel(), v => v.ReleaseChannel, v => v.DatePublished);
     }
+
+    /// <summary>The release channel this pack's downloads follow (pack setting, else the launcher
+    /// default in Settings → Mods).</summary>
+    private string PackChannel() => App.State.ModMetadata.EffectiveUpdateChannel(_pack.Id);
 
     private static bool MatchesFilters(ModVersion version, string mc, string loader) =>
         (mc.Length == 0 || version.GameVersions.Contains(mc, StringComparer.OrdinalIgnoreCase)) &&

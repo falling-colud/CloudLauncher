@@ -63,15 +63,12 @@ public partial class LoginView : Page
                     return;
                 }
 
-                var pending = await App.State.Api.RegisterAsync(new RegisterRequest(username, password, email));
-                _registering = false;
-                UpdateModeUi();
-                InfoLabel.Text = pending.Message;
-                InfoLabel.Visibility = Visibility.Visible;
-                ResendButton.Visibility = Visibility.Visible;
-                EmailBox.Text = email;
-                EmailLabel.Visibility = Visibility.Visible;
-                EmailBox.Visibility = Visibility.Visible;
+                await App.State.Api.RegisterAsync(new RegisterRequest(username, password, email));
+                // Email verification is disabled, so the new account is usable immediately —
+                // sign in right away rather than parking the user on a "check your email" screen.
+                var newTokens = await App.State.Api.LoginAsync(new LoginRequest(username, password));
+                App.State.Api.SetTokens(newTokens);
+                _shell.NavigateToPacks();
                 return;
             }
 
@@ -82,8 +79,6 @@ public partial class LoginView : Page
         catch (ApiException ex)
         {
             ErrorLabel.Text = ExtractErrorMessage(ex);
-            if (ErrorLabel.Text.Contains("verify your email", StringComparison.OrdinalIgnoreCase))
-                ResendButton.Visibility = Visibility.Visible;
         }
         catch (Exception ex)
         {

@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
 
@@ -28,11 +29,12 @@ public sealed class CurseForgeService
 
     // ── search ────────────────────────────────────────────────────────────────
 
-    // CurseForge Minecraft classIds: 6=Mods, 12=ResourcePacks, 17=Worlds, 4471=Modpacks, 4546=Shaders
+    // CurseForge Minecraft classIds: 6=Mods, 12=ResourcePacks, 17=Worlds, 4471=Modpacks, 6552=Shaders
     public const int ClassIdMods = 6;
     public const int ClassIdResourcePacks = 12;
     public const int ClassIdModpacks = 4471;
     public const int ClassIdWorlds = 17;
+    public const int ClassIdShaders = 6552;
 
     public async Task<List<ModSummary>> SearchAsync(
         string query,
@@ -42,6 +44,7 @@ public sealed class CurseForgeService
         int offset = 0,
         int classId = ClassIdMods,
         int sortField = 2,
+        IReadOnlyList<int>? categoryIds = null,
         CancellationToken ct = default)
     {
         var parameters = new List<(string Name, string Value)>
@@ -53,6 +56,13 @@ public sealed class CurseForgeService
             ("sortField", sortField.ToString()),
             ("sortOrder", "desc")
         };
+        // CF takes a single categoryId or a JSON array of categoryIds — use whichever fits, since a
+        // single-element categoryId is the most broadly-supported form.
+        var cats = categoryIds?.Where(c => c > 0).Distinct().ToList();
+        if (cats is { Count: 1 })
+            parameters.Add(("categoryId", cats[0].ToString()));
+        else if (cats is { Count: > 1 })
+            parameters.Add(("categoryIds", "[" + string.Join(",", cats) + "]"));
         if (!string.IsNullOrWhiteSpace(query))
             parameters.Add(("searchFilter", query));
         if (!string.IsNullOrEmpty(mcVersion))
@@ -66,18 +76,32 @@ public sealed class CurseForgeService
 
         using var response = await ProxyGetAsync($"mods/search?{ToQueryString(parameters)}", ct);
         if (!response.IsSuccessStatusCode)
-        {
-            var details = await response.Content.ReadAsStringAsync(ct);
-            var message = response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden
-                ? "CurseForge API key was rejected by the server. An admin must update it in the dev menu."
-                : $"CurseForge search failed: {(int)response.StatusCode} {response.ReasonPhrase}";
-            if (!string.IsNullOrWhiteSpace(details))
-                message += $" ({details})";
-            throw new HttpRequestException(message, null, response.StatusCode);
-        }
+            throw await CurseForgeRequestExceptionAsync("search", response, ct);
 
         var payload = await response.Content.ReadFromJsonAsync<CfSearchResponse>(Json, ct);
         return payload?.Data?.Select(ToSummary).ToList() ?? new();
+    }
+
+    private readonly Dictionary<int, List<ModBrowseCategory>> _categoryCache = new();
+
+    /// <summary>CurseForge's categories for a class (Mods / Resource Packs / …), cached per class for
+    /// the session. Returns each as (display name, numeric id) — the id is what search's
+    /// <c>categoryId</c> wants.</summary>
+    public async Task<List<ModBrowseCategory>> GetCategoriesAsync(int classId = ClassIdMods, CancellationToken ct = default)
+    {
+        if (_categoryCache.TryGetValue(classId, out var cached)) return cached;
+        try
+        {
+            var resp = await ProxyGetJsonAsync<CfCategoriesResponse>($"categories?gameId={MinecraftGameId}&classId={classId}", ct);
+            var list = (resp?.Data ?? new())
+                .Where(c => c.Id > 0 && !string.IsNullOrWhiteSpace(c.Name))
+                .OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(c => new ModBrowseCategory(c.Name!, c.Id.ToString()))
+                .ToList();
+            _categoryCache[classId] = list;
+            return list;
+        }
+        catch { return new(); }
     }
 
     // ── mod detail + versions ─────────────────────────────────────────────────
@@ -117,15 +141,29 @@ public sealed class CurseForgeService
                 ?? new List<ModMediaItem>());
     }
 
-    public async Task<List<ModVersion>> GetVersionsAsync(int modId, CancellationToken ct = default)
+    public Task<List<ModVersion>> GetVersionsAsync(int modId, CancellationToken ct = default) =>
+        GetVersionsAsync(modId, null, null, 0, ct);
+
+    /// <summary>A mod's files, newest first — all of them, or only those for a Minecraft version and
+    /// loader. The filter goes to CurseForge, which matters: JEI's whole history is 3,600+ files (73
+    /// pages of fifty), its NeoForge 1.21.1 files about 220. <paramref name="maxPages"/> stops early
+    /// (0 = every page); an update check only needs the first page, which holds the newest files.</summary>
+    public async Task<List<ModVersion>> GetVersionsAsync(int modId, string? mcVersion, string? loader,
+        int maxPages = 0, CancellationToken ct = default)
     {
+        var pages = 0;
         const int pageSize = 50;
         var all = new List<ModVersion>();
         var index = 0;
+        var filter = "";
+        if (!string.IsNullOrWhiteSpace(mcVersion))
+            filter += "&gameVersion=" + Uri.EscapeDataString(mcVersion.Trim());
+        if (!string.IsNullOrWhiteSpace(loader) && LoaderToInt(loader) is > 0 and var loaderType)
+            filter += "&modLoaderType=" + loaderType;
 
         while (true)
         {
-            using var response = await ProxyGetAsync($"mods/{modId}/files?index={index}&pageSize={pageSize}", ct);
+            using var response = await ProxyGetAsync($"mods/{modId}/files?index={index}&pageSize={pageSize}{filter}", ct);
             if (!response.IsSuccessStatusCode)
             {
                 if (all.Count > 0) break;
@@ -138,6 +176,7 @@ public sealed class CurseForgeService
 
             all.AddRange(page.Select(f => ToCfVersion(modId, f)));
             if (page.Count < pageSize) break;
+            if (maxPages > 0 && ++pages >= maxPages) break;
             index += pageSize;
         }
 
@@ -150,6 +189,60 @@ public sealed class CurseForgeService
         return resp?.Data is null ? null : ToCfVersion(modId, resp.Data);
     }
 
+    /// <summary>The changelog CurseForge stores for one file — HTML, fetched on demand because it is
+    /// not part of the file listing. Null when the file has none or the call failed.</summary>
+    public async Task<string?> GetChangelogAsync(int modId, int fileId, CancellationToken ct = default)
+    {
+        try
+        {
+            var resp = await ProxyGetJsonAsync<JsonElement>($"mods/{modId}/files/{fileId}/changelog", ct);
+            if (resp.ValueKind == JsonValueKind.Undefined) return null;
+            return resp.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.String
+                ? data.GetString() : null;
+        }
+        catch { return null; }
+    }
+
+    private const int BatchSize = 50;
+
+    /// <summary>Several mods in one round trip (<c>POST /mods</c>), keyed by id. Ids CurseForge does
+    /// not know are simply absent. Replaces one <c>GET /mods/{id}</c> per mod wherever a whole pack
+    /// is being identified — the difference between 8 calls and 400.</summary>
+    public async Task<Dictionary<int, ModSummary>> GetModsAsync(IEnumerable<int> modIds, CancellationToken ct = default)
+    {
+        var result = new Dictionary<int, ModSummary>();
+        var ids = modIds.Where(i => i > 0).Distinct().ToList();
+        foreach (var chunk in ids.Chunk(BatchSize))
+        {
+            using var resp = await ProxyPostJsonAsync("mods", new { modIds = chunk, filterPcOnly = false }, ct);
+            if (!resp.IsSuccessStatusCode)
+                throw await CurseForgeRequestExceptionAsync("mod lookup", resp, ct);
+            var payload = await resp.Content.ReadFromJsonAsync<CfSearchResponse>(Json, ct);
+            foreach (var m in payload?.Data ?? new())
+                result[m.Id] = ToSummary(m);
+        }
+        return result;
+    }
+
+    /// <summary>Several files in one round trip (<c>POST /mods/files</c>), keyed by file id. Each
+    /// version's id is <c>modId:fileId</c> and its single file carries CurseForge's download URL
+    /// (empty when the author opted out of third-party distribution).</summary>
+    public async Task<Dictionary<int, ModVersion>> GetFilesAsync(IEnumerable<int> fileIds, CancellationToken ct = default)
+    {
+        var result = new Dictionary<int, ModVersion>();
+        var ids = fileIds.Where(i => i > 0).Distinct().ToList();
+        foreach (var chunk in ids.Chunk(BatchSize))
+        {
+            using var resp = await ProxyPostJsonAsync("mods/files", new { fileIds = chunk }, ct);
+            if (!resp.IsSuccessStatusCode)
+                throw await CurseForgeRequestExceptionAsync("file lookup", resp, ct);
+            var payload = await resp.Content.ReadFromJsonAsync<CfFilesResponse>(Json, ct);
+            foreach (var f in payload?.Data ?? new())
+                if (f.ModId > 0) result[f.Id] = ToCfVersion(f.ModId, f);
+        }
+        return result;
+    }
+
     public async Task<Dictionary<long, (ModSummary mod, ModVersion version)>> MatchFingerprintsAsync(
         IEnumerable<long> fingerprints, CancellationToken ct = default)
     {
@@ -158,14 +251,27 @@ public sealed class CurseForgeService
 
         var body = new { fingerprints = distinct };
         using var resp = await ProxyPostJsonAsync("fingerprints", body, ct);
-        if (!resp.IsSuccessStatusCode) return new();
+        // Throw rather than return "no matches". This call is how the launcher recognises which
+        // jars on disk are already installed, and a failure is not the same answer as an empty
+        // result: reporting a blocked or erroring call as "none of these mods exist on CurseForge"
+        // is what made downloaded mods show up as not downloaded while browsing.
+        if (!resp.IsSuccessStatusCode)
+            throw await CurseForgeRequestExceptionAsync("fingerprint match", resp, ct);
 
         var payload = await resp.Content.ReadFromJsonAsync<CfFingerprintResponse>(Json, ct);
         var result = new Dictionary<long, (ModSummary, ModVersion)>();
         var exactFingerprints = payload?.Data?.ExactFingerprints ?? new();
         var requestedFingerprints = distinct.ToHashSet();
+        var exactMatches = payload?.Data?.ExactMatches ?? new List<CfFingerprintMatch>();
+
+        // One batched lookup for every matched mod's summary; a mod the batch missed falls back to
+        // the single GET below, so a partial batch answer never drops a match.
+        Dictionary<int, ModSummary> mods;
+        try { mods = await GetModsAsync(exactMatches.Where(m => m.File is not null).Select(m => m.File!.ModId), ct); }
+        catch { mods = new(); }
+
         var matchIndex = 0;
-        foreach (var match in payload?.Data?.ExactMatches ?? Enumerable.Empty<CfFingerprintMatch>())
+        foreach (var match in exactMatches)
         {
             var matchedFingerprints = match.Fingerprints?
                 .Where(requestedFingerprints.Contains)
@@ -186,8 +292,11 @@ public sealed class CurseForgeService
             matchIndex++;
 
             if (match.File is null) continue;
-            var mod = await GetModAsync(match.File.ModId, ct);
-            if (mod is null) continue;
+            if (!mods.TryGetValue(match.File.ModId, out var mod))
+            {
+                mod = await GetModAsync(match.File.ModId, ct);
+                if (mod is null) continue;
+            }
             var version = ToCfVersion(match.File.ModId, match.File);
             foreach (var fingerprint in matchedFingerprints)
                 result[fingerprint] = (mod, version);
@@ -265,11 +374,43 @@ public sealed class CurseForgeService
     {
         using var response = await ProxyGetAsync($"mods/{modId}/files/{fileId}/download-url", ct);
         if (!response.IsSuccessStatusCode)
+        {
+            if (response.StatusCode is System.Net.HttpStatusCode.Forbidden
+                                    or System.Net.HttpStatusCode.Unauthorized
+                && await DistributionOptOutAsync(modId, ct) is { } project)
+                throw new HttpRequestException(
+                    $"{project.Name} can't be downloaded through the launcher: its author has turned off " +
+                    "third-party distribution on CurseForge, so the API refuses a download URL for it — " +
+                    "with any key. Download the file from its project page and add it to the pack by hand" +
+                    (project.WebsiteUrl is null ? "." : $": {project.WebsiteUrl}"),
+                    null, response.StatusCode);
             throw await CurseForgeRequestExceptionAsync("download URL", response, ct);
+        }
 
         var resp = await response.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
         return resp.ValueKind != JsonValueKind.Undefined && resp.TryGetProperty("data", out var data)
             ? data.GetString() : null;
+    }
+
+    /// <summary>Names the project when CurseForge refuses its downloads because the author opted out
+    /// of third-party distribution (<c>allowModDistribution: false</c>) — otherwise null.
+    ///
+    /// The launcher only asks for a download URL when the file listing came back without one, which
+    /// is exactly what that opt-out looks like, and the endpoint then answers a bare 403 for every
+    /// key. A rejected key answers the same way, and the two want opposite things from whoever reads
+    /// the error: rotate a key, or go fetch the file by hand. Asking the mod endpoint settles it
+    /// either way — if the key really is the problem, this call fails too and the caller falls back
+    /// to reporting the key.</summary>
+    private async Task<(string Name, string? WebsiteUrl)?> DistributionOptOutAsync(int modId, CancellationToken ct)
+    {
+        try
+        {
+            var mod = (await ProxyGetJsonAsync<CfModResponse>($"mods/{modId}", ct))?.Data;
+            return mod is null || mod.AllowModDistribution != false
+                ? null
+                : (mod.Name, mod.Links?.WebsiteUrl);
+        }
+        catch { return null; }
     }
 
     // ── modpack manifest resolution ───────────────────────────────────────────
@@ -438,22 +579,92 @@ public sealed class CurseForgeService
     private static string ToQueryString(IEnumerable<(string Name, string Value)> parameters) =>
         string.Join("&", parameters.Select(p => $"{Uri.EscapeDataString(p.Name)}={Uri.EscapeDataString(p.Value)}"));
 
+    /// <summary>The launcher server's own explanation of a failure, when the body is one of its JSON
+    /// error payloads. The server knows things this side cannot — whether a key is configured, which
+    /// upstream routes it tried and how each was refused — so its wording wins whenever it has one.</summary>
+    private static string? ServerMessage(string body)
+    {
+        var trimmed = body?.TrimStart();
+        if (string.IsNullOrEmpty(trimmed) || trimmed[0] != '{') return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(trimmed);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+            if (!doc.RootElement.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.String)
+                return null;
+            var text = error.GetString();
+            if (string.IsNullOrWhiteSpace(text)) return null;
+            if (doc.RootElement.TryGetProperty("detail", out var detail) &&
+                detail.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(detail.GetString()))
+                text += $" ({detail.GetString()})";
+            return text;
+        }
+        catch (JsonException) { return null; }
+    }
+
+    /// <summary>A one-line gist of an upstream error body. The CloudFront block page is ~900 bytes of
+    /// HTML, and pasting it whole into a message box buries the sentence that matters.</summary>
+    private static string? Gist(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        var text = System.Text.RegularExpressions.Regex.Replace(body, "<[^>]*>", " ");
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+        if (text.Length == 0) return null;
+        return text.Length > 180 ? text[..180].TrimEnd() + "…" : text;
+    }
+
     private static async Task<HttpRequestException> CurseForgeRequestExceptionAsync(
         string operation,
         HttpResponseMessage response,
         CancellationToken ct)
     {
-        var details = await response.Content.ReadAsStringAsync(ct);
-        var message = response.StatusCode switch
+        var body = await response.Content.ReadAsStringAsync(ct);
+        string message;
+
+        if (ServerMessage(body) is { Length: > 0 } explained)
         {
-            System.Net.HttpStatusCode.ServiceUnavailable =>
-                $"CurseForge {operation} failed: the server has no CurseForge API key configured.",
-            System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden =>
-                $"CurseForge {operation} failed: the server API key was rejected.",
-            _ => $"CurseForge {operation} failed: {(int)response.StatusCode} {response.ReasonPhrase}"
-        };
-        if (!string.IsNullOrWhiteSpace(details))
-            message += $" ({details})";
+            message = $"CurseForge {operation} failed: {explained}";
+        }
+        else if (UpstreamEdge.IsBlockPage(body))
+        {
+            // Only reached when a block page arrives unproxied — an older server, or one whose
+            // routing was bypassed. Quote the CloudFront request id rather than the page: it's the
+            // one part CurseForge support can act on when asking them to unblock the address.
+            var id = UpstreamEdge.RequestId(body);
+            message = $"CurseForge {operation} failed: CurseForge's CDN is blocking the launcher server's " +
+                      "address, so the request never reached the API. This is not the API key — an admin " +
+                      "needs that address unblocked, or CurseForge traffic routed via another host " +
+                      "(set Upstream:curseforge on the server; see deploy/UPSTREAM-ROUTING.md)." +
+                      (id is null ? "" : $" (CloudFront request {id})");
+        }
+        else
+        {
+            // CurseForge answers a burst of requests with a bare, fast 403 from its edge — the same
+            // status a rejected key gets, but the key rejection says so in its body. Telling the two
+            // apart matters: one wants a pause, the other wants an admin.
+            var keyRejected = body?.Contains("API Key", StringComparison.OrdinalIgnoreCase) == true
+                              || body?.Contains("api key", StringComparison.OrdinalIgnoreCase) == true;
+            message = response.StatusCode switch
+            {
+                System.Net.HttpStatusCode.ServiceUnavailable =>
+                    $"CurseForge {operation} failed: the server has no CurseForge API key configured.",
+                System.Net.HttpStatusCode.TooManyRequests =>
+                    $"CurseForge {operation} failed: CurseForge is rate-limiting the launcher server " +
+                    "(too many requests in a short time). Wait a minute and try again.",
+                System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden when keyRejected =>
+                    $"CurseForge {operation} failed: the server API key was rejected. An admin must update it in the dev menu.",
+                System.Net.HttpStatusCode.Forbidden =>
+                    $"CurseForge {operation} failed: CurseForge refused the request (HTTP 403). This is usually a " +
+                    "temporary rate limit after a burst of requests from the launcher server — wait a minute and try again.",
+                System.Net.HttpStatusCode.Unauthorized =>
+                    $"CurseForge {operation} failed: the server API key was rejected. An admin must update it in the dev menu.",
+                _ => $"CurseForge {operation} failed: {(int)response.StatusCode} {response.ReasonPhrase}"
+            };
+            if (Gist(body ?? "") is { } gist && response.StatusCode is not (System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests))
+                message += $" ({gist})";
+        }
+
         return new HttpRequestException(message, null, response.StatusCode);
     }
 
@@ -491,11 +702,20 @@ public sealed class CurseForgeService
         [JsonPropertyName("authors")]       public List<CfAuthor>? Authors { get; set; }
         [JsonPropertyName("categories")]    public List<CfCategory>? Categories { get; set; }
         [JsonPropertyName("links")]         public CfLinks? Links { get; set; }
+        // null when CurseForge did not say; false means the author blocked third-party downloads.
+        [JsonPropertyName("allowModDistribution")] public bool? AllowModDistribution { get; set; }
         [JsonPropertyName("screenshots")]   public List<CfScreenshot>? Screenshots { get; set; }
     }
     private sealed class CfLogo   { [JsonPropertyName("url")] public string? Url { get; set; } [JsonPropertyName("thumbnailUrl")] public string? ThumbnailUrl { get; set; } }
     private sealed class CfAuthor { [JsonPropertyName("name")] public string? Name { get; set; } }
     private sealed class CfCategory { [JsonPropertyName("name")] public string Name { get; set; } = ""; }
+
+    private sealed class CfCategoriesResponse { [JsonPropertyName("data")] public List<CfCategoryOption>? Data { get; set; } }
+    private sealed class CfCategoryOption
+    {
+        [JsonPropertyName("id")]   public int Id { get; set; }
+        [JsonPropertyName("name")] public string? Name { get; set; }
+    }
     private sealed class CfLinks
     {
         [JsonPropertyName("websiteUrl")] public string? WebsiteUrl { get; set; }

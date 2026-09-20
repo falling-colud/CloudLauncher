@@ -1,11 +1,35 @@
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
+using Markdig;
 
 namespace CloudLauncher.Shared;
 
 public static partial class PackText
 {
+    // GFM-ish feature set for community descriptions — tables, task lists, autolinks, ~~strike~~,
+    // heading anchors — without Markdig's exotic extras (maths, smarty-pants) that could misfire on
+    // arbitrary READMEs. Built once; the pipeline is immutable and thread-safe.
+    private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder()
+        .UsePipeTables().UseGridTables().UseAutoLinks().UseTaskLists()
+        .UseEmphasisExtras().UseListExtras().UseAutoIdentifiers().UseFootnotes()
+        .Build();
+
+    /// <summary>
+    /// Renders arbitrary community Markdown to display HTML with a real CommonMark/GFM engine
+    /// (Markdig). Unlike the hand-rolled <see cref="MarkdownLiteToHtml"/>, this correctly handles
+    /// linked-image badges, tables, and Markdown that embeds raw HTML (e.g. a
+    /// <c>&lt;div align="center"&gt;</c> around a badge row) — the case that made whole descriptions
+    /// render as raw text. The result is sanitized (Markdig passes untrusted HTML straight through)
+    /// and wrapped in <c>.md</c> so the existing description CSS applies.
+    /// </summary>
+    public static string MarkdownToHtml(string? markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown)) return "<div class=\"md\"><p><em>No description.</em></p></div>";
+        var html = Markdown.ToHtml(markdown, MarkdownPipeline);
+        return "<div class=\"md\">" + (SanitizeDescriptionHtml(html) ?? "") + "</div>";
+    }
+
     public const int SummaryMaxLength = 2048;
     public const int DescriptionMaxLength = 2048;
 
@@ -52,12 +76,49 @@ public static partial class PackText
     public static bool LooksLikeHtml(string? text) =>
         !string.IsNullOrWhiteSpace(text) && Regex.IsMatch(text, @"<\s*(p|div|h[1-6]|img|ul|ol|li|br|a)\b", RegexOptions.IgnoreCase);
 
+    /// <summary>True when HTML-looking content still carries raw Markdown that the store never
+    /// converted — an <c>![alt](url)</c> image or a <c>#</c> heading, neither of which survives in
+    /// genuinely-rendered HTML. That's the signature of a README pasted into a store's editor.</summary>
+    public static bool LooksLikeUnconvertedMarkdown(string? text) =>
+        !string.IsNullOrWhiteSpace(text)
+        && (Regex.IsMatch(text, @"!\[[^\]]*\]\([^)]*\)")
+            || Regex.IsMatch(text, @"(?m)^[ \t]{0,3}#{1,6}[ \t]"));
+
+    /// <summary>Turns an HTML wrapper's block tags (<c>&lt;p&gt;</c>, <c>&lt;br&gt;</c>, list items…)
+    /// into the blank lines Markdown needs, so pasted-but-unconverted Markdown reflows into real
+    /// paragraphs. Inline tags (<c>&lt;a&gt;</c>, <c>&lt;img&gt;</c>, emphasis) are left for Markdig
+    /// to pass through.</summary>
+    private static string HtmlBlocksToLineBreaks(string html)
+    {
+        var s = Regex.Replace(html, @"(?i)<\s*br\s*/?\s*>", "\n");
+        s = Regex.Replace(s, @"(?i)<\s*/?\s*(p|div|section|article|header|footer|ul|ol|li|blockquote|h[1-6]|hr|table|thead|tbody|tr|pre)\b[^>]*>", "\n\n");
+        return s;
+    }
+
+    /// <summary>Strips the script-execution vectors from untrusted description HTML before it's shown
+    /// in the (JS-enabled) WebView2. Not a full allow-list sanitizer, but it removes the tags and
+    /// attributes that can run code — script/style/iframe/object/embed and friends, inline
+    /// <c>on*</c> handlers, and <c>javascript:</c>/<c>vbscript:</c>/<c>data:text/html</c> URLs — while
+    /// leaving ordinary formatting, images and links (the badges) intact.</summary>
     public static string? SanitizeDescriptionHtml(string? html)
     {
         if (string.IsNullOrWhiteSpace(html)) return null;
-        var cleaned = Regex.Replace(html, @"(?is)<\s*script[^>]*>.*?</\s*script\s*>", "");
-        cleaned = Regex.Replace(cleaned, @"(?is)<\s*iframe[^>]*>.*?</\s*iframe\s*>", "");
-        return cleaned.Trim();
+        var s = html;
+
+        // Executable / embedding elements: drop the whole element where it has content, then any
+        // stray open/close/void tags that remain.
+        s = Regex.Replace(s, @"(?is)<\s*(script|style|iframe|object|embed|noscript|template)\b[^>]*>.*?<\s*/\s*\1\s*>", "");
+        s = Regex.Replace(s, @"(?is)<\s*/?\s*(script|style|iframe|object|embed|link|meta|base|form|input|button)\b[^>]*>", "");
+
+        // Inline event handlers (onclick, onerror, onload, …).
+        s = Regex.Replace(s, @"(?is)\son[a-z]+\s*=\s*(""[^""]*""|'[^']*'|[^\s>]+)", "");
+
+        // Script-bearing URLs in href/src, quoted or bare.
+        s = Regex.Replace(s, @"(?is)\s(href|src)\s*=\s*""\s*(?:javascript|vbscript|data:text/html)[^""]*""", " $1=\"#\"");
+        s = Regex.Replace(s, @"(?is)\s(href|src)\s*=\s*'\s*(?:javascript|vbscript|data:text/html)[^']*'", " $1='#'");
+        s = Regex.Replace(s, @"(?is)\s(href|src)\s*=\s*(?:javascript|vbscript|data:text/html)[^\s>]*", " $1=#");
+
+        return s.Trim();
     }
 
     /// <summary>
@@ -129,9 +190,19 @@ public static partial class PackText
         if (string.IsNullOrWhiteSpace(content))
             return "<p><em>No description.</em></p>";
 
+        // Read-only display renderer (mod / pack browse). The full Markdig path handles badges,
+        // tables and Markdown-with-embedded-HTML; the HTML branch is for stores that ship HTML
+        // (CurseForge). Only fall back to auto-detection when the source didn't declare a format.
+        // NOTE: this is the *display* path — the description editor calls MarkdownLiteToHtml directly,
+        // so its round-trip HTML is unaffected.
         string html;
         if (isMarkdown || !LooksLikeHtml(content))
-            html = MarkdownLiteToHtml(content);
+            html = MarkdownToHtml(content);
+        else if (LooksLikeUnconvertedMarkdown(content))
+            // "HTML" that's really Markdown the author pasted into a store's editor without it being
+            // converted (CF wraps a README in <p>/<br> tags, leaving ![badge](…) literal). Re-open the
+            // block tags into line breaks so the Markdown structure re-emerges, then render properly.
+            html = MarkdownToHtml(HtmlBlocksToLineBreaks(content));
         else
             html = SanitizeDescriptionHtml(content) ?? content;
 
@@ -365,6 +436,57 @@ public static partial class PackText
         return sb.ToString();
     }
 
+    /// <summary>
+    /// The colours the generated description and editor HTML is painted with.
+    /// </summary>
+    /// <remarks>
+    /// Descriptions are rendered as a web document inside the launcher, so none of WPF's theming
+    /// reaches them — left alone they stay on the stock dark palette with blue links whatever the
+    /// user picked, which is exactly what someone with a green theme notices first. The client sets
+    /// <see cref="Current"/> from the active theme; the stylesheet below is written in the default
+    /// colours and <see cref="Recolour"/> maps them across, so there is one stylesheet rather than a
+    /// templating layer, and the default theme costs nothing.
+    /// </remarks>
+    public sealed record HtmlPalette(
+        string Background, string Surface, string SurfaceAlt, string ScrollTrack,
+        string Border, string BorderStrong,
+        string Text, string TextStrong, string TextSoft,
+        string Link, string LinkHover)
+    {
+        /// <summary>The colours the stylesheet is literally written in — replacing these with
+        /// themselves is a no-op, which is how the default theme stays byte-identical.</summary>
+        public static readonly HtmlPalette Default = new(
+            Background: "#0B0D11", Surface: "#11141B", SurfaceAlt: "#181C25", ScrollTrack: "#14171F",
+            Border: "#2E3445", BorderStrong: "#3A4254",
+            Text: "#A8B0BF", TextStrong: "#EEF1F7", TextSoft: "#C4CAD6",
+            Link: "#5B9DF9", LinkHover: "#8BB9FF");
+
+        public static HtmlPalette Current { get; set; } = Default;
+
+        public bool IsDefault => this == Default;
+    }
+
+    /// <summary>Maps the stylesheet's default colours onto the active palette. Case-sensitive on
+    /// purpose: every one of these appears in the CSS as an upper-case hex colour and nowhere else.</summary>
+    private static string Recolour(string html)
+    {
+        var p = HtmlPalette.Current;
+        if (p.IsDefault) return html;
+        var d = HtmlPalette.Default;
+        return html
+            .Replace(d.Background, p.Background)
+            .Replace(d.Surface, p.Surface)
+            .Replace(d.SurfaceAlt, p.SurfaceAlt)
+            .Replace(d.ScrollTrack, p.ScrollTrack)
+            .Replace(d.Border, p.Border)
+            .Replace(d.BorderStrong, p.BorderStrong)
+            .Replace(d.Text, p.Text)
+            .Replace(d.TextStrong, p.TextStrong)
+            .Replace(d.TextSoft, p.TextSoft)
+            .Replace(d.LinkHover, p.LinkHover)   // before Link: the two share no prefix, but order is cheap insurance
+            .Replace(d.Link, p.Link);
+    }
+
     public static string WrapHtmlDocument(string? bodyHtml, bool interactive = true, bool runnableCommands = false, bool legacyIe = true)
     {
         bodyHtml ??= "";
@@ -516,7 +638,7 @@ public static partial class PackText
         // effect yet for this process. Without it, IE7 quirks mode silently
         // drops <p> blocks that sit between inline anchors, which makes the
         // rich-description text vanish around mc-cmd-run links.
-        return """
+        return Recolour("""
                <!DOCTYPE html>
                <html><head>
                <meta http-equiv="X-UA-Compatible" content="IE=edge"/>
@@ -657,7 +779,7 @@ public static partial class PackText
                }
                a.mc-cmd-run:hover { color: #8BB9FF; }
                </style></head><body><div class="content">
-               """ + bodyHtml + "</div>" + rewriteCall
+               """) + bodyHtml + "</div>" + rewriteCall
                + (legacyIe ? wheelScript : "")
                + (legacyIe ? spoilerScript : spoilerScriptModern)
                + modernStyle + "</body></html>";
@@ -671,7 +793,7 @@ public static partial class PackText
         sb.Append("<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"/>");
         sb.Append("<meta charset=\"utf-8\"/>");
         sb.Append(EditorScript);
-        sb.Append(EditorStyles);
+        sb.Append(Recolour(EditorStyles));
         sb.Append("</head><body><div id=\"toolbar\">");
         sb.Append("<button type=\"button\" title=\"Bold\" onclick=\"execFmt('bold')\"><b>B</b></button>");
         sb.Append("<button type=\"button\" title=\"Italic\" onclick=\"execFmt('italic')\"><i>I</i></button>");
@@ -749,7 +871,7 @@ public static partial class PackText
         "var toolbar=document.getElementById('toolbar');var wrap=document.getElementById('editor-wrap');if(!wrap)return;" +
         "document.documentElement.style.overflow='hidden';document.body.style.overflow='hidden';" +
         "document.body.style.display='flex';document.body.style.flexDirection='column';document.body.style.height='100%';" +
-        "try{document.body.style.zoom='1.35';}catch(e){}" +
+        "try{document.body.style.zoom='1';}catch(e){}" +
         "function fixH(){try{" +
         "var tbH=toolbar?toolbar.offsetHeight:0;" +
         "var h=document.body.clientHeight-tbH;" +

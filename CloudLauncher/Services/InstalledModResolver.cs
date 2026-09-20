@@ -9,6 +9,15 @@ public sealed record InstalledModIdentity(
     (ModSummary Mod, ModVersion Version)? Modrinth,
     (ModSummary Mod, ModVersion Version)? CurseForge);
 
+/// <summary>The outcome of one resolve pass.
+///
+/// <see cref="Complete"/> is false when a store lookup failed, which makes a missing identity mean
+/// "not known yet" rather than "not installed". Callers must not treat a degraded pass as an
+/// authoritative picture and overwrite what they already knew — doing so is what made installed
+/// mods flip back to "downloadable" whenever an API hiccupped. It covers the two network lookups
+/// only: a single unreadable jar leaves its own identity empty without invalidating the rest.</summary>
+public sealed record InstalledModIndex(IReadOnlyList<InstalledModIdentity> Identities, bool Complete);
+
 /// <summary>
 /// Resolves installed mod jars to their Modrinth <em>and</em> CurseForge identities.
 ///
@@ -20,7 +29,7 @@ public sealed record InstalledModIdentity(
 /// </summary>
 public static class InstalledModResolver
 {
-    public static async Task<List<InstalledModIdentity>> ResolveAsync(
+    public static async Task<InstalledModIndex> ResolveAsync(
         IReadOnlyCollection<string> jarPaths,
         ModFingerprintCache cache,
         ModrinthService modrinth,
@@ -65,8 +74,10 @@ public static class InstalledModResolver
             }, ct);
         }
 
-        var modrinthMatches = await ResolveModrinthAsync(cache, modrinth, pathToSha.Values, ct);
-        var curseForgeMatches = await ResolveCurseForgeAsync(cache, curseForge, pathToFingerprint.Values, ct);
+        var (modrinthMatches, modrinthComplete) =
+            await ResolveModrinthAsync(cache, modrinth, pathToSha.Values, ct);
+        var (curseForgeMatches, curseForgeComplete) =
+            await ResolveCurseForgeAsync(cache, curseForge, pathToFingerprint.Values, ct);
 
         var results = new List<InstalledModIdentity>(jarPaths.Count);
         foreach (var path in jarPaths)
@@ -83,20 +94,23 @@ public static class InstalledModResolver
                 && cf.mod.Source == ModSource.CurseForge
                     ? cf : null;
 
-            // Warm the shared cache with a primary match (Modrinth preferred) so other
-            // views and later sessions resolve this jar without a network round-trip.
+            // Warm the shared cache so other views and later sessions resolve this jar without a
+            // network round-trip: a primary match (Modrinth preferred, kept for older readers) plus
+            // the identity on each store, which is what lets a cross-listed jar load with both.
             if (modrinthId is { } m) cache.StoreMatch(path, m.Mod, m.Version);
             else if (curseForgeId is { } c) cache.StoreMatch(path, c.Mod, c.Version);
+            cache.StoreStoreMatches(path, modrinthId, curseForgeId);
 
             results.Add(new InstalledModIdentity(path, modrinthId, curseForgeId));
         }
 
         cache.Flush();
-        return results;
+        return new InstalledModIndex(results, modrinthComplete && curseForgeComplete);
     }
 
-    private static async Task<Dictionary<string, (ModSummary mod, ModVersion version)>> ResolveModrinthAsync(
-        ModFingerprintCache cache, ModrinthService modrinth, IEnumerable<string> shaHashes, CancellationToken ct)
+    private static async Task<(Dictionary<string, (ModSummary mod, ModVersion version)> Matches, bool Complete)>
+        ResolveModrinthAsync(
+            ModFingerprintCache cache, ModrinthService modrinth, IEnumerable<string> shaHashes, CancellationToken ct)
     {
         var matches = cache.ResolveModrinthMatches(shaHashes);
         var missing = shaHashes
@@ -114,13 +128,16 @@ public static class InstalledModResolver
                     cache.RememberModrinthMatch(hash, match.mod, match.version);
                 }
             }
-            catch { /* offline or API error — keep whatever resolved from cache */ }
+            // Offline or API error — keep whatever resolved from cache, but say the pass is partial
+            // so the caller treats the gaps as unknown rather than as "not installed".
+            catch { return (matches, false); }
         }
-        return matches;
+        return (matches, true);
     }
 
-    private static async Task<Dictionary<long, (ModSummary mod, ModVersion version)>> ResolveCurseForgeAsync(
-        ModFingerprintCache cache, CurseForgeService curseForge, IEnumerable<long> fingerprints, CancellationToken ct)
+    private static async Task<(Dictionary<long, (ModSummary mod, ModVersion version)> Matches, bool Complete)>
+        ResolveCurseForgeAsync(
+            ModFingerprintCache cache, CurseForgeService curseForge, IEnumerable<long> fingerprints, CancellationToken ct)
     {
         var matches = cache.ResolveCurseForgeMatches(fingerprints);
         var missing = fingerprints
@@ -138,8 +155,8 @@ public static class InstalledModResolver
                     cache.RememberCurseForgeMatch(fingerprint, match.mod, match.version);
                 }
             }
-            catch { /* offline or API error — keep whatever resolved from cache */ }
+            catch { return (matches, false); }
         }
-        return matches;
+        return (matches, true);
     }
 }

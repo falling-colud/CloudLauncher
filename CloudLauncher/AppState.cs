@@ -1,4 +1,4 @@
-using CloudLauncher.Services;
+﻿using CloudLauncher.Services;
 
 namespace CloudLauncher;
 
@@ -19,9 +19,14 @@ public sealed class AppState
     public PackAssetService PackAssets { get; }
     public WorldService Worlds { get; }
     public ResourcePackService ResourcePacks { get; }
+    public ShaderPackService Shaders { get; }
     public ModFingerprintCache ModFingerprints { get; }
+    public ModCounterpartCache ModCounterparts { get; }
+    public ModAddedCache ModAdded { get; }
+    public ModVersionCatalog ModVersions { get; }
     public ModMetadataService ModMetadata { get; }
     public PackModInventory ModInventory { get; }
+    public ModPlanService ModPlans { get; }
     public TestLaunchScope TestScope { get; }
     public UpdateService Update { get; }
 
@@ -44,17 +49,25 @@ public sealed class AppState
         Modrinth = new ModrinthService(Api);
         CurseForge = new CurseForgeService(Api);
         ModFingerprints = new ModFingerprintCache();
-        ModMetadata = new ModMetadataService(Packs);
+        ModCounterparts = new ModCounterpartCache();
+        ModAdded = new ModAddedCache();
+        ModVersions = new ModVersionCatalog(Modrinth, CurseForge);
+        ModMetadata = new ModMetadataService(Packs, Settings);
         Packs.SetModMetadata(ModMetadata);
-        ModInventory = new PackModInventory(Packs, ModFingerprints, Modrinth, CurseForge, ModMetadata);
+        ModInventory = new PackModInventory(Packs, ModFingerprints, Modrinth, CurseForge, ModMetadata, ModAdded);
+        ModPlans = new ModPlanService(Packs);
+        Packs.SetModPlans(ModPlans);
         TestScope = new TestLaunchScope(Packs);
         ModpackImport = new ModpackImportService(Modrinth, CurseForge, Api, Packs, ModFingerprints);
+        ModpackImport.SetModMetadata(ModMetadata);
+        ModpackImport.SetSettings(Settings);
         PackAssets = new PackAssetService(Packs, Modrinth);
         Packs.SetPackAssets(PackAssets);
         ModpackDownload = new ModpackDownloadService(Modrinth, CurseForge, ModpackImport, Api, Packs, PackAssets, Settings);
         ModpackImport.SetPackAssets(PackAssets);
         Worlds = new WorldService(Settings, Packs);
         ResourcePacks = new ResourcePackService(Settings, Packs);
+        Shaders = new ShaderPackService(Settings, Packs);
         Update = new UpdateService(Api);
     }
 }

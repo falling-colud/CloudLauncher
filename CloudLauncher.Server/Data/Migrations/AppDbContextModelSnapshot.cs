@@ -483,6 +483,24 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.ToTable("PackCollaborators");
                 });
 
+            modelBuilder.Entity("CloudLauncher.Server.Data.PackListing", b =>
+                {
+                    b.Property<Guid>("PackId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("AddedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("PackId", "UserId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("PackListings");
+                });
+
             modelBuilder.Entity("CloudLauncher.Server.Data.PackManifestEntry", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1008,6 +1026,25 @@ namespace CloudLauncher.Server.Data.Migrations
                 {
                     b.HasOne("CloudLauncher.Server.Data.Pack", "Pack")
                         .WithMany("Collaborators")
+                        .HasForeignKey("PackId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Pack");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.PackListing", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.Pack", "Pack")
+                        .WithMany()
                         .HasForeignKey("PackId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();

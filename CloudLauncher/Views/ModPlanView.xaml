@@ -1,0 +1,188 @@
+﻿<UserControl x:Class="CloudLauncher.Views.ModPlanView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:CloudLauncher.Views"
+             Background="Transparent" Focusable="True">
+    <UserControl.Resources>
+        <local:PriorityToBrushConverter x:Key="PriorityBrush"/>
+        <local:PriorityToVisibilityConverter x:Key="PriorityVis"/>
+        <local:NotEmptyToVisibilityConverter x:Key="NotEmptyVis"/>
+    </UserControl.Resources>
+
+    <DockPanel>
+        <!-- ───────────────────────────── toolbar ───────────────────────────── -->
+        <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Board" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox x:Name="BoardBox" Width="190" SelectionChanged="OnBoardChanged"
+                          ToolTip="Switch between planning boards">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="{Binding Category}" FontSize="11"
+                                           Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center"
+                                           Visibility="{Binding Category, Converter={StaticResource NotEmptyVis}}"/>
+                                <TextBlock Text="  ·  " FontSize="11" Foreground="{DynamicResource TextTertiaryBrush}"
+                                           VerticalAlignment="Center"
+                                           Visibility="{Binding Category, Converter={StaticResource NotEmptyVis}}"/>
+                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+                <Button x:Name="ManageBoardsButton" Style="{StaticResource IconButton}" Content="&#xE712;"
+                        FontFamily="{StaticResource IconFont}" FontSize="13" Margin="4,0,0,0"
+                        ToolTip="Manage boards — create, reorder, group and delete" Click="OnManageBoards"/>
+
+                <Border Width="1" Margin="10,4" Background="{DynamicResource BorderBrush}"/>
+
+                <Button Content="Mod" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
+                        Click="OnAddModCard" ToolTip="Add a card for one specific mod"/>
+                <Button Content="Group ▾" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
+                        Margin="6,0,0,0" Click="OnAddGroupCard"
+                        ToolTip="Add a live card for every mod sharing a property (category, priority, side…)"/>
+                <Button Content="Note" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
+                        Margin="6,0,0,0" Click="OnAddNoteCard" ToolTip="Add a free-text planning card"/>
+                <Button Content="Section" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
+                        Margin="6,0,0,0" Click="OnAddSection"
+                        ToolTip="Add a titled region — dragging it carries the cards inside"/>
+                <Button x:Name="ArrowToolButton" Content="Arrow" Style="{StaticResource SubtleButton}" Padding="11,5"
+                        MinHeight="0" Margin="6,0,0,0" Click="OnToggleArrowTool"
+                        ToolTip="Draw arrows between cards: click a card, then the card it points to. Stays on until you click it again or press Esc."/>
+                <Button Content="Tools ▾" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
+                        Margin="10,0,0,0" Click="OnTools" ToolTip="Fill the board automatically, or clear it"/>
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <TextBlock x:Name="PlanStatus" Style="{StaticResource Caption}"
+                           Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"
+                           Margin="0,0,10,0" MaxWidth="360" TextTrimming="CharacterEllipsis"/>
+                <Button x:Name="PaletteToggle" Style="{StaticResource IconButton}" Content="&#xE71C;"
+                        FontFamily="{StaticResource IconFont}" FontSize="13"
+                        ToolTip="Show or hide the mod list" Click="OnTogglePalette"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE71F;" FontFamily="{StaticResource IconFont}"
+                        FontSize="13" ToolTip="Zoom out" Click="OnZoomOut"/>
+                <Button Style="{StaticResource IconButton}" Content="&#xE8A3;" FontFamily="{StaticResource IconFont}"
+                        FontSize="13" ToolTip="Zoom in" Click="OnZoomIn"/>
+                <Button Style="{StaticResource SubtleButton}" Content="Fit" Padding="12,6" Margin="6,0,0,0"
+                        ToolTip="Fit the whole board to the view" Click="OnFit"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- ──────────────────────── palette + canvas ──────────────────────── -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="PaletteColumn" Width="212"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Drag any mod from here onto the board -->
+            <Border x:Name="PaletteHost" Grid.Column="0" Margin="0,0,10,0"
+                    Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="8">
+                <DockPanel Margin="8">
+                    <TextBlock DockPanel.Dock="Top" Text="Drag a mod onto the board"
+                               Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                               TextWrapping="Wrap" Margin="2,0,2,8"/>
+                    <Border DockPanel.Dock="Top" MinHeight="30" Margin="0,0,0,8"
+                            Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="6">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="{StaticResource IconFont}"
+                                       FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}"
+                                       VerticalAlignment="Center" Margin="9,0,7,0"/>
+                            <Grid Grid.Column="1">
+                                <TextBlock x:Name="PaletteHint" Text="Search mods…"
+                                           Foreground="{DynamicResource TextTertiaryBrush}" FontSize="12"
+                                           VerticalAlignment="Center" Margin="0,0,8,0" IsHitTestVisible="False"/>
+                                <TextBox x:Name="PaletteSearch" Background="Transparent" BorderThickness="0"
+                                         FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"
+                                         TextChanged="OnPaletteSearch">
+                                    <TextBox.Template>
+                                        <ControlTemplate TargetType="TextBox">
+                                            <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+                                        </ControlTemplate>
+                                    </TextBox.Template>
+                                </TextBox>
+                            </Grid>
+                        </Grid>
+                    </Border>
+
+                    <ListBox x:Name="PaletteList" Background="Transparent" BorderThickness="0"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                             PreviewMouseLeftButtonDown="OnPaletteMouseDown"
+                             PreviewMouseMove="OnPaletteMouseMove"
+                             MouseDoubleClick="OnPaletteDoubleClick"
+                             ToolTip="Drag onto the board, or double-click to drop it in the middle">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="0,2">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="4"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" CornerRadius="2" Margin="0,1,7,1"
+                                            Background="{Binding Priority, Converter={StaticResource PriorityBrush}}"
+                                            Visibility="{Binding Priority, Converter={StaticResource PriorityVis}}"/>
+                                    <StackPanel Grid.Column="1">
+                                        <TextBlock Text="{Binding DisplayName}" FontSize="12"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Text="{Binding CategoriesLabel}" FontSize="10"
+                                                   Foreground="{DynamicResource TextTertiaryBrush}"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Visibility="{Binding CategoriesLabel, Converter={StaticResource NotEmptyVis}}"/>
+                                    </StackPanel>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+
+            <Border x:Name="Viewport" Grid.Column="1" ClipToBounds="True" AllowDrop="True"
+                    Focusable="True" FocusVisualStyle="{x:Null}"
+                    Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="8"
+                    MouseWheel="OnViewportWheel"
+                    PreviewMouseLeftButtonDown="OnViewportPreviewMouseDown"
+                    PreviewMouseLeftButtonUp="OnViewportPreviewMouseUp"
+                    MouseLeftButtonDown="OnViewportMouseDown"
+                    MouseMove="OnViewportMouseMove"
+                    MouseLeftButtonUp="OnViewportMouseUp"
+                    MouseRightButtonUp="OnViewportRightClick"
+                    DragOver="OnViewportDragOver"
+                    Drop="OnViewportDrop">
+                <Grid>
+                    <!-- ruled grid, kept in sync with the canvas pan/zoom in code -->
+                    <Rectangle x:Name="GridBackdrop" IsHitTestVisible="False"/>
+
+                    <Canvas x:Name="BoardCanvas" RenderTransformOrigin="0,0"
+                            HorizontalAlignment="Left" VerticalAlignment="Top">
+                        <Canvas.RenderTransform>
+                            <TransformGroup>
+                                <ScaleTransform x:Name="ZoomT" ScaleX="1" ScaleY="1"/>
+                                <TranslateTransform x:Name="PanT" X="0" Y="0"/>
+                            </TransformGroup>
+                        </Canvas.RenderTransform>
+                    </Canvas>
+
+                    <!-- shown only while the board has nothing on it -->
+                    <StackPanel x:Name="EmptyHint" IsHitTestVisible="False"
+                                HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="380">
+                        <TextBlock Text="Plan your modpack here" Style="{StaticResource H3}"
+                                   HorizontalAlignment="Center" Margin="0,0,0,6"/>
+                        <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                                   TextAlignment="Center" TextWrapping="Wrap"
+                                   Text="Drag mods in from the left, add a live group card for a category or priority, and connect them with arrows: turn on Arrow above and click one card then another, or drag the dot on a card's edge. Double-click anywhere for a note, right-click for everything else. Drop cards onto a section and they move with it; shift-drag to select a group."/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
+    </DockPanel>
+</UserControl>

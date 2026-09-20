@@ -1,12 +1,12 @@
-<Window x:Class="CloudLauncher.Views.MinecraftHostWindow"
+﻿<Window x:Class="CloudLauncher.Views.MinecraftHostWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="Minecraft"
         Height="720" Width="1280" MinHeight="480" MinWidth="980"
         WindowStartupLocation="CenterScreen"
-        Background="{StaticResource Surface0Brush}"
-        Foreground="{StaticResource TextPrimaryBrush}"
+        Background="{DynamicResource Surface0Brush}"
+        Foreground="{DynamicResource TextPrimaryBrush}"
         WindowStyle="None"
         AllowsTransparency="False"
         TextOptions.TextRenderingMode="ClearType"
@@ -26,8 +26,8 @@
     </shell:WindowChrome.WindowChrome>
 
     <Border x:Name="RootBorder"
-            Background="{StaticResource Surface0Brush}"
-            BorderBrush="{StaticResource BorderBrush}"
+            Background="{DynamicResource Surface0Brush}"
+            BorderBrush="{DynamicResource BorderBrush}"
             BorderThickness="1">
         <Grid>
             <Grid.RowDefinitions>
@@ -38,8 +38,8 @@
 
             <Border x:Name="TitleBar"
                     Grid.Row="0"
-                    Background="{StaticResource TitleBarBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    Background="{DynamicResource TitleBarBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="0,0,0,1">
                 <DockPanel LastChildFill="True">
                     <StackPanel DockPanel.Dock="Right"
@@ -66,7 +66,7 @@
                                 VerticalAlignment="Center"
                                 Margin="14,0,16,0">
                         <Ellipse Width="8" Height="8"
-                                 Fill="{StaticResource AccentBrush}"
+                                 Fill="{DynamicResource AccentBrush}"
                                  VerticalAlignment="Center"
                                  Margin="0,0,8,0"/>
                         <TextBlock x:Name="TitleLabel"
@@ -93,20 +93,20 @@
                 <Border x:Name="GameSurface"
                         Grid.Column="0"
                         Background="Black"
-                        BorderBrush="{StaticResource BorderSubtleBrush}"
+                        BorderBrush="{DynamicResource BorderSubtleBrush}"
                         BorderThickness="0,0,1,0"
                         SizeChanged="OnGameSurfaceSizeChanged">
                     <TextBlock x:Name="AttachStatusLabel"
                                Text="Waiting for Minecraft window..."
-                               Foreground="{StaticResource TextSecondaryBrush}"
+                               Foreground="{DynamicResource TextSecondaryBrush}"
                                HorizontalAlignment="Center"
                                VerticalAlignment="Center"/>
                 </Border>
 
                 <Border x:Name="RightCollapseRail"
                         Grid.Column="1"
-                        Background="{StaticResource Surface1Brush}"
-                        BorderBrush="{StaticResource BorderBrush}"
+                        Background="{DynamicResource Surface1Brush}"
+                        BorderBrush="{DynamicResource BorderBrush}"
                         BorderThickness="1,0,0,0"
                         Visibility="Collapsed">
                     <Button x:Name="CollapsedRightCollapseButton"
@@ -126,13 +126,13 @@
 
                 <Border x:Name="RightPanel"
                         Grid.Column="2"
-                        Background="{StaticResource Surface1Brush}"
-                        BorderBrush="{StaticResource BorderBrush}"
+                        Background="{DynamicResource Surface1Brush}"
+                        BorderBrush="{DynamicResource BorderBrush}"
                         BorderThickness="1,0,0,0">
                     <DockPanel>
                         <Border DockPanel.Dock="Top"
-                                Background="{StaticResource Surface1Brush}"
-                                BorderBrush="{StaticResource BorderSubtleBrush}"
+                                Background="{DynamicResource Surface1Brush}"
+                                BorderBrush="{DynamicResource BorderSubtleBrush}"
                                 BorderThickness="0,0,0,1"
                                 Padding="8,5">
                             <DockPanel LastChildFill="True">
@@ -167,20 +167,20 @@
                                            FontWeight="SemiBold"
                                            VerticalAlignment="Center"
                                            TextTrimming="CharacterEllipsis"
-                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
                             </DockPanel>
                         </Border>
                         <Frame x:Name="PackFrame"
                                NavigationUIVisibility="Hidden"
-                               Background="{StaticResource Surface0Brush}"/>
+                               Background="{DynamicResource Surface0Brush}"/>
                     </DockPanel>
                 </Border>
             </Grid>
 
             <Grid Grid.Row="2">
                 <Border x:Name="BottomBar"
-                        Background="{StaticResource Surface1Brush}"
-                        BorderBrush="{StaticResource BorderBrush}"
+                        Background="{DynamicResource Surface1Brush}"
+                        BorderBrush="{DynamicResource BorderBrush}"
                         BorderThickness="0,1,0,0"
                         Padding="14,0">
                     <DockPanel LastChildFill="True">
@@ -197,7 +197,7 @@
                                        FontFamily="{StaticResource MonoFont}"
                                        FontSize="12"
                                        FontWeight="SemiBold"
-                                       Foreground="{StaticResource TextPrimaryBrush}"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"
                                        Margin="0,1,22,0"/>
                             <TextBlock Text="Playing"
                                        Style="{StaticResource Caption}"
@@ -206,7 +206,7 @@
                                        FontFamily="{StaticResource MonoFont}"
                                        FontSize="12"
                                        FontWeight="SemiBold"
-                                       Foreground="{StaticResource AccentBrush}"
+                                       Foreground="{DynamicResource AccentBrush}"
                                        Margin="0,1,0,0"/>
                         </StackPanel>
                     </DockPanel>
@@ -215,8 +215,8 @@
                 <Border x:Name="BottomCollapsedStrip"
                         Height="10"
                         VerticalAlignment="Stretch"
-                        Background="{StaticResource Surface3Brush}"
-                        BorderBrush="{StaticResource BorderBrush}"
+                        Background="{DynamicResource Surface3Brush}"
+                        BorderBrush="{DynamicResource BorderBrush}"
                         BorderThickness="0,1,0,0"
                         Visibility="Collapsed"
                         Cursor="Hand"

@@ -18,6 +18,10 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
     private ModMetadataService? _modMetadata;
     public void SetModMetadata(ModMetadataService metadata) => _modMetadata = metadata;
 
+    /// <summary>Same cycle-breaking setter for the planning boards (plans.json lives beside mods.json).</summary>
+    private ModPlanService? _modPlans;
+    public void SetModPlans(ModPlanService plans) => _modPlans = plans;
+
     /// <summary>Resolves <paramref name="relative"/> under <paramref name="gameDir"/> and
     /// guarantees the result stays inside the pack's game directory. Manifest relative paths
     /// originate from whoever uploaded the shared pack and are untrusted; without this guard a
@@ -428,19 +432,50 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         var gameDir = GameDir(packId);
         ProgressHub.Indeterminate(packId, "Building manifest…");
 
-        var entries = await Task.Run(() =>
+        // Private assets never leave this machine, whatever the rules say (see PrivateAssetPolicy).
+        // Done here rather than in the caller so no upload path - button, script, future automation -
+        // can forget it. Reported loudly: an omission the owner cannot see is how the bundle leaked.
+        var (publicPaths, privatePaths) = PrivateAssetPolicy.Partition(sharedPaths, settings);
+        if (privatePaths.Count > 0)
+            Report($"Kept private on this machine (not uploaded): {PrivateAssetPolicy.Describe(privatePaths, settings)}");
+        sharedPaths = publicPaths;
+
+        // Manifest names can differ from local paths in exactly one case: a jar that LOW MODE renamed to
+        // .jar.disabled is shared under its enabled name, so this machine's low mode never becomes everyone's
+        // baseline and mod updates keep flowing to other players. Hand-disabled jars keep their name - that
+        // rename is a deliberate whole-pack action.
+        // The same masking applies to config CONTENT: a file low mode turned down is hashed and uploaded as
+        // the player's own pre-low-mode values, so low mode can safely edit shared configs too. Null means
+        // "nothing masked here", and the file on disk is uploaded verbatim.
+        var entryPaths = await Task.Run(() =>
         {
-            var result = new List<ManifestEntry>();
+            var result = new List<(ManifestEntry Entry, string Abs, byte[]? Masked)>();
             foreach (var rel in sharedPaths)
             {
                 var abs = Path.Combine(gameDir, rel.Replace('/', Path.DirectorySeparatorChar));
                 if (!File.Exists(abs)) continue;
-                using var fs = File.OpenRead(abs);
-                var hash = Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
-                result.Add(new ManifestEntry(rel, hash, new FileInfo(abs).Length));
+
+                var masked = LowModeService.SharedContentFor(gameDir, rel);
+                string hash;
+                long length;
+                if (masked is not null)
+                {
+                    hash = Convert.ToHexString(SHA256.HashData(masked)).ToLowerInvariant();
+                    length = masked.LongLength;
+                }
+                else
+                {
+                    using var fs = File.OpenRead(abs);
+                    hash = Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+                    length = new FileInfo(abs).Length;
+                }
+
+                var manifestRel = LowModeService.UploadNameFor(rel);
+                result.Add((new ManifestEntry(manifestRel, hash, length), abs, masked));
             }
             return result;
         }, ct);
+        var entries = entryPaths.Select(p => p.Entry).ToList();
 
         Report($"game/ has {entries.Count} shared file(s) to sync");
 
@@ -448,9 +483,9 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         Report($"Server says {begin.MissingHashes.Count} blob(s) need upload");
 
         var missingSet = new HashSet<string>(begin.MissingHashes, StringComparer.OrdinalIgnoreCase);
-        var byHash = entries
-            .GroupBy(e => e.Hash, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First().RelativePath, StringComparer.OrdinalIgnoreCase);
+        var byHash = entryPaths
+            .GroupBy(p => p.Entry.Hash, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
         var i = 0;
         foreach (var hash in missingSet)
@@ -458,14 +493,16 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             ct.ThrowIfCancellationRequested();
             // Skip (don't crash) if the server asks for a blob we have no local path for — a
             // malformed/mismatched response otherwise threw KeyNotFoundException and aborted sync.
-            if (!byHash.TryGetValue(hash, out var rel)) continue;
-            var abs = Path.Combine(gameDir, rel.Replace('/', Path.DirectorySeparatorChar));
+            if (!byHash.TryGetValue(hash, out var pair)) continue;
             i++;
-            Report($"Uploading {i}/{missingSet.Count}: {rel}");
+            Report($"Uploading {i}/{missingSet.Count}: {pair.Entry.RelativePath}");
             ProgressHub.Report(packId, missingSet.Count == 0 ? 1 : (double)i / missingSet.Count,
-                $"Uploading {i}/{missingSet.Count}: {rel}");
-            await using var fs = File.OpenRead(abs);
-            await api.UploadBlobAsync(packId, hash, fs, ct);
+                $"Uploading {i}/{missingSet.Count}: {pair.Entry.RelativePath}");
+            // Upload the masked bytes when there are any, so the blob matches the hash in the manifest.
+            await using Stream body = pair.Masked is not null
+                ? new MemoryStream(pair.Masked, writable: false)
+                : File.OpenRead(pair.Abs);
+            await api.UploadBlobAsync(packId, hash, body, ct);
         }
 
         ProgressHub.Indeterminate(packId, "Committing…");
@@ -485,6 +522,29 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         ProgressHub.Indeterminate(packId, "Fetching manifest…");
         var manifest = await api.GetManifestAsync(packId, ct);
         Report($"Server manifest has {manifest.Entries.Count} files at version {manifest.Version}");
+
+        // A manifest can still carry private paths - an older upload from before the policy existed, or
+        // a collaborator's copy - and must not be allowed to overwrite the real files here. They are
+        // dropped from the working set entirely, so neither the download loop nor the prune below sees them.
+        var privateOnServer = manifest.Entries.Where(e => PrivateAssetPolicy.IsPrivate(e.RelativePath, settings)).ToList();
+        if (privateOnServer.Count > 0)
+        {
+            Report($"Ignoring private path(s) from the server manifest: {PrivateAssetPolicy.Describe(privateOnServer.Select(e => e.RelativePath).ToList(), settings)}");
+            manifest = manifest with { Entries = manifest.Entries.Where(e => !PrivateAssetPolicy.IsPrivate(e.RelativePath, settings)).ToList() };
+        }
+
+        // Whose machine is this? The owner's private files are protected from the prune below; on any
+        // other machine a private path that arrived through an earlier sync is exactly what should be
+        // pruned once the server stops listing it. If the pack cannot be fetched, err on the side of
+        // keeping files - a lost network is not a reason to delete anything.
+        bool protectPrivate;
+        try
+        {
+            var packInfo = await api.GetPackAsync(packId, ct);
+            protectPrivate = settings.UserId is Guid me && packInfo.OwnerId == me;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch { protectPrivate = true; }
 
         // Compare against currently present game/ files
         var serverPaths = new HashSet<string>(manifest.Entries.Select(e => e.RelativePath), StringComparer.OrdinalIgnoreCase);
@@ -570,6 +630,10 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         var previousServerPaths = LoadSyncManifestLock(packId);
         foreach (var rel in previousServerPaths)
         {
+            // The owner's private path is never pruned: the lock may list it from an upload made before
+            // the policy existed, and "no longer on the server" is exactly the state the policy creates
+            // on purpose. Elsewhere it is pruned like any other file the server stopped listing.
+            if (protectPrivate && PrivateAssetPolicy.IsPrivate(rel, settings)) continue;
             if (!serverPaths.Contains(rel))
             {
                 // Guard the delete sink too: the sync-lock list was itself populated from
@@ -583,9 +647,11 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         }
 
         SaveSyncManifestLock(packId, manifest.Entries.Select(e => e.RelativePath));
-        // Drop the cached mods.json so a collaborator's freshly-synced flags/categories are read
-        // from disk next time, instead of being overwritten by our stale in-memory copy.
+        // Drop the cached mods.json / plans.json so a collaborator's freshly-synced flags, categories
+        // and planning boards are read from disk next time, instead of being overwritten by our
+        // stale in-memory copies.
         _modMetadata?.Invalidate(packId);
+        _modPlans?.Invalidate(packId);
         Report("Done.");
         ProgressHub.Clear(packId);
         settings.PackSyncedVersion[packId] = manifest.Version;

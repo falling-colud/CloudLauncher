@@ -6,4 +6,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Renders read-only mod / pack descriptions (arbitrary community Markdown, often with embedded
+         HTML) to HTML. The hand-rolled MarkdownLite converter still backs the description editor. -->
+    <PackageReference Include="Markdig" Version="0.37.0" />
+  </ItemGroup>
+
 </Project>

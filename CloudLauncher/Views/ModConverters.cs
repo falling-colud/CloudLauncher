@@ -59,3 +59,28 @@ public sealed class ModSideLabelConverter : IValueConverter
     public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
         => Binding.DoNothing;
 }
+
+/// <summary>
+/// Paints a category group header in that category's own colour, so the headings in the List view
+/// match the swatches on the Categories page and the clusters in the Graph.
+/// </summary>
+/// <remarks>
+/// The colour is per pack and a value converter has no pack, so the view hands it a lookup when it
+/// loads. Static because exactly one Modpack Management page is open at a time — and if none is, the
+/// fallback is just the muted text colour, which is the right answer for a header anyway.
+/// </remarks>
+public sealed class CategoryToBrushConverter : IValueConverter
+{
+    /// <summary>Set by the view: category name → its brush, or null when it has no colour.</summary>
+    public static Func<string, Brush?>? Lookup;
+
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+    {
+        var fallback = (Brush)Application.Current.Resources["TextSecondaryBrush"];
+        if (value is not string name || Lookup is null) return fallback;
+        return Lookup(name) ?? fallback;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}

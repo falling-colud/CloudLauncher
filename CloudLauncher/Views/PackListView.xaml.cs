@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using CloudLauncher.Services;
 using CloudLauncher.Shared;
 
@@ -268,6 +269,10 @@ public partial class PackListView : Page
         EmptyState.Visibility = Visibility.Collapsed;
         try
         {
+            // First launch on a fresh install: join the pack this launcher ships for, so the list is
+            // never empty for someone who has just installed it. No-op on every later start.
+            await App.State.ModpackDownload.EnsureDefaultPackAsync();
+
             var packs = await App.State.Api.ListPacksAsync();
             _rows.Clear();
             foreach (var p in packs.Where(p => !App.State.Settings.IsPackHidden(p.Id)))
@@ -286,13 +291,40 @@ public partial class PackListView : Page
             RefreshFolderChips();
             ApplyFilter();
 
-            StatusLabel.Text = "";
+            // A list served from the cache is still a list — say where it came from and come back for
+            // a real one shortly, rather than leaving someone staring at instances that may be stale.
+            if (App.State.Api.PackListStale is { Length: > 0 } why)
+            {
+                StatusLabel.Text = $"Showing your last known instances — the server is not answering ({why}). Retrying…";
+                ScheduleStaleRetry();
+            }
+            else StatusLabel.Text = "";
+
             EmptyState.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
         {
             StatusLabel.Text = ex.Message;
         }
+    }
+
+    private DispatcherTimer? _staleRetry;
+
+    /// <summary>One delayed re-fetch after the server failed us. Not a poll: it stops as soon as a
+    /// real answer arrives, and every later refresh (navigating back, pulling down) reschedules it.</summary>
+    private void ScheduleStaleRetry()
+    {
+        _staleRetry ??= new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+        _staleRetry.Tick -= OnStaleRetryTick;
+        _staleRetry.Tick += OnStaleRetryTick;
+        _staleRetry.Start();
+    }
+
+    private async void OnStaleRetryTick(object? sender, EventArgs e)
+    {
+        _staleRetry?.Stop();
+        if (!IsLoaded) return;
+        await RefreshAsync();
     }
 
     private void RefreshFolderChips()

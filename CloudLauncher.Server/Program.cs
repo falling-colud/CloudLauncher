@@ -4,6 +4,7 @@ using System.Threading.RateLimiting;
 using CloudLauncher.Server;
 using CloudLauncher.Server.Auth;
 using CloudLauncher.Server.Data;
+using CloudLauncher.Server.Net;
 using CloudLauncher.Server.Storage;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
@@ -55,8 +56,27 @@ builder.Services.AddSingleton<BlobStore>();
 builder.Services.AddSingleton(launcherOptions);
 builder.Services.AddSingleton<LauncherStore>();
 builder.Services.AddHttpClient();
+// Outbound routing for the mod-platform proxy. Registers one HttpClient per configured route so a
+// CDN block on this server address can be retried through a relay or outbound proxy. Throws on
+// malformed "Upstream" config, so a typo surfaces at startup rather than when someone browses mods.
+builder.Services.AddUpstreamRouting(builder.Configuration);
+// Short response cache + per-platform pacing for the mod-platform proxy, so every launcher's update
+// check adds up to a queue at the stores' rate limits instead of a burst that gets the whole server
+// address throttled (see Net/UpstreamGuard.cs).
+// Its own size-limited cache rather than the shared IMemoryCache: a SizeLimit on the shared one would make
+// every future cache.Set elsewhere in the server throw unless it also sets a Size.
+builder.Services.AddSingleton(_ => new UpstreamGuard(
+    new Microsoft.Extensions.Caching.Memory.MemoryCache(
+        new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions { SizeLimit = 96L * 1024 * 1024 })));
 
-builder.Services.AddDbContext<AppDbContext>(opt => opt.UseNpgsql(connectionString));
+// Retry transient database failures instead of turning them into 500s. On 2026-09-19 the box's
+// disk filled, Postgres PANICked and spent minutes in crash recovery answering every connection with
+// "57P03: the database system is not yet accepting connections"; the API stayed up and answered every
+// request with an unhandled exception, so launchers showed a 500 and an empty instance list. A handful
+// of spaced retries rides out a recovery like that, and DbUnavailableMiddleware turns what is left
+// into an honest 503 the client can wait on.
+builder.Services.AddDbContext<AppDbContext>(opt => opt.UseNpgsql(connectionString, npgsql =>
+    npgsql.EnableRetryOnFailure(maxRetryCount: 4, maxRetryDelay: TimeSpan.FromSeconds(5), errorCodesToAdd: null)));
 
 builder.Services
     .AddIdentityCore<AppUser>(o =>
@@ -133,11 +153,47 @@ builder.WebHost.ConfigureKestrel(o =>
 
 var app = builder.Build();
 
+// The database may still be coming up (a container start, or crash recovery after the disk filled).
+// Wait for it rather than dying on the first connection: systemd would restart us straight into the
+// same wall, and after a few attempts give up entirely.
+await WaitForDatabaseAsync(app.Services, app.Logger);
+
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
 }
+
+static async Task WaitForDatabaseAsync(IServiceProvider services, ILogger logger)
+{
+    var deadline = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(5);
+    for (var attempt = 1; ; attempt++)
+    {
+        try
+        {
+            using var scope = services.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            if (await db.Database.CanConnectAsync()) return;
+        }
+        catch (Exception ex) when (DbUnavailableMiddleware.IsUnavailable(ex))
+        {
+            if (DateTimeOffset.UtcNow > deadline) throw;
+            logger.LogWarning("Database not ready yet (attempt {Attempt}): {Message}", attempt, ex.Message);
+        }
+        if (DateTimeOffset.UtcNow > deadline)
+            throw new TimeoutException("Database did not become available within five minutes.");
+        await Task.Delay(TimeSpan.FromSeconds(Math.Min(10, attempt * 2)));
+    }
+}
+
+// Serve the marketing / download site from wwwroot ("/" -> index.html). Placed before the
+// rate limiter and auth so the public landing page and installer download aren't gated.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+// Before anything that touches the database, so a database that is down reaches the client as a
+// 503 with a Retry-After rather than an unhandled 500.
+app.UseMiddleware<DbUnavailableMiddleware>();
 
 app.UseRateLimiter();
 app.UseAuthentication();

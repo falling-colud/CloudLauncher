@@ -1,11 +1,11 @@
-<Window x:Class="CloudLauncher.Views.DevWindow"
+﻿<Window x:Class="CloudLauncher.Views.DevWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:CloudLauncher.Views"
         Title="Dev tools" Height="760" Width="800"
         WindowStartupLocation="CenterOwner"
-        Background="{StaticResource Surface1Brush}"
-        Foreground="{StaticResource TextPrimaryBrush}">
+        Background="{DynamicResource Surface1Brush}"
+        Foreground="{DynamicResource TextPrimaryBrush}">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <Grid Margin="22">
             <Grid.RowDefinitions>
@@ -29,7 +29,7 @@
                                Text="Stored on the server and used by every launcher to download mods. Keys are never returned to clients — leave the box empty unless changing the key."/>
                     <DockPanel Margin="0,0,0,2">
                         <TextBlock Text="CurseForge API key" Width="180" VerticalAlignment="Center"
-                                   Foreground="{StaticResource TextSecondaryBrush}"/>
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
                         <Button DockPanel.Dock="Right" Content="Save" Click="OnSaveApiKeys" Style="{StaticResource AccentButton}"/>
                         <Button DockPanel.Dock="Right" Content="Clear" Style="{StaticResource DangerButton}"
                                 Margin="0,0,6,0" Click="OnClearCfKey"/>
@@ -40,7 +40,7 @@
 
                     <DockPanel Margin="0,0,0,2">
                         <TextBlock Text="Modrinth token (optional)" Width="180" VerticalAlignment="Center"
-                                   Foreground="{StaticResource TextSecondaryBrush}"/>
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
                         <Button DockPanel.Dock="Right" Content="Save" Click="OnSaveApiKeys" Style="{StaticResource AccentButton}"/>
                         <Button DockPanel.Dock="Right" Content="Clear" Style="{StaticResource DangerButton}"
                                 Margin="0,0,6,0" Click="OnClearMrToken"/>
@@ -95,10 +95,10 @@
                         </DataGrid.Columns>
                     </DataGrid>
 
-                    <Border Grid.Row="2" Padding="12,8" BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="0,1,0,0">
+                    <Border Grid.Row="2" Padding="12,8" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0">
                         <DockPanel>
                             <TextBlock Text="Add rule" VerticalAlignment="Center" Margin="0,0,8,0"
-                                       Foreground="{StaticResource TextSecondaryBrush}"/>
+                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
                             <ComboBox x:Name="NewActionBox2" Width="130" DockPanel.Dock="Right" Margin="8,0,0,0"/>
                             <Button Content="Add" Style="{StaticResource AccentButton}"
                                     DockPanel.Dock="Right" Click="OnAddDefaultRule"/>

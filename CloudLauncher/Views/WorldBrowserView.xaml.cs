@@ -53,7 +53,7 @@ public partial class WorldBrowserView : Page
         OverviewBrowser.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void ShowOverview(string? content) => OverviewBrowser.Show(content);
+    private void ShowOverview(string? content, bool isMarkdown = false) => OverviewBrowser.Show(content, isMarkdown);
 
     private async Task InitAsync()
     {
@@ -124,12 +124,32 @@ public partial class WorldBrowserView : Page
         await ResetAndLoadAsync();
     }
 
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => _searchText = SearchBox.Text;
+    // Search as you type (see ModExplorerPage): reload a moment after typing stops; Enter is immediate.
+    private System.Windows.Threading.DispatcherTimer? _searchTimer;
+    private string _lastSearched = "";
+
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        _searchText = SearchBox.Text;
+        if (_searchTimer is null)
+        {
+            _searchTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+            _searchTimer.Tick += async (_, _) =>
+            {
+                _searchTimer.Stop();
+                if (_activeChip is null || string.Equals(_searchText.Trim(), _lastSearched, StringComparison.Ordinal)) return;
+                _lastSearched = _searchText.Trim();
+                await ResetAndLoadAsync();
+            };
+        }
+        _searchTimer.Stop();
+        _searchTimer.Start();
+    }
 
     private async void OnSearchKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Enter) { e.Handled = true; await ResetAndLoadAsync(); }
-        else if (e.Key == Key.Escape) { SearchBox.Text = ""; _searchText = ""; await ResetAndLoadAsync(); }
+        if (e.Key == Key.Enter) { e.Handled = true; _searchTimer?.Stop(); _lastSearched = _searchText.Trim(); await ResetAndLoadAsync(); }
+        else if (e.Key == Key.Escape) { SearchBox.Text = ""; _searchText = ""; _searchTimer?.Stop(); _lastSearched = ""; await ResetAndLoadAsync(); }
     }
 
     private void OnFiltersClick(object sender, RoutedEventArgs e) => FiltersPopup.IsOpen = !FiltersPopup.IsOpen;
@@ -411,7 +431,7 @@ public partial class WorldBrowserView : Page
         {
             var cfId = int.TryParse(world.Id, out var parsed) ? parsed : 0;
             var detail = await App.State.CurseForge.GetProjectDetailAsync(cfId, ct);
-            ShowOverview(detail.Description ?? world.Description);
+            ShowOverview(detail.Description ?? world.Description, detail.IsMarkdown);
             ShowScreenshots(detail.Screenshots);
             ConfigureLinks(detail.Links with { WebsiteUrl = detail.Links.WebsiteUrl ?? _currentProjectUrl });
 
@@ -449,7 +469,7 @@ public partial class WorldBrowserView : Page
         try
         {
             var detail = await App.State.Api.GetSharedWorldAsync(world.Id, ct);
-            ShowOverview(detail.Description ?? detail.Summary);
+            ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
             VersionsGrid.ItemsSource = detail.Versions
                 .OrderByDescending(v => v.PublishedAt)
                 .Select(WorldVersionRow.FromCloud)

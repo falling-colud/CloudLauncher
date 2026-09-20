@@ -1,4 +1,4 @@
-namespace CloudLauncher.Services;
+﻿namespace CloudLauncher.Services;
 
 public sealed record ModDownloadItem(
     ModSummary Mod,
@@ -15,11 +15,12 @@ public static class ModDependencyResolver
         string loader,
         ModrinthService modrinth,
         CurseForgeService curseForge,
+        string? channel = null,
         CancellationToken ct = default)
     {
         var result = new List<ModDownloadItem>();
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await VisitAsync(rootMod, rootVersion, isDependency: false, result, visited, minecraftVersion, loader, modrinth, curseForge, ct);
+        await VisitAsync(rootMod, rootVersion, isDependency: false, result, visited, minecraftVersion, loader, modrinth, curseForge, channel, ct);
         return result;
     }
 
@@ -33,15 +34,16 @@ public static class ModDependencyResolver
         string loader,
         ModrinthService modrinth,
         CurseForgeService curseForge,
+        string? channel,
         CancellationToken ct)
     {
         if (!visited.Add($"{version.Source}:{version.Id}")) return;
 
         foreach (var dependency in version.Dependencies.Where(IsRequiredDependency))
         {
-            var resolved = await ResolveDependencyAsync(dependency, minecraftVersion, loader, modrinth, curseForge, ct);
+            var resolved = await ResolveDependencyAsync(dependency, minecraftVersion, loader, modrinth, curseForge, channel, ct);
             if (resolved is not null)
-                await VisitAsync(resolved.Value.Mod, resolved.Value.Version, isDependency: true, result, visited, minecraftVersion, loader, modrinth, curseForge, ct);
+                await VisitAsync(resolved.Value.Mod, resolved.Value.Version, isDependency: true, result, visited, minecraftVersion, loader, modrinth, curseForge, channel, ct);
         }
 
         var file = await ResolveDownloadFileAsync(mod, version, curseForge, ct);
@@ -59,12 +61,13 @@ public static class ModDependencyResolver
         string loader,
         ModrinthService modrinth,
         CurseForgeService curseForge,
+        string? channel,
         CancellationToken ct)
     {
         return dependency.Source switch
         {
-            ModSource.CurseForge => await ResolveCurseForgeDependencyAsync(dependency, minecraftVersion, loader, curseForge, ct),
-            ModSource.Modrinth => await ResolveModrinthDependencyAsync(dependency, minecraftVersion, loader, modrinth, ct),
+            ModSource.CurseForge => await ResolveCurseForgeDependencyAsync(dependency, minecraftVersion, loader, curseForge, channel, ct),
+            ModSource.Modrinth => await ResolveModrinthDependencyAsync(dependency, minecraftVersion, loader, modrinth, channel, ct),
             _ => null
         };
     }
@@ -74,6 +77,7 @@ public static class ModDependencyResolver
         string minecraftVersion,
         string loader,
         ModrinthService modrinth,
+        string? channel,
         CancellationToken ct)
     {
         if (!string.IsNullOrWhiteSpace(dependency.VersionId))
@@ -97,7 +101,7 @@ public static class ModDependencyResolver
         if (versions.Count == 0)
             versions = await modrinth.GetVersionsAsync(dependency.ProjectId, ct: ct);
 
-        var version = PickCompatibleVersion(versions, minecraftVersion, loader);
+        var version = PickCompatibleVersion(versions, minecraftVersion, loader, channel);
         return version is null ? null : (mod, version);
     }
 
@@ -106,6 +110,7 @@ public static class ModDependencyResolver
         string minecraftVersion,
         string loader,
         CurseForgeService curseForge,
+        string? channel,
         CancellationToken ct)
     {
         if (!int.TryParse(dependency.ProjectId, out var modId)) return null;
@@ -114,22 +119,21 @@ public static class ModDependencyResolver
         if (mod is null) return null;
 
         var versions = await curseForge.GetVersionsAsync(modId, ct);
-        var version = PickCompatibleVersion(versions, minecraftVersion, loader);
+        var version = PickCompatibleVersion(versions, minecraftVersion, loader, channel);
         return version is null ? null : (mod, version);
     }
 
-    private static ModVersion? PickCompatibleVersion(IReadOnlyList<ModVersion> versions, string minecraftVersion, string loader)
+    private static ModVersion? PickCompatibleVersion(
+        IReadOnlyList<ModVersion> versions, string minecraftVersion, string loader, string? channel)
     {
-        var compatible = versions.Where(v => MatchesFilters(v, minecraftVersion, loader)).ToList();
-        var pick = compatible.FirstOrDefault(v => string.Equals(v.ReleaseChannel, "release", StringComparison.OrdinalIgnoreCase))
-            ?? compatible.FirstOrDefault();
+        var compatible = versions.Where(v => MatchesFilters(v, minecraftVersion, loader));
+        var pick = ModUpdateChannel.PickNewest(compatible, channel, v => v.ReleaseChannel, v => v.DatePublished);
         if (pick is not null) return pick;
 
         // Nothing matched the exact MC version + loader (e.g. the dependency lists "1.20" while the
         // pack is "1.20.1"). Rather than silently skip a *required* dependency, fall back to the
         // newest available version so it still installs.
-        return versions.FirstOrDefault(v => string.Equals(v.ReleaseChannel, "release", StringComparison.OrdinalIgnoreCase))
-            ?? versions.FirstOrDefault();
+        return ModUpdateChannel.PickNewest(versions, channel, v => v.ReleaseChannel, v => v.DatePublished);
     }
 
     private static bool MatchesFilters(ModVersion version, string minecraftVersion, string loader) =>

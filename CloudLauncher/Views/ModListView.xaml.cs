@@ -13,14 +13,22 @@ using Microsoft.Win32;
 
 namespace CloudLauncher.Views;
 
+/// <summary>
+/// The pack page's Mods tab: a grid over the pack's installed mods. Reads the same unified
+/// <see cref="PackModInventory"/> the Modpack Management page does, so a mod that is listed on both
+/// stores shows the store it was installed from (or the pack's default store) here exactly as it
+/// does there, and the update check, source filter and "Update all" review share one rule set.
+/// </summary>
 public partial class ModListView : UserControl
 {
     private PackDetail? _pack;
     private Window? _ownerWindow;
-    private readonly ObservableCollection<ModRow> _rows = new();
+    private readonly ObservableCollection<PackMod> _rows = new();
     private readonly ICollectionView _view;
     private int _scanGeneration;
+    private CancellationTokenSource? _cts;
     private string _searchText = "";
+    private bool _checkingUpdates;
 
     private const double SearchCollapsedWidth = 36;
     private const double SearchExpandedWidth = 240;
@@ -37,256 +45,160 @@ public partial class ModListView : UserControl
     {
         _pack = pack;
         _ownerWindow = owner;
+        LowModeBox.IsChecked = LowModeService.IsEnabled(App.State.Settings, pack.Id);
         _ = ScanModsAsync();
     }
 
-    // ── scan + match ──────────────────────────────────────────────────────────
-
-    private static int FolderPriority(string folder) => folder switch
+    /// <summary>
+    /// Records the low-mode preference. The settings themselves are rewritten at launch rather than here, so the
+    /// pack's config files are only ever touched while the game is closed - editing them under a running game would
+    /// simply be overwritten when it exits.
+    /// </summary>
+    private void OnLowModeToggled(object sender, RoutedEventArgs e)
     {
-        "local" => 0,
-        _ => 1
-    };
-
-    private static string ModFileKey(string path)
-    {
-        var name = Path.GetFileName(path) ?? "";
-        if (name.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase))
-            return name[..^".disabled".Length];
-        return name;
+        if (_pack is null) return;
+        App.State.Settings.PackLowMode[_pack.Id] = LowModeBox.IsChecked == true;
+        App.State.Settings.Save();
     }
 
-    private async Task ScanModsAsync()
+    private async void OnExplainLowMode(object sender, RoutedEventArgs e)
+    {
+        if (_pack is null) return;
+        string gameDir;
+        try { gameDir = App.State.Packs.GameDir(_pack.Id); } catch { gameDir = ""; }
+        var text = await Task.Run(() => LowModeService.Describe(gameDir));
+        await AppDialog.MessageAsync(_ownerWindow, "What low mode does", text, "Got it");
+    }
+
+    // ── scan + identify + update check ────────────────────────────────────────
+
+    private async Task ScanModsAsync(bool forceUpdateCheck = false)
     {
         if (_pack is null) return;
         var generation = ++_scanGeneration;
-        StatusLabel.Text = "Scanning mods...";
-        _rows.Clear();
-
+        _cts?.Cancel();
+        _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
         var pack = _pack;
-        var jars = await Task.Run(() =>
+
+        StatusLabel.Text = "Scanning mods...";
+        UpdateAllButton.Visibility = Visibility.Collapsed;
+        List<PackMod> mods;
+        try
         {
-            var found = new List<(string path, string folder, bool isEnabled)>();
-            void AddFolder(string dir, string label)
-            {
-                if (!Directory.Exists(dir)) return;
-                foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.TopDirectoryOnly))
-                {
-                    if (f.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase))
-                        found.Add((f, label, false));
-                    else if (f.EndsWith(".jar", StringComparison.OrdinalIgnoreCase))
-                        found.Add((f, label, true));
-                }
-            }
-            AddFolder(Path.Combine(App.State.Packs.GameDir(pack.Id), "mods"), "game");
-            if (pack.IsShared)
-                AddFolder(Path.Combine(App.State.Packs.LocalDir(pack.Id), "mods"), "local");
-            return found
-                .OrderBy(j => FolderPriority(j.folder))
-                .Aggregate(new Dictionary<string, (string path, string folder, bool isEnabled)>(StringComparer.OrdinalIgnoreCase),
-                    (deduped, item) =>
-                    {
-                        var key = ModFileKey(item.path);
-                        if (!deduped.ContainsKey(key))
-                            deduped[key] = item;
-                        return deduped;
-                    })
-                .Values
-                .ToList();
-        });
-
-        if (generation != _scanGeneration) return;
-        if (jars.Count == 0) { StatusLabel.Text = "No mod files found in any mods/ folder."; return; }
-
-        var cache = App.State.ModFingerprints;
-        // ConcurrentDictionary: these are written from the Parallel.ForEach below, and plain
-        // Dictionary writes from multiple threads can corrupt it (hang / IndexOutOfRangeException).
-        var pathToSha = new System.Collections.Concurrent.ConcurrentDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var pathToCurseForgeFingerprint = new System.Collections.Concurrent.ConcurrentDictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        var toHash = new List<string>();
-
-        foreach (var (path, _, _) in jars)
-        {
-            if (cache.TryGet(path, out var entry))
-            {
-                pathToSha[path] = entry.Sha512;
-                pathToCurseForgeFingerprint[path] = entry.CurseForgeFingerprint;
-            }
-            else
-            {
-                toHash.Add(path);
-            }
+            mods = await App.State.ModInventory.LoadAsync(pack.Id, pack.IsShared, ct);
         }
-
-        if (toHash.Count == 0)
-            StatusLabel.Text = "Loading mods...";
-        else
-            StatusLabel.Text = toHash.Count == jars.Count
-                ? $"Identifying {toHash.Count} mod(s)..."
-                : $"Identifying {toHash.Count} new/changed mod(s)...";
-
-        var allCached = toHash.Count == 0;
-        if (allCached && jars.All(j => cache.TryGetCachedMatch(j.path, out _, out _)))
+        catch (OperationCanceledException) { return; }
+        catch (Exception ex)
         {
-            if (generation != _scanGeneration) return;
-            PopulateRows(
-                jars,
-                pathToSha,
-                pathToCurseForgeFingerprint,
-                cache.ResolveModrinthMatches(pathToSha.Values),
-                cache.ResolveCurseForgeMatches(pathToCurseForgeFingerprint.Values),
-                cache);
-            UpdateStatusLabel();
-            _ = CheckUpdatesInBackgroundAsync(generation);
+            if (generation == _scanGeneration) StatusLabel.Text = "Failed to scan mods: " + ex.Message;
             return;
         }
-
-        if (toHash.Count > 0)
-        {
-            await Task.Run(() =>
-            {
-                Parallel.ForEach(toHash, new ParallelOptions { MaxDegreeOfParallelism = 4 }, path =>
-                {
-                    try
-                    {
-                        var (sha512, fingerprint) = ModFingerprintCache.ComputeHashes(path);
-                        cache.Store(path, sha512, fingerprint);
-                        pathToSha[path] = sha512;
-                        pathToCurseForgeFingerprint[path] = fingerprint;
-                    }
-                    catch { /* locked file */ }
-                });
-            });
-        }
-
         if (generation != _scanGeneration) return;
 
-        var modrinthMatches = cache.ResolveModrinthMatches(pathToSha.Values);
-        var missingSha = pathToSha.Values
-            .Where(h => !modrinthMatches.ContainsKey(h))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (missingSha.Count > 0)
-        {
-            try
-            {
-                var fresh = await App.State.Modrinth.MatchHashesAsync(missingSha);
-                foreach (var (hash, match) in fresh)
-                {
-                    modrinthMatches[hash] = match;
-                    cache.RememberModrinthMatch(hash, match.mod, match.version);
-                }
-            }
-            catch { /* no network / API error */ }
-        }
-
-        if (generation != _scanGeneration) return;
-
-        var curseForgeMatches = cache.ResolveCurseForgeMatches(pathToCurseForgeFingerprint.Values);
-        var missingFingerprints = pathToCurseForgeFingerprint.Values
-            .Where(f => !curseForgeMatches.ContainsKey(f))
-            .Distinct()
-            .ToList();
-        if (missingFingerprints.Count > 0)
-        {
-            try
-            {
-                var fresh = await App.State.CurseForge.MatchFingerprintsAsync(missingFingerprints);
-                foreach (var (fingerprint, match) in fresh)
-                {
-                    curseForgeMatches[fingerprint] = match;
-                    cache.RememberCurseForgeMatch(fingerprint, match.mod, match.version);
-                }
-            }
-            catch { /* no network / API error */ }
-        }
-
-        if (generation != _scanGeneration) return;
-
-        PopulateRows(jars, pathToSha, pathToCurseForgeFingerprint, modrinthMatches, curseForgeMatches, cache);
-        cache.Flush();
-        UpdateStatusLabel();
-        _ = CheckUpdatesInBackgroundAsync(generation);
-    }
-
-    private void PopulateRows(
-        IReadOnlyList<(string path, string folder, bool isEnabled)> jars,
-        IReadOnlyDictionary<string, string> pathToSha,
-        IReadOnlyDictionary<string, long> pathToCurseForgeFingerprint,
-        Dictionary<string, (ModSummary mod, ModVersion version)> modrinthMatches,
-        Dictionary<long, (ModSummary mod, ModVersion version)> curseForgeMatches,
-        ModFingerprintCache cache)
-    {
         _rows.Clear();
-        foreach (var (path, folder, isEnabled) in jars)
-        {
-            if (pathToSha.TryGetValue(path, out var sha512)
-                && modrinthMatches.TryGetValue(sha512, out var modrinthMatch))
-            {
-                cache.StoreMatch(path, modrinthMatch.mod, modrinthMatch.version);
-                _rows.Add(new ModRow(path, folder, isEnabled, modrinthMatch.mod, modrinthMatch.version, null));
-            }
-            else if (pathToCurseForgeFingerprint.TryGetValue(path, out var fingerprint)
-                     && curseForgeMatches.TryGetValue(fingerprint, out var curseForgeMatch))
-            {
-                cache.StoreMatch(path, curseForgeMatch.mod, curseForgeMatch.version);
-                _rows.Add(new ModRow(path, folder, isEnabled, curseForgeMatch.mod, curseForgeMatch.version, null));
-            }
-            else if (cache.TryGetCachedMatch(path, out var cachedMod, out var cachedVersion))
-            {
-                _rows.Add(new ModRow(path, folder, isEnabled, cachedMod, cachedVersion, null));
-            }
-            else
-            {
-                _rows.Add(new ModRow(path, folder, isEnabled, null, null, null));
-            }
-        }
+        foreach (var m in mods) _rows.Add(m);
+        if (mods.Count == 0) { StatusLabel.Text = "No mod files found in any mods/ folder."; return; }
+        UpdateStatusLabel(identifying: true);
+
+        // Second pass: store identities (hashing + cached matching), patched into the rows in place.
+        try { await App.State.ModInventory.ResolveIdentitiesAsync(pack.Id, mods, ct); }
+        catch (OperationCanceledException) { return; }
+        catch { /* offline — keep the file-name view */ }
+        if (generation != _scanGeneration) return;
+
+        _view.Refresh();
+        UpdateStatusLabel();
+        await CheckUpdatesAsync(mods, generation, ct, forceUpdateCheck);
     }
 
-    private async Task CheckUpdatesInBackgroundAsync(int generation)
+    /// <summary>Background update check over every identified mod, a few at a time. The lists come
+    /// from the shared version catalog, so re-opening this tab is cheap; the ApiClient paces the
+    /// actual store traffic so a big pack can't trip the stores' rate limits.</summary>
+    private async Task CheckUpdatesAsync(IReadOnlyList<PackMod> mods, int generation, CancellationToken ct,
+        bool forceRefresh = false)
     {
-        for (var i = 0; i < _rows.Count; i++)
+        if (_pack is null) return;
+        var mc = _pack.MinecraftVersion;
+        var loader = ModUpdater.LoaderTag(_pack);
+        _checkingUpdates = true;
+        UpdateStatusLabel();
+        var gate = new SemaphoreSlim(3, 3);
+        try
         {
-            if (generation != _scanGeneration) return;
-            var row = _rows[i];
-            if (row.LinkedMod is null || row.LinkedVersion is null) continue;
-
-            var latestVer = await TryGetLatestCompatibleAsync(row.LinkedMod, row.LinkedVersion);
-            if (generation != _scanGeneration) return;
-            if (latestVer is null) continue;
-
-            _rows[i] = new ModRow(
-                row.FilePath, row.Folder, row.IsEnabled,
-                row.LinkedMod, row.LinkedVersion, latestVer);
+            await Task.WhenAll(mods.Select(async mod =>
+            {
+                if (mod.PrimaryMod is null || mod.PrimaryVersion is null) return;
+                await gate.WaitAsync(ct);
+                try
+                {
+                    var latest = await ModUpdater.FindUpdateAsync(mod, mc, loader, forceRefresh, ct);
+                    if (ct.IsCancellationRequested || generation != _scanGeneration) return;
+                    await Dispatcher.InvokeAsync(() => { mod.LatestVersion = latest; });
+                }
+                finally { gate.Release(); }
+            }));
         }
+        catch (OperationCanceledException) { return; }
+        catch { /* individual failures are already swallowed; nothing else to do */ }
+        if (generation != _scanGeneration) return;
+        _checkingUpdates = false;
+        _lastCheckedAt = DateTime.Now;
+        _lastCheckWasFresh = forceRefresh;
+        UpdateStatusLabel();
     }
 
-    private void UpdateStatusLabel()
+    private DateTime? _lastCheckedAt;
+    private bool _lastCheckWasFresh;
+
+    private void UpdateStatusLabel(bool identifying = false)
     {
         var total = _rows.Count;
-        var linked = _rows.Count(r => r.LinkedMod != null);
+        var curse = _rows.Count(r => r.PrimarySource == ModSource.CurseForge);
+        var modrinth = _rows.Count(r => r.PrimarySource == ModSource.Modrinth);
         var external = _rows.Count(r => r.IsExternal);
-        var disabled = _rows.Count(r => !r.IsEnabled);
+        var disabled = _rows.Count(r => !r.Enabled);
+        var updates = _rows.Count(r => r.HasUpdate);
         var visible = _view.Cast<object>().Count();
 
-        var summary = $"{total} mod(s) — {linked} linked, {external} external";
+        var summary = $"{total} mod(s) — {curse} CurseForge, {modrinth} Modrinth, {external} external";
         if (disabled > 0) summary += $", {disabled} disabled";
-        if (!string.IsNullOrWhiteSpace(_searchText))
-            summary += $" — showing {visible} of {total}";
+        if (updates > 0) summary += $", {updates} update(s)";
+        if (visible != total) summary += $" — showing {visible}";
+        if (identifying) summary += " — identifying…";
+        else if (_checkingUpdates) summary += " — checking for updates…";
+        // Say when the stores were last asked, so "did it actually check?" has an answer on screen.
+        else if (_lastCheckedAt is { } at)
+            summary += $" — checked {at:HH:mm}{(_lastCheckWasFresh ? "" : " (cached)")}";
         StatusLabel.Text = summary;
+
+        UpdateAllButton.Content = $"Update all ({updates})";
+        UpdateAllButton.Visibility = updates > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    // ── filtering ─────────────────────────────────────────────────────────────
 
     private bool ModFilter(object item)
     {
-        if (item is not ModRow row) return false;
+        if (item is not PackMod mod) return false;
+
+        var sourceOk = SourceFilterBox.SelectedIndex switch
+        {
+            1 => mod.PrimarySource == ModSource.CurseForge,
+            2 => mod.PrimarySource == ModSource.Modrinth,
+            3 => mod.IsExternal,
+            _ => true
+        };
+        if (!sourceOk) return false;
+
         var query = _searchText.Trim();
         if (string.IsNullOrEmpty(query)) return true;
-
-        query = query.ToLowerInvariant();
-        return row.Name.Contains(query, StringComparison.OrdinalIgnoreCase)
-               || row.Version.Contains(query, StringComparison.OrdinalIgnoreCase)
-               || row.SourceLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
-               || row.Folder.Contains(query, StringComparison.OrdinalIgnoreCase);
+        return mod.DisplayName.Contains(query, StringComparison.OrdinalIgnoreCase)
+               || mod.VersionLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
+               || mod.SourceLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
+               || mod.Folder.Contains(query, StringComparison.OrdinalIgnoreCase)
+               || mod.CategoriesLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
+               || mod.FileName.Contains(query, StringComparison.OrdinalIgnoreCase);
     }
 
     private void ApplyFilter()
@@ -297,6 +209,12 @@ public partial class ModListView : UserControl
     }
 
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => ApplyFilter();
+
+    private void OnSourceFilterChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!IsLoaded || _view is null) return;
+        ApplyFilter();
+    }
 
     private void OnSearchToggle(object sender, RoutedEventArgs e)
     {
@@ -354,32 +272,6 @@ public partial class ModListView : UserControl
         return false;
     }
 
-    private async Task<ModVersion?> TryGetLatestCompatibleAsync(ModSummary mod, ModVersion installed)
-    {
-        try
-        {
-            var mc = _pack?.MinecraftVersion;
-            var loader = _pack?.Loader == LoaderKind.None ? null : _pack?.Loader.ToString().ToLowerInvariant();
-            var versions = mod.Source == ModSource.CurseForge && int.TryParse(mod.Id, out var curseForgeId)
-                ? (await App.State.CurseForge.GetVersionsAsync(curseForgeId))
-                    .Where(v => IsCompatibleVersion(v, mc, loader))
-                    .ToList()
-                : await App.State.Modrinth.GetVersionsAsync(mod.Id, mc, loader);
-            var latest = versions.FirstOrDefault(v => v.ReleaseChannel == "release") ?? versions.FirstOrDefault();
-            return latest?.Id != installed.Id ? latest : null;
-        }
-        catch { return null; }
-    }
-
-    private static bool IsCompatibleVersion(ModVersion version, string? mc, string? loader)
-    {
-        var supportsMinecraft = string.IsNullOrEmpty(mc)
-            || version.GameVersions.Any(v => string.Equals(v, mc, StringComparison.OrdinalIgnoreCase));
-        var supportsLoader = string.IsNullOrEmpty(loader)
-            || version.Loaders.Any(v => string.Equals(v, loader, StringComparison.OrdinalIgnoreCase));
-        return supportsMinecraft && supportsLoader;
-    }
-
     // When the mods grid gets narrow (e.g. inside a side panel), shed the less
     // important columns in priority order so the mod Name always keeps room and
     // wins over the Source label and the Update button.
@@ -387,11 +279,21 @@ public partial class ModListView : UserControl
     {
         if (!e.WidthChanged) return;
         var w = e.NewSize.Width;
+        SourceColumn.Visibility  = w < 520 ? Visibility.Collapsed : Visibility.Visible;
         UpdateColumn.Visibility  = w < 440 ? Visibility.Collapsed : Visibility.Visible;
         VersionColumn.Visibility = w < 360 ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private async void OnRefresh(object s, RoutedEventArgs e) => await ScanModsAsync();
+    /// <summary>
+    /// Refresh: re-scan the folder AND ask the stores again, rather than reusing the version lists
+    /// the session already has.
+    /// </summary>
+    /// <remarks>Version lists are cached for fifteen minutes (see <see cref="ModVersionCatalog"/>) so
+    /// that opening this tab does not cost a store call per mod — which is what got the launcher's
+    /// server throttled in September. The consequence is that leaving the tab and coming back shows
+    /// the same answer as before, which looks like the check never ran. This button is the way to
+    /// actually ask again.</remarks>
+    private async void OnRefresh(object s, RoutedEventArgs e) => await ScanModsAsync(forceUpdateCheck: true);
 
     private void OnOpenManagement(object s, RoutedEventArgs e)
     {
@@ -419,26 +321,143 @@ public partial class ModListView : UserControl
         await App.State.ModpackDownload.StartLocalFileImportAsync(path, name);
     }
 
+    // ── updates ───────────────────────────────────────────────────────────────
+
     private async void OnModAction(object s, RoutedEventArgs e)
     {
-        if (s is FrameworkElement el && el.DataContext is ModRow row && row.LatestVersion != null)
-            await UpdateRowAsync(row);
+        if (s is FrameworkElement el && el.DataContext is PackMod mod && mod.HasUpdate)
+            await UpdateModAsync(mod);
     }
+
+    private async void OnUpdateAll(object sender, RoutedEventArgs e)
+    {
+        if (_pack is null) return;
+        var updatable = _rows.Where(m => m.HasUpdate && m.LatestVersion is not null).ToList();
+        if (updatable.Count == 0) { StatusLabel.Text = "Everything is up to date."; return; }
+
+        List<(PackMod Mod, ModVersion Target)>? chosen;
+        if (_ownerWindow is MainWindow host)
+        {
+            chosen = await ModUpdateReviewDialog.ShowAsync(host, _pack, updatable);
+        }
+        else
+        {
+            // No in-window card host here (the in-game overlay): fall back to a plain confirm that
+            // updates everything except locked mods.
+            var run = updatable.Where(m => !m.Meta.UpdateLocked).ToList();
+            var held = updatable.Count - run.Count;
+            var ok = await AppDialog.ConfirmAsync(_ownerWindow, "Update all",
+                $"Update {run.Count} mod(s)?" + (held > 0 ? $" {held} locked mod(s) will be skipped." : ""),
+                "Update", "Cancel");
+            chosen = ok ? run.Select(m => (m, m.LatestVersion!)).ToList() : null;
+        }
+        if (chosen is null || chosen.Count == 0) return;
+
+        var summary = await RunUpdatesAsync(chosen);
+        StatusLabel.Text = summary.Describe();
+        await ScanModsAsync();
+    }
+
+    /// <summary>Installs a batch of updates several at a time, showing a bar per mod when there is a
+    /// window to show it in (the in-game overlay has none — there the status line reports the result).</summary>
+    private async Task<ModUpdateRunner.Summary> RunUpdatesAsync(IReadOnlyList<(PackMod Mod, ModVersion Target)> chosen)
+    {
+        if (_pack is not null && _ownerWindow is MainWindow host)
+            return await ModUpdateProgressDialog.RunAsync(host, _pack, chosen);
+
+        StatusLabel.Text = $"Updating {chosen.Count} mod(s)…";
+        var jobs = chosen.Select(c => new ModUpdateRunner.Job(c.Mod, c.Target)).ToList();
+        return await ModUpdateRunner.RunAsync(jobs, App.State.Settings.EffectiveModDownloadConcurrency);
+    }
+
+    private async Task UpdateModAsync(PackMod mod)
+    {
+        if (_pack is null || mod.LatestVersion is null) return;
+        if (!await ConfirmUpdateGuardsAsync(mod)) return;
+
+        StatusLabel.Text = $"Updating {mod.DisplayName}…";
+        try
+        {
+            if (await ModUpdater.InstallVersionAsync(mod, mod.LatestVersion))
+            {
+                StatusLabel.Text = $"Updated {mod.DisplayName}.";
+                await ScanModsAsync();
+            }
+            else StatusLabel.Text = "No downloadable file.";
+        }
+        catch (Exception ex) { StatusLabel.Text = "Update failed: " + ex.Message; }
+    }
+
+    /// <summary>The lock and the update-incompatible flag are set in Modpack Management; this view
+    /// honours them and lets the user override once.</summary>
+    private async Task<bool> ConfirmUpdateGuardsAsync(PackMod mod)
+    {
+        if (_pack is null) return false;
+        if (mod.Meta.UpdateLocked &&
+            !await AppDialog.ConfirmAsync(_ownerWindow, "Mod is locked",
+                $"{mod.DisplayName} is locked to its current version.\n\nUpdate it anyway? It stays locked afterwards.",
+                "Update anyway", "Keep locked"))
+            return false;
+
+        if (mod.Meta.UpdateIncompatible && App.State.ModMetadata.Advanced(_pack.Id).WarnOnUpdateIncompatible &&
+            !await AppDialog.ConfirmAsync(_ownerWindow, "Update warning",
+                $"{mod.DisplayName} is marked as update-incompatible — updating it may break your setup.\n\nUpdate anyway?",
+                "Update", "Cancel", danger: true))
+            return false;
+        return true;
+    }
+
+    private async Task UpdateToVersionAsync(PackMod mod)
+    {
+        if (_pack is null || mod.PrimaryMod is null || _ownerWindow is not MainWindow host)
+        {
+            StatusLabel.Text = mod.PrimaryMod is null ? $"{mod.DisplayName} isn't identified yet." : "";
+            return;
+        }
+
+        StatusLabel.Text = $"Loading versions for {mod.DisplayName}…";
+        var versions = await ModUpdater.FetchVersionsAsync(mod.PrimaryMod);
+        if (versions.Count == 0) { StatusLabel.Text = $"No versions found for {mod.DisplayName}."; return; }
+
+        var chosen = await ModVersionPickerDialog.ShowAsync(host, mod.DisplayName, versions,
+            _pack.MinecraftVersion, ModUpdater.LoaderTag(_pack), mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber);
+        if (chosen is null) { StatusLabel.Text = ""; return; }
+        if (!await ConfirmUpdateGuardsAsync(mod)) { StatusLabel.Text = ""; return; }
+
+        StatusLabel.Text = $"Installing {mod.DisplayName} {chosen.VersionNumber}…";
+        try
+        {
+            if (await ModUpdater.InstallVersionAsync(mod, chosen))
+            {
+                StatusLabel.Text = $"Installed {mod.DisplayName} {chosen.VersionNumber}.";
+                await ScanModsAsync();
+            }
+            else StatusLabel.Text = "That version has no downloadable file.";
+        }
+        catch (Exception ex) { StatusLabel.Text = "Install failed: " + ex.Message; }
+    }
+
+    // ── open ──────────────────────────────────────────────────────────────────
 
     private void OnModDoubleClick(object s, MouseButtonEventArgs e)
     {
-        if (ModGrid.SelectedItem is ModRow row && row.LinkedMod != null && _pack is not null)
-        {
-            if (_ownerWindow is MinecraftHostWindow host)
-                host.OpenModExplorerForPack(_pack);
-            else if (_ownerWindow is MainWindow main)
-                main.OpenModExplorerForPack(_pack);
-            else
-                new ModExplorerWindow(_pack) { Owner = _ownerWindow }.Show();
-        }
+        if (ModGrid.SelectedItem is PackMod mod) OpenModPage(mod);
+    }
+
+    private void OpenModPage(PackMod mod)
+    {
+        if (_pack is null) return;
+        if (_ownerWindow is MinecraftHostWindow host)
+            host.OpenModExplorerForPack(_pack);
+        else if (_ownerWindow is MainWindow main)
+            main.OpenModExplorerForPack(_pack, mod.PrimaryMod);
+        else
+            new ModExplorerWindow(_pack) { Owner = _ownerWindow }.Show();
     }
 
     // ── context-menu actions ─────────────────────────────────────────────────
+
+    private PackMod? SelectedMod => ModGrid.SelectedItem as PackMod;
 
     private void OnModGridPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -451,111 +470,152 @@ public partial class ModListView : UserControl
 
     private void OnModContextMenuOpened(object sender, RoutedEventArgs e)
     {
-        var row = ModGrid.SelectedItem as ModRow;
-        CtxCreateHostedMod.IsEnabled = row is { IsExternal: true };
-        CtxEnableMod.Visibility = row is { IsEnabled: false } ? Visibility.Visible : Visibility.Collapsed;
-        CtxDisableMod.Visibility = row is { IsEnabled: true } ? Visibility.Visible : Visibility.Collapsed;
+        var mod = SelectedMod;
+        CtxOpenPage.IsEnabled = mod is { IsExternal: false };
+        CtxOpenWebsite.IsEnabled = mod?.PageUrl is not null;
+        CtxUpdate.IsEnabled = mod is { HasUpdate: true };
+        CtxUpdate.Header = mod is { HasUpdate: true, LatestVersion: { } v } ? $"Update to {v.VersionNumber}" : "Update to latest";
+        CtxUpdateToVersion.IsEnabled = mod is { IsExternal: false } && _ownerWindow is MainWindow;
+        CtxCreateHostedMod.IsEnabled = mod is { IsExternal: true };
+        CtxEnableMod.Visibility = mod is { Enabled: false } ? Visibility.Visible : Visibility.Collapsed;
+        CtxDisableMod.Visibility = mod is { Enabled: true } ? Visibility.Visible : Visibility.Collapsed;
+
+        // The store submenu only means something for a jar known on both stores.
+        CtxStore.Visibility = mod is { IsCrossListed: true } ? Visibility.Visible : Visibility.Collapsed;
+        if (mod is { IsCrossListed: true })
+        {
+            var packDefault = mod.DefaultSource switch
+            {
+                ModSource.CurseForge => "CurseForge",
+                ModSource.Modrinth => "Modrinth",
+                _ => "Modrinth first"
+            };
+            CtxStoreAuto.Header = $"Pack default ({packDefault})";
+            CtxStoreAuto.InputGestureText = mod.Meta.PreferredSource is null ? "✓" : "";
+            CtxStoreCurse.InputGestureText = mod.Meta.PreferredSource == ModSource.CurseForge ? "✓" : "";
+            CtxStoreModrinth.InputGestureText = mod.Meta.PreferredSource == ModSource.Modrinth ? "✓" : "";
+        }
     }
 
     private void OnCtxOpenPage(object s, RoutedEventArgs e)
     {
-        if (ModGrid.SelectedItem is not ModRow row || row.LinkedMod is null) return;
-        var slug = string.IsNullOrEmpty(row.LinkedMod.Slug) ? row.LinkedMod.Id : row.LinkedMod.Slug;
-        var url = row.LinkedMod.Source == ModSource.CurseForge
-            ? $"https://www.curseforge.com/minecraft/mc-mods/{slug}"
-            : $"https://modrinth.com/mod/{slug}";
+        if (SelectedMod is { } mod) OpenModPage(mod);
+    }
+
+    private void OnCtxOpenWebsite(object s, RoutedEventArgs e)
+    {
+        if (SelectedMod?.PageUrl is not { } url) return;
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
     }
 
     private async void OnCtxUpdate(object s, RoutedEventArgs e)
     {
-        if (ModGrid.SelectedItem is not ModRow row || !row.HasUpdate) return;
-        await UpdateRowAsync(row);
+        if (SelectedMod is { HasUpdate: true } mod) await UpdateModAsync(mod);
+    }
+
+    private async void OnCtxUpdateToVersion(object s, RoutedEventArgs e)
+    {
+        if (SelectedMod is { } mod) await UpdateToVersionAsync(mod);
+    }
+
+    private void OnCtxStoreAuto(object s, RoutedEventArgs e) => SetPreferredSource(null);
+    private void OnCtxStoreCurse(object s, RoutedEventArgs e) => SetPreferredSource(ModSource.CurseForge);
+    private void OnCtxStoreModrinth(object s, RoutedEventArgs e) => SetPreferredSource(ModSource.Modrinth);
+
+    /// <summary>Pins (or un-pins) which store's listing a cross-listed mod follows, then re-checks
+    /// its update against that store's version list.</summary>
+    private async void SetPreferredSource(ModSource? source)
+    {
+        if (_pack is null || SelectedMod is not { } mod) return;
+        mod.Meta.PreferredSource = source;
+        App.State.ModInventory.SaveMeta(_pack.Id, mod);
+        _view.Refresh();
+        UpdateStatusLabel();
+        var latest = await ModUpdater.FindUpdateAsync(mod, _pack.MinecraftVersion, ModUpdater.LoaderTag(_pack));
+        mod.LatestVersion = latest;
+        UpdateStatusLabel();
     }
 
     private async void OnCtxEnable(object s, RoutedEventArgs e)
     {
-        if (ModGrid.SelectedItem is not ModRow row || row.IsEnabled) return;
-        await SetModEnabledAsync(row, true);
+        if (SelectedMod is { Enabled: false } mod) await SetModEnabledAsync(mod, true);
     }
 
     private async void OnCtxDisable(object s, RoutedEventArgs e)
     {
-        if (ModGrid.SelectedItem is not ModRow row || !row.IsEnabled) return;
-        await SetModEnabledAsync(row, false);
+        if (SelectedMod is { Enabled: true } mod) await SetModEnabledAsync(mod, false);
     }
 
     private async void OnModEnabledToggle(object sender, RoutedEventArgs e)
     {
-        if (sender is not ToggleButton toggle || toggle.DataContext is not ModRow row) return;
+        if (sender is not ToggleButton toggle || toggle.DataContext is not PackMod mod) return;
         var wantEnabled = toggle.IsChecked == true;
-        if (wantEnabled == row.IsEnabled) return;
+        if (wantEnabled == mod.Enabled) return;
 
-        var ok = await SetModEnabledAsync(row, wantEnabled);
-        if (!ok) toggle.IsChecked = row.IsEnabled;
+        var ok = await SetModEnabledAsync(mod, wantEnabled);
+        if (!ok) toggle.IsChecked = mod.Enabled;
     }
 
-    private Task<bool> SetModEnabledAsync(ModRow row, bool enabled)
+    /// <summary>Flips a mod on disk (<c>.jar</c> ⇄ <c>.jar.disabled</c>) and applies the same dependency
+    /// cascade the Modpack Management page uses, so the two never disagree about what a disable means.</summary>
+    private Task<bool> SetModEnabledAsync(PackMod mod, bool enabled)
     {
-        try
+        if (_pack is null) return Task.FromResult(false);
+        var adv = App.State.ModMetadata.Advanced(_pack.Id);
+        var inv = App.State.ModInventory;
+        var all = _rows.ToList();
+
+        if (!enabled)
         {
-            var newPath = enabled ? EnableModPath(row.FilePath) : DisableModPath(row.FilePath);
-            ReplaceRow(row, newPath, enabled);
-            StatusLabel.Text = enabled ? $"Enabled {row.Name}." : $"Disabled {row.Name}.";
-            UpdateStatusLabel();
-            return Task.FromResult(true);
+            var also = adv.CascadeDisableDependents
+                ? ModGraphService.PlanDisable(all, mod, adv.CascadeDisableLibraries).AlsoDisable
+                : Array.Empty<PackMod>();
+            if (!inv.SetEnabled(mod, false))
+            {
+                StatusLabel.Text = $"Could not disable {mod.DisplayName}.";
+                mod.Refresh();
+                return Task.FromResult(false);
+            }
+            foreach (var m in also) inv.SetEnabled(m, false);
+            StatusLabel.Text = also.Count == 0
+                ? $"Disabled {mod.DisplayName}."
+                : $"Disabled {mod.DisplayName} and {also.Count} dependent(s).";
         }
-        catch (Exception ex)
+        else
         {
-            StatusLabel.Text = enabled ? "Enable failed: " + ex.Message : "Disable failed: " + ex.Message;
-            return Task.FromResult(false);
+            var deps = ModGraphService.PlanEnable(all, mod);
+            if (!inv.SetEnabled(mod, true))
+            {
+                StatusLabel.Text = $"Could not enable {mod.DisplayName}.";
+                mod.Refresh();
+                return Task.FromResult(false);
+            }
+            foreach (var m in deps) inv.SetEnabled(m, true);
+            StatusLabel.Text = deps.Count == 0
+                ? $"Enabled {mod.DisplayName}."
+                : $"Enabled {mod.DisplayName} and {deps.Count} dependency(ies).";
         }
-    }
-
-    private void ReplaceRow(ModRow row, string newPath, bool isEnabled)
-    {
-        var idx = _rows.IndexOf(row);
-        if (idx < 0) return;
-        _rows[idx] = row.WithPath(newPath, isEnabled);
-    }
-
-    private static string EnableModPath(string path)
-    {
-        if (!path.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Mod is already enabled.");
-        var enabledPath = path[..^".disabled".Length];
-        File.Move(path, enabledPath);
-        return enabledPath;
-    }
-
-    private static string DisableModPath(string path)
-    {
-        if (path.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Mod is already disabled.");
-        if (!path.EndsWith(".jar", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("Only .jar mods can be disabled.");
-        var disabledPath = path + ".disabled";
-        File.Move(path, disabledPath);
-        return disabledPath;
+        _view.Refresh();
+        return Task.FromResult(true);
     }
 
     private async void OnCtxCreateHostedMod(object sender, RoutedEventArgs e)
     {
         if (_pack is null) return;
-        if (ModGrid.SelectedItem is not ModRow row) return;
-        if (!row.IsExternal)
+        if (SelectedMod is not { } mod) return;
+        if (!mod.IsExternal)
         {
             StatusLabel.Text = "This jar is already linked to a known mod.";
             return;
         }
-        if (!File.Exists(row.FilePath))
+        if (!File.Exists(mod.FilePath))
         {
             StatusLabel.Text = "Jar file no longer exists.";
             return;
         }
 
-        var defaultName = CleanModName(Path.GetFileNameWithoutExtension(row.FilePath));
+        var defaultName = CleanModName(Path.GetFileNameWithoutExtension(mod.FileName));
         var nameDialog = new SimpleInputDialog("Create hosted mod", "Mod name", defaultName)
         {
             Owner = _ownerWindow
@@ -569,7 +629,7 @@ public partial class ModListView : UserControl
             return;
         }
 
-        var defaultVersion = GuessVersion(row.FilePath);
+        var defaultVersion = GuessVersion(mod.FileName);
         var versionDialog = new SimpleInputDialog("Upload first version", "Version string", defaultVersion)
         {
             Owner = _ownerWindow
@@ -583,24 +643,24 @@ public partial class ModListView : UserControl
             return;
         }
 
-        StatusLabel.Text = $"Creating hosted mod for {Path.GetFileName(row.FilePath)}...";
+        StatusLabel.Text = $"Creating hosted mod for {mod.FileName}...";
         try
         {
             var loadersCsv = PackLoaderCsv(_pack);
             var created = await App.State.Api.CreateModAsync(new CreateModRequest(
                 modName,
-                $"Created from {Path.GetFileName(row.FilePath)}",
+                $"Created from {mod.FileName}",
                 null,
                 PackVisibility.Private,
                 _pack.MinecraftVersion,
                 loadersCsv));
 
             StatusLabel.Text = "Uploading first version...";
-            await App.State.Api.UploadModVersionAsync(created.Id, row.FilePath, new CreateModVersionRequest(
+            await App.State.Api.UploadModVersionAsync(created.Id, mod.FilePath, new CreateModVersionRequest(
                 version,
                 null,
                 "release",
-                Path.GetFileName(row.FilePath),
+                Path.GetFileName(mod.FilePath),
                 _pack.MinecraftVersion,
                 loadersCsv));
 
@@ -623,8 +683,8 @@ public partial class ModListView : UserControl
 
     private void OnCtxReveal(object s, RoutedEventArgs e)
     {
-        if (ModGrid.SelectedItem is not ModRow row) return;
-        var dir = Path.GetDirectoryName(row.FilePath);
+        if (SelectedMod is not { } mod) return;
+        var dir = Path.GetDirectoryName(mod.FilePath);
         if (dir is null) return;
         try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true }); }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
@@ -632,55 +692,16 @@ public partial class ModListView : UserControl
 
     private async void OnCtxDelete(object s, RoutedEventArgs e)
     {
-        if (ModGrid.SelectedItem is not ModRow row) return;
-        if (MessageBox.Show(_ownerWindow,
-                $"Delete {Path.GetFileName(row.FilePath)}?",
-                "Confirm delete", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        if (SelectedMod is not { } mod) return;
+        if (!await AppDialog.ConfirmAsync(_ownerWindow, "Delete mod",
+                $"Delete {Path.GetFileName(mod.FilePath)}?", "Delete", "Cancel", danger: true))
             return;
         try
         {
-            File.Delete(row.FilePath);
+            File.Delete(mod.FilePath);
             await ScanModsAsync();
         }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
-    }
-
-    private async Task UpdateRowAsync(ModRow row)
-    {
-        StatusLabel.Text = $"Updating {row.Name}…";
-        var file = row.LatestVersion!.Files.FirstOrDefault(f => f.IsPrimary) ?? row.LatestVersion.Files.FirstOrDefault();
-        if (file is null) { StatusLabel.Text = "No downloadable file."; return; }
-        try
-        {
-            file = await EnsureDownloadableFileAsync(row.LatestVersion, file);
-            if (string.IsNullOrWhiteSpace(file.DownloadUrl))
-            {
-                StatusLabel.Text = "No downloadable file.";
-                return;
-            }
-
-            var dest = Path.Combine(Path.GetDirectoryName(row.FilePath)!, file.Filename);
-            await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, dest);
-            if (!string.Equals(row.FilePath, dest, StringComparison.OrdinalIgnoreCase) && File.Exists(row.FilePath))
-                File.Delete(row.FilePath);
-            StatusLabel.Text = $"Updated {row.Name}.";
-            await ScanModsAsync();
-        }
-        catch (Exception ex) { StatusLabel.Text = "Update failed: " + ex.Message; }
-    }
-
-    private static async Task<ModVersionFile> EnsureDownloadableFileAsync(ModVersion version, ModVersionFile file)
-    {
-        if (version.Source != ModSource.CurseForge || !string.IsNullOrWhiteSpace(file.DownloadUrl)) return file;
-
-        var ids = version.Id.Split(':');
-        if (ids.Length != 2
-            || !int.TryParse(ids[0], out var modId)
-            || !int.TryParse(ids[1], out var fileId))
-            return file;
-
-        var url = await App.State.CurseForge.GetDownloadUrlAsync(modId, fileId);
-        return string.IsNullOrWhiteSpace(url) ? file : file with { DownloadUrl = url };
     }
 
     private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
@@ -704,74 +725,10 @@ public partial class ModListView : UserControl
         return string.IsNullOrWhiteSpace(stem) ? "New mod" : stem;
     }
 
-    private static string GuessVersion(string filePath)
+    private static string GuessVersion(string fileName)
     {
-        var stem = Path.GetFileNameWithoutExtension(filePath);
+        var stem = Path.GetFileNameWithoutExtension(fileName);
         var match = System.Text.RegularExpressions.Regex.Match(stem, @"(?<!\d)(\d+\.\d+(?:\.\d+)?(?:[-+][A-Za-z0-9_.-]+)?)(?!\d)");
         return match.Success ? match.Groups[1].Value : "1.0.0";
-    }
-}
-
-// ── row view model ────────────────────────────────────────────────────────────
-
-public sealed class ModRow
-{
-    public string FilePath     { get; }
-    public string Folder       { get; }
-    public bool IsEnabled      { get; }
-    public ModSummary? LinkedMod     { get; }
-    public ModVersion? LinkedVersion { get; }
-    public ModVersion? LatestVersion { get; set; }
-
-    public bool IsExternal  => LinkedMod is null;
-    public bool HasUpdate   => LatestVersion is not null;
-
-    public string Name       => LinkedMod?.Name ?? DisplayFileStem(FilePath);
-    public string Version    => LinkedVersion?.VersionNumber ?? "(unknown)";
-    public long VersionSortKey => ComputeVersionSortKey(LinkedVersion?.VersionNumber);
-    public string Initial    => (LinkedMod?.Name ?? DisplayFileStem(FilePath) ?? "?").Trim() is { Length: > 0 } name
-        ? name[..1].ToUpperInvariant()
-        : "?";
-    public string IconUrl    => LinkedMod?.IconUrl ?? "";
-    public string SourceLabel => LinkedMod?.Source switch
-        { ModSource.Modrinth => "Modrinth", ModSource.CurseForge => "CurseForge", _ => "External" }
-        ?? "External";
-    public string SourceIconUrl => LinkedMod?.Source switch
-        {
-            ModSource.Modrinth => "https://modrinth.com/favicon.ico",
-            ModSource.CurseForge => "https://www.curseforge.com/favicon.ico",
-            _ => ""
-        }
-        ?? "";
-
-    public ModRow(string path, string folder, bool isEnabled, ModSummary? mod, ModVersion? ver, ModVersion? latest)
-    {
-        FilePath = path; Folder = folder; IsEnabled = isEnabled; LinkedMod = mod; LinkedVersion = ver; LatestVersion = latest;
-    }
-
-    public ModRow WithPath(string path, bool isEnabled) =>
-        new(path, Folder, isEnabled, LinkedMod, LinkedVersion, LatestVersion);
-
-    private static string DisplayFileStem(string path)
-    {
-        var name = Path.GetFileName(path) ?? "";
-        if (name.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase))
-            name = name[..^".disabled".Length];
-        return Path.GetFileNameWithoutExtension(name);
-    }
-
-    private static long ComputeVersionSortKey(string? version)
-    {
-        if (string.IsNullOrWhiteSpace(version)) return 0;
-        var parts = version.Split('.', '-', '_');
-        long value = 0;
-        for (var i = 0; i < 4; i++)
-        {
-            value *= 1000;
-            if (i >= parts.Length) continue;
-            if (!int.TryParse(parts[i], out var part)) break;
-            value += Math.Clamp(part, 0, 999);
-        }
-        return value;
     }
 }

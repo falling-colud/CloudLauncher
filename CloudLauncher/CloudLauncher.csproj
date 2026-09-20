@@ -22,9 +22,18 @@
         <Nullable>enable</Nullable>
         <ImplicitUsings>enable</ImplicitUsings>
         <UseWPF>true</UseWPF>
-        <!-- Launcher version. Bump this before publishing an update; publish-update.ps1
-             reads it and the in-app updater compares against it. -->
-        <Version>1.0.1</Version>
+        <!-- Embedded as the exe's Win32 icon (taskbar / Explorer / Alt-Tab) and used by the
+             installer for shortcuts. Because the self-updater rebuilds from this same project,
+             every self-updated exe keeps the icon too. -->
+        <ApplicationIcon>Assets\appicon.ico</ApplicationIcon>
+        <!-- Product metadata surfaced in Explorer's file properties and by the installer. -->
+        <Product>CloudLauncher</Product>
+        <Company>CloudLauncher</Company>
+        <Description>CloudLauncher — a cloud-synced Minecraft launcher.</Description>
+        <!-- Launcher version. Bump this before publishing an update or building the installer;
+             publish-update.ps1 / build-installer.ps1 read it and the in-app updater compares
+             against it. -->
+        <Version>1.3.7</Version>
     </PropertyGroup>
 
 </Project>

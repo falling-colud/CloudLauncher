@@ -144,8 +144,12 @@ public partial class MinecraftHostWindow : Window
         RefreshHotkeyLabels();
     }
 
-    public void OpenModExplorerForPack(PackDetail pack) =>
-        PushPackPage(new ModExplorerPage(_shell, pack), $"Browse mods · {pack.Name}");
+    public void OpenModExplorerForPack(PackDetail pack, CloudLauncher.Services.ModSummary? showMod = null)
+    {
+        var page = new ModExplorerPage(_shell, pack);
+        PushPackPage(page, $"Browse mods · {pack.Name}");
+        if (showMod is not null) _ = page.ShowModAsync(showMod);
+    }
 
     public void OpenResourcePackExplorerForPack(PackDetail pack) =>
         PushPackPage(new ResourcePackExplorerPage(_shell, pack), $"Browse resource packs · {pack.Name}");
@@ -1001,14 +1005,37 @@ public partial class MinecraftHostWindow : Window
         if (!GetClipCursor(out var clip))
             return false;
 
-        var virtualWidth = GetSystemMetrics(SmCxVirtualScreen);
-        var virtualHeight = GetSystemMetrics(SmCyVirtualScreen);
-        if (virtualWidth <= 0 || virtualHeight <= 0)
+        // Reference the clip against the monitor Minecraft is on, NOT the whole
+        // virtual desktop. With two monitors the virtual screen spans both, while
+        // the default (unconfined) clip stays a single monitor — so comparing the
+        // clip width against the virtual width made an ordinary, unconfined cursor
+        // look "smaller than the screen" and register as camera look. That pinned
+        // the cursor to the window centre and clipped it to the host every frame,
+        // with no way to move or click free — which is why this only ever broke on
+        // multi-monitor setups.
+        if (!TryGetMonitorBounds(_minecraftHwnd, out var monitor))
             return false;
 
-        // Allow a small margin to avoid false positives from DPI rounding.
-        return (clip.Right - clip.Left) + 32 < virtualWidth
-            || (clip.Bottom - clip.Top) + 32 < virtualHeight;
+        var monitorWidth = monitor.Right - monitor.Left;
+        var monitorHeight = monitor.Bottom - monitor.Top;
+        if (monitorWidth <= 0 || monitorHeight <= 0)
+            return false;
+
+        // A clip centred on a different display is the default desktop clip (often
+        // the primary monitor's rect), never GLFW confining the cursor to the game.
+        var clipCentreX = clip.Left + ((clip.Right - clip.Left) / 2);
+        var clipCentreY = clip.Top + ((clip.Bottom - clip.Top) / 2);
+        if (clipCentreX < monitor.Left || clipCentreX >= monitor.Right ||
+            clipCentreY < monitor.Top || clipCentreY >= monitor.Bottom)
+        {
+            return false;
+        }
+
+        // Camera look confines the cursor to MC's window, which is smaller than the
+        // monitor. The 32px margin absorbs DPI rounding and borderless fullscreen's
+        // one-pixel shrink, so a full-monitor clip never counts as mouse-look.
+        return (clip.Right - clip.Left) + 32 < monitorWidth
+            || (clip.Bottom - clip.Top) + 32 < monitorHeight;
     }
 
     private IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam)
@@ -1574,17 +1601,12 @@ public partial class MinecraftHostWindow : Window
     private static extern bool GetClipCursor(out NativeRect lpRect);
 
     [DllImport("user32.dll")]
-    private static extern int GetSystemMetrics(int nIndex);
-
-    [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetMonitorInfo(IntPtr hMonitor, ref NativeMonitorInfo lpmi);
 
     private const uint MonitorDefaultToNearest = 0x00000002;
-    private const int SmCxVirtualScreen = 78;
-    private const int SmCyVirtualScreen = 79;
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool GetCursorInfo(ref CursorInfo pci);

@@ -11,6 +11,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<Pack> Packs => Set<Pack>();
     public DbSet<PackCollaborator> PackCollaborators => Set<PackCollaborator>();
+    public DbSet<PackListing> PackListings => Set<PackListing>();
     public DbSet<Team> Teams => Set<Team>();
     public DbSet<TeamMember> TeamMembers => Set<TeamMember>();
     public DbSet<PackTeam> PackTeams => Set<PackTeam>();
@@ -52,6 +53,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
         {
             e.HasKey(x => new { x.PackId, x.UserId });
             e.HasOne(x => x.Pack).WithMany(p => p.Collaborators).HasForeignKey(x => x.PackId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<PackListing>(e =>
+        {
+            e.HasKey(x => new { x.PackId, x.UserId });
+            e.HasOne(x => x.Pack).WithMany().HasForeignKey(x => x.PackId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         });
 

@@ -1,3 +1,4 @@
+﻿using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.IO;
 
@@ -21,8 +22,13 @@ public sealed class PackMod : INotifyPropertyChanged
 
     public long Size { get; init; }
 
-    /// <summary>When the jar landed in the pack folder (file creation time). Drives the "Last added" sort.</summary>
-    public DateTime AddedAt { get; init; }
+    /// <summary>When this mod first landed in the pack. Seeded from the jar's creation time and then
+    /// held steady across updates by <see cref="ModAddedCache"/>. Drives the "Add date" sort.</summary>
+    public DateTime AddedAt { get; set; }
+
+    /// <summary>"Added 12 Sep 2026, 21:04" in local time, for the List view row and the tooltip.</summary>
+    public string AddedLabel =>
+        AddedAt <= DateTime.MinValue ? "" : "Added " + AddedAt.ToLocalTime().ToString("d MMM yyyy, HH:mm");
 
     private bool _enabled;
     public bool Enabled
@@ -36,13 +42,14 @@ public sealed class PackMod : INotifyPropertyChanged
     public ModSummary? CurseForge { get; set; }
     public ModVersion? CurseForgeVersion { get; set; }
 
-    /// <summary>Fills in the resolved store identity after the fast initial scan and refreshes bindings.</summary>
+    /// <summary>Fills in the resolved store identity after the fast initial scan and refreshes bindings.
+    /// A store that came back unresolved is left as it was rather than cleared: identity lookups fail
+    /// per store (an API outage, a CDN block), and blanking one we had already identified drops the
+    /// mod back to looking unrecognised until some later pass happens to succeed.</summary>
     public void ApplyIdentity(ModSummary? modrinth, ModVersion? modrinthVer, ModSummary? curse, ModVersion? curseVer)
     {
-        Modrinth = modrinth;
-        ModrinthVersion = modrinthVer;
-        CurseForge = curse;
-        CurseForgeVersion = curseVer;
+        if (modrinth is not null) { Modrinth = modrinth; ModrinthVersion = modrinthVer; }
+        if (curse is not null) { CurseForge = curse; CurseForgeVersion = curseVer; }
         Refresh();
     }
 
@@ -73,15 +80,30 @@ public sealed class PackMod : INotifyPropertyChanged
 
     // ── derived display / identity ─────────────────────────────────────────────
 
-    // Honor the store the user installed from (Meta.PreferredSource) so a cross-listed jar keeps that
-    // store's identity; otherwise default to Modrinth-first.
-    public ModSummary? PrimaryMod => Meta.PreferredSource switch
+    /// <summary>The pack-wide store preference (<see cref="ModAdvancedSettings.PreferredSource"/>),
+    /// stamped on by the inventory at load so a mod without its own preference follows it.</summary>
+    public ModSource? DefaultSource { get; set; }
+
+    /// <summary>The pack-wide update channel (<see cref="ModAdvancedSettings.UpdateChannel"/>), stamped
+    /// on by the inventory at load; <see cref="EffectiveUpdateChannel"/> applies the per-mod override.</summary>
+    public string DefaultUpdateChannel { get; set; } = ModUpdateChannel.Release;
+
+    /// <summary>The channel this mod's updates are drawn from: its own setting, else the pack's.</summary>
+    public string EffectiveUpdateChannel =>
+        ModUpdateChannel.Normalize(Meta.UpdateChannel) ?? ModUpdateChannel.Normalize(DefaultUpdateChannel) ?? ModUpdateChannel.Release;
+
+    /// <summary>The store this mod follows: its own choice, else the pack default, else Modrinth first.</summary>
+    public ModSource? EffectiveSourcePreference => Meta.PreferredSource ?? DefaultSource;
+
+    // Honor the store the user installed from (Meta.PreferredSource) - or the pack-wide default a
+    // CurseForge import sets - so a cross-listed jar keeps that store's identity; otherwise Modrinth-first.
+    public ModSummary? PrimaryMod => EffectiveSourcePreference switch
     {
         ModSource.CurseForge when CurseForge is not null => CurseForge,
         ModSource.Modrinth when Modrinth is not null => Modrinth,
         _ => Modrinth ?? CurseForge
     };
-    public ModVersion? PrimaryVersion => Meta.PreferredSource switch
+    public ModVersion? PrimaryVersion => EffectiveSourcePreference switch
     {
         ModSource.CurseForge when CurseForgeVersion is not null => CurseForgeVersion,
         ModSource.Modrinth when ModrinthVersion is not null => ModrinthVersion,
@@ -89,6 +111,30 @@ public sealed class PackMod : INotifyPropertyChanged
     };
     public ModSource? PrimarySource => PrimaryMod?.Source;
     public bool IsExternal => PrimaryMod is null;
+
+    /// <summary>True when the jar is known on both stores, so a store preference actually changes something.</summary>
+    public bool IsCrossListed => Modrinth is not null && CurseForge is not null;
+
+    /// <summary>Numeric key so a grid sorts "1.10" after "1.9" instead of alphabetically.</summary>
+    public long VersionSortKey
+    {
+        get
+        {
+            var version = PrimaryVersion?.VersionNumber;
+            if (string.IsNullOrWhiteSpace(version)) return 0;
+            var parts = version.Split('.', '-', '_', '+', ' ');
+            long value = 0;
+            for (var i = 0; i < 4; i++)
+            {
+                value *= 1000;
+                if (i >= parts.Length) continue;
+                var digits = new string(parts[i].TakeWhile(char.IsDigit).ToArray());
+                if (!int.TryParse(digits, out var part)) break;
+                value += Math.Clamp(part, 0, 999);
+            }
+            return value;
+        }
+    }
 
     public string DisplayName => PrimaryMod?.Name ?? Path.GetFileNameWithoutExtension(FileName);
     public string VersionLabel => PrimaryVersion?.VersionNumber ?? "—";
@@ -99,12 +145,31 @@ public sealed class PackMod : INotifyPropertyChanged
     public IReadOnlyList<string> CandidateKeys => ModMetadataService.CandidateKeys(Modrinth, CurseForge, FileName);
 
     public int Priority => Meta.Priority;
+    public int ContentSize => Meta.ContentSize;
+    public string ContentSizeLabel => ModContentSize.Label(Meta.ContentSize);
     public bool IsLibrary => Meta.IsLibrary;
     public bool IsTesting => Meta.IsTesting;
     public bool IsExtra => Meta.IsExtra;
+
+    /// <summary>Held at its current version: bulk updates skip it. See <see cref="ModMeta.UpdateLocked"/>.</summary>
+    public bool IsUpdateLocked => Meta.UpdateLocked;
     public ModSide Side => Meta.Side;
     public bool IsSideRestricted => Meta.Side != ModSide.Both;
     public bool IsLocal => string.Equals(Folder, "local", StringComparison.OrdinalIgnoreCase);
+
+    public string? Note => string.IsNullOrWhiteSpace(Meta.Note) ? null : Meta.Note!.Trim();
+    public bool HasNote => Note is not null;
+
+    /// <summary>First line of the note, trimmed to fit a card row.</summary>
+    public string NotePreview
+    {
+        get
+        {
+            if (Note is not { } n) return "";
+            var line = n.Split('\n')[0].TrimEnd('\r', ' ');
+            return line.Length > 90 ? line[..90].TrimEnd() + "…" : line;
+        }
+    }
 
     public string Initial =>
         DisplayName.Trim() is { Length: > 0 } n ? n[..1].ToUpperInvariant() : "?";
@@ -127,6 +192,13 @@ public sealed class PackMod : INotifyPropertyChanged
     }
 
     public string CategoriesLabel => Meta.Categories.Count == 0 ? "" : string.Join(", ", Meta.Categories);
+
+    /// <summary>The category this mod is filed under when the views group by category: its first
+    /// one, or "Uncategorized". A mod can be in several; the first is the one it was put in first,
+    /// and grouping needs exactly one bucket per mod — the same rule the graph uses.</summary>
+    public string PrimaryCategory => Meta.Categories.FirstOrDefault() ?? UncategorizedName;
+
+    public const string UncategorizedName = "Uncategorized";
 
     public IReadOnlyList<ModDependency> Dependencies
     {
@@ -153,6 +225,7 @@ public sealed class PackMod : INotifyPropertyChanged
         var sb = new System.Text.StringBuilder();
         sb.AppendLine(DisplayName);
         sb.AppendLine($"Version: {VersionLabel}    Source: {SourceLabel}    Folder: {Folder}");
+        if (AddedLabel.Length > 0) sb.AppendLine(AddedLabel);
         if (PrimaryMod?.Author is { Length: > 0 } author) sb.AppendLine($"Author: {author}");
 
         var flags = new List<string>();
@@ -162,11 +235,24 @@ public sealed class PackMod : INotifyPropertyChanged
         if (IsExtra) flags.Add("extra");
         if (Side != ModSide.Both) flags.Add(Side == ModSide.Client ? "client-only" : "server-only");
         if (Priority != 0) flags.Add($"priority {Priority}");
+        if (ContentSize != 0) flags.Add($"{ContentSizeLabel.ToLowerInvariant()} content");
         if (Meta.UpdateIncompatible) flags.Add("update-incompatible");
+        if (Meta.UpdateLocked) flags.Add("updates locked");
         if (flags.Count > 0) sb.AppendLine("Flags: " + string.Join(", ", flags));
         if (Meta.Categories.Count > 0) sb.AppendLine("Categories: " + string.Join(", ", Meta.Categories));
         if (RequiredDependencies.Count > 0) sb.AppendLine($"Dependencies: {RequiredDependencies.Count}");
-        if (HasUpdate) sb.AppendLine($"Update available → {LatestVersion!.VersionNumber}");
+        if (HasUpdate)
+            sb.AppendLine($"Update available → {LatestVersion!.VersionNumber}" +
+                          (Meta.UpdateLocked ? "  (locked — “Update all” skips this)" : ""));
+        if (Meta.UpdateChannel is not null)
+            sb.AppendLine($"Update channel: {ModUpdateChannel.Label(Meta.UpdateChannel)}");
+
+        if (Note is { } note)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Note:");
+            sb.AppendLine(note.Length > 500 ? note[..500].TrimEnd() + "…" : note);
+        }
 
         if (PrimaryMod?.Description is { Length: > 0 } desc)
         {
@@ -201,22 +287,57 @@ public sealed class PackModInventory
     private readonly ModrinthService _modrinth;
     private readonly CurseForgeService _curseForge;
     private readonly ModMetadataService _metadata;
+    private readonly ModAddedCache _added;
+
+    /// <summary>The store each pack's mods evidently came from (see <see cref="InferSource"/>), for
+    /// packs that have no explicit default. Kept for the session so reloads don't flip labels.</summary>
+    private readonly ConcurrentDictionary<Guid, ModSource?> _inferred = new();
 
     public PackModInventory(
         PackFolderService packs,
         ModFingerprintCache cache,
         ModrinthService modrinth,
         CurseForgeService curseForge,
-        ModMetadataService metadata)
+        ModMetadataService metadata,
+        ModAddedCache added)
     {
         _packs = packs;
         _cache = cache;
         _modrinth = modrinth;
         _curseForge = curseForge;
         _metadata = metadata;
+        _added = added;
     }
 
     public ModMetadataService Metadata => _metadata;
+
+    /// <summary>The store a pack's mods evidently came from, when the pack has no explicit default:
+    /// whichever store more of its jars exist on <em>exclusively</em>. A jar only CurseForge knows
+    /// can't have come from Modrinth, so a pack of CurseForge-only mods with one Modrinth-only mod is
+    /// a CurseForge pack — and its cross-listed mods should link there too. Null when it's a tie.</summary>
+    public ModSource? InferredSource(Guid packId) => _inferred.TryGetValue(packId, out var s) ? s : null;
+
+    /// <summary>Exclusive-store counts behind <see cref="InferredSource"/>, for the Advanced tab's label.</summary>
+    public (int CurseForgeOnly, int ModrinthOnly) ExclusiveCounts(IEnumerable<PackMod> mods)
+    {
+        int cf = 0, mr = 0;
+        foreach (var m in mods)
+        {
+            if (m.CurseForge is not null && m.Modrinth is null) cf++;
+            else if (m.Modrinth is not null && m.CurseForge is null) mr++;
+        }
+        return (cf, mr);
+    }
+
+    private static ModSource? InferSource(int curseForgeOnly, int modrinthOnly) =>
+        curseForgeOnly > modrinthOnly ? ModSource.CurseForge
+        : modrinthOnly > curseForgeOnly ? ModSource.Modrinth
+        : null;
+
+    /// <summary>The store a mod without its own preference follows: the pack's explicit default,
+    /// else the inferred one.</summary>
+    private ModSource? EffectiveDefault(Guid packId) =>
+        _metadata.Advanced(packId).PreferredSource ?? InferredSource(packId);
 
     /// <summary>Fast first pass: enumerate the jars, attach saved flags, and reuse each jar's
     /// locally-cached store identity (name / icon / version) — all without hashing or network, so
@@ -228,6 +349,8 @@ public sealed class PackModInventory
         return await Task.Run(() =>
         {
             var found = ScanFolders(packId, includeLocal);
+            var advanced = _metadata.Advanced(packId);
+            var channel = _metadata.EffectiveUpdateChannel(packId);
 
             var mods = new List<PackMod>(found.Count);
             foreach (var (path, folder, enabled) in found)
@@ -255,22 +378,41 @@ public sealed class PackModInventory
                     Enabled = enabled,
                     Size = size,
                     AddedAt = addedAt,
+                    DefaultSource = advanced.PreferredSource ?? InferredSource(packId),
+                    DefaultUpdateChannel = channel,
                     Meta = _metadata.GetMeta(packId, ModMetadataService.CandidateKeys(null, null, fileName))
                 };
 
-                // Reuse the saved identity right away (no hashing, no network — validated by the jar's
-                // size + write time). The list/graph show real names, versions and icons immediately;
-                // ResolveIdentitiesAsync still re-resolves both stores and re-checks for updates after.
-                if (_cache.TryGetCachedMatch(path, out var cachedMod, out var cachedVer))
+                // Reuse the saved identities right away (no hashing, no network — validated by the jar's
+                // size + write time). Both stores' identities when known, so a cross-listed mod shows
+                // the store it follows from the first frame instead of flipping once resolution lands.
+                if (_cache.TryGetCachedMatches(path, out var cachedMr, out var cachedCf))
                 {
-                    if (cachedMod.Source == ModSource.Modrinth) mod.ApplyIdentity(cachedMod, cachedVer, null, null);
-                    else mod.ApplyIdentity(null, null, cachedMod, cachedVer);
+                    mod.ApplyIdentity(cachedMr?.Mod, cachedMr?.Version, cachedCf?.Mod, cachedCf?.Version);
                     mod.Meta = _metadata.GetMeta(packId, mod.CandidateKeys); // re-key to the stable source id
                 }
+
+                // "Added" is the first time this mod was seen here, not this jar's creation time —
+                // an update replaces the jar, and the user still means "when did I add this mod".
+                mod.AddedAt = _added.Resolve(packId, mod.CandidateKeys, addedAt);
 
                 mods.Add(mod);
             }
 
+            // First load this session: infer the pack's home store from what the cache already knows,
+            // so the very first paint links cross-listed mods to the right store.
+            if (advanced.PreferredSource is null && !_inferred.ContainsKey(packId))
+            {
+                var (cfOnly, mrOnly) = ExclusiveCounts(mods);
+                var guess = InferSource(cfOnly, mrOnly);
+                if (guess is not null)
+                {
+                    _inferred[packId] = guess;
+                    foreach (var m in mods) m.DefaultSource = guess;
+                }
+            }
+
+            _added.Flush();
             return Sort(mods);
         }, ct);
     }
@@ -282,10 +424,10 @@ public sealed class PackModInventory
     {
         if (mods.Count == 0) return;
         var paths = mods.Select(m => m.FilePath).ToList();
-        var identities = await InstalledModResolver.ResolveAsync(paths, _cache, _modrinth, _curseForge, ct);
+        var index = await InstalledModResolver.ResolveAsync(paths, _cache, _modrinth, _curseForge, ct);
 
         var byPath = new Dictionary<string, InstalledModIdentity>(StringComparer.OrdinalIgnoreCase);
-        foreach (var id in identities) byPath[id.Path] = id;
+        foreach (var id in index.Identities) byPath[id.Path] = id;
 
         foreach (var m in mods)
         {
@@ -296,11 +438,33 @@ public sealed class PackModInventory
             m.ApplyIdentity(id.Modrinth?.Mod, id.Modrinth?.Version, id.CurseForge?.Mod, id.CurseForge?.Version);
             // Re-read flags now that a stable source key (modrinth:/curseforge:) is available.
             m.Meta = _metadata.GetMeta(packId, m.CandidateKeys);
+            m.AddedAt = _added.Resolve(packId, m.CandidateKeys, m.AddedAt);
+        }
+
+        // Re-infer from the full picture — but only from a pass where both stores answered, since a
+        // store that failed would make every jar look exclusive to the other one.
+        if (index.Complete)
+        {
+            var (cfOnly, mrOnly) = ExclusiveCounts(mods);
+            _inferred[packId] = InferSource(cfOnly, mrOnly);
+            // Every mod answered, so anything else on file is a mod that left the pack. Pruning off a
+            // partial pass would throw away the added dates of the mods that store did not answer for.
+            _added.Prune(packId, mods.SelectMany(m => m.CandidateKeys));
+        }
+        _added.Flush();
+        var effective = EffectiveDefault(packId);
+        foreach (var m in mods)
+        {
+            if (m.DefaultSource == effective) continue;
+            m.DefaultSource = effective;
+            m.Refresh();
         }
     }
 
+    // Priority first, then content size (bigger mods float up within a band), then name.
     private static List<PackMod> Sort(IEnumerable<PackMod> mods) =>
         mods.OrderByDescending(m => m.Priority)
+            .ThenByDescending(m => m.ContentSize)
             .ThenBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -371,5 +535,20 @@ public sealed class PackModInventory
     {
         _metadata.SetMeta(packId, mod.CandidateKeys, mod.Meta);
         mod.Refresh();
+    }
+
+    /// <summary>Re-stamps the pack-wide defaults (store preference, update channel) onto already
+    /// loaded mods after the Advanced settings changed, so labels and links follow without a re-scan.</summary>
+    public void ApplyPackDefaults(Guid packId, IEnumerable<PackMod> mods)
+    {
+        var advanced = _metadata.Advanced(packId);
+        var source = advanced.PreferredSource ?? InferredSource(packId);
+        var channel = _metadata.EffectiveUpdateChannel(packId);
+        foreach (var m in mods)
+        {
+            m.DefaultSource = source;
+            m.DefaultUpdateChannel = channel;
+            m.Refresh();
+        }
     }
 }

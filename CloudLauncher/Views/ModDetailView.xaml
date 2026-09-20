@@ -1,8 +1,8 @@
-<Page x:Class="CloudLauncher.Views.ModDetailView"
+﻿<Page x:Class="CloudLauncher.Views.ModDetailView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       Title="Mod"
-      Background="{StaticResource Surface0Brush}">
+      Background="{DynamicResource Surface0Brush}">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="22,16,22,28">
 
@@ -10,9 +10,9 @@
                 <StackPanel>
                     <DockPanel Margin="0,0,0,8">
                         <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
-                                Background="{StaticResource Surface4Brush}">
+                                Background="{DynamicResource Surface4Brush}">
                             <TextBlock x:Name="VisibilityLabel" Style="{StaticResource PillText}"
-                                       Foreground="{StaticResource TextSecondaryBrush}"/>
+                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
                         </Border>
                         <TextBlock x:Name="ModNameLabel" Style="{StaticResource H2}"
                                    TextTrimming="CharacterEllipsis"/>
@@ -65,8 +65,8 @@
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <Border Padding="10" Margin="0,0,0,1"
-                                        Background="{StaticResource Surface1Brush}"
-                                        BorderBrush="{StaticResource BorderSubtleBrush}"
+                                        Background="{DynamicResource Surface1Brush}"
+                                        BorderBrush="{DynamicResource BorderSubtleBrush}"
                                         BorderThickness="0,0,0,1">
                                     <Grid>
                                         <Grid.ColumnDefinitions>
@@ -81,11 +81,11 @@
                                                        Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
                                         </StackPanel>
                                         <Border Grid.Column="1" Style="{StaticResource Pill}"
-                                                Background="{StaticResource Surface4Brush}"
+                                                Background="{DynamicResource Surface4Brush}"
                                                 Margin="0,0,10,0" VerticalAlignment="Center">
                                             <TextBlock Text="{Binding ReleaseChannel}"
                                                        Style="{StaticResource PillText}"
-                                                       Foreground="{StaticResource TextSecondaryBrush}"/>
+                                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
                                         </Border>
                                         <Button Grid.Column="2" Content="Open" Click="OnDownloadVersionTemp"
                                                 Tag="{Binding}" Padding="10,4" MinWidth="0" MinHeight="0"
@@ -103,7 +103,7 @@
             </Border>
 
             <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
-                       Margin="0,4,0,0" Foreground="{StaticResource DangerBrush}"/>
+                       Margin="0,4,0,0" Foreground="{DynamicResource DangerBrush}"/>
         </StackPanel>
     </ScrollViewer>
 </Page>

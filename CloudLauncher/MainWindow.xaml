@@ -1,12 +1,12 @@
-<Window x:Class="CloudLauncher.MainWindow"
+﻿<Window x:Class="CloudLauncher.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:anim="clr-namespace:CloudLauncher.Animations"
         Title="CloudLauncher" Height="720" Width="1180" MinWidth="780" MinHeight="500"
         WindowStartupLocation="CenterScreen"
-        Background="{StaticResource Surface0Brush}"
-        Foreground="{StaticResource TextPrimaryBrush}"
+        Background="{DynamicResource Surface0Brush}"
+        Foreground="{DynamicResource TextPrimaryBrush}"
         WindowStyle="None"
         AllowsTransparency="False"
         TextOptions.TextRenderingMode="ClearType">
@@ -21,7 +21,7 @@
 
     <Window.Resources>
         <Style x:Key="SidebarHeader" TargetType="TextBlock">
-            <Setter Property="Foreground" Value="{StaticResource TextTertiaryBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextTertiaryBrush}"/>
             <Setter Property="FontSize" Value="10"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
@@ -34,8 +34,8 @@
         </Style>
     </Window.Resources>
 
-    <Border x:Name="RootBorder" Background="{StaticResource Surface0Brush}"
-            BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
+    <Border x:Name="RootBorder" Background="{DynamicResource Surface0Brush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
         <Grid>
             <Grid.LayoutTransform>
                 <ScaleTransform x:Name="RootScale"/>
@@ -51,8 +51,8 @@
 
             <!-- ════════════════ TITLE BAR ════════════════ -->
             <Border Grid.Row="0" Grid.ColumnSpan="2"
-                    Background="{StaticResource TitleBarBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    Background="{DynamicResource TitleBarBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="0,0,0,1">
                 <DockPanel LastChildFill="True">
 
@@ -70,18 +70,18 @@
                     <!-- Brand (left edge of the title bar) -->
                     <StackPanel DockPanel.Dock="Left" Orientation="Horizontal"
                                 VerticalAlignment="Center" Margin="20,0,16,0">
-                        <Ellipse Width="8" Height="8" Fill="{StaticResource AccentBrush}"
+                        <Ellipse Width="8" Height="8" Fill="{DynamicResource AccentBrush}"
                                  VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <TextBlock Text="CloudLauncher"
                                    FontSize="13" FontWeight="SemiBold"
-                                   Foreground="{StaticResource TextPrimaryBrush}"
+                                   Foreground="{DynamicResource TextPrimaryBrush}"
                                    VerticalAlignment="Center"/>
                     </StackPanel>
 
                     <!-- Minecraft-account chip -->
                     <Border DockPanel.Dock="Right" Margin="0,4,12,4"
-                            Background="{StaticResource Surface3Brush}"
-                            BorderBrush="{StaticResource BorderBrush}" BorderThickness="1"
+                            Background="{DynamicResource Surface3Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                             CornerRadius="16" Padding="2"
                             shell:WindowChrome.IsHitTestVisibleInChrome="True">
                         <Button x:Name="McAccountChip" Style="{StaticResource IconButton}"
@@ -90,16 +90,16 @@
                                 ToolTip="Switch Minecraft account">
                             <StackPanel Orientation="Horizontal">
                                 <Border Width="22" Height="22" CornerRadius="11"
-                                        Background="{StaticResource AccentSoftBrush}">
+                                        Background="{DynamicResource AccentSoftBrush}">
                                     <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}"
-                                               FontSize="11" Foreground="{StaticResource AccentBrush}"
+                                               FontSize="11" Foreground="{DynamicResource AccentBrush}"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                 </Border>
                                 <TextBlock x:Name="McAccountChipLabel"
                                            Text="No MC account"
                                            Margin="8,0,8,0" VerticalAlignment="Center"
                                            FontSize="12"
-                                           Foreground="{StaticResource TextSecondaryBrush}"/>
+                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
                             </StackPanel>
                         </Button>
                     </Border>
@@ -113,8 +113,8 @@
                  flexible label column. Icons stay anchored at the same X when the sidebar
                  collapses (60 px) or expands (240 px) — only the label column shrinks. -->
             <Border Grid.Row="1" Grid.Column="0"
-                    Background="{StaticResource Surface1Brush}"
-                    BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+                    Background="{DynamicResource Surface1Brush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                 <DockPanel x:Name="Sidebar">
 
                     <!-- ── TOP: hamburger + LIBRARY label (expands rightward) ────────── -->
@@ -131,7 +131,7 @@
                                 <ControlTemplate.Triggers>
                                     <Trigger Property="IsMouseOver" Value="True">
                                         <Setter TargetName="bg" Property="Background"
-                                                Value="{StaticResource SurfaceHoverBrush}"/>
+                                                Value="{DynamicResource SurfaceHoverBrush}"/>
                                     </Trigger>
                                 </ControlTemplate.Triggers>
                             </ControlTemplate>
@@ -144,18 +144,18 @@
                             <TextBlock Grid.Column="0" Text="&#xE700;"
                                        FontFamily="{StaticResource IconFont}" FontSize="16"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"
-                                       Foreground="{StaticResource TextSecondaryBrush}"/>
+                                       Foreground="{DynamicResource TextSecondaryBrush}"/>
                             <TextBlock x:Name="SidebarHeaderLabel" Grid.Column="1"
                                        Style="{StaticResource SidebarHeader}" Text="LIBRARY"/>
                         </Grid>
                     </Button>
 
                     <Border DockPanel.Dock="Top" Height="1"
-                            Background="{StaticResource BorderSubtleBrush}" Margin="0,2,0,4"/>
+                            Background="{DynamicResource BorderSubtleBrush}" Margin="0,2,0,4"/>
 
                     <!-- ── BOTTOM GROUP: utility panels ──────────────────────────────── -->
                     <StackPanel DockPanel.Dock="Bottom" Margin="0,0,0,12">
-                        <Border Height="1" Background="{StaticResource BorderSubtleBrush}" Margin="0,4,0,4"/>
+                        <Border Height="1" Background="{DynamicResource BorderSubtleBrush}" Margin="0,4,0,4"/>
 
                         <ToggleButton x:Name="NavTeams" Style="{StaticResource NavButton}"
                                       Click="OnNavTeams" ToolTip="Teams">
@@ -212,10 +212,10 @@
                                 <TextBlock Grid.Column="0" Text="&#xE7BA;"
                                            FontFamily="{StaticResource IconFont}" FontSize="15"
                                            HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           Foreground="{StaticResource WarningBrush}"/>
+                                           Foreground="{DynamicResource WarningBrush}"/>
                                 <TextBlock x:Name="NavDevLabel" Grid.Column="1"
                                            Style="{StaticResource NavLabel}" Text="Dev tools"
-                                           Foreground="{StaticResource WarningBrush}"/>
+                                           Foreground="{DynamicResource WarningBrush}"/>
                             </Grid>
                         </ToggleButton>
                     </StackPanel>
@@ -281,6 +281,21 @@
                                            Style="{StaticResource NavLabel}" Text="Resource packs"/>
                             </Grid>
                         </ToggleButton>
+
+                        <ToggleButton x:Name="NavShaders" Style="{StaticResource NavButton}"
+                                      Click="OnNavShaders" ToolTip="Shader packs">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="60"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="&#xE706;"
+                                           FontFamily="{StaticResource IconFont}" FontSize="15"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="NavShadersLabel" Grid.Column="1"
+                                           Style="{StaticResource NavLabel}" Text="Shaders"/>
+                            </Grid>
+                        </ToggleButton>
                     </StackPanel>
                 </DockPanel>
             </Border>
@@ -301,7 +316,7 @@
                 <Frame x:Name="MainFrame" Grid.Column="0"
                        NavigationUIVisibility="Hidden"
                        anim:Animate.PageTransition="True"
-                       Background="{StaticResource Surface0Brush}"/>
+                       Background="{DynamicResource Surface0Brush}"/>
 
                 <!--  Drag splitter between master and side panel  -->
                 <GridSplitter x:Name="PanelSplitter"
@@ -315,23 +330,23 @@
                     <GridSplitter.Template>
                         <ControlTemplate TargetType="GridSplitter">
                             <Border x:Name="track"
-                                    Background="{StaticResource BorderBrush}"
+                                    Background="{DynamicResource BorderBrush}"
                                     Width="1"
                                     HorizontalAlignment="Center">
                                 <!-- grip dots centred in the handle -->
                                 <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
                                     <Ellipse Width="3" Height="3" Margin="0,2"
-                                             Fill="{StaticResource TextTertiaryBrush}"/>
+                                             Fill="{DynamicResource TextTertiaryBrush}"/>
                                     <Ellipse Width="3" Height="3" Margin="0,2"
-                                             Fill="{StaticResource TextTertiaryBrush}"/>
+                                             Fill="{DynamicResource TextTertiaryBrush}"/>
                                     <Ellipse Width="3" Height="3" Margin="0,2"
-                                             Fill="{StaticResource TextTertiaryBrush}"/>
+                                             Fill="{DynamicResource TextTertiaryBrush}"/>
                                 </StackPanel>
                             </Border>
                             <ControlTemplate.Triggers>
                                 <Trigger Property="IsMouseOver" Value="True">
                                     <Setter TargetName="track" Property="Background"
-                                            Value="{StaticResource AccentBrush}"/>
+                                            Value="{DynamicResource AccentBrush}"/>
                                     <Setter TargetName="track" Property="Width" Value="2"/>
                                 </Trigger>
                             </ControlTemplate.Triggers>
@@ -341,12 +356,12 @@
 
                 <Grid x:Name="SidePanelHost" Grid.Column="2"
                       Visibility="Collapsed">
-                    <Border Background="{StaticResource Surface1Brush}"
-                            BorderBrush="{StaticResource BorderBrush}"
+                    <Border Background="{DynamicResource Surface1Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}"
                             BorderThickness="0,0,0,0">
                         <Frame x:Name="SideFrame" NavigationUIVisibility="Hidden"
                                anim:Animate.PageTransition="True"
-                               Background="{StaticResource Surface0Brush}"/>
+                               Background="{DynamicResource Surface0Brush}"/>
                     </Border>
                     <StackPanel Orientation="Vertical"
                                 HorizontalAlignment="Right"
@@ -359,8 +374,8 @@
                                 MinWidth="32"
                                 MinHeight="32"
                                 Padding="8"
-                                Background="{StaticResource Surface3Brush}"
-                                BorderBrush="{StaticResource BorderBrush}"
+                                Background="{DynamicResource Surface3Brush}"
+                                BorderBrush="{DynamicResource BorderBrush}"
                                 BorderThickness="1"
                                 Content="&#xE8BB;"
                                 FontFamily="{StaticResource IconFont}"
@@ -375,8 +390,8 @@
                                 MinHeight="32"
                                 Padding="8"
                                 Margin="0,6,0,0"
-                                Background="{StaticResource Surface3Brush}"
-                                BorderBrush="{StaticResource BorderBrush}"
+                                Background="{DynamicResource Surface3Brush}"
+                                BorderBrush="{DynamicResource BorderBrush}"
                                 BorderThickness="1"
                                 Content="&#xE72B;"
                                 FontFamily="{StaticResource IconFont}"

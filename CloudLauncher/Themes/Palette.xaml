@@ -95,6 +95,18 @@
         <GradientStop Color="#FF161014" Offset="1"/>
     </LinearGradientBrush>
 
+    <!--  Log view — defaults; ThemeService re-derives these from the user's colours at startup.
+         Kept as their own tier because a log is read rather than navigated: flatter background,
+         fixed-meaning level colours.  -->
+    <SolidColorBrush x:Key="LogBackgroundBrush" Color="#FF07090C"/>
+    <SolidColorBrush x:Key="LogTextBrush"       Color="#FFA8B0BF"/>
+    <SolidColorBrush x:Key="LogMutedBrush"      Color="#FF6B7484"/>
+    <SolidColorBrush x:Key="LogAccentBrush"     Color="#FF5B9DF9"/>
+    <SolidColorBrush x:Key="LogWarningBrush"    Color="#FFE3B341"/>
+    <SolidColorBrush x:Key="LogErrorBrush"      Color="#FFFF6B6B"/>
+    <SolidColorBrush x:Key="LogSuccessBrush"    Color="#FF3FB950"/>
+    <SolidColorBrush x:Key="LogSelectionBrush"  Color="#556B1212"/>
+
     <!--  Scrollbar  -->
     <SolidColorBrush x:Key="ScrollThumbBrush"      Color="#FF3A4254"/>
     <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#FF505A70"/>

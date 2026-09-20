@@ -1,7 +1,7 @@
-<UserControl x:Class="CloudLauncher.Views.ModDownloadOptionsDialog"
+﻿<UserControl x:Class="CloudLauncher.Views.ModDownloadOptionsDialog"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Border Background="{StaticResource Surface2Brush}" BorderBrush="{StaticResource BorderStrongBrush}"
+    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="24" MinWidth="340" MaxWidth="420">
         <Border.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>

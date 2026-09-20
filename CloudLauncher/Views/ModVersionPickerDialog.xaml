@@ -1,7 +1,7 @@
-<UserControl x:Class="CloudLauncher.Views.ModVersionPickerDialog"
+﻿<UserControl x:Class="CloudLauncher.Views.ModVersionPickerDialog"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Border Background="{StaticResource Surface2Brush}" BorderBrush="{StaticResource BorderStrongBrush}"
+    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="22" Width="520" Height="580">
         <Border.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
@@ -21,7 +21,7 @@
                 </StackPanel>
             </Grid>
 
-            <Border Background="{StaticResource Surface1Brush}" BorderBrush="{StaticResource BorderBrush}"
+            <Border Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="1" CornerRadius="6">
                 <ListBox x:Name="List" Background="Transparent" BorderThickness="0" MouseDoubleClick="OnListDoubleClick"
                          SelectionChanged="OnSelectionChanged">
@@ -35,21 +35,21 @@
                                 <StackPanel Grid.Column="0">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Text="{Binding VersionLabel}" FontWeight="SemiBold"
-                                                   Foreground="{StaticResource TextPrimaryBrush}"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"
                                                    TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                         <Border Style="{StaticResource Pill}" Background="{Binding ChannelBrush}" Margin="8,0,0,0">
                                             <TextBlock Text="{Binding Channel}" Style="{StaticResource PillText}" Foreground="White"/>
                                         </Border>
-                                        <Border Style="{StaticResource Pill}" Background="{StaticResource AccentSoftBrush}" Margin="6,0,0,0"
+                                        <Border Style="{StaticResource Pill}" Background="{DynamicResource AccentSoftBrush}" Margin="6,0,0,0"
                                                 Visibility="{Binding CurrentVisibility}">
-                                            <TextBlock Text="Current" Style="{StaticResource PillText}" Foreground="{StaticResource AccentBrush}"/>
+                                            <TextBlock Text="Current" Style="{StaticResource PillText}" Foreground="{DynamicResource AccentBrush}"/>
                                         </Border>
                                     </StackPanel>
                                     <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
-                                               Foreground="{StaticResource TextSecondaryBrush}" Margin="0,2,0,0"/>
+                                               Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0"/>
                                 </StackPanel>
                                 <TextBlock Grid.Column="1" Text="{Binding DateLabel}" Style="{StaticResource Caption}"
-                                           Foreground="{StaticResource TextTertiaryBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                           Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
                             </Grid>
                         </DataTemplate>
                     </ListBox.ItemTemplate>

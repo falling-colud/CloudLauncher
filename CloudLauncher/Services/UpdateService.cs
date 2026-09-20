@@ -88,8 +88,17 @@ public sealed class UpdateService(ApiClient api)
         Process.Start(psi);
     }
 
-    // Waits for the launcher to exit, retries the copy in case files are still locked,
-    // then relaunches. Kept dependency-free so it runs on a stock Windows install.
+    // Waits for the launcher to exit, copies the new build over the install directory, then
+    // relaunches. Kept dependency-free so it runs on a stock Windows install (robocopy ships
+    // with every supported Windows).
+    //
+    // We use robocopy rather than Copy-Item because `Copy-Item -Path Source\* -Dest Dest -Recurse`
+    // has a well-known footgun: when a subfolder (e.g. "runtimes") already exists in the install
+    // directory — which is always the case for an update over an existing install — it copies the
+    // source subfolder *into* the existing one (runtimes\runtimes) instead of merging. robocopy
+    // merges correctly and retries files that are briefly still locked as the process exits.
+    // No /MIR: mirroring would delete the installer's uninstaller (unins*.exe) and anything else
+    // living alongside the app, so we copy additively.
     private const string UpdaterScript = """
         param(
           [int]$LauncherPid,
@@ -97,16 +106,23 @@ public sealed class UpdateService(ApiClient api)
           [string]$Dest,
           [string]$Exe
         )
-        try { Wait-Process -Id $LauncherPid -Timeout 60 -ErrorAction SilentlyContinue } catch {}
+        $ErrorActionPreference = 'SilentlyContinue'
+        $log = Join-Path ([System.IO.Path]::GetDirectoryName($PSCommandPath)) 'apply-update.log'
+        function Log($m) { "{0:o}  {1}" -f (Get-Date), $m | Out-File -FilePath $log -Append -Encoding utf8 }
+
+        try { Wait-Process -Id $LauncherPid -Timeout 120 } catch {}
         Start-Sleep -Seconds 1
-        for ($i = 0; $i -lt 30; $i++) {
-          try {
-            Copy-Item -Path (Join-Path $Source '*') -Destination $Dest -Recurse -Force -ErrorAction Stop
-            break
-          } catch {
-            Start-Sleep -Milliseconds 500
-          }
+
+        $ok = $false
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
+          & robocopy $Source $Dest /E /R:3 /W:2 /NFL /NDL /NP /NJH /NJS | Out-Null
+          $code = $LASTEXITCODE
+          Log "robocopy attempt $attempt exit $code"
+          # robocopy: exit codes 0-7 are success (bit flags), 8+ mean a copy failure.
+          if ($code -lt 8) { $ok = $true; break }
+          Start-Sleep -Seconds 1
         }
+        Log "copy ok=$ok; relaunching $Exe"
         Start-Process -FilePath $Exe -WorkingDirectory $Dest
         """;
 }

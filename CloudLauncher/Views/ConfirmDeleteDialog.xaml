@@ -1,10 +1,10 @@
-<Window x:Class="CloudLauncher.Views.ConfirmDeleteDialog"
+﻿<Window x:Class="CloudLauncher.Views.ConfirmDeleteDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Delete instance" Height="320" Width="480"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
-        Background="{StaticResource Surface1Brush}"
-        Foreground="{StaticResource TextPrimaryBrush}">
+        Background="{DynamicResource Surface1Brush}"
+        Foreground="{DynamicResource TextPrimaryBrush}">
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -15,10 +15,10 @@
         <!-- Header with warning icon -->
         <DockPanel Grid.Row="0" Margin="0,0,0,16">
             <Border DockPanel.Dock="Left" Width="48" Height="48" CornerRadius="12"
-                    Background="{StaticResource AccentSoftBrush}"
+                    Background="{DynamicResource AccentSoftBrush}"
                     VerticalAlignment="Top" Margin="0,0,16,0">
                 <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource IconFont}" FontSize="22"
-                           Foreground="{StaticResource AccentBrush}"
+                           Foreground="{DynamicResource AccentBrush}"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <StackPanel VerticalAlignment="Center">
@@ -31,18 +31,18 @@
         <!-- Body -->
         <StackPanel Grid.Row="1" Margin="0,0,0,12">
             <TextBlock x:Name="BodyLabel" Style="{StaticResource Body}" TextWrapping="Wrap"
-                       Foreground="{StaticResource TextSecondaryBrush}">
+                       Foreground="{DynamicResource TextSecondaryBrush}">
                 This will remove the instance from the server. Anyone you shared it with will lose access.
             </TextBlock>
-            <Border Background="{StaticResource Surface0Brush}" CornerRadius="6"
+            <Border Background="{DynamicResource Surface0Brush}" CornerRadius="6"
                     Padding="12,10" Margin="0,12,0,0"
-                    BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="1">
+                    BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1">
                 <DockPanel>
                     <TextBlock DockPanel.Dock="Left" Text="&#xE946;" FontFamily="{StaticResource IconFont}"
-                               FontSize="14" Foreground="{StaticResource InfoBlueBrush}"
+                               FontSize="14" Foreground="{DynamicResource InfoBlueBrush}"
                                VerticalAlignment="Top" Margin="0,2,10,0"/>
                     <TextBlock TextWrapping="Wrap" Style="{StaticResource Caption}"
-                               Foreground="{StaticResource TextSecondaryBrush}">
+                               Foreground="{DynamicResource TextSecondaryBrush}">
                         Local files inside the instance folder on your machine are <Run FontWeight="SemiBold">kept</Run>.
                         Delete them yourself if you no longer need them.
                     </TextBlock>

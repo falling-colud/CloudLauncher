@@ -61,7 +61,7 @@ public partial class ResourcePackExplorerPage : Page
         OverviewBrowser.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void ShowOverview(string? content) => OverviewBrowser.Show(content);
+    private void ShowOverview(string? content, bool isMarkdown = false) => OverviewBrowser.Show(content, isMarkdown);
 
     // ── source chips ─────────────────────────────────────────────────────────
 
@@ -136,19 +136,43 @@ public partial class ResourcePackExplorerPage : Page
 
     // ── search + filters ─────────────────────────────────────────────────────
 
-    private void OnSearchTextChanged(object s, TextChangedEventArgs e) => _searchText = SearchBox.Text;
+    // Search as you type (see ModExplorerPage): reload a moment after typing stops; Enter is immediate.
+    private System.Windows.Threading.DispatcherTimer? _searchTimer;
+    private string _lastSearched = "";
+
+    private void OnSearchTextChanged(object s, TextChangedEventArgs e)
+    {
+        _searchText = SearchBox.Text;
+        if (_searchTimer is null)
+        {
+            _searchTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+            _searchTimer.Tick += async (_, _) =>
+            {
+                _searchTimer.Stop();
+                if (_activeChip is null || string.Equals(_searchText.Trim(), _lastSearched, StringComparison.Ordinal)) return;
+                _lastSearched = _searchText.Trim();
+                await ResetAndLoadAsync();
+            };
+        }
+        _searchTimer.Stop();
+        _searchTimer.Start();
+    }
 
     private async void OnSearchKeyDown(object s, KeyEventArgs e)
     {
         if (e.Key == Key.Enter)
         {
             e.Handled = true;
+            _searchTimer?.Stop();
+            _lastSearched = _searchText.Trim();
             await ResetAndLoadAsync();
         }
         else if (e.Key == Key.Escape)
         {
             SearchBox.Text = "";
             _searchText = "";
+            _searchTimer?.Stop();
+            _lastSearched = "";
             await ResetAndLoadAsync();
         }
     }
@@ -330,7 +354,7 @@ public partial class ResourcePackExplorerPage : Page
         DetailPlaceholder.Visibility = Visibility.Collapsed;
         ModTabs.Visibility = Visibility.Visible;
         ModTabs.SelectedIndex = 0;
-        ShowOverview(mod.Summary ?? "*No summary.*");
+        ShowOverview(mod.Summary ?? "*No summary.*", isMarkdown: true);
         ScreenshotsEmptyText.Text = "Screenshots are not supported for hosted resource packs yet.";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
@@ -339,7 +363,7 @@ public partial class ResourcePackExplorerPage : Page
         try
         {
             var detail = await App.State.Api.GetResourcePackAsync(mod.Id, ct);
-            ShowOverview(detail.Description ?? detail.Summary);
+            ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
             var hostedVersions = detail.Versions.Select(v => new VersionRow(new ModVersion(
                 v.Id.ToString(),
                 v.VersionString, v.VersionString,
@@ -383,7 +407,7 @@ public partial class ResourcePackExplorerPage : Page
             var detail = mod.Source == ModSource.CurseForge
                 ? await App.State.CurseForge.GetProjectDetailAsync(int.TryParse(mod.Id, out var cid) ? cid : 0, ct)
                 : await App.State.Modrinth.GetProjectDetailAsync(mod.Id, ct);
-            ShowOverview(detail.Description ?? mod.Description);
+            ShowOverview(detail.Description ?? mod.Description, detail.IsMarkdown);
             ShowScreenshots(detail.Screenshots);
             ConfigureLinks(detail.Links with { WebsiteUrl = detail.Links.WebsiteUrl ?? BuildProjectUrl(mod) });
 

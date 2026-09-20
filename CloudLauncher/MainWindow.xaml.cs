@@ -14,7 +14,7 @@ namespace CloudLauncher;
 public partial class MainWindow : Window, IDialogHost
 {
     // ── master page state ────────────────────────────────────────────────────
-    private enum MasterPage { None, Packs, Worlds, Mods, ResourcePacks }
+    private enum MasterPage { None, Packs, Worlds, Mods, ResourcePacks, Shaders }
     private MasterPage _currentMaster = MasterPage.None;
 
     // ── side-panel state ─────────────────────────────────────────────────────
@@ -41,7 +41,7 @@ public partial class MainWindow : Window, IDialogHost
         { "NavPacks", "NavWorlds", "NavMods", "NavResourcePacks", "NavTeams", "NavAccount", "NavSettings", "NavDev" };
 
     private static readonly string[] NavLabelNames =
-        { "NavPacksLabel", "NavWorldsLabel", "NavModsLabel", "NavResourcePacksLabel",
+        { "NavPacksLabel", "NavWorldsLabel", "NavModsLabel", "NavResourcePacksLabel", "NavShadersLabel",
           "NavTeamsLabel", "NavAccountLabel", "NavSettingsLabel", "NavDevLabel" };
 
     public MainWindow()
@@ -57,14 +57,22 @@ public partial class MainWindow : Window, IDialogHost
         // its WebView2/WebBrowser hosts and collections) would be rooted for the app's lifetime.
         // We manage our own back-stack (_sideStack) and never use Frame.GoBack, so drain the
         // journal after each navigation to let discarded pages be collected.
-        MainFrame.Navigated += DrainFrameJournal;
-        SideFrame.Navigated += DrainFrameJournal;
+        // Navigated also fires here for nested frames (ModManagementView's BrowseFrame), so
+        // drain the frame we subscribed to rather than the event's sender — a nested frame
+        // journals into its parent anyway, and RemoveBackEntry throws on one that doesn't
+        // own a journal.
+        MainFrame.Navigated += (_, _) => DrainFrameJournal(MainFrame);
+        SideFrame.Navigated += (_, _) => DrainFrameJournal(SideFrame);
     }
 
-    private static void DrainFrameJournal(object sender, System.Windows.Navigation.NavigationEventArgs e)
+    /// <summary>Empties <paramref name="f"/>'s back-stack so discarded pages aren't rooted by it.</summary>
+    private static void DrainFrameJournal(Frame f)
     {
-        if (sender is Frame f)
-            while (f.RemoveBackEntry() != null) { }
+        // A Frame creates its journal lazily, on the navigation that first needs a back entry.
+        // Before that — notably the first navigation of each frame — RemoveBackEntry() throws
+        // "This operation is available only when Frame has its own journal". CanGoBack is false
+        // in exactly that case (and when the stack is already empty), so it guards both.
+        while (f.CanGoBack && f.RemoveBackEntry() != null) { }
     }
 
     // ── lifecycle ────────────────────────────────────────────────────────────
@@ -227,6 +235,16 @@ public partial class MainWindow : Window, IDialogHost
         UpdateChrome();
     }
 
+    public void NavigateToShaders()
+    {
+        Sidebar.IsEnabled = true;
+        ResetSidePanel();
+        if (MainFrame.Content is not ShaderPacksView)
+            MainFrame.Navigate(new ShaderPacksView(this));
+        _currentMaster = MasterPage.Shaders;
+        UpdateChrome();
+    }
+
     // ── side-panel openers ───────────────────────────────────────────────────
 
     public void OpenTeams()     => OpenSidePanelFresh(SidePanelKind.Teams,     "Teams",              new TeamsView(this));
@@ -244,8 +262,12 @@ public partial class MainWindow : Window, IDialogHost
     public void OpenModDetail(Guid modId, string title) =>
         OpenSidePanelPushed(SidePanelKind.ModDetail, title, new ModDetailView(this, modId));
 
-    public void OpenModExplorerForPack(CloudLauncher.Shared.PackDetail pack) =>
-        OpenSidePanelPushed(SidePanelKind.ModExplorer, $"Browse mods · {pack.Name}", new ModExplorerPage(this, pack));
+    public void OpenModExplorerForPack(CloudLauncher.Shared.PackDetail pack, CloudLauncher.Services.ModSummary? showMod = null)
+    {
+        var page = new ModExplorerPage(this, pack);
+        OpenSidePanelPushed(SidePanelKind.ModExplorer, $"Browse mods · {pack.Name}", page);
+        if (showMod is not null) _ = page.ShowModAsync(showMod);
+    }
 
     public void OpenModManagementForPack(CloudLauncher.Shared.PackDetail pack) =>
         OpenSidePanelPushed(SidePanelKind.ModManagement, $"Mods · {pack.Name}", new ModManagementView(this, pack));
@@ -632,6 +654,7 @@ public partial class MainWindow : Window, IDialogHost
     private void OnNavWorlds(object sender, RoutedEventArgs e) => NavigateToWorlds();
     private void OnNavMods(object sender, RoutedEventArgs e)           => NavigateToMods();
     private void OnNavResourcePacks(object sender, RoutedEventArgs e) => NavigateToResourcePacks();
+    private void OnNavShaders(object sender, RoutedEventArgs e) => NavigateToShaders();
 
     private void OnNavTeams(object sender, RoutedEventArgs e)    => ToggleTopLevel(SidePanelKind.Teams,    OpenTeams);
     private void OnNavAccount(object sender, RoutedEventArgs e)  => ToggleTopLevel(SidePanelKind.Account,  OpenAccount);
@@ -692,6 +715,7 @@ public partial class MainWindow : Window, IDialogHost
         NavWorlds.IsChecked   = _currentMaster == MasterPage.Worlds;
         NavMods.IsChecked           = _currentMaster == MasterPage.Mods;
         NavResourcePacks.IsChecked = _currentMaster == MasterPage.ResourcePacks;
+        NavShaders.IsChecked       = _currentMaster == MasterPage.Shaders;
         NavTeams.IsChecked    = _currentSidePanel == SidePanelKind.Teams;
         NavAccount.IsChecked  = _currentSidePanel == SidePanelKind.Account
                              || _currentSidePanel == SidePanelKind.McAccount;
@@ -710,6 +734,7 @@ public partial class MainWindow : Window, IDialogHost
         NavWorlds.IsEnabled   = loggedIn;
         NavMods.IsEnabled           = loggedIn;
         NavResourcePacks.IsEnabled = loggedIn;
+        NavShaders.IsEnabled       = loggedIn;
 
         NavDev.Visibility = (loggedIn && string.Equals(username, "colud", StringComparison.OrdinalIgnoreCase))
             ? Visibility.Visible : Visibility.Collapsed;

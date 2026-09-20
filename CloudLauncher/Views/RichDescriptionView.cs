@@ -53,9 +53,8 @@ public sealed class RichDescriptionView : UserControl, IDisposable
     public RichDescriptionView()
     {
         // Paint the document background underneath so there's no white flash before the
-        // first frame renders (matches the body colour in WrapHtmlDocument).
-        Background = new SolidColorBrush(Color.FromRgb(0x0B, 0x0D, 0x11));
-        _web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, 0x0B, 0x0D, 0x11);
+        // first frame renders (matches the body colour in WrapHtmlDocument, whatever the theme).
+        ApplyThemeBackground();
         _web.NavigationStarting += OnNavigationStarting;
         _web.NavigationCompleted += OnNavigationCompleted;
         _web.CoreWebView2InitializationCompleted += OnCoreInitialized;
@@ -72,7 +71,36 @@ public sealed class RichDescriptionView : UserControl, IDisposable
         _revealTimer.Tick += OnRevealTimerTick;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        Services.ThemeService.Changed += OnThemeChanged;
     }
+
+    /// <summary>
+    /// A description is a web document, so changing the launcher's colours does not repaint it —
+    /// the HTML has to be generated again. Re-showing the same content is enough, and it is what
+    /// makes "colours apply immediately" true on this panel too.
+    /// </summary>
+    private void OnThemeChanged()
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(OnThemeChanged); return; }
+        if (_disposed) return;
+        ApplyThemeBackground();
+        if (_lastContent is not null) Show(_lastContent, _lastIsMarkdown, _options);
+    }
+
+    private void ApplyThemeBackground()
+    {
+        var hex = PackText.HtmlPalette.Current.Background;
+        try
+        {
+            var colour = (Color)ColorConverter.ConvertFromString(hex);
+            Background = new SolidColorBrush(colour);
+            _web.DefaultBackgroundColor = System.Drawing.Color.FromArgb(0xFF, colour.R, colour.G, colour.B);
+        }
+        catch { /* a malformed colour must not take the panel down */ }
+    }
+
+    private string? _lastContent;
+    private bool _lastIsMarkdown;
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -92,6 +120,8 @@ public sealed class RichDescriptionView : UserControl, IDisposable
     /// <summary>Render a description (HTML or markdown) into the view.</summary>
     public void Show(string? content, bool isMarkdown = false, RichDescriptionOptions? options = null)
     {
+        _lastContent = content;
+        _lastIsMarkdown = isMarkdown;
         _options = options;
         var runnable = options?.EnableCommandRun == true;
 
@@ -278,6 +308,7 @@ public sealed class RichDescriptionView : UserControl, IDisposable
     /// prompt cleanup (e.g. a browse window closing).</summary>
     public void Dispose()
     {
+        Services.ThemeService.Changed -= OnThemeChanged;
         if (_disposed) return;
         _disposed = true;
         Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
