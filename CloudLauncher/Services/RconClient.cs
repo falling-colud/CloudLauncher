@@ -35,11 +35,6 @@ public sealed class RconClient : IDisposable
     private const int TypeCommand = 2;
     private const int TypeLogin = 3;
 
-    /// <summary>Request id used for the trailing empty command that marks the end of a long reply.
-    /// Any value that cannot collide with a real command id will do; this one is recognisable in a
-    /// packet capture.</summary>
-    private const int SentinelRequestId = 0x7F0F_0F0F;
-
     private readonly TcpClient _tcp;
     private readonly NetworkStream _stream;
 
@@ -51,13 +46,21 @@ public sealed class RconClient : IDisposable
     private int _nextRequestId = 1;
     private bool _disposed;
 
+    /// <summary>Set once a command has been abandoned with its reply still in flight, which leaves
+    /// unread packets in the socket that belong to a command nobody is waiting for any more. The
+    /// connection is then unusable: see <see cref="SendCommandAsync"/>.</summary>
+    private volatile bool _poisoned;
+
     private RconClient(TcpClient tcp)
     {
         _tcp = tcp;
         _stream = tcp.GetStream();
     }
 
-    public bool IsConnected => !_disposed && _tcp.Connected;
+    /// <summary>True while this connection can still be trusted to answer the command it is asked.
+    /// Goes false after a timed-out command as well as after <see cref="Dispose"/> — the caller's cue
+    /// to drop this client and connect again rather than keep typing into it.</summary>
+    public bool IsConnected => !_disposed && !_poisoned && _tcp.Connected;
 
     /// <summary>
     /// Opens a connection and logs in, or throws.
@@ -127,11 +130,22 @@ public sealed class RconClient : IDisposable
     /// full <c>whitelist list</c>) comes back whole instead of cut off at the first packet.</para>
     /// <para>A server that ignores the sentinel would leave this waiting, so the read has its own
     /// timeout; anything already accumulated is returned rather than thrown away.</para>
+    /// <para>The sentinel gets a <em>fresh</em> id per command, taken from the same counter as the
+    /// command itself, and every packet whose id is neither of this command's two is dropped. That
+    /// matters after a timeout: the abandoned command's fragments and its sentinel are still in the
+    /// socket, and with one shared sentinel id for all time the next command would stop at the
+    /// <em>previous</em> command's sentinel and hand back the previous command's output — a console
+    /// that confidently answers the wrong question, for the rest of the session. A timeout therefore
+    /// also poisons the connection (<see cref="IsConnected"/> goes false) so the caller reconnects
+    /// instead of carrying on down a desynchronised stream.</para>
     /// </remarks>
     public async Task<string> SendCommandAsync(string command, TimeSpan? timeout = null,
                                                CancellationToken ct = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_poisoned)
+            throw new IOException("This RCON connection is out of step after a command that did not " +
+                                  "answer in time. Reconnect before sending more commands.");
 
         await _gate.WaitAsync(ct);
         try
@@ -141,8 +155,9 @@ public sealed class RconClient : IDisposable
             var token = deadline.Token;
 
             var id = NextId();
+            var sentinelId = NextId();
             await WritePacketAsync(id, TypeCommand, command ?? "", token);
-            await WritePacketAsync(SentinelRequestId, TypeCommand, "", token);
+            await WritePacketAsync(sentinelId, TypeCommand, "", token);
 
             var body = new StringBuilder();
             try
@@ -150,16 +165,19 @@ public sealed class RconClient : IDisposable
                 while (true)
                 {
                     var packet = await ReadPacketAsync(token);
-                    if (packet.RequestId == SentinelRequestId) break;
+                    if (packet.RequestId == sentinelId) break;
                     if (packet.RequestId == id) body.Append(packet.Body);
-                    // Anything else is a stray reply to a command that already timed out; drop it.
+                    // Anything else belongs to an earlier command — ids only ever go up — so it is a
+                    // leftover of something that already gave up waiting; drop it.
                 }
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
+                // Whatever is left of this command is still on its way, so the socket can no longer be
+                // read in step. Partial output beats no output, but this client is finished either way.
+                _poisoned = true;
                 if (body.Length == 0)
                     throw new TimeoutException("The server did not answer that command in time.");
-                // Partial output beats no output, and the caller shows it as-is.
             }
 
             return body.ToString().TrimEnd('\r', '\n');

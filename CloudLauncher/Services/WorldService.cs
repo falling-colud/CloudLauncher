@@ -214,6 +214,74 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         }, ct);
     }
 
+    /// <summary>
+    /// Copies a save over an existing one at <paramref name="dst"/>, all-or-nothing.
+    /// </summary>
+    /// <remarks>
+    /// Never delete the destination first. The callers hand this the same token their Cancel button
+    /// holds, so a delete-then-copy left a half-written folder where the user's world had been the
+    /// moment anyone cancelled mid-copy — the copy throws between two files and there is nothing to
+    /// put back. The new copy is built in a temporary sibling instead and only swapped in once it is
+    /// complete, and the old save is moved aside rather than deleted so that even a failed swap
+    /// leaves one intact copy on disk. On cancellation or failure the temporary folder goes and the
+    /// existing save is untouched.
+    /// </remarks>
+    public static async Task ReplaceWorldAsync(string src, string dst, IProgress<double>? progress = null,
+                                               CancellationToken ct = default)
+    {
+        var stamp = DateTime.Now.ToString("HHmmssfff");
+        var staging = dst + ".incoming-" + stamp;
+        try
+        {
+            await CopyWorldAsync(src, staging, progress, ct);
+        }
+        catch
+        {
+            await TryDeleteDirectoryAsync(staging);
+            throw;
+        }
+
+        // Committed from here: the copy is whole on disk, so the swap runs uncancellably.
+        var parked = dst + ".replaced-" + stamp;
+        var hadExisting = Directory.Exists(dst);
+        try
+        {
+            await Task.Run(() =>
+            {
+                if (hadExisting) Directory.Move(dst, parked);
+                Directory.Move(staging, dst);
+            }, CancellationToken.None);
+        }
+        catch
+        {
+            if (hadExisting && !Directory.Exists(dst) && Directory.Exists(parked))
+            {
+                try { Directory.Move(parked, dst); } catch { /* left as .replaced-… on disk */ }
+            }
+            await TryDeleteDirectoryAsync(staging);
+            throw;
+        }
+
+        Invalidate(dst);
+        if (hadExisting) await TryDeleteDirectoryAsync(parked);
+    }
+
+    /// <summary>
+    /// Removes a directory if it is there, swallowing failures.
+    /// </summary>
+    /// <remarks>Used for the temporary folders of a swap, where the swap has already decided which
+    /// copy is the real one: failing to tidy up is never a reason to fail the operation, and never a
+    /// reason to touch the copy that is now live.</remarks>
+    private static async Task TryDeleteDirectoryAsync(string dir)
+    {
+        try
+        {
+            if (Directory.Exists(dir))
+                await Task.Run(() => Directory.Delete(dir, recursive: true), CancellationToken.None);
+        }
+        catch { /* best effort */ }
+    }
+
     /// <summary>Copies a world into another instance's <c>saves/</c> and returns the folder name it
     /// landed under, which is uniquified rather than overwriting an existing save.</summary>
     public async Task<string> CopyToPackAsync(WorldInfo world, Guid targetPackId, string targetPackName,
@@ -319,7 +387,15 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         return zipPath;
     }
 
-    /// <summary>Backups taken of this world, newest first.</summary>
+    /// <summary>
+    /// Backups taken of this world, newest first.
+    /// </summary>
+    /// <remarks>
+    /// The match is the whole name, not just the prefix: every backup is
+    /// <c>&lt;folder&gt;-&lt;timestamp&gt;.zip</c>, and a bare prefix test also swept up
+    /// <c>MyWorld-copy-…</c> and <c>MyWorld-2-…</c> under <c>MyWorld</c>. Those are different saves,
+    /// and restoring one of them here overwrote a world with a duplicate's contents.
+    /// </remarks>
     public List<WorldBackup> ListBackups(WorldInfo world)
     {
         var dir = BackupsDir(world.SourcePackId);
@@ -330,6 +406,7 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         {
             var name = Path.GetFileName(file);
             if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!IsBackupStamp(Path.GetFileNameWithoutExtension(name).AsSpan(prefix.Length))) continue;
             try
             {
                 var info = new FileInfo(file);
@@ -340,6 +417,18 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         return result.OrderByDescending(b => b.TakenAt).ToList();
     }
 
+    /// <summary>True for the <c>yyyyMMdd-HHmmss</c> tail <see cref="BackupAsync"/> appends.</summary>
+    /// <remarks>This is what makes the backup match exact: whatever follows the folder name must be
+    /// the timestamp and nothing else, so a longer folder name that merely starts the same way
+    /// cannot claim this zip.</remarks>
+    private static bool IsBackupStamp(ReadOnlySpan<char> tail)
+    {
+        if (tail.Length != 15 || tail[8] != '-') return false;
+        for (var i = 0; i < tail.Length; i++)
+            if (i != 8 && !char.IsAsciiDigit(tail[i])) return false;
+        return true;
+    }
+
     /// <summary>
     /// Replaces the live save with the contents of a backup zip.
     /// </summary>
@@ -347,9 +436,17 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// A safety backup of the current state is taken first, and the old folder is moved aside rather
     /// than deleted until the extract has succeeded — restoring the wrong snapshot is a mistake
     /// people make, and it must not also be the moment their current world disappears.
+    /// <para>
+    /// The extract succeeding is the commit point, and nothing after it may roll back. Removing the
+    /// parked copy used to sit inside the same <c>try</c>, so a game still holding one of its files
+    /// sent a perfectly good restore down the rollback path, which deletes the world that was just
+    /// restored. Tidying up is now allowed to fail: the parked folder's path is returned instead so
+    /// the caller can mention it, and the restored world is never touched again.
+    /// </para>
     /// </remarks>
-    public async Task RestoreAsync(WorldInfo world, string zipPath, IProgress<double>? progress = null,
-                                   CancellationToken ct = default)
+    /// <returns>The path of the parked copy of the old save if it could not be removed, else null.</returns>
+    public async Task<string?> RestoreAsync(WorldInfo world, string zipPath, IProgress<double>? progress = null,
+                                            CancellationToken ct = default)
     {
         await BackupAsync(world, null, ct);
 
@@ -361,7 +458,6 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
             FlattenIfSingleSubdir(world.FolderPath);
             if (!IsWorldFolder(world.FolderPath))
                 throw new InvalidOperationException("That backup does not contain a level.dat.");
-            await Task.Run(() => Directory.Delete(parked, recursive: true), CancellationToken.None);
         }
         catch
         {
@@ -372,11 +468,19 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
                 Directory.Move(parked, world.FolderPath);
             }
             catch { /* the parked copy is still on disk under its .restoring name */ }
+            Invalidate(world.FolderPath);
             throw;
         }
-        finally
+
+        Invalidate(world.FolderPath);
+        try
         {
-            Invalidate(world.FolderPath);
+            await Task.Run(() => Directory.Delete(parked, recursive: true), CancellationToken.None);
+            return null;
+        }
+        catch
+        {
+            return parked;
         }
     }
 

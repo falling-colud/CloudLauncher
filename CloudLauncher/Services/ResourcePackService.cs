@@ -173,10 +173,16 @@ public sealed class ResourcePackService(AppSettings settings, PackFolderService 
 
     /// <summary>Replaces the enabled stack. <paramref name="fileNamesHighestFirst"/> is in the order
     /// the UI shows it; the file gets the reversed list plus "vanilla" at the bottom.</summary>
-    public void SetActive(Guid packId, string? packName, IReadOnlyList<string> fileNamesHighestFirst)
+    /// <param name="minecraftVersion">The instance's Minecraft version, if the caller has it. Only
+    /// consulted when options.txt holds no named pack to copy the spelling from — the first pack
+    /// turned on in an instance — and it is what keeps a pre-1.13 instance from being written a
+    /// <c>file/</c> prefix its game does not understand. Callers that are merely reordering or
+    /// removing entries can leave it out: the stack they are editing is itself the evidence.</param>
+    public void SetActive(Guid packId, string? packName, IReadOnlyList<string> fileNamesHighestFirst,
+        string? minecraftVersion = null)
     {
         var dir = packName is null ? packs.GameDir(packId) : packs.GameDir(packId, packName);
-        var prefix = OptionsTxtService.UsesFilePrefix(dir) ? "file/" : "";
+        var prefix = OptionsTxtService.UsesFilePrefix(dir, minecraftVersion) ? "file/" : "";
 
         var ordered = fileNamesHighestFirst
             .Where(n => !string.IsNullOrWhiteSpace(n))
@@ -191,12 +197,15 @@ public sealed class ResourcePackService(AppSettings settings, PackFolderService 
     /// <remarks>A newly enabled pack goes to the top of the stack — highest priority — which is where
     /// the game itself puts one you select, and is what somebody who just installed a texture pack
     /// expects to see the moment they load a world.</remarks>
-    public void SetEnabled(Guid packId, string? packName, string fileName, bool enabled)
+    /// <param name="minecraftVersion">Passed on to <see cref="SetActive"/>; this is the call that
+    /// writes the very first entry into an instance's stack, so it is the one that most needs it.</param>
+    public void SetEnabled(Guid packId, string? packName, string fileName, bool enabled,
+        string? minecraftVersion = null)
     {
         var stack = ActiveFor(packId, packName);
         stack.RemoveAll(n => string.Equals(n, fileName, StringComparison.OrdinalIgnoreCase));
         if (enabled) stack.Insert(0, fileName);
-        SetActive(packId, packName, stack);
+        SetActive(packId, packName, stack, minecraftVersion);
     }
 
     /// <summary>

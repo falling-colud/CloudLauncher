@@ -661,7 +661,10 @@ public partial class SettingsPanel : Page
     /// <remarks>
     /// The copy runs off the UI thread and reports per-folder progress, because an instances folder is
     /// routinely tens of gigabytes. A folder that cannot be moved (usually because Minecraft still has
-    /// a file open in it) stops the move and leaves everything where it was rather than half-migrating.
+    /// a file open in it) stops the move and leaves everything where it was rather than half-migrating:
+    /// see the rollback in the catch below, which exists because a half-done move orphans the instances
+    /// it already moved — <see cref="AppSettings.PacksRoot"/> would still point at the old folder and
+    /// nothing would look for them in the new one.
     /// </remarks>
     private async void OnChangePacksFolder(object sender, RoutedEventArgs e)
     {
@@ -705,9 +708,10 @@ public partial class SettingsPanel : Page
         ChangePacksFolderButton.IsEnabled = false;
         Directory.CreateDirectory(chosen);
 
+        var duplicated = new List<string>();
         if (move)
         {
-            var moved = 0;
+            var moved = new List<MovedInstance>();
             try
             {
                 await Task.Run(() =>
@@ -719,11 +723,9 @@ public partial class SettingsPanel : Page
                         if (Directory.Exists(destination))
                             throw new IOException($"'{name}' already exists in the new folder.");
 
-                        // Directory.Move is a rename within a volume and a full copy across one;
-                        // either way it throws rather than half-writing, which is what we want here.
-                        Directory.Move(source, destination);
-                        moved++;
-                        var done = moved;
+                        if (!MoveInstanceFolder(source, destination)) duplicated.Add(name);
+                        moved.Add(new MovedInstance(name, source, destination));
+                        var done = moved.Count;
                         Dispatcher.Invoke(() =>
                             StatusLabel.Text = $"Moving instances… {done} of {sources.Length}");
                     }
@@ -731,11 +733,28 @@ public partial class SettingsPanel : Page
             }
             catch (Exception ex)
             {
-                StatusLabel.Text = $"Stopped after {moved} of {sources.Length}: {ex.Message}";
+                // Whatever moved before the failure is now in the new folder while PacksRoot still
+                // names the old one, so those instances are orphaned — the launcher would not look
+                // for them anywhere. Put them back, and if even that fails, name each one and where
+                // it now sits instead of leaving the user to search two drives.
+                // Across volumes the undo is a copy back, so it is not instant — say what is going on.
+                StatusLabel.Text = "Putting the instances that had already moved back…";
+                var stranded = await Task.Run(() => RollBackMove(moved));
+                var count = moved.Count;
+                StatusLabel.Text = stranded.Count == 0
+                    ? $"Stopped after {count} of {sources.Length}; those were moved back. {ex.Message}"
+                    : $"Stopped after {count} of {sources.Length}; {stranded.Count} could not be moved back.";
                 await AppDialog.MessageAsync(_shell, "The move stopped",
-                    $"{moved} of {sources.Length} instance folders were moved before this failed:\n\n{ex.Message}\n\n"
-                    + "Close Minecraft if an instance is running, then try again. The instances folder has "
-                    + "not been changed, so nothing is lost.");
+                    $"{count} of {sources.Length} instance folders were moved before this failed:\n\n{ex.Message}\n\n"
+                    + (stranded.Count == 0
+                        ? "Close Minecraft if an instance is running, then try again. Everything that had "
+                          + "already moved has been put back and the instances folder has not been changed, "
+                          + "so nothing is lost."
+                        : "Close Minecraft if an instance is running, then try again. The instances folder "
+                          + "has not been changed, but these could not be put back and are now in the new "
+                          + "folder:\n\n" + string.Join("\n", stranded.Take(20))
+                          + "\n\nMove them back into\n" + current + "\nby hand, or point the launcher at the "
+                          + "new folder and move the rest across too."));
                 return;
             }
         }
@@ -752,7 +771,109 @@ public partial class SettingsPanel : Page
         App.State.Packs.InvalidateRootCache();
         _shell.RefreshPacks();
 
-        StatusLabel.Text = $"Instances now live in {chosen}.";
+        StatusLabel.Text = $"Instances now live in {chosen}." +
+            (duplicated.Count > 0
+                ? $" {duplicated.Count} folder(s) could not be cleared out of the old location — a second " +
+                  "copy is still there and can be deleted once Minecraft is closed."
+                : "");
+    }
+
+    /// <summary>One instance folder that has already been moved, kept so the move can be undone.</summary>
+    private readonly record struct MovedInstance(string Name, string Source, string Destination);
+
+    /// <summary>
+    /// Moves one instance folder. Returns false when the data arrived at <paramref name="destination"/>
+    /// but the original could not be deleted, so a duplicate is still sitting in the old folder.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Directory.Move"/> is a rename, and a rename cannot cross a volume — Windows fails it
+    /// with ERROR_NOT_SAME_DEVICE. Moving instances onto a bigger drive is the main reason anyone uses
+    /// this button, so that path is not an edge case and the manual copy below is the one that usually
+    /// runs. A copy that fails partway takes its own half-written destination back out: a partial
+    /// instance folder is indistinguishable from a real one, and the source has not been touched yet.
+    /// </remarks>
+    private static bool MoveInstanceFolder(string source, string destination)
+    {
+        try
+        {
+            Directory.Move(source, destination);
+            return true;
+        }
+        catch (IOException ex) when (IsCrossVolume(ex, source, destination))
+        {
+            // Fall through to the copy below.
+        }
+
+        try
+        {
+            CopyDirectory(source, destination);
+        }
+        catch
+        {
+            try { if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true); }
+            catch { /* best effort; the exception below is what the user needs to see */ }
+            throw;
+        }
+
+        // The bytes are safely at the destination now, so a locked file in the old folder must not
+        // fail the move and trigger a rollback — it is reported as a leftover copy instead.
+        try { Directory.Delete(source, recursive: true); }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+        return true;
+    }
+
+    /// <summary>ERROR_NOT_SAME_DEVICE, or simply two different volumes.</summary>
+    /// <remarks>The HResult check is the precise one; the root comparison is there because a mapped
+    /// drive or a mount point can surface the same condition under a different code.</remarks>
+    private static bool IsCrossVolume(IOException ex, string source, string destination)
+    {
+        const int ErrorNotSameDevice = unchecked((int)0x80070011);
+        if (ex.HResult == ErrorNotSameDevice) return true;
+        var from = Path.GetPathRoot(Path.GetFullPath(source));
+        var to = Path.GetPathRoot(Path.GetFullPath(destination));
+        return !string.Equals(from, to, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Recursive copy used when a move has to cross volumes.</summary>
+    /// <remarks>Junctions and symlinks are skipped rather than followed: an instances folder that
+    /// contains a junction back to itself would otherwise recurse until it ran out of path, and the
+    /// data behind a junction does not live in this folder anyway.</remarks>
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (var dir in Directory.GetDirectories(source))
+        {
+            if (new DirectoryInfo(dir).Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+            CopyDirectory(dir, Path.Combine(destination, Path.GetFileName(dir)));
+        }
+        foreach (var file in Directory.GetFiles(source))
+            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: true);
+    }
+
+    /// <summary>
+    /// Puts back everything a failed move had already moved. Returns "name → where it is now" for any
+    /// that could not be put back, so the message can name them instead of saying "nothing is lost".
+    /// </summary>
+    private static List<string> RollBackMove(IReadOnlyList<MovedInstance> moved)
+    {
+        var stranded = new List<string>();
+        foreach (var item in moved)
+        {
+            try
+            {
+                // A cross-volume move that could not delete its source left the original in place,
+                // so the destination is the duplicate and dropping it is the whole undo.
+                if (Directory.Exists(item.Source) && Directory.Exists(item.Destination))
+                {
+                    Directory.Delete(item.Destination, recursive: true);
+                    continue;
+                }
+                MoveInstanceFolder(item.Destination, item.Source);
+            }
+            catch { stranded.Add($"{item.Name} → {item.Destination}"); }
+        }
+        return stranded;
     }
 
     private static bool PathsEqual(string a, string b) =>

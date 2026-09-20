@@ -413,9 +413,15 @@ public partial class WorldDetailView : Page
             var ct = BeginBusy("Restoring…");
             try
             {
-                await App.State.Worlds.RestoreAsync(_world, backup.Source.Path, BarProgress(), ct);
+                // A non-null result means the restore succeeded but the old save could not be
+                // deleted afterwards — say where it is rather than silently leaving it in saves/.
+                var leftover = await App.State.Worlds.RestoreAsync(_world, backup.Source.Path, BarProgress(), ct);
                 await ReloadAsync();
-                SetStatus($"Restored the snapshot from {backup.Source.TakenAt.LocalDateTime:f}.", StatusKind.Success);
+                SetStatus(leftover is null
+                    ? $"Restored the snapshot from {backup.Source.TakenAt.LocalDateTime:f}."
+                    : $"Restored the snapshot from {backup.Source.TakenAt.LocalDateTime:f}. The old save is still "
+                      + $"on disk as '{Path.GetFileName(leftover)}' — delete it once Minecraft has let go of it.",
+                    StatusKind.Success);
             }
             finally { EndBusy(); }
         }
@@ -1024,12 +1030,13 @@ public partial class WorldDetailView : Page
                     var ct = BeginBusy($"Copying the save into {pack.Name}…");
                     try
                     {
+                        // Replacing never deletes first: this token is the Cancel button's, and a
+                        // copy cancelled between two files would leave the instance with a partial
+                        // world and nothing to put back. The swap waits for a complete copy.
                         if (replace)
-                        {
-                            await Task.Run(() => Directory.Delete(target, recursive: true), ct);
-                            WorldService.Invalidate(target);
-                        }
-                        await WorldService.CopyWorldAsync(_world.FolderPath, target, BarProgress(), ct);
+                            await WorldService.ReplaceWorldAsync(_world.FolderPath, target, BarProgress(), ct);
+                        else
+                            await WorldService.CopyWorldAsync(_world.FolderPath, target, BarProgress(), ct);
                     }
                     finally { EndBusy(); }
                 }

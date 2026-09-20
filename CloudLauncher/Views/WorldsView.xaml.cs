@@ -736,9 +736,10 @@ public partial class WorldsView : Page
                     var ct = BeginBusy($"Replacing the copy in {pack.Name}…");
                     try
                     {
-                        await Task.Run(() => Directory.Delete(targetSaves, recursive: true), ct);
-                        WorldService.Invalidate(targetSaves);
-                        await WorldService.CopyWorldAsync(row.Source.FolderPath, targetSaves, BarProgress(), ct);
+                        // Not a delete followed by a copy: this token is the Cancel button's, and
+                        // cancelling mid-copy would leave the user with neither world. The swap
+                        // only happens once the new copy is complete.
+                        await WorldService.ReplaceWorldAsync(row.Source.FolderPath, targetSaves, BarProgress(), ct);
                     }
                     finally { EndBusy(); }
                 }

@@ -251,20 +251,33 @@ public class AuthController(
         var user = await users.FindByIdAsync(id.ToString());
         if (user is null) return Unauthorized();
 
-        var blobs = db.ModVersions
+        // The four sources are queried separately and unioned here rather than Concat-ed into one
+        // query. EF cannot translate a set operation that follows a client projection — building a
+        // BlobRef in the Select and then Concat/Distinct throws "Unable to translate set operation
+        // after client projection has been applied", which failed this endpoint for every user. Each
+        // query still projects only the two columns and does its own server-side DISTINCT, so what
+        // comes back is small; the GroupBy below finishes the de-duplication across the four sets.
+        var modBlobs = await db.ModVersions
             .Where(v => v.Mod.OwnerId == id)
-            .Select(v => new BlobRef(v.BlobHash, v.FileSize))
-            .Concat(db.SharedWorldVersions
-                .Where(v => v.World.OwnerId == id)
-                .Select(v => new BlobRef(v.BlobHash, v.FileSize)))
-            .Concat(db.HostedResourcePackVersions
-                .Where(v => v.ResourcePack.OwnerId == id)
-                .Select(v => new BlobRef(v.BlobHash, v.FileSize)))
-            .Concat(db.PackManifestEntries
-                .Where(e => e.Pack.OwnerId == id && e.Pack.IsShared)
-                .Select(e => new BlobRef(e.Hash, e.Size)));
+            .Select(v => new { Hash = v.BlobHash, Size = v.FileSize })
+            .Distinct().ToListAsync(ct);
+        var worldBlobs = await db.SharedWorldVersions
+            .Where(v => v.World.OwnerId == id)
+            .Select(v => new { Hash = v.BlobHash, Size = v.FileSize })
+            .Distinct().ToListAsync(ct);
+        var packBlobs = await db.HostedResourcePackVersions
+            .Where(v => v.ResourcePack.OwnerId == id)
+            .Select(v => new { Hash = v.BlobHash, Size = v.FileSize })
+            .Distinct().ToListAsync(ct);
+        var manifestBlobs = await db.PackManifestEntries
+            .Where(e => e.Pack.OwnerId == id && e.Pack.IsShared)
+            .Select(e => new { Hash = e.Hash, Size = e.Size })
+            .Distinct().ToListAsync(ct);
 
-        var distinct = await blobs.Distinct().ToListAsync(ct);
+        var distinct = modBlobs.Concat(worldBlobs).Concat(packBlobs).Concat(manifestBlobs)
+            .Select(b => new BlobRef(b.Hash, b.Size))
+            .Distinct()
+            .ToList();
         // DISTINCT is over (hash, size); grouping again collapses the pathological case of one hash
         // recorded with two different sizes, which would otherwise be counted twice.
         var usedBytes = distinct.GroupBy(b => b.Hash).Sum(g => g.First().Size);

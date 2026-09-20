@@ -41,8 +41,10 @@ public sealed record ServerEntry(
 /// <para><c>servers.dat</c> is <see cref="RuleAction.Ignored"/> in the default pack rules, so it is a
 /// per-machine file and nothing written here is ever synced to a team. That is deliberate and the UI
 /// says so: adding a server for yourself must not add it for everyone in a shared pack.</para>
-/// <para>A missing or unreadable file is an ordinary outcome — an instance that has never been
-/// launched has no server list — and reads answer with an empty list rather than throwing.</para>
+/// <para>A missing or unreadable file is an ordinary outcome for a <em>read</em> — an instance that has
+/// never been launched has no server list — and reads answer with an empty list rather than throwing.
+/// Writes are not so relaxed: an unreadable existing file makes a mutation throw, because the
+/// alternative is replacing the player's list with whatever was being added. See <see cref="Edit"/>.</para>
 /// </remarks>
 public sealed class ServerListService(PackFolderService packs)
 {
@@ -77,14 +79,25 @@ public sealed class ServerListService(PackFolderService packs)
 
     /// <summary>Every server across the given instances. Reads files, so callers run it off the UI
     /// thread — a dozen instances on a slow disk is not free.</summary>
-    public List<ServerEntry> ScanAll(IEnumerable<PackSummary> instances)
+    public List<ServerEntry> ScanAll(IEnumerable<PackSummary> instances) => ScanAll(instances, out _);
+
+    /// <summary>
+    /// Every server across the given instances, together with the instances that could not be read.
+    /// </summary>
+    /// <param name="unreadable">Names of the instances whose list threw. The caller shows the count:
+    /// silently dropping them makes a server look deleted when it is only unreadable.</param>
+    /// <remarks>Resilient per instance, and deliberately catching everything rather than the two file
+    /// exceptions it used to: an instance whose game directory has never been created, or whose
+    /// <c>servers.dat</c> is corrupt, can fail in ways that are neither <see cref="IOException"/> nor
+    /// <see cref="UnauthorizedAccessException"/>, and one such instance must not empty the whole page.</remarks>
+    public List<ServerEntry> ScanAll(IEnumerable<PackSummary> instances, out List<string> unreadable)
     {
         var all = new List<ServerEntry>();
+        unreadable = new List<string>();
         foreach (var pack in instances)
         {
             try { all.AddRange(Read(pack.Id, pack.Name)); }
-            catch (IOException) { /* one unreadable instance must not empty the whole page */ }
-            catch (UnauthorizedAccessException) { }
+            catch (Exception) { unreadable.Add(pack.Name); }
         }
         return all;
     }
@@ -95,6 +108,7 @@ public sealed class ServerListService(PackFolderService packs)
         Edit(packId, list =>
         {
             list.Children.Add(BuildEntry(name, address, iconBase64, hidden: false, acceptTextures: null));
+            return true;
         });
     }
 
@@ -105,82 +119,93 @@ public sealed class ServerListService(PackFolderService packs)
     /// screen, and a player who has dragged their servers into an order they like should not find them
     /// reshuffled because they fixed a typo. The entry's icon and texture-prompt answer are kept for
     /// the same reason.</remarks>
-    public bool Update(ServerEntry entry, string name, string address)
-    {
-        var changed = false;
+    public bool Update(ServerEntry entry, string name, string address) =>
         Edit(entry.SourcePackId, list =>
         {
-            if (Locate(list, entry) is not { } tag) return;
+            if (Locate(list, entry) is not { } tag) return false;
             SetString(tag, "name", name);
             SetString(tag, "ip", address);
-            changed = true;
+            return true;
         });
-        return changed;
-    }
 
     /// <summary>Removes an entry from its instance's list.</summary>
-    public bool Remove(ServerEntry entry)
-    {
-        var removed = false;
+    public bool Remove(ServerEntry entry) =>
         Edit(entry.SourcePackId, list =>
         {
-            if (Locate(list, entry) is not { } tag) return;
-            removed = list.Children.Remove(tag);
+            if (Locate(list, entry) is not { } tag) return false;
+            return list.Children.Remove(tag);
         });
-        return removed;
-    }
 
     /// <summary>
     /// Copies an entry into another instance's list, icon and all.
     /// </summary>
     /// <returns>False when that instance already lists the same address, which is a no-op rather than
     /// a duplicate row in the player's multiplayer screen.</returns>
-    public bool CopyTo(ServerEntry entry, Guid targetPackId)
-    {
-        var copied = false;
+    public bool CopyTo(ServerEntry entry, Guid targetPackId) =>
         Edit(targetPackId, list =>
         {
             var key = AppSettings.ServerKey(entry.Address);
-            if (list.Children.Any(c => AppSettings.ServerKey(c["ip"]?.AsString() ?? "") == key)) return;
+            if (list.Children.Any(c => AppSettings.ServerKey(c["ip"]?.AsString() ?? "") == key)) return false;
             list.Children.Add(BuildEntry(entry.Name, entry.Address, entry.IconBase64,
                                          hidden: false, entry.AcceptTextures));
-            copied = true;
+            return true;
         });
-        return copied;
-    }
 
     /// <summary>Moves an entry up or down the instance's list, which is the order the game shows.</summary>
-    public bool Move(ServerEntry entry, int delta)
-    {
-        var moved = false;
+    public bool Move(ServerEntry entry, int delta) =>
         Edit(entry.SourcePackId, list =>
         {
-            if (Locate(list, entry) is not { } tag) return;
+            if (Locate(list, entry) is not { } tag) return false;
             var from = list.Children.IndexOf(tag);
             var to = from + delta;
-            if (to < 0 || to >= list.Children.Count) return;
+            if (to < 0 || to >= list.Children.Count) return false;
             list.Children.RemoveAt(from);
             list.Children.Insert(to, tag);
-            moved = true;
+            return true;
         });
-        return moved;
-    }
 
     // ── the file ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Re-reads the instance's list, hands it to <paramref name="mutate"/>, and writes it back.
+    /// Re-reads the instance's list, hands it to <paramref name="mutate"/>, and writes it back if
+    /// <paramref name="mutate"/> reports that it changed something.
     /// </summary>
-    /// <remarks>Deliberately re-reads rather than trusting the rows on screen: the game may have been
+    /// <returns>What <paramref name="mutate"/> returned: true when the file was rewritten.</returns>
+    /// <exception cref="IOException">The instance has a <c>servers.dat</c> that could not be read. The
+    /// caller reports this; it must never be treated as "no servers yet".</exception>
+    /// <remarks>
+    /// <para>Deliberately re-reads rather than trusting the rows on screen: the game may have been
     /// running since the page loaded and rewritten the file on exit. The write preserves whatever
     /// compression the file used, because Minecraft writes this one uncompressed and silently drops a
-    /// gzipped one.</remarks>
-    private void Edit(Guid packId, Action<NbtTag> mutate)
+    /// gzipped one.</para>
+    /// <para>An empty list is synthesised only when the file genuinely does not exist. <see
+    /// cref="Nbt.ReadFile(string, out NbtCompression)"/> answers null both for "no file" and for "the
+    /// file is there but could not be read or parsed" — a momentary lock from antivirus or a sync
+    /// client, a half-written file, the game holding it — and treating the second case as the first is
+    /// total data loss on the very first action: the player's whole multiplayer list, names, order and
+    /// favicons, replaced by the one entry being added, with <c>servers.dat_old</c> either missing (the
+    /// backup copy fails under the same lock) or overwritten with the damaged file. Hence
+    /// <see cref="File.Exists(string)"/> first, and a throw rather than a guess.</para>
+    /// <para>Nothing is written when the mutation did not change anything, so a "that entry is no
+    /// longer in the list" outcome leaves the file exactly as it was found instead of rewriting it.</para>
+    /// </remarks>
+    private bool Edit(Guid packId, Func<NbtTag, bool> mutate)
     {
         var path = FileFor(packId);
-        var root = Nbt.ReadFile(path, out var compression);
-        if (root is null)
+        NbtTag? root;
+        NbtCompression compression;
+
+        if (File.Exists(path))
         {
+            root = Nbt.ReadFile(path, out compression);
+            if (root is null)
+                throw new IOException(
+                    $"Could not read this instance's server list ({path}). It may be open in Minecraft " +
+                    "or held by another program — close the game and try again. Nothing was changed.");
+        }
+        else
+        {
+            // An instance that has never been launched has no servers.dat; creating one is correct.
             root = NbtTag.NewCompound();
             compression = NbtCompression.None;
         }
@@ -193,8 +218,9 @@ public sealed class ServerListService(PackFolderService packs)
             root.Children.Add(list);
         }
 
-        mutate(list);
+        if (!mutate(list)) return false;
         Nbt.WriteFile(path, root, compression);
+        return true;
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+﻿using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
 using CloudLauncher.Shared;
@@ -248,7 +249,32 @@ public static class ConfigHubService
         return dot > 0;
     }
 
-    /// <summary>The backups sitting next to <paramref name="fullPath"/>, newest first.</summary>
+    /// <summary>
+    /// When a backup was actually taken, read out of the <c>.bak-yyyyMMdd-HHmmss</c> suffix this page
+    /// wrote, falling back to the file's last-write time for a name that is not one of ours.
+    /// </summary>
+    /// <remarks>
+    /// The last-write time is the wrong answer here and it looks like the right one:
+    /// <see cref="File.Copy(string,string,bool)"/> gives the copy the <i>source</i> file's last-write
+    /// time, so a backup carries the age of the content inside it, never the moment it was taken. Two
+    /// edits in a row therefore sort backwards, and "restore the newest backup" would hand back the
+    /// older one. The stamp in the name is written once and never touched again, so it is the
+    /// authority — do not swap this back to mtime.
+    /// </remarks>
+    public static DateTime BackupTakenUtc(FileInfo backup)
+    {
+        var name = backup.Name;
+        var dot = name.LastIndexOf(".bak-", StringComparison.OrdinalIgnoreCase);
+        if (dot >= 0 && DateTime.TryParseExact(
+                name[(dot + 5)..], "yyyyMMdd-HHmmss", CultureInfo.InvariantCulture,
+                // The stamp is written from DateTime.Now, so it is local time.
+                DateTimeStyles.AssumeLocal, out var taken))
+            return taken.ToUniversalTime();
+        return backup.LastWriteTimeUtc;
+    }
+
+    /// <summary>The backups sitting next to <paramref name="fullPath"/>, most recently taken first
+    /// (see <see cref="BackupTakenUtc"/> for why that is not the same as newest by mtime).</summary>
     public static List<FileInfo> FindBackups(string fullPath)
     {
         try
@@ -257,7 +283,7 @@ public static class ConfigHubService
             if (dir is null || !Directory.Exists(dir)) return [];
             return new DirectoryInfo(dir)
                 .GetFiles(Path.GetFileName(fullPath) + ".bak-*")
-                .OrderByDescending(f => f.LastWriteTimeUtc)
+                .OrderByDescending(BackupTakenUtc)
                 .ToList();
         }
         catch { return []; }

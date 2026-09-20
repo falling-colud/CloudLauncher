@@ -361,11 +361,12 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     /// <remarks>
     /// <para>A null field keeps whatever is stored, so a caller that only wants to fix the changelog
     /// sends only the changelog and cannot accidentally blank the rest.</para>
-    /// <para>The parent mod's denormalised CSVs are re-written exactly as <see cref="UploadVersion"/>
-    /// does it, because they exist to make the browse filters work and are supposed to describe the
-    /// most recent word on compatibility. Editing the newest version's Minecraft list and leaving the
-    /// mod advertising the old one would make the mod un-findable under the version it now supports.
-    /// </para>
+    /// <para>The parent mod's denormalised CSVs describe the most recent word on compatibility, so
+    /// they are re-written only when the version being edited is the newest one — the same rule
+    /// <see cref="UploadVersion"/> relies on, where the row it just added always is. Editing the
+    /// newest version's Minecraft list and leaving the mod advertising the old one would make the mod
+    /// un-findable under the version it now supports; rewriting them from an <em>older</em> version
+    /// would be worse, republishing the whole mod under a compatibility list it outgrew.</para>
     /// </remarks>
     [HttpPatch("{id:guid}/versions/{versionId:guid}")]
     public async Task<ActionResult<HostedModVersionInfo>> UpdateVersion(
@@ -406,8 +407,19 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         if (req.LoadersCsv is not null)
             version.LoadersCsv = req.LoadersCsv.Length == 0 ? null : req.LoadersCsv.ToLowerInvariant();
 
-        if (!string.IsNullOrWhiteSpace(version.McVersionsCsv)) mod.McVersionsCsv = version.McVersionsCsv;
-        if (!string.IsNullOrWhiteSpace(version.LoadersCsv))    mod.LoadersCsv    = version.LoadersCsv;
+        // Only the newest version may speak for the mod. UploadVersion can denormalise
+        // unconditionally because the row it has just added is by definition the newest one; here the
+        // caller may be correcting an old build, and copying its CSVs up would silently republish the
+        // whole mod as (say) 1.16-only, with nothing that ever recomputes it. Do not remove this
+        // check: the endpoint is reached from the per-version "Edit details…" action, so editing an
+        // old version is the normal case, not an edge case.
+        var isNewest = !await db.ModVersions
+            .AnyAsync(v => v.ModId == id && v.Id != versionId && v.PublishedAt > version.PublishedAt, ct);
+        if (isNewest)
+        {
+            if (!string.IsNullOrWhiteSpace(version.McVersionsCsv)) mod.McVersionsCsv = version.McVersionsCsv;
+            if (!string.IsNullOrWhiteSpace(version.LoadersCsv))    mod.LoadersCsv    = version.LoadersCsv;
+        }
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 

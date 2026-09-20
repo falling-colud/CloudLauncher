@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Net.Sockets;
 using System.Text;
@@ -235,7 +236,7 @@ public static class MinecraftServerPing
         {
             if (version.TryGetProperty("name", out var vn) && vn.ValueKind == JsonValueKind.String)
                 versionName = StripFormatting(vn.GetString());
-            if (version.TryGetProperty("protocol", out var pv) && pv.TryGetInt32(out var p)) protocol = p;
+            if (version.TryGetProperty("protocol", out var pv) && TryReadInt32(pv, out var p)) protocol = p;
         }
 
         var online = 0;
@@ -243,8 +244,8 @@ public static class MinecraftServerPing
         var sample = new List<string>();
         if (root.TryGetProperty("players", out var players) && players.ValueKind == JsonValueKind.Object)
         {
-            if (players.TryGetProperty("online", out var on) && on.TryGetInt32(out var o)) online = o;
-            if (players.TryGetProperty("max", out var mx) && mx.TryGetInt32(out var m)) max = m;
+            if (players.TryGetProperty("online", out var on) && TryReadInt32(on, out var o)) online = o;
+            if (players.TryGetProperty("max", out var mx) && TryReadInt32(mx, out var m)) max = m;
             if (players.TryGetProperty("sample", out var list) && list.ValueKind == JsonValueKind.Array)
             {
                 foreach (var entry in list.EnumerateArray())
@@ -283,6 +284,30 @@ public static class MinecraftServerPing
             FaviconBase64 = favicon,
             LatencyMs = latencyMs
         };
+    }
+
+    /// <summary>
+    /// Reads a status field that is supposed to be a number.
+    /// </summary>
+    /// <remarks>The <see cref="JsonValueKind"/> check is not decoration and must not be folded away:
+    /// <see cref="JsonElement.TryGetInt32"/> <em>throws</em> <see cref="InvalidOperationException"/>
+    /// when the element is a string, a bool or null — it does not return false — and that exception is
+    /// not one <see cref="PingAsync(string, int, TimeSpan?, CancellationToken)"/> catches, so a plugin
+    /// that writes <c>"online": "12"</c> (they exist) would paint a perfectly live server as offline.
+    /// A numeric string is parsed rather than discarded, because it is plainly the number meant.</remarks>
+    private static bool TryReadInt32(JsonElement element, out int value)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Number:
+                return element.TryGetInt32(out value);
+            case JsonValueKind.String:
+                return int.TryParse(element.GetString(), NumberStyles.Integer,
+                                    CultureInfo.InvariantCulture, out value);
+            default:
+                value = 0;
+                return false;
+        }
     }
 
     /// <summary>

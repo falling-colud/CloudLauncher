@@ -446,15 +446,19 @@ public partial class ResourcePackListView : UserControl
         if (!await ConfirmStackWriteAsync()) return;
 
         var stack = App.State.ResourcePacks.ActiveFor(_pack.Id, _pack.Name);
-        foreach (var row in rows)
-        {
-            stack.RemoveAll(n => string.Equals(n, row.FileName, StringComparison.OrdinalIgnoreCase));
-            // Newly enabled packs go on top, in the order they were selected, so a bulk "turn on"
-            // produces the stack the user was looking at rather than a reversed one.
-            if (enabled) stack.Insert(0, row.FileName);
-        }
+        var names = rows.Select(r => r.FileName).ToList();
+        stack.RemoveAll(n => names.Any(x => string.Equals(x, n, StringComparison.OrdinalIgnoreCase)));
 
-        App.State.ResourcePacks.SetActive(_pack.Id, _pack.Name, stack);
+        // Newly enabled packs go on top, in the order they were selected, so a bulk "turn on"
+        // produces the stack the user was looking at rather than a reversed one. Inserted as one
+        // range rather than row by row at index 0: each single insert pushes the previous one down,
+        // which quietly turned the whole selection upside down — and this list is highest priority
+        // first, so that inversion is what the game then loads.
+        if (enabled) stack.InsertRange(0, names);
+
+        // The instance's version decides how entries are spelled when options.txt has none to copy
+        // from yet — "file/Name.zip" from 1.13 on, the bare name before that.
+        App.State.ResourcePacks.SetActive(_pack.Id, _pack.Name, stack, _pack.MinecraftVersion);
         RefreshStackState();
         StatusLabel.Text = rows.Count == 1
             ? $"{rows[0].DisplayName} turned {(enabled ? "on" : "off")}."
@@ -500,7 +504,7 @@ public partial class ResourcePackListView : UserControl
             if (toTop) stack.InsertRange(0, names);
             else stack.AddRange(names);
 
-            App.State.ResourcePacks.SetActive(_pack.Id, _pack.Name, stack);
+            App.State.ResourcePacks.SetActive(_pack.Id, _pack.Name, stack, _pack.MinecraftVersion);
             RefreshStackState();
             StatusLabel.Text = toTop ? "Moved to the top of the stack." : "Moved to the bottom of the stack.";
         }

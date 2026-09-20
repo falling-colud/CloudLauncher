@@ -499,9 +499,14 @@ public partial class WorldBrowserView : Page
         var packId = picker.SelectedPackId.Value;
         var pack = packs.First(p => p.Id == packId);
 
+        // Each download owns its source. The field only points at the newest one, so a download
+        // that finishes late must not dispose or clear whatever is in the field by then — doing
+        // that killed the Cancel button for the download still running and threw
+        // ObjectDisposedException out of it.
+        var cts = new CancellationTokenSource();
         _downloadCts?.Cancel();
-        _downloadCts = new CancellationTokenSource();
-        var ct = _downloadCts.Token;
+        _downloadCts = cts;
+        var ct = cts.Token;
 
         if (button is not null) button.IsEnabled = false;
         ShowDownloadProgress(true);
@@ -540,8 +545,8 @@ public partial class WorldBrowserView : Page
             if (zipPath is not null) { try { File.Delete(zipPath); } catch { /* best effort */ } }
             ShowDownloadProgress(false);
             if (button is not null) button.IsEnabled = true;
-            _downloadCts?.Dispose();
-            _downloadCts = null;
+            if (ReferenceEquals(_downloadCts, cts)) _downloadCts = null;
+            cts.Dispose();
         }
     }
 

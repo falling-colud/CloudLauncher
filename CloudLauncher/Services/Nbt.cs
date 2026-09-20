@@ -98,10 +98,17 @@ public enum NbtCompression { None, GZip, ZLib }
 public static class Nbt
 {
     /// <summary>
-    /// Reads an NBT file. Returns the root compound, or null when the file is missing or is not NBT.
+    /// Reads an NBT file. Returns the root compound, or null when the file is missing OR unreadable.
     /// </summary>
-    /// <remarks>Never throws for a malformed file: these are other programs' files, sometimes
-    /// half-written by a crashed game, and one bad instance must not take a whole page down.</remarks>
+    /// <remarks>
+    /// <para>Never throws for a malformed file: these are other programs' files, sometimes half-written
+    /// by a crashed game, and one bad instance must not take a whole page down.</para>
+    /// <para><b>null is deliberately ambiguous</b> — it means "no usable tree", which covers a file
+    /// that is absent, locked by the game or a sync client, truncated, or not NBT at all. A caller
+    /// about to WRITE the file back must not read null as "it was empty": check
+    /// <see cref="File.Exists(string)"/> first and refuse rather than replace, or it will overwrite a
+    /// list it merely failed to read. Callers that only display are free to treat null as empty.</para>
+    /// </remarks>
     public static NbtTag? ReadFile(string path, out NbtCompression compression)
     {
         compression = NbtCompression.None;
@@ -111,9 +118,12 @@ public static class Nbt
             var raw = File.ReadAllBytes(path);
             return Read(raw, out compression);
         }
-        // EndOfStreamException and InvalidDataException both derive from IOException, so the one
-        // clause covers a truncated file, a corrupt gzip member and a plain read failure alike.
+        // EndOfStreamException derives from IOException, but InvalidDataException does NOT — it comes
+        // off SystemException — so it needs its own clause. Without it a corrupt gzip member or an
+        // unknown tag byte escapes a method documented never to throw, and one bad level.dat takes
+        // out the scan of every world in the instance.
         catch (IOException) { return null; }
+        catch (InvalidDataException) { return null; }
         catch (UnauthorizedAccessException) { return null; }
     }
 
@@ -142,18 +152,26 @@ public static class Nbt
             body = new MemoryStream(raw);
         }
 
+        // The catch has to sit OUTSIDE the finally, because disposing a GZipStream or ZLibStream over
+        // corrupt data validates the trailer and throws InvalidDataException from Dispose itself — and
+        // an exception raised in a finally block sails straight past that same try's catch clauses.
         try
         {
-            using var reader = new BinaryReader(body);
-            var type = (NbtTagType)reader.ReadByte();
-            if (type != NbtTagType.Compound) return null;   // every real NBT file starts with one
-            var name = ReadString(reader);
-            var root = new NbtTag { Type = NbtTagType.Compound, Name = name };
-            ReadCompoundBody(reader, root);
-            return root;
+            try
+            {
+                using var reader = new BinaryReader(body);
+                var type = (NbtTagType)reader.ReadByte();
+                if (type != NbtTagType.Compound) return null;   // every real NBT file starts with one
+                var name = ReadString(reader);
+                var root = new NbtTag { Type = NbtTagType.Compound, Name = name };
+                ReadCompoundBody(reader, root);
+                return root;
+            }
+            finally { body.Dispose(); }
         }
-        catch (IOException) { return null; }   // truncated, or not NBT after all
-        finally { body.Dispose(); }
+        catch (IOException) { return null; }                  // truncated mid-tag
+        catch (InvalidDataException) { return null; }         // corrupt deflate stream, or unknown tag byte
+        catch (ArgumentOutOfRangeException) { return null; }  // a nonsense length in a corrupt file
     }
 
     /// <summary>
@@ -197,6 +215,34 @@ public static class Nbt
 
     // ── reading ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The largest array payload this reader will allocate for, in bytes.
+    /// </summary>
+    /// <remarks>Generous for the files the launcher reads — servers.dat and level.dat are kilobytes —
+    /// and small enough that a corrupt or hostile file cannot exhaust memory. Without it a single
+    /// flipped byte in a length field asks for a 2 GB allocation and takes the launcher down with an
+    /// OutOfMemoryException, which is exactly what a file scan must never do.</remarks>
+    private const int MaxArrayBytes = 64 * 1024 * 1024;
+
+    /// <summary>Validates an element count read from the file before anything is allocated for it.</summary>
+    private static int CheckCount(BinaryReader r, int count, int elementSize)
+    {
+        if (count < 0)
+            throw new InvalidDataException($"Negative NBT array length ({count})");
+
+        long bytes = (long)count * elementSize;
+        if (bytes > MaxArrayBytes)
+            throw new InvalidDataException($"NBT array of {count} elements exceeds the {MaxArrayBytes} byte limit");
+
+        // When the length is knowable, an array claiming more than the file holds is corrupt, and
+        // saying so here is cheaper and clearer than a truncated read further down.
+        var stream = r.BaseStream;
+        if (stream.CanSeek && bytes > stream.Length - stream.Position)
+            throw new InvalidDataException($"NBT array of {count} elements runs past the end of the file");
+
+        return count;
+    }
+
     private static void ReadCompoundBody(BinaryReader r, NbtTag parent)
     {
         while (true)
@@ -223,22 +269,22 @@ public static class Nbt
 
             case NbtTagType.ByteArray:
             {
-                var n = BE32(r);
+                var n = CheckCount(r, BE32(r), sizeof(byte));
                 tag.ByteArrayValue = n > 0 ? r.ReadBytes(n) : [];
                 break;
             }
             case NbtTagType.IntArray:
             {
-                var n = BE32(r);
-                var a = new int[Math.Max(n, 0)];
+                var n = CheckCount(r, BE32(r), sizeof(int));
+                var a = new int[n];
                 for (var i = 0; i < a.Length; i++) a[i] = BE32(r);
                 tag.IntArrayValue = a;
                 break;
             }
             case NbtTagType.LongArray:
             {
-                var n = BE32(r);
-                var a = new long[Math.Max(n, 0)];
+                var n = CheckCount(r, BE32(r), sizeof(long));
+                var a = new long[n];
                 for (var i = 0; i < a.Length; i++) a[i] = BE64(r);
                 tag.LongArrayValue = a;
                 break;
@@ -246,7 +292,9 @@ public static class Nbt
             case NbtTagType.List:
             {
                 var elem = (NbtTagType)r.ReadByte();
-                var n = BE32(r);
+                // One byte is the smallest a list element can be, so this bounds the element COUNT
+                // without assuming anything about how big each element turns out to be.
+                var n = CheckCount(r, BE32(r), sizeof(byte));
                 tag.ListElementType = elem;
                 for (var i = 0; i < n; i++) tag.Children.Add(ReadPayload(r, elem, ""));
                 break;
@@ -284,13 +332,53 @@ public static class Nbt
         return v;
     }
 
+    /// <summary>
+    /// Reads a Java "modified UTF-8" string: a 16-bit byte count followed by that many bytes.
+    /// </summary>
+    /// <remarks>
+    /// Not plain UTF-8, and the difference is not academic here. Java encodes NUL as the two bytes
+    /// <c>C0 80</c>, and encodes a character outside the BMP as its two UTF-16 surrogates, each in
+    /// three bytes (CESU-8) rather than as one four-byte sequence. <see cref="Encoding.UTF8"/> turns
+    /// both of those into U+FFFD, so decoding a world named with an emoji and writing it back — which
+    /// is exactly what renaming a world does — would silently replace the name with question marks in
+    /// the player's own level.dat. Decoding per UTF-16 code unit reassembles the surrogate pair
+    /// correctly and costs nothing.
+    /// </remarks>
     private static string ReadString(BinaryReader r)
     {
         var len = (ushort)BE16(r);
         if (len == 0) return "";
         var bytes = r.ReadBytes(len);
         if (bytes.Length < len) throw new EndOfStreamException();
-        return Encoding.UTF8.GetString(bytes);
+
+        var sb = new StringBuilder(len);
+        var i = 0;
+        while (i < len)
+        {
+            int a = bytes[i];
+            if (a < 0x80)
+            {
+                sb.Append((char)a);
+                i += 1;
+            }
+            else if ((a & 0xE0) == 0xC0)
+            {
+                if (i + 1 >= len) throw new InvalidDataException("Truncated two-byte character in NBT string");
+                sb.Append((char)(((a & 0x1F) << 6) | (bytes[i + 1] & 0x3F)));
+                i += 2;
+            }
+            else if ((a & 0xF0) == 0xE0)
+            {
+                if (i + 2 >= len) throw new InvalidDataException("Truncated three-byte character in NBT string");
+                sb.Append((char)(((a & 0x0F) << 12) | ((bytes[i + 1] & 0x3F) << 6) | (bytes[i + 2] & 0x3F)));
+                i += 3;
+            }
+            else
+            {
+                throw new InvalidDataException($"Invalid modified-UTF-8 lead byte 0x{a:X2} in NBT string");
+            }
+        }
+        return sb.ToString();
     }
 
     // ── writing ──────────────────────────────────────────────────────────────
@@ -373,11 +461,35 @@ public static class Nbt
         for (var shift = 56; shift >= 0; shift -= 8) w.Write((byte)(v >> shift));
     }
 
+    /// <summary>Writes a Java "modified UTF-8" string — the exact inverse of <see cref="ReadString"/>.</summary>
+    /// <remarks>Encoding per UTF-16 code unit is what makes it modified UTF-8 rather than plain: a NUL
+    /// becomes <c>C0 80</c> so it can never terminate the string, and an astral character becomes its
+    /// two surrogates in three bytes each, which is what Java reads back. See the remark on
+    /// <see cref="ReadString"/> for why this matters to a file the player owns.</remarks>
     private static void WriteString(BinaryWriter w, string? s)
     {
-        var bytes = Encoding.UTF8.GetBytes(s ?? "");
-        if (bytes.Length > ushort.MaxValue) throw new InvalidDataException("NBT string too long");
-        WBE16(w, (short)(ushort)bytes.Length);
-        w.Write(bytes);
+        s ??= "";
+        var buffer = new List<byte>(s.Length + 8);
+        foreach (var c in s)
+        {
+            if (c is >= '\u0001' and <= '\u007F')
+            {
+                buffer.Add((byte)c);
+            }
+            else if (c == '\0' || c <= '\u07FF')
+            {
+                buffer.Add((byte)(0xC0 | (c >> 6)));
+                buffer.Add((byte)(0x80 | (c & 0x3F)));
+            }
+            else
+            {
+                buffer.Add((byte)(0xE0 | (c >> 12)));
+                buffer.Add((byte)(0x80 | ((c >> 6) & 0x3F)));
+                buffer.Add((byte)(0x80 | (c & 0x3F)));
+            }
+        }
+        if (buffer.Count > ushort.MaxValue) throw new InvalidDataException("NBT string too long");
+        WBE16(w, (short)(ushort)buffer.Count);
+        w.Write(buffer.ToArray());
     }
 }

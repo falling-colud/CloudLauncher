@@ -242,6 +242,13 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
     /// <summary>Copies a shader zip from anywhere on disk into the instance. Returns the new path.</summary>
     /// <param name="replace">True overwrites a same-named pack; false (the default) installs
     /// alongside it as "name-2.zip". Only the caller knows which the user asked for.</param>
+    /// <remarks>Installing a pack over itself is a no-op rather than a copy, because the source can
+    /// already BE the destination: "Open folder" on the Shaders page shows the instance's own
+    /// <c>shaderpacks/</c>, and dragging a pack from there back onto the list and choosing "Replace"
+    /// arrives here with both paths equal. Without the <see cref="SamePath"/> guard the replace branch
+    /// deletes the pack first and then copies the (now gone) source onto itself — an empty folder and
+    /// a cheerful "Added 1 shader pack". See <see cref="CopyFolder"/> for the same guard one level
+    /// down.</remarks>
     public string Install(Guid packId, string sourceFile, bool replace = false)
     {
         var dir = FolderFor(packId);
@@ -252,12 +259,14 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
         {
             // An unpacked shader folder dropped in from Explorer is as valid as a zip.
             var folderDest = replace ? Path.Combine(dir, name) : NextFreePath(dir, name);
+            if (SamePath(sourceFile, folderDest)) return folderDest;
             if (replace && Directory.Exists(folderDest)) Directory.Delete(folderDest, recursive: true);
             CopyFolder(sourceFile, folderDest);
             return folderDest;
         }
 
         var dest = replace ? Path.Combine(dir, name) : NextFreePath(dir, name);
+        if (SamePath(sourceFile, dest)) return dest;
         File.Copy(sourceFile, dest, overwrite: replace);
         return dest;
     }
@@ -270,13 +279,17 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
     /// <summary>Copies a shader into another instance, so a pack you like is one click away in all of them.</summary>
     /// <remarks>The pack's Iris settings file travels with it. Leaving it behind means the copy opens
     /// at defaults, which is exactly the thing the user was trying to avoid by copying rather than
-    /// re-downloading.</remarks>
+    /// re-downloading.
+    /// <para>Copying a pack into the instance it already lives in returns it untouched: with
+    /// <paramref name="replace"/> set, the folder branch would otherwise delete the source before
+    /// copying it, destroying the pack it was asked to duplicate.</para></remarks>
     public string CopyTo(ShaderPackInfo shader, Guid targetPackId, bool replace = false)
     {
         var dir = Path.Combine(packs.GameDir(targetPackId), FolderName);
         Directory.CreateDirectory(dir);
 
         var dest = replace ? Path.Combine(dir, shader.FileName) : NextFreePath(dir, shader.FileName);
+        if (SamePath(shader.FilePath, dest)) return shader.FilePath;
         if (shader.IsFolder)
         {
             if (replace && Directory.Exists(dest)) Directory.Delete(dest, recursive: true);
@@ -357,8 +370,32 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// True when two paths name the same file or folder on disk.
+    /// </summary>
+    /// <remarks>Guards the install/copy paths against source == destination, which is reachable from
+    /// the UI (dragging a pack out of the instance's own shaderpacks/ back onto the list) and is
+    /// silently destructive: the "replace" branches delete the destination first, and for an unpacked
+    /// folder that destination IS the user's pack. Compared as full paths so that "..\shaderpacks\X"
+    /// and an absolute path match, case-insensitively and ignoring a trailing separator because
+    /// Windows treats both spellings as one path. A path the OS cannot even resolve is reported as
+    /// "not the same", leaving the copy to fail the way it always did rather than turning a bad path
+    /// into a silent no-op.</remarks>
+    private static bool SamePath(string a, string b)
+    {
+        try
+        {
+            static string Norm(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
+            return string.Equals(Norm(a), Norm(b), StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     private static void CopyFolder(string source, string dest)
     {
+        // Belt and braces for the callers above: copying a folder onto itself would walk it while
+        // writing into it.
+        if (SamePath(source, dest)) return;
         Directory.CreateDirectory(dest);
         foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
             Directory.CreateDirectory(dir.Replace(source, dest));

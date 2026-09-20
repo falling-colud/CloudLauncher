@@ -186,16 +186,44 @@ public static class OptionsTxtService
     /// <summary>
     /// True when this instance's options.txt spells its entries <c>file/Name.zip</c>, the 1.13+ form.
     /// </summary>
-    /// <remarks>Decided from what is already in the file rather than from the pack's Minecraft version,
-    /// because the file is the thing the game actually parses. With nothing to go on — a fresh
-    /// instance, or one with only "vanilla" enabled — the modern form is assumed, which is correct for
-    /// every version this launcher installs by default.</remarks>
-    public static bool UsesFilePrefix(string gameDir)
+    /// <param name="minecraftVersion">The instance's Minecraft version, used only when the file itself
+    /// says nothing. Pass it wherever it is known — see <see cref="VersionUsesFilePrefix"/>.</param>
+    /// <remarks>Decided from what is already in the file where possible, because the file is the thing
+    /// the game actually parses. The fallback matters more than it looks: an instance whose stack holds
+    /// nothing but "vanilla" — which is every instance until the first pack is turned on — offers no
+    /// evidence at all, and answering "modern" there wrote <c>file/</c> entries into pre-1.13
+    /// instances, where the game matches the entry against the bare file name and so loaded none of
+    /// them. With no evidence the version decides; with no version either, the modern form is assumed,
+    /// which is right for every version this launcher installs by default.</remarks>
+    public static bool UsesFilePrefix(string gameDir, string? minecraftVersion = null)
     {
         var existing = ReadResourcePacks(gameDir);
         var named = existing.Where(e => !string.Equals(e, VanillaEntry, StringComparison.Ordinal)).ToList();
-        if (named.Count == 0) return true;
+        if (named.Count == 0) return VersionUsesFilePrefix(minecraftVersion);
         return named.Any(e => e.StartsWith("file/", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// True when <paramref name="minecraftVersion"/> is 1.13 or later, the releases that spell
+    /// resource pack entries <c>file/Name.zip</c>.
+    /// </summary>
+    /// <remarks>1.13 is where the prefix arrived: before it, options.txt listed the bare file name and
+    /// nothing else. Only the <c>1.x</c> release form is read — a version string this does not
+    /// understand (a snapshot like <c>23w31a</c>, a loader's own naming, an empty value) is treated as
+    /// modern, since everything that is not a numbered release predates nothing and the launcher only
+    /// installs current versions by default.</remarks>
+    public static bool VersionUsesFilePrefix(string? minecraftVersion)
+    {
+        if (string.IsNullOrWhiteSpace(minecraftVersion)) return true;
+
+        // "1.12.2", "1.13", "1.20.1-pre1" → the number after the first dot is what decides.
+        var parts = minecraftVersion.Trim().Split('.');
+        if (parts.Length < 2 || parts[0] != "1") return true;
+
+        var minorDigits = new string(parts[1].TakeWhile(char.IsDigit).ToArray());
+        if (minorDigits.Length == 0) return true;
+        return !int.TryParse(minorDigits, NumberStyles.Integer, CultureInfo.InvariantCulture, out var minor)
+               || minor >= 13;
     }
 
     /// <summary>The file name inside an options.txt entry, with any <c>file/</c> prefix removed.</summary>

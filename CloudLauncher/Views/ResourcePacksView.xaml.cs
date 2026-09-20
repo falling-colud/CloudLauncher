@@ -771,7 +771,13 @@ public partial class ResourcePacksView : Page
             if (!await ConfirmStackWriteAsync(row)) return;
 
             var turnOn = !row.Enabled;
-            App.State.ResourcePacks.SetEnabled(row.Info.SourcePackId, row.Info.SourcePackName, row.FileName, turnOn);
+            // The instance's version decides how the entry is spelled when this is the first pack
+            // turned on there — "file/Name.zip" from 1.13 on, the bare name before that. _packs can
+            // still be empty on a page that has not listed instances yet, in which case the modern
+            // form is assumed exactly as before.
+            var mcVersion = _packs.FirstOrDefault(p => p.Id == row.Info.SourcePackId)?.MinecraftVersion;
+            App.State.ResourcePacks.SetEnabled(row.Info.SourcePackId, row.Info.SourcePackName, row.FileName,
+                turnOn, mcVersion);
             await RefreshInstalledAsync();
             Okay(turnOn
                 ? row.DisplayName + " is on — top of " + row.SourcePackName + "'s stack."

@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Windows;
@@ -38,6 +38,15 @@ public partial class ServersView : Page
     /// worth of admin, short enough that settings.json stays small.</summary>
     private const int MaxCommandHistory = 60;
 
+    /// <summary>The size the server-list-ping protocol specifies for a favicon, and the width every
+    /// one of them is decoded at. See <see cref="DecodeFavicon"/>.</summary>
+    private const int FaviconPixelSize = 64;
+
+    /// <summary>The longest base64 favicon this will even try to decode. A 64×64 PNG is a few
+    /// kilobytes; 256 KB is generous for one and still a hard ceiling on what an unknown server can
+    /// make the launcher allocate.</summary>
+    private const int MaxFaviconBase64Length = 256 * 1024;
+
     private readonly MainWindow _shell;
     private readonly ServerListService _servers = new(App.State.Packs);
     private readonly ObservableCollection<ServerRow> _rows = new();
@@ -49,6 +58,11 @@ public partial class ServersView : Page
     /// gathered instead of blanking the page and starting the sweep again.</summary>
     private readonly Dictionary<string, ServerPingResult> _pings = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ImageSource> _icons = new(StringComparer.Ordinal);
+
+    /// <summary>What the last scan could not read, if anything. Kept rather than written straight to
+    /// the status line because the ping sweep owns that line while it runs and clears it at the end —
+    /// the warning has to survive the sweep or nobody ever sees it.</summary>
+    private string _scanWarning = "";
 
     private CancellationTokenSource? _pingCts;
     private ServerSort _sort = ServerSort.List;
@@ -102,20 +116,36 @@ public partial class ServersView : Page
         finally { _loading = false; }
     }
 
-    /// <summary>Re-reads every instance's server list off the UI thread, then rebuilds and re-pings.</summary>
+    /// <summary>
+    /// Re-reads every instance's server list off the UI thread, then rebuilds and re-pings.
+    /// </summary>
+    /// <remarks>An instance whose list could not be read is skipped rather than allowed to empty the
+    /// page, but the count is said out loud: a server that is merely unreadable looks exactly like a
+    /// server that has been deleted, and the difference matters before anyone re-adds it by hand.</remarks>
     private async Task ScanAsync()
     {
         var packs = _packs.ToList();
+        var unreadable = new List<string>();
         try
         {
-            _entries = await Task.Run(() => _servers.ScanAll(packs));
+            _entries = await Task.Run(() =>
+            {
+                var found = _servers.ScanAll(packs, out var skipped);
+                unreadable = skipped;
+                return found;
+            });
+            _scanWarning = unreadable.Count == 0
+                ? ""
+                : $"Could not read the server list for {unreadable.Count} instance(s): " +
+                  $"{string.Join(", ", unreadable)}. Their servers are not shown.";
         }
         catch (Exception ex)
         {
-            StatusLabel.Text = "Could not read the server lists: " + ex.Message;
+            _scanWarning = "Could not read the server lists: " + ex.Message;
             _entries = new List<ServerEntry>();
         }
         Refresh();
+        if (_scanWarning.Length > 0) StatusLabel.Text = _scanWarning;
         await PingVisibleAsync();
     }
 
@@ -279,7 +309,17 @@ public partial class ServersView : Page
                     {
                         _pings[row.Key] = result;
                         if (icon is not null) _icons[row.Key] = icon;
-                        row.Apply(result, icon ?? CachedIcon(row.Key));
+                        var shown = icon ?? CachedIcon(row.Key);
+                        row.Apply(result, shown);
+                        // Refresh() builds brand-new ServerRow objects, and typing a character into
+                        // the search box does exactly that in the middle of the sweep. The row this
+                        // ping was started for is then no longer the one on screen, so paint the
+                        // live one with the same address too — otherwise every row the sweep had not
+                        // yet reached when the user typed sits at "not pinged yet" until they press
+                        // refresh by hand.
+                        foreach (var live in _rows)
+                            if (!ReferenceEquals(live, row) && live.Key == row.Key)
+                                live.Apply(result, shown);
                     });
                 }
                 finally { gate.Release(); }
@@ -296,7 +336,7 @@ public partial class ServersView : Page
         await Task.WhenAll(tasks);
 
         if (ct.IsCancellationRequested) return;
-        StatusLabel.Text = "";
+        StatusLabel.Text = _scanWarning;
         UpdateSubLabel(_rows.Count);
         if (_sort == ServerSort.Status || _sort == ServerSort.Players) Refresh();
     }
@@ -308,18 +348,28 @@ public partial class ServersView : Page
     /// <summary>
     /// Turns a base64 PNG into a frozen image, or null for anything that is not one.
     /// </summary>
-    /// <remarks>Frozen so it can be handed to the UI thread from the ping's own thread. Both sources
+    /// <remarks>
+    /// <para>Frozen so it can be handed to the UI thread from the ping's own thread. Both sources
     /// are other people's data — a server's favicon and whatever the game last wrote into
-    /// servers.dat — so every failure mode here is "no icon", never an exception.</remarks>
+    /// servers.dat — so every failure mode here is "no icon", never an exception.</para>
+    /// <para>The two bounds are there because this is the one decode in the client fed straight from
+    /// an untrusted remote host. <see cref="MaxFaviconBase64Length"/> caps what is even attempted, and
+    /// <see cref="BitmapImage.DecodePixelWidth"/> caps what is allocated: without it a server can
+    /// answer the status ping with a 30000×30000 PNG that costs a few kilobytes on the wire and
+    /// several gigabytes once decoded, and one row of a server list takes the launcher down. 64 is the
+    /// size the protocol specifies for a favicon, so nothing legitimate loses detail.</para>
+    /// </remarks>
     private static ImageSource? DecodeFavicon(string? base64)
     {
         if (string.IsNullOrWhiteSpace(base64)) return null;
+        if (base64.Length > MaxFaviconBase64Length) return null;
         try
         {
             var bytes = Convert.FromBase64String(base64.Trim());
             var image = new BitmapImage();
             image.BeginInit();
             image.CacheOption = BitmapCacheOption.OnLoad;
+            image.DecodePixelWidth = FaviconPixelSize;
             image.StreamSource = new MemoryStream(bytes);
             image.EndInit();
             image.Freeze();
@@ -328,25 +378,25 @@ public partial class ServersView : Page
         catch (FormatException) { return null; }
         catch (NotSupportedException) { return null; }   // not an image WPF can decode
         catch (IOException) { return null; }
+        catch (OverflowException) { return null; }       // a header claiming more pixels than fit
     }
 
     // ── toolbar ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The one refresh on this page: re-read every instance's servers.dat AND ping every server again.
+    /// </summary>
+    /// <remarks>There used to be a separate ping-only button next to it. Two near-identical circular
+    /// glyphs side by side is the duplicate-refresh problem the user reported on the mod hub, and the
+    /// distinction was not one anybody would make at a glance — a refresh should simply refresh.
+    /// Disabled while it runs so it cannot start a second sweep over the first.</remarks>
     private async void OnRefresh(object sender, RoutedEventArgs e)
     {
+        if (!RefreshButton.IsEnabled) return;
+        RefreshButton.IsEnabled = false;
         try { await LoadAsync(); }
         catch (Exception ex) { StatusLabel.Text = "Refresh failed: " + ex.Message; }
-    }
-
-    private async void OnPingAll(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            StatusLabel.Text = "Pinging…";
-            await PingVisibleAsync();
-            StatusLabel.Text = "";
-        }
-        catch (Exception ex) { StatusLabel.Text = "Ping failed: " + ex.Message; }
+        finally { RefreshButton.IsEnabled = true; }
     }
 
     private async void OnPackFilterChanged(object sender, SelectionChangedEventArgs e)
@@ -1037,10 +1087,15 @@ public partial class ServersView : Page
             AppendConsole(string.IsNullOrWhiteSpace(reply)
                 ? "(the server said nothing)"
                 : MinecraftServerPing.StripFormatting(reply));
-            SetConsoleStatus("");
+            // A command that only half finished comes back with what arrived, but leaves the rest of
+            // its reply in the socket, so RconClient marks the connection unusable. Honour that here:
+            // reading the next command's answer off a stream still carrying this one's tail would show
+            // confident, wrong output.
+            if (_rcon is { IsConnected: false }) DropDesynchronisedConsole("That command did not finish.");
+            else SetConsoleStatus("");
         }
         catch (OperationCanceledException) { SetConsoleStatus("Cancelled."); }
-        catch (TimeoutException ex) { SetConsoleStatus(ex.Message); }
+        catch (TimeoutException ex) { DropDesynchronisedConsole(ex.Message); }
         catch (Exception ex)
         {
             // A dead socket is the usual cause; say so and put the pane back into its offline state
@@ -1048,6 +1103,22 @@ public partial class ServersView : Page
             CloseConsoleConnection();
             SetConsoleState(connected: false, "The console connection dropped: " + ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Drops an RCON connection that can no longer be read in step, and says so in the pane.
+    /// </summary>
+    /// <remarks>A timed-out command leaves its own reply — and the empty sentinel command that marks
+    /// the end of it — still on their way from the server. Keeping the socket would mean the next
+    /// command returns this one's output: a console that answers the wrong question without ever
+    /// looking broken, which is worse than an error. Reconnecting is one button, and the scrollback is
+    /// kept so nothing said so far is lost.</remarks>
+    private void DropDesynchronisedConsole(string why)
+    {
+        CloseConsoleConnection();
+        AppendConsole("— disconnected: the server did not finish answering —");
+        SetConsoleState(connected: false, why + " The console disconnected so it cannot show you a " +
+                                                "stale answer — press Connect to carry on.");
     }
 
     /// <summary>Stores the command in this server's history, newest last, without duplicating the one

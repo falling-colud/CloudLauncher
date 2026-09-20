@@ -946,7 +946,7 @@ public partial class ModGraphView : UserControl
         border.MouseLeftButtonDown += (_, e) => OnNodeDown(border, m, e);
         border.MouseMove += OnNodeMove;
         border.MouseLeftButtonUp += OnNodeUp;
-        border.MouseRightButtonUp += (_, e) => { ShowOptions(m, border); e.Handled = true; };
+        border.MouseRightButtonUp += (_, e) => OnNodeRightClick(border, m, e);
         return border;
     }
 
@@ -1057,10 +1057,16 @@ public partial class ModGraphView : UserControl
         if (!IsCustomMode) return; // only the custom layout is draggable
 
         _userInteracted = true;
+        // The graph can be rebuilt out from under a drag — a rebuild clears _rect, _nodeEls and the
+        // canvas — and then this mod is no longer on it. That is not hypothetical: the node's own
+        // context menu takes the mouse capture away, so the left-button-up never reaches OnNodeUp and
+        // the drag fields stay set while "Delete" or "Disable" rebuilds the graph without this node.
+        // Indexing _rect here would throw KeyNotFoundException out of a WPF mouse handler, which
+        // closes the launcher rather than misdrawing one node. Leave this guard in place.
+        if (!_rect.TryGetValue(_dragMod, out var r)) { CancelNodeDrag(); return; }
         double nl = _dragOrigLeft + dx, nt = _dragOrigTop + dy;
         Canvas.SetLeft(_dragNode, nl);
         Canvas.SetTop(_dragNode, nt);
-        var r = _rect[_dragMod];
         _rect[_dragMod] = new Rect(nl, nt, r.Width, r.Height);
         RedrawEdges();
     }
@@ -1079,6 +1085,68 @@ public partial class ModGraphView : UserControl
         // right-click options menu ("Open page") instead.
         if (!dragged) return;
         if (IsCustomMode && _rect.TryGetValue(mod, out var r))
+            App.State.ModMetadata.SetNodePosition(_packId, mod.Key, r.X, r.Y);
+    }
+
+    /// <summary>
+    /// Right-click on a node: ends any drag still in flight, then opens the options menu for the node
+    /// actually under the cursor.
+    /// </summary>
+    /// <remarks>
+    /// <para>Two things go wrong if this simply calls <see cref="ShowOptions"/>. While a drag is
+    /// running the dragged node holds the mouse capture, so a right-click <i>anywhere</i> on the graph
+    /// is routed to that node — the menu would act on the mod being dragged rather than the one
+    /// clicked. And opening the menu takes the capture for itself, so the matching left-button-up
+    /// never reaches <see cref="OnNodeUp"/>: the drag fields stay set, and a menu item that rebuilds
+    /// the graph (delete, disable, re-scan) leaves them pointing at a mod that is no longer a key in
+    /// <c>_rect</c>, which the next mouse move used to turn into a crash.</para>
+    /// <para>The try/catch is not decoration: an exception escaping a WPF event handler is unhandled
+    /// and takes the whole launcher down, and this one is reached by an ordinary right-click.</para>
+    /// </remarks>
+    private void OnNodeRightClick(Border node, PackMod mod, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        try
+        {
+            var position = e.GetPosition(GraphCanvas);
+            CancelNodeDrag();
+            var target = NodeUnder(position) ?? (mod, node);
+            ShowOptions(target.Item1, target.Item2);
+        }
+        catch (Exception ex) { GraphStatus.Text = "Could not open the menu: " + ex.Message; }
+    }
+
+    /// <summary>The node at a canvas point, or null when the point is not over one.</summary>
+    /// <remarks>Used instead of the clicked element because during a drag every mouse event is routed
+    /// to the captured node, whatever the cursor is actually over.</remarks>
+    private (PackMod, Border)? NodeUnder(Point canvasPoint)
+    {
+        var hit = GraphCanvas.InputHitTest(canvasPoint) as DependencyObject;
+        for (; hit is not null; hit = VisualTreeHelper.GetParent(hit))
+        {
+            if (hit is not Border border) continue;
+            foreach (var pair in _nodeEls)
+                if (ReferenceEquals(pair.Value, border)) return (pair.Key, border);
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Ends a drag in flight, keeping wherever the node was dragged to, and drops every reference the
+    /// drag was holding.
+    /// </summary>
+    /// <remarks>Clearing <c>_dragMod</c> is the point: it is a key into <c>_rect</c>, and a rebuild
+    /// can retire it while the drag is still notionally running.</remarks>
+    private void CancelNodeDrag()
+    {
+        if (_dragNode is null && _dragMod is null) return;
+        _dragNode?.ReleaseMouseCapture();
+        var mod = _dragMod;
+        var dragged = _dragMoved;
+        _dragNode = null;
+        _dragMod = null;
+        _dragMoved = false;
+        if (dragged && mod is not null && IsCustomMode && _rect.TryGetValue(mod, out var r))
             App.State.ModMetadata.SetNodePosition(_packId, mod.Key, r.X, r.Y);
     }
 

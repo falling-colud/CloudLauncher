@@ -754,9 +754,46 @@ public partial class ConfigHubView : Page
         try
         {
             FileEditorWindow.OpenFileFor(_shell, entry.PackId, entry.PackName, entry.FullPath);
+            HookEditorClose(entry.PackId, entry.PackName);
             StatusLabel.Text = $"Opened {entry.FileName} from {entry.PackName} in the editor.";
         }
         catch (Exception ex) { StatusLabel.Text = "Could not open the editor: " + ex.Message; }
+    }
+
+    /// <summary>Editor windows this page has already subscribed to, so opening a second file in the
+    /// same window does not stack another refresh onto its close.</summary>
+    private readonly HashSet<FileEditorWindow> _hookedEditors = new();
+
+    /// <summary>
+    /// Re-reads the edited instance once its editor window closes, so its rows stop showing the size
+    /// and age the files had before they were edited.
+    /// </summary>
+    /// <remarks>
+    /// <para>The editor saves without announcing it, and nothing else notices: the cheap folder stamp
+    /// the scan cache is validated against only covers each root and its immediate children, so saving
+    /// <c>config/jei/jei-client.ini</c> — an existing file, in a nested folder — changes neither. The
+    /// row would keep its pre-edit numbers until somebody pressed Refresh.</para>
+    /// <para>The window is found by its title instead of being handed to us because
+    /// <see cref="FileEditorWindow"/> owns its one-window-per-instance table and this page must not
+    /// reach into it. Two instances sharing a display name would at worst cost one extra refresh.</para>
+    /// </remarks>
+    private void HookEditorClose(Guid packId, string packName)
+    {
+        var window = Application.Current?.Windows.OfType<FileEditorWindow>()
+            .FirstOrDefault(w => w.Title == $"Edit files · {packName}");
+        if (window is null || !_hookedEditors.Add(window)) return;
+
+        window.Closed += OnEditorClosed;
+
+        void OnEditorClosed(object? sender, EventArgs e)
+        {
+            window.Closed -= OnEditorClosed;
+            _hookedEditors.Remove(window);
+            // Drop the cached walk either way — a later visit to this page must not read it back.
+            ConfigHubService.Invalidate(packId);
+            // force: false so only the invalidated instance is re-walked; the others stay cached.
+            if (IsLoaded) _ = LoadAsync(force: false);
+        }
     }
 
     private void OnRowReveal(object sender, RoutedEventArgs e) => Reveal(RowFor(sender)?.Entry);
@@ -1133,10 +1170,12 @@ public partial class ConfigHubView : Page
                 return;
             }
 
+            // Most recently taken, not newest by mtime — a backup inherits its source file's
+            // last-write time, so mtime is the age of the content, not of the backup.
             var newest = backups[0];
             if (!await AppDialog.ConfirmAsync(_shell, "Restore backup",
                     $"Restore {row.FileName} in {row.Entry.PackName} from the backup taken " +
-                    $"{ConfigHubService.FormatAge(newest.LastWriteTimeUtc)} " +
+                    $"{ConfigHubService.FormatAge(ConfigHubService.BackupTakenUtc(newest))} " +
                     $"({ConfigHubService.FormatSize(newest.Length)})?\n\n" +
                     (backups.Count > 1 ? $"There are {backups.Count} backups; this restores the newest.\n\n" : "") +
                     "The file as it stands now is backed up first, so this is reversible.",

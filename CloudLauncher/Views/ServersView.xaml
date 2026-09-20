@@ -20,13 +20,13 @@
                 <Button Content="Add server" Style="{StaticResource AccentButton}" Click="OnAddServer"
                         Padding="12,5" Margin="0,0,8,0"
                         ToolTip="Add a server to one instance's multiplayer list"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE895;"
-                        FontFamily="{StaticResource IconFont}" FontSize="13" Click="OnPingAll"
-                        Margin="0,0,4,0"
-                        ToolTip="Ping every server again (F5 refreshes the whole page)"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE72C;"
+                <!-- One refresh, not two. A separate "ping only" button sat beside this one as a
+                     near-identical circular glyph, which is precisely the duplicate-refresh confusion
+                     the user called out elsewhere tonight. Refresh re-reads every instance's list AND
+                     re-pings, which is what anyone pressing it wants. -->
+                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;"
                         FontFamily="{StaticResource IconFont}" FontSize="13" Click="OnRefresh"
-                        ToolTip="Re-read every instance's server list and ping again"/>
+                        ToolTip="Re-read every instance's server list and ping every server again (F5)"/>
             </StackPanel>
             <StackPanel>
                 <TextBlock Style="{StaticResource H1}" Text="Servers"/>
