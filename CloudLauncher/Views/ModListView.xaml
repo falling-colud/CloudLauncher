@@ -100,7 +100,7 @@
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                         <!--  Never bind a URL straight to Image.Source; see IconLoader. The cell is 28px.  -->
                                         <Image local:IconLoader.Url="{Binding IconUrl}"
-                                               local:IconLoader.DecodeWidth="28" Stretch="UniformToFill"/>
+                                               local:IconLoader.DecodeWidth="28" Stretch="Uniform"/>
                                     </Grid>
                                 </slate:SlateBorder>
                             </DataTemplate>

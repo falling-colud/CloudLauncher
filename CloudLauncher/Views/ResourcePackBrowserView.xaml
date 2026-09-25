@@ -173,7 +173,7 @@
                                                 stutters when scrolling fast.  -->
                                                 <Image views:IconLoader.Url="{Binding IconUrl}"
                                                        views:IconLoader.DecodeWidth="44"
-                                                       Stretch="UniformToFill"/>
+                                                       Stretch="Uniform"/>
                                             </Grid>
                                         </slate:SlateBorder>
                                         <StackPanel Grid.Column="1" Margin="0,0,12,0">

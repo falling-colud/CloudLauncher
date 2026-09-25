@@ -423,7 +423,7 @@
                                                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                                             <!--  Never bind a URL straight to Image.Source: see IconLoader.  -->
                                                             <Image views:IconLoader.Url="{Binding IconUrl}"
-                                                                   views:IconLoader.DecodeWidth="44" Stretch="UniformToFill"/>
+                                                                   views:IconLoader.DecodeWidth="44" Stretch="Uniform"/>
                                                         </Grid>
                                                     </slate:SlateBorder>
 

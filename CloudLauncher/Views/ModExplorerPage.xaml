@@ -212,7 +212,7 @@
                                                 downloads and decodes at full size on the UI thread
                                                 for every row that gets realized.  -->
                                                 <Image views:IconLoader.Url="{Binding IconUrl}"
-                                                       views:IconLoader.DecodeWidth="42" Stretch="UniformToFill"/>
+                                                       views:IconLoader.DecodeWidth="42" Stretch="Uniform"/>
                                             </Grid>
                                         </slate:SlateBorder>
 

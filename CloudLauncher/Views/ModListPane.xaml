@@ -200,7 +200,7 @@
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                         <!--  Never bind a URL straight to Image.Source: see IconLoader.  -->
                                         <Image local:IconLoader.Url="{Binding Mod.IconUrl}"
-                                               local:IconLoader.DecodeWidth="36" Stretch="UniformToFill"/>
+                                               local:IconLoader.DecodeWidth="36" Stretch="Uniform"/>
                                     </Grid>
                                 </slate:SlateBorder>
 

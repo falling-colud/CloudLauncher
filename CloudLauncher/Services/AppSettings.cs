@@ -12,7 +12,10 @@ public sealed partial class AppSettings
     public string ServerUrl { get; set; } = DefaultServerUrl;
 
     /// <summary>The address every new install uses, over TLS.</summary>
-    public const string DefaultServerUrl = "https://launcher.crispythedev.duckdns.org";
+    public const string DefaultServerUrl = "https://api.cloudlauncher.co";
+
+    /// <summary>The previous address, still served. Used while a resolver does not know the new name yet.</summary>
+    public const string FallbackServerUrl = "https://launcher.crispythedev.duckdns.org";
 
     /// <summary>Addresses older builds shipped with. Settings still pointing at one are moved to
     /// <see cref="DefaultServerUrl"/> on load, so tokens stop going over plain HTTP.</summary>
@@ -21,6 +24,8 @@ public sealed partial class AppSettings
         "http://130.61.131.193:5000",
         "https://130.61.131.193:5000",
         "http://130.61.131.193:5000/",
+        FallbackServerUrl,
+        FallbackServerUrl + "/",
     ];
 
     // AccessToken and RefreshToken live in AppSettings.Secrets.cs, in the secret store.
@@ -1056,15 +1061,37 @@ public sealed partial class AppSettings
     public void MigrateServerUrl()
     {
         var current = (ServerUrl ?? "").Trim();
-        if (current.Length == 0)
+        if (current.Length == 0) current = DefaultServerUrl;
+        var isDefault = string.Equals(current.TrimEnd('/'), DefaultServerUrl, StringComparison.OrdinalIgnoreCase);
+        var isLegacy = LegacyServerUrls.Any(u => string.Equals(u.TrimEnd('/'), current.TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
+        if (!isDefault && !isLegacy)
         {
-            ServerUrl = DefaultServerUrl;
+            if (ServerUrl != current) ServerUrl = current;
             return;
         }
-        if (!LegacyServerUrls.Any(u => string.Equals(u.TrimEnd('/'), current.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)))
-            return;
-        ServerUrl = DefaultServerUrl;
+
+        // The new name needs the domain's nameserver change to have reached this PC's resolver. Until
+        // it has, the old address keeps working, so a launcher stays (or lands) there and tries again
+        // next start.
+        var newHostKnown = HostResolves(new Uri(DefaultServerUrl).Host);
+        var target = newHostKnown ? DefaultServerUrl : FallbackServerUrl;
+        if (string.Equals(current.TrimEnd('/'), target, StringComparison.OrdinalIgnoreCase)) { ServerUrl = target; return; }
+        ServerUrl = target;
         try { Save(); } catch { /* read-only profile: the in-memory value still points at the right place */ }
+    }
+
+    /// <summary>True when the name resolves within a short wait; a slow or offline resolver counts as no.</summary>
+    private static bool HostResolves(string host)
+    {
+        try
+        {
+            var lookup = System.Net.Dns.GetHostAddressesAsync(host);
+            return lookup.Wait(TimeSpan.FromSeconds(2)) && lookup.Result.Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public bool IsLoggedIn => !string.IsNullOrEmpty(AccessToken) && !string.IsNullOrEmpty(RefreshToken);

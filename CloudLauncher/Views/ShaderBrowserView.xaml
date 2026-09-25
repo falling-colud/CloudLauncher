@@ -174,7 +174,7 @@
                                                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                                 <Image views:IconLoader.Url="{Binding IconUrl}"
                                                        views:IconLoader.DecodeWidth="44"
-                                                       Stretch="UniformToFill"/>
+                                                       Stretch="Uniform"/>
                                             </Grid>
                                         </slate:SlateBorder>
 
@@ -302,7 +302,7 @@
                                                                 ClipToBounds="True">
                                                             <Image views:IconLoader.Url="{Binding ImageUrl}"
                                                                    views:IconLoader.DecodeWidth="190"
-                                                                   Stretch="UniformToFill"/>
+                                                                   Stretch="Uniform"/>
                                                         </slate:SlateBorder>
                                                         <TextBlock Text="{Binding Title}" Style="{StaticResource Caption}"
                                                                    Margin="0,6,0,0" TextWrapping="Wrap"/>

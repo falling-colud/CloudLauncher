@@ -3,6 +3,14 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.1 - 2026-09-26
+
+- The launcher and website moved to cloudlauncher.co. Existing installs switch to the new
+  address by themselves once their DNS resolver knows it; the old address keeps working.
+- Mod, pack and world icons are no longer cropped when they aren't square.
+- Planning notes shrunk to their title keep the resize grip clear of the text.
+- Discord link in the sidebar, in Settings > About and on the website.
+
 ## 0.9.0 - 2026-09-25
 
 - New app icon.

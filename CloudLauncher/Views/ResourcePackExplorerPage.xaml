@@ -171,7 +171,7 @@
                                             decodes at native size on the UI thread, which makes scrolling stutter.  -->
                                             <Image views:IconLoader.Url="{Binding IconUrl}"
                                                    views:IconLoader.DecodeWidth="42"
-                                                   Stretch="UniformToFill"/>
+                                                   Stretch="Uniform"/>
                                         </Grid>
                                     </slate:SlateBorder>
 

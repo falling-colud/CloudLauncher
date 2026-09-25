@@ -190,7 +190,7 @@
                                                 the UI thread, which makes fast scrolling stutter. -->
                                                 <Image views:IconLoader.Url="{Binding IconUrl}"
                                                        views:IconLoader.DecodeWidth="42"
-                                                       Stretch="UniformToFill"/>
+                                                       Stretch="Uniform"/>
                                                 <!-- Locally cached artwork for a CloudLauncher pack you
                                                 already have; hosted packs carry no icon URL of their
                                                 own. -->

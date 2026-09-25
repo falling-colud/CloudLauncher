@@ -28,6 +28,7 @@ public partial class ModPlanView : UserControl
     // before layout like every other card's.
     private const double NoteProgressH = 26, NoteTasksHeaderH = 28, NoteTaskRowH = 22, NoteAddTaskRowH = 24, NoteTasksPad = 6;
     private const double NoteCornerW = 26;   // one top-right corner control plus its gap
+    private const double NoteGripRoom = 18;  // kept clear of a title-only note's text for the resize grip
     private const double NoteBodyLineH = 16; // one line of description: shorter than this under the title and only the title shows
     private const double MinCardW = 144;     // the narrowest a note resizes to: six cells
     private const double SectionW = 552, SectionH = 216; // two columns (23 x 24 wide), 9 x 24 tall
@@ -1288,7 +1289,7 @@ public partial class ModPlanView : UserControl
             FontWeight = titled ? FontWeights.SemiBold : FontWeights.Normal,
             TextWrapping = titled ? TextWrapping.Wrap : TextWrapping.NoWrap
         };
-        text.Measure(new Size(Math.Max(20, w - 3 - 24 - corner * NoteCornerW), double.PositiveInfinity));
+        text.Measure(new Size(Math.Max(20, w - 3 - 24 - Math.Max(corner * NoteCornerW, NoteGripRoom)), double.PositiveInfinity));
         return Math.Max(minH, Math.Ceiling(text.DesiredSize.Height + 20));
     }
 
@@ -1773,7 +1774,7 @@ public partial class ModPlanView : UserControl
                 TextDecorations = ticked ? TextDecorations.Strikethrough : null,
                 TextWrapping = titled ? TextWrapping.Wrap : TextWrapping.NoWrap,
                 TextTrimming = TextTrimming.CharacterEllipsis,
-                Margin = new Thickness(0, 0, cornerRoom, titleOnly ? 0 : 5)
+                Margin = new Thickness(0, 0, titleOnly ? Math.Max(cornerRoom, NoteGripRoom) : cornerRoom, titleOnly ? 0 : 5)
             });
         }
         // The description, unless only the title shows. With a tracker or task list an empty one is
