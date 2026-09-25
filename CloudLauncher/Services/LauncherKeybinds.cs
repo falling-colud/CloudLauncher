@@ -39,7 +39,7 @@ public static class LauncherKeybinds
                 "keypad.7" => "Numpad 7",
                 "keypad.8" => "Numpad 8",
                 "keypad.9" => "Numpad 9",
-                // Single letters, and function keys ("f5" → "F5"), read better capitalised.
+                // Single letters and function keys ("f5" -> "F5") read better capitalised.
                 _ => part.Length == 1 || (part.Length <= 3 && part[0] == 'f' && part[1..].All(char.IsDigit))
                     ? part.ToUpperInvariant()
                     : part

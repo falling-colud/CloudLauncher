@@ -7,11 +7,10 @@ namespace CloudLauncher.Services;
 /// One entry in an instance's multiplayer list.
 /// </summary>
 /// <param name="SourcePackId">The instance whose <c>servers.dat</c> this came out of.</param>
-/// <param name="Index">Where it sits in that file's list, which is also the order the game shows and
-/// the only identity an entry has — <c>servers.dat</c> stores no ids.</param>
-/// <param name="Hidden">True for the entries Minecraft writes when you use Direct Connect. The game
-/// keeps them but never draws them; the Servers page shows them behind a toggle, because "the address
-/// I typed in once last week" is exactly the thing people come looking for.</param>
+/// <param name="Index">Position in that file's list: the order the game shows, and the entry's only
+/// identity, since <c>servers.dat</c> stores no ids.</param>
+/// <param name="Hidden">True for the entries Minecraft writes for Direct Connect. The game keeps them
+/// but never shows them; the Servers page shows them behind a toggle.</param>
 public sealed record ServerEntry(
     Guid SourcePackId,
     string SourcePackName,
@@ -25,26 +24,20 @@ public sealed record ServerEntry(
     public string Host => MinecraftServerPing.ParseAddress(Address).Host;
     public int Port => MinecraftServerPing.ParseAddress(Address).Port;
 
-    /// <summary>The address in the form used as a key across instances: one server that appears in
-    /// four instances is one server, and its console credentials and ping belong to the address.</summary>
+    /// <summary>The address as a key across instances: the same server in several instances is one
+    /// server, and its console credentials and ping belong to the address.</summary>
     public string Key => AppSettings.ServerKey(Address);
 }
 
-/// <summary>
-/// Reads and writes the multiplayer server lists Minecraft keeps inside each instance.
-/// </summary>
+/// <summary>Reads and writes the multiplayer server lists Minecraft keeps inside each
+/// instance.</summary>
 /// <remarks>
-/// <para>The list lives at <c>&lt;instance game dir&gt;/servers.dat</c>, an uncompressed NBT file whose
-/// root holds a single list named <c>servers</c>. <see cref="Nbt"/> does the format; this does the
-/// meaning, including writing the file back the way it was found and keeping Minecraft's own
-/// <c>servers.dat_old</c> backup convention.</para>
-/// <para><c>servers.dat</c> is <see cref="RuleAction.Ignored"/> in the default pack rules, so it is a
-/// per-machine file and nothing written here is ever synced to a team. That is deliberate and the UI
-/// says so: adding a server for yourself must not add it for everyone in a shared pack.</para>
-/// <para>A missing or unreadable file is an ordinary outcome for a <em>read</em> — an instance that has
-/// never been launched has no server list — and reads answer with an empty list rather than throwing.
-/// Writes are not so relaxed: an unreadable existing file makes a mutation throw, because the
-/// alternative is replacing the player's list with whatever was being added. See <see cref="Edit"/>.</para>
+/// <para>The list is <c>&lt;instance game dir&gt;/servers.dat</c>, an uncompressed NBT file with one
+/// list named <c>servers</c>. Writes keep the file's format and Minecraft's <c>servers.dat_old</c>
+/// backup. The file is per-machine (<see cref="RuleAction.Ignored"/> in the default rules), so it is
+/// never synced.</para>
+/// <para>Reads treat a missing or unreadable file as empty; writes throw on an unreadable file
+/// rather than replace the player's list (see <see cref="Edit"/>).</para>
 /// </remarks>
 public sealed class ServerListService(PackFolderService packs)
 {
@@ -77,19 +70,15 @@ public sealed class ServerListService(PackFolderService packs)
         return results;
     }
 
-    /// <summary>Every server across the given instances. Reads files, so callers run it off the UI
-    /// thread — a dozen instances on a slow disk is not free.</summary>
+    /// <summary>Every server across the given instances. Reads files, so call it off the UI
+    /// thread.</summary>
     public List<ServerEntry> ScanAll(IEnumerable<PackSummary> instances) => ScanAll(instances, out _);
 
-    /// <summary>
-    /// Every server across the given instances, together with the instances that could not be read.
-    /// </summary>
-    /// <param name="unreadable">Names of the instances whose list threw. The caller shows the count:
-    /// silently dropping them makes a server look deleted when it is only unreadable.</param>
-    /// <remarks>Resilient per instance, and deliberately catching everything rather than the two file
-    /// exceptions it used to: an instance whose game directory has never been created, or whose
-    /// <c>servers.dat</c> is corrupt, can fail in ways that are neither <see cref="IOException"/> nor
-    /// <see cref="UnauthorizedAccessException"/>, and one such instance must not empty the whole page.</remarks>
+    /// <summary>Every server across the given instances, plus the instances that could not be
+    /// read.</summary>
+    /// <param name="unreadable">Names of instances whose list threw. The caller shows the count so their
+    /// servers don't just look deleted.</param>
+    /// <remarks>Catches everything per instance, so one broken instance can't empty the page.</remarks>
     public List<ServerEntry> ScanAll(IEnumerable<PackSummary> instances, out List<string> unreadable)
     {
         var all = new List<ServerEntry>();
@@ -115,10 +104,8 @@ public sealed class ServerListService(PackFolderService packs)
     /// <summary>
     /// Renames or re-addresses an existing entry in place.
     /// </summary>
-    /// <remarks>In place matters: the order of <c>servers.dat</c> is the order of the multiplayer
-    /// screen, and a player who has dragged their servers into an order they like should not find them
-    /// reshuffled because they fixed a typo. The entry's icon and texture-prompt answer are kept for
-    /// the same reason.</remarks>
+    /// <remarks>In place so the player's order on the multiplayer screen survives a typo fix. The
+    /// entry's icon and texture-prompt answer are kept too.</remarks>
     public bool Update(ServerEntry entry, string name, string address) =>
         Edit(entry.SourcePackId, list =>
         {
@@ -139,8 +126,7 @@ public sealed class ServerListService(PackFolderService packs)
     /// <summary>
     /// Copies an entry into another instance's list, icon and all.
     /// </summary>
-    /// <returns>False when that instance already lists the same address, which is a no-op rather than
-    /// a duplicate row in the player's multiplayer screen.</returns>
+    /// <returns>False when that instance already lists the same address; nothing is added.</returns>
     public bool CopyTo(ServerEntry entry, Guid targetPackId) =>
         Edit(targetPackId, list =>
         {
@@ -166,29 +152,15 @@ public sealed class ServerListService(PackFolderService packs)
 
     // ── the file ─────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Re-reads the instance's list, hands it to <paramref name="mutate"/>, and writes it back if
-    /// <paramref name="mutate"/> reports that it changed something.
-    /// </summary>
+    /// <summary>Re-reads the instance's list, hands it to <paramref name="mutate"/>, and writes it
+    /// back if <paramref name="mutate"/> reports a change.</summary>
     /// <returns>What <paramref name="mutate"/> returned: true when the file was rewritten.</returns>
-    /// <exception cref="IOException">The instance has a <c>servers.dat</c> that could not be read. The
-    /// caller reports this; it must never be treated as "no servers yet".</exception>
-    /// <remarks>
-    /// <para>Deliberately re-reads rather than trusting the rows on screen: the game may have been
-    /// running since the page loaded and rewritten the file on exit. The write preserves whatever
-    /// compression the file used, because Minecraft writes this one uncompressed and silently drops a
-    /// gzipped one.</para>
-    /// <para>An empty list is synthesised only when the file genuinely does not exist. <see
-    /// cref="Nbt.ReadFile(string, out NbtCompression)"/> answers null both for "no file" and for "the
-    /// file is there but could not be read or parsed" — a momentary lock from antivirus or a sync
-    /// client, a half-written file, the game holding it — and treating the second case as the first is
-    /// total data loss on the very first action: the player's whole multiplayer list, names, order and
-    /// favicons, replaced by the one entry being added, with <c>servers.dat_old</c> either missing (the
-    /// backup copy fails under the same lock) or overwritten with the damaged file. Hence
-    /// <see cref="File.Exists(string)"/> first, and a throw rather than a guess.</para>
-    /// <para>Nothing is written when the mutation did not change anything, so a "that entry is no
-    /// longer in the list" outcome leaves the file exactly as it was found instead of rewriting it.</para>
-    /// </remarks>
+    /// <exception cref="IOException">The instance has a <c>servers.dat</c> that could not be read. It
+    /// must never be treated as "no servers yet".</exception>
+    /// <remarks>Re-reads because the game may have rewritten the file, and keeps its compression
+    /// (Minecraft ignores a gzipped one). An empty list is only created when the file doesn't exist:
+    /// <see cref="Nbt.ReadFile(string, out NbtCompression)"/> also returns null for a locked or
+    /// half-written file, and treating that as empty would wipe the player's list.</remarks>
     private bool Edit(Guid packId, Func<NbtTag, bool> mutate)
     {
         var path = FileFor(packId);
@@ -201,7 +173,7 @@ public sealed class ServerListService(PackFolderService packs)
             if (root is null)
                 throw new IOException(
                     $"Could not read this instance's server list ({path}). It may be open in Minecraft " +
-                    "or held by another program — close the game and try again. Nothing was changed.");
+                    "or held by another program - close the game and try again. Nothing was changed.");
         }
         else
         {
@@ -226,10 +198,9 @@ public sealed class ServerListService(PackFolderService packs)
     /// <summary>
     /// Finds the tag an on-screen row refers to in a freshly read list.
     /// </summary>
-    /// <remarks>Index first, because that is the row's identity and duplicates of one address are
-    /// legal; the address is then verified, and only if it disagrees does this fall back to searching
-    /// by address. That covers the case where the game added or removed a server while the page was
-    /// open, which would otherwise silently edit the wrong entry.</remarks>
+    /// <remarks>By index first, since duplicate addresses are legal. If the address at that index
+    /// disagrees, falls back to searching by address, in case the game changed the list while the page
+    /// was open.</remarks>
     private static NbtTag? Locate(NbtTag list, ServerEntry entry)
     {
         var key = AppSettings.ServerKey(entry.Address);

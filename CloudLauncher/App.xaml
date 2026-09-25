@@ -16,7 +16,7 @@
                 <Setter Property="anim:Animate.WindowFadeIn" Value="True"/>
                 <Setter Property="Background" Value="{DynamicResource Surface1Brush}"/>
                 <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
-                <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+                <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
                 <Setter Property="FontSize" Value="13"/>
                 <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
                 <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
@@ -26,12 +26,12 @@
             <Style TargetType="Page">
                 <Setter Property="Background" Value="{DynamicResource Surface0Brush}"/>
                 <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
-                <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+                <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
             </Style>
 
             <Style TargetType="UserControl">
                 <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
-                <Setter Property="FontFamily" Value="{StaticResource UiFont}"/>
+                <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
                 <Setter Property="FontSize"   Value="13"/>
             </Style>
         </ResourceDictionary>

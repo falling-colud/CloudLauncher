@@ -4,16 +4,11 @@ using System.Text.Json.Serialization;
 
 namespace CloudLauncher.Services;
 
-/// <summary>
-/// Loads and saves per-pack mod flags from <c>game/.cloudlauncher/mods.json</c>. Because that
-/// folder lives under <c>game/</c> and the default rules route <c>.cloudlauncher/</c> to Shared,
-/// the flags sync to collaborators through the normal pack pipeline — "saved to the modpack".
-///
-/// Mods are keyed by a stable identity: the source project id when known (<c>modrinth:…</c> /
-/// <c>curseforge:…</c>), which survives version updates, falling back to the file name for
-/// unidentified jars. Reads probe every candidate key so a mod recognised under one key in a
-/// later session still finds its flags; writes consolidate onto the primary key.
-/// </summary>
+/// <summary>Loads and saves per-pack mod flags from <c>game/.cloudlauncher/mods.json</c>, which the
+/// default sync rules share with collaborators.</summary>
+/// <remarks>Mods are keyed by source project id when known (<c>modrinth:...</c> or
+/// <c>curseforge:...</c>), which survives version updates, with the file name as a fallback. Reads
+/// try every candidate key; writes consolidate onto the primary one.</remarks>
 public sealed class ModMetadataService
 {
     private readonly PackFolderService _packs;
@@ -29,9 +24,28 @@ public sealed class ModMetadataService
 
     public ModMetadataService(PackFolderService packs, AppSettings settings) { _packs = packs; _settings = settings; }
 
+    // ──────────────────── the global scope ────────────────────
+
+    /// <summary>The scope id the global Mods page edits: one document of flags, categories and layout
+    /// that belongs to no instance and is never synced.</summary>
+    /// <remarks>A scope id lets every caller that takes a pack id work on the global page unchanged.
+    /// Not <see cref="Guid.Empty"/>: <c>PackFolderService.PackRoot</c> throws for it, which makes
+    /// <see cref="Save"/> silently do nothing. Stored beside settings.json
+    /// (<see cref="AppSettings.DataRootPath"/>) because a pack's <c>mods.json</c> syncs to
+    /// collaborators.</remarks>
+    public static readonly Guid GlobalScope = new("c10dc10d-0000-4000-8000-000000000001");
+
+    /// <summary>True when <paramref name="scopeId"/> is <see cref="GlobalScope"/> rather than an
+    /// instance.</summary>
+    public static bool IsGlobalScope(Guid scopeId) => scopeId == GlobalScope;
+
+    /// <summary>File name of the global document, beside <c>settings.json</c>.</summary>
+    private const string GlobalFileName = "global-mods.json";
+
     // ── key derivation ───────────────────────────────────────────────────────
 
-    /// <summary>The primary (canonical) key for a mod — source id preferred, file name fallback.</summary>
+    /// <summary>The primary (canonical) key for a mod: the source id if known, else the file
+    /// name.</summary>
     public static string KeyFor(ModSummary? modrinth, ModSummary? curseForge, string fileName)
     {
         if (modrinth is not null)   return $"modrinth:{modrinth.Id}";
@@ -61,6 +75,9 @@ public sealed class ModMetadataService
 
     private string? TryMetaPath(Guid packId)
     {
+        // Checked before anything that could throw; GameDir would fail for the sentinel id (see
+        // GlobalScope).
+        if (IsGlobalScope(packId)) return Path.Combine(AppSettings.DataRootPath, GlobalFileName);
         try { return Path.Combine(_packs.GameDir(packId), ".cloudlauncher", "mods.json"); }
         catch { return null; } // pack folder not materialised yet
     }
@@ -97,9 +114,8 @@ public sealed class ModMetadataService
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                // Temp + atomic rename: a torn File.WriteAllText (crash/power loss mid-write) would
-                // leave an unparseable mods.json, which Load() silently resets to an empty doc —
-                // wiping every priority/category/side flag, which then syncs to collaborators.
+                // Temp file + atomic rename. A torn write would leave an unparseable mods.json, which
+                // Load() resets to empty, wiping every flag (and syncing that to collaborators).
                 var tmp = path + ".tmp";
                 File.WriteAllText(tmp, JsonSerializer.Serialize(doc, JsonOpts));
                 File.Move(tmp, path, overwrite: true);
@@ -117,8 +133,8 @@ public sealed class ModMetadataService
 
     // ── per-mod flags ──────────────────────────────────────────────────────────
 
-    /// <summary>Returns the stored flags for a mod, or a fresh default if none. The returned
-    /// instance is the live cached object — mutate it then call <see cref="SetMeta"/> to persist.</summary>
+    /// <summary>Returns the stored flags for a mod, or a fresh default if none. The result is the live
+    /// cached object: mutate it, then call <see cref="SetMeta"/> to persist.</summary>
     public ModMeta GetMeta(Guid packId, IReadOnlyList<string> candidateKeys)
     {
         var doc = Load(packId);
@@ -131,9 +147,31 @@ public sealed class ModMetadataService
         return new ModMeta();
     }
 
-    /// <summary>Stores flags under the primary (first) candidate key and consolidates any copies
-    /// stored under the other candidate keys. A default/empty meta is removed entirely so the
-    /// file stays small and only carries meaningful flags. Persists immediately.</summary>
+    /// <summary>The flags in force for a mod in one instance: the instance's own entry, else the
+    /// global default, else nothing.</summary>
+    /// <remarks>Inherited values are a clone, since <see cref="GetMeta"/> hands out live objects and an
+    /// edit would otherwise change the global entry for every instance. An own entry equal to the
+    /// default can't be told from no entry (<see cref="StoreMeta"/> deletes those), so an inherited
+    /// flag can't yet be overridden back to its default.</remarks>
+    /// <param name="packId">The instance asking, or <see cref="GlobalScope"/>, which never
+    /// inherits.</param>
+    /// <param name="candidateKeys">The mod's keys, most stable first, from
+    /// <see cref="CandidateKeys"/>.</param>
+    /// <param name="inherited">True when the values came from the global document, so a list can
+    /// badge the row.</param>
+    public ModMeta EffectiveMeta(Guid packId, IReadOnlyList<string> candidateKeys, out bool inherited)
+    {
+        inherited = false;
+        var own = GetMeta(packId, candidateKeys);
+        if (!own.IsDefault || IsGlobalScope(packId)) return own;
+
+        var global = GetMeta(GlobalScope, candidateKeys);
+        if (global.IsDefault) return own;
+
+        inherited = true;
+        return global.Clone();
+    }
+
     /// <summary>The auto-managed category that every library-marked mod belongs to.</summary>
     public const string LibraryCategory = "Library";
 
@@ -157,9 +195,10 @@ public sealed class ModMetadataService
         Save(packId);
     }
 
-    /// <summary>The <see cref="SetMeta"/> body without the write, so bulk edits can do one save at
-    /// the end instead of one per mod.</summary>
-    private void StoreMeta(Guid packId, IReadOnlyList<string> candidateKeys, ModMeta meta)
+    /// <summary>Stores flags under the primary (first) candidate key, removing copies under the other
+    /// keys, and drops default flags entirely so the file only carries meaningful ones. This is
+    /// <see cref="SetMeta"/> without the write, so bulk edits can save once at the end.</summary>
+    internal void StoreMeta(Guid packId, IReadOnlyList<string> candidateKeys, ModMeta meta)
     {
         if (candidateKeys.Count == 0) return;
         if (ApplyLibraryCategory(meta) && meta.IsLibrary) AddCategory(packId, LibraryCategory);
@@ -210,13 +249,10 @@ public sealed class ModMetadataService
         return cat;
     }
 
-    /// <summary>
-    /// Moves a category to a new slot. Position in <see cref="PackModMetadata.Categories"/> *is* the
-    /// display order — every surface renders them in stored order rather than alphabetically — so
-    /// this is the whole of "reorder".
-    /// </summary>
-    /// <param name="newIndex">Index in the list as it stands right now (before the move). Shifting
-    /// for the removal is handled here so callers can just say "put it where that one is".</param>
+    /// <summary>Moves a category to a new slot. List order in <see cref="PackModMetadata.Categories"/>
+    /// is the display order everywhere, so this is all reordering needs.</summary>
+    /// <param name="newIndex">Index in the list before the move. The shift from removing the item is
+    /// handled here, so callers can just say "put it where that one is".</param>
     public void MoveCategory(Guid packId, string name, int newIndex)
     {
         var doc = Load(packId);
@@ -247,8 +283,8 @@ public sealed class ModMetadataService
         }
     }
 
-    /// <summary>Sets (or clears, with null) a category's colour. Applies to the built-in Library
-    /// category too — colour is presentation only, so there's nothing to protect there.</summary>
+    /// <summary>Sets (or clears, with null) a category's colour. Also allowed on the built-in Library
+    /// category, since colour is presentation only.</summary>
     public void SetCategoryColor(Guid packId, string name, string? color)
     {
         var doc = Load(packId);
@@ -265,10 +301,8 @@ public sealed class ModMetadataService
     /// One pass and one write, rather than a save per mod.</summary>
     public int SetMembership(Guid packId, IEnumerable<PackMod> mods, string category, bool member)
     {
-        // The Library category and the IsLibrary flag are two views of the same thing. Adding a mod
-        // to "Library" therefore drives the flag, and StoreMeta's ApplyLibraryCategory keeps the
-        // category list in step — so managing Library by membership stays consistent with the flag
-        // set from a mod's options menu.
+        // The Library category mirrors the IsLibrary flag: membership sets the flag, and StoreMeta's
+        // ApplyLibraryCategory keeps the category list in step.
         var isLibrary = string.Equals(category, LibraryCategory, StringComparison.OrdinalIgnoreCase);
         var changed = 0;
         foreach (var mod in mods)
@@ -298,10 +332,10 @@ public sealed class ModMetadataService
     /// <param name="SharedCategories">Categories both already have.</param>
     /// <param name="Assignments">Mod in this pack -> the categories the source puts it in.</param>
     /// <param name="UnmatchedSourceMods">Mods the source categorises that are not installed here.</param>
-    /// <param name="FlagAssignments">Mods whose per-mod settings — priority, content size, side,
-    /// library, extra, channel, lock and note — can be taken from the source pack. Only mods whose
-    /// own metadata here is still untouched (<see cref="ModMeta.IsDefault"/>) qualify, so importing
-    /// can never overwrite something the user set in this pack.</param>
+    /// <param name="FlagAssignments">Mods whose per-mod settings (priority, content size, side,
+    /// library, extra, channel, lock and note) can be taken from the source pack. Only mods with
+    /// untouched metadata here (<see cref="ModMeta.IsDefault"/>) qualify, so an import never overwrites
+    /// the user's own settings.</param>
     public sealed record CategoryImportPlan(
         IReadOnlyList<CustomCategory> NewCategories,
         IReadOnlyList<string> SharedCategories,
@@ -314,17 +348,11 @@ public sealed class ModMetadataService
         public bool IsEmpty => NewCategories.Count == 0 && Assignments.Count == 0 && FlagAssignments.Count == 0;
     }
 
-    /// <summary>
-    /// Works out what copying <paramref name="sourcePackId"/>'s categories onto
-    /// <paramref name="targetMods"/> would produce, without changing anything.
-    /// </summary>
-    /// <remarks>
-    /// Mods match across instances by their stored key, which is the store's project id
-    /// (<c>modrinth:AANobbMI</c>) for anything identified and the file name otherwise — the same
-    /// key the flags are saved under, so a mod tagged "Performance" in one pack is recognised as
-    /// the same mod in another even at a different version. Mods the source does not know about
-    /// are left exactly as they are: this adds, it never clears.
-    /// </remarks>
+    /// <summary>Works out what copying <paramref name="sourcePackId"/>'s categories onto
+    /// <paramref name="targetMods"/> would produce, without changing anything.</summary>
+    /// <remarks>Mods match by stored key (project id such as <c>modrinth:AANobbMI</c>, else file name),
+    /// so the same mod matches across instances even at different versions. It only adds; mods the
+    /// source doesn't know are left alone.</remarks>
     public CategoryImportPlan PlanCategoryImport(Guid sourcePackId, Guid targetPackId, IReadOnlyList<PackMod> targetMods)
     {
         var source = Load(sourcePackId);
@@ -360,9 +388,8 @@ public sealed class ModMetadataService
                 .ToList();
             if (wanted.Count > 0) assignments.Add((mod, wanted));
 
-            // Setting a pack up twice used to mean re-flagging every mod by hand: the import copied
-            // the category names and dropped priority, size, side, library, notes and locks. It only
-            // fills in mods this pack has said nothing about yet, so "adds, never clears" still holds.
+            // Only mods this pack has no settings for yet take the source's flags, so the import still
+            // only adds.
             if (mod.Meta.IsDefault && HasImportableFlags(from)) flagAssignments.Add((mod, from));
         }
 
@@ -380,16 +407,11 @@ public sealed class ModMetadataService
         || from.IsLibrary || from.IsExtra || from.UpdateLocked || from.UpdateChannel is not null
         || !string.IsNullOrWhiteSpace(from.Note);
 
-    /// <summary>
-    /// Copies the per-mod settings the import carries onto a target mod's (still untouched) metadata.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately not everything on <see cref="ModMeta"/>. <c>IsTesting</c> is left behind because
-    /// a test set is about what you are doing right now in one instance, not a property of the mod;
-    /// <c>PinnedVersionId</c> and <c>PreferredSource</c> are left behind because they name a
-    /// version and a store this pack may not be on; and the incompatibility lists are left behind
-    /// because they hold keys of the <em>source</em> pack's mods.
-    /// </remarks>
+    /// <summary>Copies the per-mod settings the import carries onto a target mod's (still untouched)
+    /// metadata.</summary>
+    /// <remarks>Not everything on <see cref="ModMeta"/>: <c>IsTesting</c> is about one instance's
+    /// current work, <c>PinnedVersionId</c> and <c>PreferredSource</c> name a version and store this
+    /// pack may not use, and the incompatibility lists hold keys of the source pack's mods.</remarks>
     private static void CopyImportableFlags(ModMeta from, ModMeta to)
     {
         to.Priority = from.Priority;
@@ -426,8 +448,8 @@ public sealed class ModMetadataService
                 doc.Categories.Add(new CustomCategory { Name = cat.Name, Color = cat.Color });
         }
 
-        // Flags first, so a mod that is in both lists ends up with the source's settings AND its
-        // categories in one stored write rather than two.
+        // Flags first, so a mod in both lists gets the source's settings and categories in one
+        // stored write.
         foreach (var (mod, from) in plan.FlagAssignments)
         {
             var meta = GetMeta(targetPackId, mod.CandidateKeys);
@@ -479,16 +501,13 @@ public sealed class ModMetadataService
             if (cat is not null && target is null) cat.Name = newName;   // straight rename
             else if (cat is not null) doc.Categories.Remove(cat);        // merge into existing target
 
-            // Folded-shut state follows the name, so renaming a collapsed category does not
-            // silently pop it open.
+            // Collapsed state follows the name, so a renamed category stays collapsed.
             if (doc.CollapsedCategories.RemoveAll(c => string.Equals(c, oldName, StringComparison.OrdinalIgnoreCase)) > 0)
                 Add(doc.CollapsedCategories, newName);
 
             foreach (var meta in doc.Mods.Values)
             {
-                // Only mods that were actually IN the old category move to the new one. (This used to
-                // add newName to every mod carrying any flag at all, which silently dumped unrelated
-                // mods into a category every time one was renamed.)
+                // Only mods that were in the old category move to the new one.
                 var wasMember = meta.Categories.RemoveAll(c => string.Equals(c, oldName, StringComparison.OrdinalIgnoreCase)) > 0;
                 if (!wasMember) continue;
                 if (!meta.Categories.Any(c => string.Equals(c, newName, StringComparison.OrdinalIgnoreCase)))
@@ -505,8 +524,8 @@ public sealed class ModMetadataService
         Save(packId);
     }
 
-    /// <summary>Brings every library-marked mod into the managed <see cref="LibraryCategory"/> (and drops
-    /// it from non-library mods), retroactively fixing mods flagged before this rule existed.</summary>
+    /// <summary>Puts every library-marked mod into the managed <see cref="LibraryCategory"/> (and
+    /// takes it off non-library mods), which also fixes mods flagged by older versions.</summary>
     public void SyncManagedCategories(Guid packId)
     {
         var doc = Load(packId);
@@ -525,8 +544,8 @@ public sealed class ModMetadataService
     public void SaveAdvanced(Guid packId) => Save(packId);
 
     /// <summary>The release channel this pack's downloads and update checks follow: its own setting,
-    /// else the launcher-wide default. A mod's own <see cref="ModMeta.UpdateChannel"/> beats both —
-    /// <see cref="PackMod.EffectiveUpdateChannel"/> applies that last step.</summary>
+    /// else the launcher-wide default. A mod's own <see cref="ModMeta.UpdateChannel"/> beats both; that
+    /// step is in <see cref="PackMod.EffectiveUpdateChannel"/>.</summary>
     public string EffectiveUpdateChannel(Guid packId) =>
         ModUpdateChannel.Normalize(Advanced(packId).UpdateChannel) ?? LauncherUpdateChannel;
 
@@ -535,9 +554,8 @@ public sealed class ModMetadataService
         ModUpdateChannel.Normalize(_settings.ModVersionChannel) ?? ModUpdateChannel.Alpha;
 
     /// <summary>Brings an older mods.json up to <see cref="PackModMetadata.CurrentVersion"/>.
-    /// Version 1 had no way to say "follow the launcher default", so its pack channel was written as
-    /// "release" whether or not anyone chose it; that is read as unset. A pack deliberately moved to
-    /// beta or alpha said something the default never could, so it is kept.</summary>
+    /// Version 1 always wrote the pack channel as "release", even when nobody chose it, so that is
+    /// read as unset. Beta or alpha was an explicit choice and is kept.</summary>
     private static void Migrate(PackModMetadata doc)
     {
         if (doc.Version >= PackModMetadata.CurrentVersion) return;
@@ -623,7 +641,7 @@ public sealed class ModMetadataService
         Save(packId);
     }
 
-    /// <summary>Folds or unfolds several at once — one write for a "collapse all".</summary>
+    /// <summary>Folds or unfolds several at once, with one write for "collapse all".</summary>
     public void SetCategoriesCollapsed(Guid packId, IEnumerable<string> names, bool collapsed)
     {
         var doc = Load(packId);

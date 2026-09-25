@@ -6,15 +6,12 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// The management page for a hosted resource pack: its overview, who can see it, and the zip
-/// versions uploaded against it.
-/// </summary>
-/// <remarks>
-/// Everything editable here is owner-only, and the owner check is the single <c>isOwner</c> flag
-/// computed in <see cref="ApplyPack"/> — a collaborator sees the same page read-only rather than a
-/// different one.
-/// </remarks>
+/// <summary>The management page for a hosted resource pack: overview, visibility and uploaded
+/// versions.</summary>
+/// <remarks>Each control is enabled by the grant the server checks for it: owner for the overview
+/// and deletes, <see cref="PackPermissions.UploadShared"/> to upload,
+/// <see cref="PackPermissions.ManageCollaborators"/> to share and
+/// <see cref="PackPermissions.Download"/> to save a version. A disabled control says why.</remarks>
 public partial class ResourcePackDetailView : Page
 {
     private readonly MainWindow _shell;
@@ -62,10 +59,13 @@ public partial class ResourcePackDetailView : Page
         McVersionsBox.IsReadOnly = !_isOwner;
         VisibilityBox.IsEnabled = _isOwner;
         SaveButton.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
-        PermissionsButton.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
-        DeletePackButton.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
-        UploadVersionButton.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
+        // Non-owners get no Save button; its status line says whose pack this is and what they may do.
+        if (!_isOwner) SaveStatus.Text = AccessNote();
+        ApplyPermissions();
 
+        var downloadHint = CanDownload
+            ? "Download to a chosen path"
+            : $"You can see this pack but not download it. Ask {_pack.OwnerUsername} for download access.";
         VersionsList.ItemsSource = _pack.Versions
             .OrderByDescending(v => v.PublishedAt)
             .Select(v => new VersionRowVm
@@ -74,15 +74,117 @@ public partial class ResourcePackDetailView : Page
                 VersionString = v.VersionString,
                 ReleaseChannel = v.ReleaseChannel,
                 FileName = v.FileName,
-                MetaLabel = $"{v.FileName} · {FormatSize(v.FileSize)} · {v.PublishedAt:yyyy-MM-dd}",
-                Tooltip = BuildVersionTooltip(v)
+                // TimeFormat shows local time. PublishedAt arrives with a +00:00 offset, so formatting it
+                // directly would print UTC and disagree with the tooltip.
+                MetaLabel = $"{v.FileName} · {FormatSize(v.FileSize)} · {TimeFormat.Date(v.PublishedAt)}",
+                Tooltip = BuildVersionTooltip(v),
+                CanDownload = CanDownload,
+                DownloadHint = downloadHint
             })
             .ToList();
         VersionsEmpty.Visibility = _pack.Versions.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    /// <summary>The changelog belongs in the tooltip: it is the one thing that tells a collaborator
-    /// whether this version is worth taking, and the row has no space for it.</summary>
+    // ── permissions ──────────────────────────────────────────────────────────
+
+    private PackPermissions Granted => _pack?.EffectivePermissions ?? PackPermissions.None;
+    private bool CanManage => _isOwner || Granted.HasFlag(PackPermissions.ManageCollaborators);
+    private bool CanUpload => _isOwner || Granted.HasFlag(PackPermissions.UploadShared);
+    private bool CanDownload => _isOwner || Granted.HasFlag(PackPermissions.Download);
+
+    /// <summary>True for someone on the pack's own collaborator list, the only access a person can
+    /// give back from here.</summary>
+    private bool IsDirectCollaborator =>
+        !_isOwner && _pack is { } pack && App.State.Settings.UserId is { } me
+        && pack.Collaborators.Any(c => c.UserId == me);
+
+    /// <summary>Turns each action on or off by the grant it needs, and says which one when it is off.</summary>
+    private void ApplyPermissions()
+    {
+        if (_pack is null) return;
+        var owner = _pack.OwnerUsername;
+
+        PermissionsButton.Visibility = Visibility.Visible;
+        PermissionsButton.IsEnabled = CanManage;
+        PermissionsButton.ToolTip = CanManage
+            ? "Choose who can see, download, upload to or manage this pack"
+            : $"Only {owner}, or somebody {owner} gave full access to, can change who has this pack.";
+
+        UploadVersionButton.Visibility = Visibility.Visible;
+        UploadVersionButton.IsEnabled = CanUpload;
+        UploadVersionButton.ToolTip = CanUpload
+            ? "Publish a new zip as the next version of this pack"
+            : $"You can see this pack but not upload versions of it. Ask {owner} for upload access.";
+
+        DeletePackButton.Visibility = Visibility.Visible;
+        DeletePackButton.IsEnabled = _isOwner;
+        DeletePackButton.ToolTip = _isOwner
+            ? "Removes the hosted pack and every uploaded version"
+            : $"Only {owner} can delete this pack.";
+
+        LeaveButton.Visibility = IsDirectCollaborator ? Visibility.Visible : Visibility.Collapsed;
+        LeaveButton.IsEnabled = true;
+        LeaveButton.ToolTip = $"Give back the access {owner} gave you. Copies already installed stay where they are.";
+    }
+
+    /// <summary>One line for somebody who is not the owner: whose pack this is and what they may do.</summary>
+    private string AccessNote()
+    {
+        if (_pack is null || _isOwner) return "";
+        var can = new List<string>();
+        if (CanDownload) can.Add("download it");
+        if (CanUpload) can.Add("upload versions");
+        if (CanManage) can.Add("choose who has it");
+        var what = can.Count switch
+        {
+            0 => "see it",
+            1 => can[0],
+            _ => string.Join(", ", can.Take(can.Count - 1)) + " and " + can[^1]
+        };
+        return $"Owned by {_pack.OwnerUsername}. You can {what}; only the owner can change these details.";
+    }
+
+    /// <summary>Gives back the access the owner granted, after asking.</summary>
+    /// <remarks>Re-reads the pack afterwards instead of closing, since a team or public visibility may
+    /// still give access. The page closes only when nothing is left.</remarks>
+    private async void OnLeave(object sender, RoutedEventArgs e)
+    {
+        if (_pack is null || App.State.Settings.UserId is not { } me || !IsDirectCollaborator) return;
+        var pack = _pack;
+        try
+        {
+            if (!await AppDialog.ConfirmAsync(_shell, "Leave resource pack",
+                    $"Leave '{pack.Name}'? You lose the access {pack.OwnerUsername} gave you, and only they "
+                    + "can give it back. Copies already installed in an instance stay where they are. If one "
+                    + "of your teams also has this pack, you keep what the team gives.",
+                    "Leave", "Cancel", danger: true))
+                return;
+
+            LeaveButton.IsEnabled = false;
+            await App.State.Api.RemoveResourcePackCollaboratorAsync(pack.Id, me);
+        }
+        catch (Exception ex)
+        {
+            LeaveButton.IsEnabled = true;
+            Fail("Could not leave: " + ContentBundleService.Explain(ex, ex.Message));
+            return;
+        }
+
+        try
+        {
+            _pack = await App.State.Api.GetResourcePackAsync(_packId);
+            ApplyPack();
+            Okay($"You left {pack.Name}. What is left comes from a team or from it being public.");
+        }
+        catch (Exception ex)
+        {
+            // Nothing left to show: the pack was only ever shared with this person directly.
+            AppLog.LogError("ResourcePackDetailView.Leave", ex);
+            _shell.CloseSidePanel();
+        }
+    }
+
+    /// <summary>Row tooltip with the version details and changelog, which the row has no room for.</summary>
     private static string BuildVersionTooltip(HostedResourcePackVersionInfo v)
     {
         var lines = new List<string>
@@ -118,7 +220,7 @@ public partial class ResourcePackDetailView : Page
             var name = NameBox.Text.Trim();
             if (name.Length is 0 or > 128)
             {
-                SaveStatus.Text = "Name must be 1–128 characters.";
+                SaveStatus.Text = "Name must be 1-128 characters.";
                 return;
             }
 
@@ -126,8 +228,6 @@ public partial class ResourcePackDetailView : Page
             var vis = Enum.TryParse<PackVisibility>(visText, out var v) ? v : PackVisibility.Private;
             var mc = McVersionsBox.Text.Trim();
 
-            // The name and the MC versions used to be passed as null here, silently discarding any
-            // edit — a misnamed pack was permanent even though the server has always accepted both.
             var req = new UpdateResourcePackRequest(
                 name,
                 SummaryBox.Text,
@@ -135,7 +235,7 @@ public partial class ResourcePackDetailView : Page
                 vis,
                 mc.Length == 0 ? null : mc);
 
-            SaveStatus.Text = "Saving…";
+            SaveStatus.Text = "Saving...";
             SaveButton.IsEnabled = false;
             await App.State.Api.UpdateResourcePackAsync(_pack.Id, req);
             SaveStatus.Text = "Saved.";
@@ -147,7 +247,7 @@ public partial class ResourcePackDetailView : Page
 
     private void OnEditPermissions(object sender, RoutedEventArgs e)
     {
-        if (_pack is null) return;
+        if (_pack is null || !CanManage) return;
         new PermissionsDialog(_pack) { Owner = _shell }.ShowDialog();
         _ = ReloadAsync();
     }
@@ -155,8 +255,7 @@ public partial class ResourcePackDetailView : Page
     /// <summary>
     /// Deletes the hosted pack and every version uploaded to it.
     /// </summary>
-    /// <remarks>Also clears the hosting link from any locally installed zip that pointed here, so a
-    /// pack on disk cannot go on claiming to be published to something that no longer exists.</remarks>
+    /// <remarks>Also clears the hosting link from any local zip that pointed here.</remarks>
     private async void OnDeletePack(object sender, RoutedEventArgs e)
     {
         if (_pack is null || !_isOwner) return;
@@ -194,7 +293,7 @@ public partial class ResourcePackDetailView : Page
 
     private async void OnUploadVersion(object sender, RoutedEventArgs e)
     {
-        if (_pack is null) return;
+        if (_pack is null || !CanUpload) return;
         try
         {
             var dlg = new Microsoft.Win32.OpenFileDialog
@@ -209,7 +308,7 @@ public partial class ResourcePackDetailView : Page
             if (meta.ShowDialog() != true || meta.Result is null) return;
 
             StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
-            StatusLabel.Text = "Uploading…";
+            StatusLabel.Text = "Uploading...";
             UploadVersionButton.IsEnabled = false;
 
             await App.State.Api.UploadResourcePackVersionAsync(_pack.Id, dlg.FileName, meta.Result);
@@ -224,7 +323,7 @@ public partial class ResourcePackDetailView : Page
     /// than retypes.</summary>
     private string NextVersionSuggestion() =>
         _pack?.Versions.OrderByDescending(v => v.PublishedAt).FirstOrDefault()?.VersionString
-        ?? DateTimeOffset.Now.ToString("yyyy.MM.dd.HHmm");
+        ?? TimeFormat.VersionStamp(DateTimeOffset.Now);
 
     private void OnVersionMenuOpened(object sender, RoutedEventArgs e)
     {
@@ -262,9 +361,7 @@ public partial class ResourcePackDetailView : Page
     /// <summary>
     /// Deletes one uploaded version.
     /// </summary>
-    /// <remarks>Uploading the wrong zip used to be permanent — nothing in the UI could take a version
-    /// back down. The blob itself stays: the store is content-addressed and another pack may share
-    /// it.</remarks>
+    /// <remarks>The blob stays: the store is content-addressed and another pack may share it.</remarks>
     private async void OnCtxDeleteVersion(object sender, RoutedEventArgs e)
     {
         if (_pack is null || !_isOwner) return;
@@ -297,10 +394,13 @@ public partial class ResourcePackDetailView : Page
     private async Task SaveVersionAsync(VersionRowVm row, Button? button)
     {
         if (_pack is null) return;
+        if (!row.CanDownload) { Fail(row.DownloadHint); return; }
         try
         {
             var fileName = string.IsNullOrWhiteSpace(row.FileName) ? row.VersionString : row.FileName;
             if (!fileName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) fileName += ".zip";
+            // The name is the uploader's; the dialog only ever suggests a plain file name.
+            if (!PathSafety.IsSafeFileName(fileName)) fileName = "resourcepack.zip";
 
             var dlg = new Microsoft.Win32.SaveFileDialog
             {
@@ -310,7 +410,7 @@ public partial class ResourcePackDetailView : Page
             if (dlg.ShowDialog(_shell) != true) return;
 
             StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
-            StatusLabel.Text = "Downloading…";
+            StatusLabel.Text = "Downloading...";
 
             await using var stream = await App.State.Api.DownloadResourcePackVersionAsync(_pack.Id, row.Id);
             await using var fs = File.Create(dlg.FileName);
@@ -335,5 +435,10 @@ public partial class ResourcePackDetailView : Page
         public string FileName { get; set; } = "";
         public string MetaLabel { get; set; } = "";
         public string Tooltip { get; set; } = "";
+
+        /// <summary>Whether this person may download the file. The server would answer 403, so the row's
+        /// button is disabled with a reason instead.</summary>
+        public bool CanDownload { get; set; } = true;
+        public string DownloadHint { get; set; } = "Download to a chosen path";
     }
 }

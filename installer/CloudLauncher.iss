@@ -1,11 +1,10 @@
 ; ============================================================================
 ;  CloudLauncher installer (Inno Setup 6)
 ;
-;  Per-USER install to %LocalAppData%\Programs\CloudLauncher. This is deliberate:
-;  the in-app self-updater (UpdateService) overwrites files in the install
-;  directory WITHOUT elevating, so the app must live somewhere the user can write.
-;  A Program Files install would break every self-update. This also means no UAC
-;  prompt on install, matching how VS Code / Discord / Slack install themselves.
+;  Per-user install to %LocalAppData%\Programs\CloudLauncher: the self-updater
+;  (UpdateService) overwrites files in the install directory without elevating,
+;  so a Program Files install would break self-updates. It also means there is no
+;  UAC prompt on install.
 ;
 ;  Build this with build-installer.ps1, which publishes the client and passes the
 ;  version + source paths via /D defines. It can also be opened directly in the
@@ -13,7 +12,7 @@
 ; ============================================================================
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.1"
+  #define MyAppVersion "0.0.0"
 #endif
 ; Folder containing the published win-x64 self-contained build (CloudLauncher.exe + deps).
 #ifndef SourceDir
@@ -29,21 +28,29 @@
 
 #define MyAppName "CloudLauncher"
 #define MyAppExeName "CloudLauncher.exe"
-#define MyAppPublisher "CloudLauncher"
+#define MyAppPublisher "falling_colud"
+#define MyAppURL "https://cloudlauncher.co"
 
 [Setup]
-; AppId uniquely identifies the app for upgrades/uninstall. NEVER change it once shipped.
+; AppId identifies the app for upgrades and uninstall. Never change it once shipped.
 AppId={{36177AA6-424D-4067-BC72-75848D92B481}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
+AppPublisherURL={#MyAppURL}
+AppSupportURL={#MyAppURL}
+AppUpdatesURL={#MyAppURL}
+AppCopyright=Copyright (c) 2026 {#MyAppPublisher}
 VersionInfoVersion={#MyAppVersion}
 VersionInfoProductVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoCopyright=Copyright (c) 2026 {#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Setup
+VersionInfoProductName={#MyAppName}
 
 ; --- per-user install, no elevation ---
 PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
@@ -54,6 +61,8 @@ SetupIconFile={#AppIcon}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 ShowLanguageDialog=no
+LicenseFile=license-terms.txt
+MinVersion=10.0.17763
 
 ; --- output ---
 OutputDir={#OutputDir}
@@ -65,7 +74,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 
 ; Close a running CloudLauncher (via the Restart Manager) so its files aren't locked
-; during install/upgrade, then don't auto-restart it — [Run] handles relaunch.
+; during install/upgrade, then don't auto-restart it: [Run] handles relaunch.
 CloseApplications=yes
 RestartApplications=no
 
@@ -92,5 +101,48 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 ; The self-updater merges new builds over {app} without pruning removed files, so after a
 ; few self-updates the folder may hold files this installer never placed. Remove the whole
 ; folder on uninstall. User data (packs, settings, accounts) lives under %AppData%\CloudLauncher
-; and %LocalAppData%\CloudLauncher — NOT here — so this does not touch it.
+; and %LocalAppData%\CloudLauncher, not here, so this does not touch it.
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// Always forget the sign-in on this PC; ask before removing instances and settings.
+procedure DeleteSignIns(DataDir: String);
+var
+  Rec: TFindRec;
+begin
+  if FindFirst(DataDir + '\*', Rec) then
+  begin
+    try
+      repeat
+        if (Rec.Attributes and FILE_ATTRIBUTE_DIRECTORY <> 0) and (Rec.Name <> '.') and (Rec.Name <> '..') then
+        begin
+          DelTree(DataDir + '\' + Rec.Name + '\secrets', True, True, True);
+          DeleteFile(DataDir + '\' + Rec.Name + '\minecraft-microsoft-accounts.json');
+        end;
+      until not FindNext(Rec);
+    finally
+      FindClose(Rec);
+    end;
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir, LocalDir: String;
+begin
+  if CurUninstallStep <> usPostUninstall then Exit;
+  DataDir := ExpandConstant('{userappdata}\CloudLauncher');
+  LocalDir := ExpandConstant('{localappdata}\CloudLauncher');
+  DelTree(GetEnv('TEMP') + '\CloudLauncherUpdate', True, True, True);
+  if not DirExists(DataDir) and not DirExists(LocalDir) then Exit;
+  if SuppressibleMsgBox('Also delete your CloudLauncher data on this PC?' + #13#10#13#10 +
+       'This removes your local instances, worlds, settings and cached files. ' +
+       'Anything stored in your CloudLauncher account stays there.',
+       mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
+  begin
+    DelTree(DataDir, True, True, True);
+    DelTree(LocalDir, True, True, True);
+  end
+  else
+    DeleteSignIns(DataDir);
+end;

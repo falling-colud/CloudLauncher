@@ -9,9 +9,10 @@ using Microsoft.EntityFrameworkCore;
 namespace CloudLauncher.Server.Controllers;
 
 /// <summary>Launcher-wide settings stored in the database so every client sees the
-/// same values. Secret keys are never returned — admins see only "is set" flags.</summary>
+/// same values. Secret keys are never returned; admins only see "is set" flags.</summary>
 [ApiController]
-public class SettingsController(AppDbContext db, UpstreamGuard upstreamGuard) : ControllerBase
+public class SettingsController(
+    AppDbContext db, UpstreamGuard upstreamGuard, ILogger<SettingsController> log) : ControllerBase
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -64,6 +65,27 @@ public class SettingsController(AppDbContext db, UpstreamGuard upstreamGuard) : 
         return Ok(new DefaultRulesResponse(DeserializeRules(s?.DefaultRulesJson)));
     }
 
+    /// <summary>Whether new accounts can be created, by registering or by a first Google sign-in.</summary>
+    [Authorize(Roles = "admin")]
+    [HttpGet("admin/registration")]
+    public async Task<ActionResult<RegistrationSettings>> GetRegistration(CancellationToken ct) =>
+        Ok(new RegistrationSettings(Open: !await AccountSignups.AreClosedAsync(db, ct)));
+
+    /// <summary>Opens or closes sign-ups. Existing accounts are not affected either way.</summary>
+    [Authorize(Roles = "admin")]
+    [HttpPut("admin/registration")]
+    public async Task<ActionResult<RegistrationSettings>> SetRegistration(
+        [FromBody] RegistrationSettings req, CancellationToken ct)
+    {
+        var s = await LoadOrCreateAsync(ct);
+        s.RegistrationClosed = !req.Open;
+        s.UpdatedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        log.LogInformation("Admin {AdminId} turned sign-ups {State}.", this.UserId(), req.Open ? "on" : "off");
+        return Ok(new RegistrationSettings(Open: !s.RegistrationClosed));
+    }
+
     private async Task<GlobalSetting> LoadOrCreateAsync(CancellationToken ct)
     {
         var existing = await db.GlobalSettings.FirstOrDefaultAsync(ct);
@@ -81,3 +103,6 @@ public class SettingsController(AppDbContext db, UpstreamGuard upstreamGuard) : 
         catch { return Array.Empty<PackFileRule>(); }
     }
 }
+
+/// <summary>The sign-up switch as the admin routes read and write it.</summary>
+public sealed record RegistrationSettings(bool Open);

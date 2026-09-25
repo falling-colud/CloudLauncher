@@ -1,20 +1,18 @@
 namespace CloudLauncher.Services;
 
 /// <summary>
-/// Heuristics for deciding whether a project listing on one store is the same mod as
-/// a listing on the other store.
+/// Heuristics for deciding whether a project on one store is the same mod as a project on the
+/// other store.
 ///
-/// Hash matching (SHA-512 / Murmur2) is exact but only links the two stores when they
-/// host a byte-identical jar. Many mods ship a re-built/re-signed jar to each store, so
-/// the hashes differ and a mod installed from CurseForge can still look downloadable on
-/// Modrinth (and vice versa). This closes that gap by matching on the project's slug or
-/// display name, which stay stable across stores — while staying strict enough (exact
-/// match after normalisation) that an unrelated mod sharing a name isn't wrongly hidden.
+/// Hash matching (SHA-512 / Murmur2) only links the stores when both host a byte-identical jar,
+/// and many mods ship a rebuilt or re-signed jar to each. Matching the slug or display name
+/// (exact match after normalisation) closes that gap without hiding unrelated mods that happen
+/// to share a name.
 /// </summary>
 public static class ModMatching
 {
     /// <summary>True when <paramref name="candidate"/> shares a normalised slug or name
-    /// with the source mod from the other store — a high-confidence identity signal.</summary>
+    /// with the source mod from the other store.</summary>
     public static bool IsLikelySameMod(ModSummary candidate, string? sourceSlug, string? sourceName) =>
         KeysMatch(candidate.Slug, sourceSlug)
         || KeysMatch(candidate.Slug, sourceName)

@@ -1,0 +1,56 @@
+<UserControl x:Class="CloudLauncher.Views.PageStateView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--  Put this last in the page's row-3 content Grid, beside the list. It overlays the cell it
+    shares, so it has to come last (WPF draws siblings in order), and it starts with hit-testing
+    off so the rows underneath stay clickable while refreshing. PageState turns hit-testing on
+    for the states that have a button. Driven only by Views/PageState.cs; pages never touch
+    these elements directly.  -->
+    <Grid x:Name="Root" IsHitTestVisible="False">
+
+        <!--  Refreshing: the data on screen is still valid, so only a thin bar at the top of the list.  -->
+        <ProgressBar x:Name="TopBar" Style="{StaticResource PageStateBusyBar}" Visibility="Collapsed"/>
+
+        <!--  Loading: no data yet. A bar in the middle of the content area plus a line saying what is
+        being read. The status bar says the same, but this is where people are looking.  -->
+        <StackPanel x:Name="BusyPanel" Style="{StaticResource PageStatePanel}" Visibility="Collapsed">
+            <ProgressBar x:Name="BusySpinner" Width="160" Height="4" IsIndeterminate="True"
+                         HorizontalAlignment="Center"/>
+            <TextBlock x:Name="BusyLine" Style="{StaticResource PageStateBody}" Margin="0,14,0,0"/>
+            <TextBlock x:Name="BusyDetail" Style="{StaticResource Caption}" Margin="0,5,0,0"
+                       TextAlignment="Center" TextWrapping="Wrap" Visibility="Collapsed"/>
+            <Button x:Name="BusyCancelButton" Content="Cancel" HorizontalAlignment="Center"
+                    Margin="0,14,0,0" Padding="14,5" Visibility="Collapsed" Click="OnCancelClick"/>
+        </StackPanel>
+
+        <!--  Empty: loaded, and there is nothing. PageState only enters it from a completed Content(0).  -->
+        <StackPanel x:Name="EmptyPanel" Style="{StaticResource PageStatePanel}" Visibility="Collapsed">
+            <TextBlock x:Name="EmptyGlyph" Style="{StaticResource PageStateGlyph}" Text="&#xE8A5;"/>
+            <TextBlock x:Name="EmptyTitle" Style="{StaticResource PageStateTitle}"/>
+            <TextBlock x:Name="EmptyBody" Style="{StaticResource PageStateBody}"/>
+            <Button x:Name="EmptyActionButton" Style="{StaticResource AccentButton}"
+                    HorizontalAlignment="Center" Margin="0,16,0,0" Visibility="Collapsed"
+                    Click="OnEmptyActionClick"/>
+        </StackPanel>
+
+        <!--  Error: a sentence the user can act on, and a Retry. The exception itself goes to AppLog.  -->
+        <StackPanel x:Name="ErrorPanel" Style="{StaticResource PageStatePanel}" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource PageStateGlyph}" Text="&#xE7BA;"
+                       Foreground="{DynamicResource WarningBrush}"/>
+            <TextBlock x:Name="ErrorTitle" Style="{StaticResource PageStateTitle}"/>
+            <TextBlock x:Name="ErrorBody" Style="{StaticResource PageStateBody}"/>
+            <Button x:Name="ErrorRetryButton" Content="Retry" Style="{StaticResource AccentButton}"
+                    HorizontalAlignment="Center" Margin="0,16,0,0" Click="OnRetryClick"/>
+        </StackPanel>
+
+        <!--  Offline is separate from Error: nothing is broken on this PC, the server just isn't
+        answering. The panel says what still works.  -->
+        <StackPanel x:Name="OfflinePanel" Style="{StaticResource PageStatePanel}" Visibility="Collapsed">
+            <TextBlock Style="{StaticResource PageStateGlyph}" Text="&#xE753;"/>
+            <TextBlock x:Name="OfflineTitle" Style="{StaticResource PageStateTitle}" Text="You are offline"/>
+            <TextBlock x:Name="OfflineBody" Style="{StaticResource PageStateBody}"/>
+            <Button x:Name="OfflineRetryButton" Content="Try again" Style="{StaticResource AccentButton}"
+                    HorizontalAlignment="Center" Margin="0,16,0,0" Click="OnRetryClick"/>
+        </StackPanel>
+    </Grid>
+</UserControl>

@@ -8,20 +8,14 @@ namespace CloudLauncher.Services;
 /// <summary>
 /// Repairs a half-downloaded MCEF native bundle before it can crash the client.
 ///
-/// <para>MCEF fetches ~270&#160;MB of Chromium natives into <c>mods/mcef-libraries/</c> on first
-/// run. That folder is deliberately excluded from pack sync, so every player downloads it
-/// themselves, and an interrupted download leaves the folder present but incomplete. MCEF treats
-/// "folder is there" as "already installed", so it never retries — and the next launch dies during
-/// client init with <c>UnsatisfiedLinkError: Can't load library: …\libGLESv2.dll</c>, which reads
-/// like a hard crash rather than a download that needs finishing.</para>
+/// <para>MCEF downloads about 270&#160;MB of Chromium natives into <c>mods/mcef-libraries/</c> on
+/// first run. The folder is excluded from pack sync, and after an interrupted download MCEF sees the
+/// folder and never retries, so the next launch dies with
+/// <c>UnsatisfiedLinkError: Can't load library: ...\libGLESv2.dll</c>.</para>
 ///
-/// <para>This checks the bundle actually contains the natives it should, and if it does not,
-/// deletes it so MCEF downloads it again cleanly. The folder is a cache and is never synced, so
-/// deleting it costs bandwidth and nothing else.</para>
-///
-/// <para>The check is deliberately shallow: presence and a plausible size for the files that CEF
-/// loads first. It is not a checksum — MCEF keeps its own <c>.sha256</c> beside the folder for
-/// that, and re-hashing 270&#160;MB on every launch would be worse than the bug.</para>
+/// <para>If natives are missing, the bundle is deleted so MCEF downloads it again. It's an unsynced
+/// cache, so that only costs bandwidth. The check is presence plus a plausible size, not a checksum;
+/// hashing 270&#160;MB on every launch would cost too much.</para>
 /// </summary>
 public static class McefLibrariesService
 {
@@ -29,15 +23,13 @@ public static class McefLibrariesService
     private static readonly (string Name, long MinBytes)[] RequiredNatives =
     [
         ("libcef.dll",     64L * 1024 * 1024),   // ~200 MB in practice
-        ("libGLESv2.dll",   1L * 1024 * 1024),   // ~7 MB — the one in the crash report
+        ("libGLESv2.dll",   1L * 1024 * 1024),   // ~7 MB, the one named in the crash
         ("chrome_elf.dll",       256L * 1024),
         ("jcef.dll",             256L * 1024),
     ];
 
-    /// <summary>
-    /// Verifies the pack's MCEF bundle and clears it when it is unusable. Returns a line for the
-    /// launch log, or an empty string when there is nothing to say.
-    /// </summary>
+    /// <summary>Verifies the pack's MCEF bundle and clears it when it is unusable. Returns a line for
+    /// the launch log, or an empty string when there is nothing to say.</summary>
     public static string Verify(string gameDir)
     {
         try
@@ -49,7 +41,7 @@ public static class McefLibrariesService
             if (problem is null) return "";
 
             Directory.Delete(root, recursive: true);
-            return $"MCEF: {problem} — cleared, it will download again on this launch";
+            return $"MCEF: {problem} - cleared, it will download again on this launch";
         }
         catch (Exception ex)
         {
@@ -59,15 +51,12 @@ public static class McefLibrariesService
         }
     }
 
-    /// <summary>
-    /// Describes what is wrong with a bundle, or null when it looks complete. Split out so the
-    /// reason can be logged — "libGLESv2.dll is 0 bytes" is a very different report from
-    /// "no platform folder", and the difference matters when a player asks why.
-    /// </summary>
+    /// <summary>Describes what is wrong with a bundle, or null when it looks complete. Separate so the
+    /// reason can be logged.</summary>
     private static string? Diagnose(string root)
     {
         var platform = Directory.EnumerateDirectories(root)
-            .FirstOrDefault(d => Path.GetFileName(d).Contains('_'));   // windows_amd64, linux_amd64, macos_arm64…
+            .FirstOrDefault(d => Path.GetFileName(d).Contains('_'));   // windows_amd64, linux_amd64, macos_arm64, ...
         if (platform is null)
             return "native folder is missing";
 

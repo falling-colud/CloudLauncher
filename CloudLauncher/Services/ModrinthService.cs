@@ -65,7 +65,7 @@ public sealed record ModMediaItem(
     string? Description);
 
 /// <summary>One selectable category in the mod-browse filter. <see cref="Label"/> is shown to the
-/// user; <see cref="Value"/> is what the store's search wants — a Modrinth category slug, or a
+/// user; <see cref="Value"/> is what the store's search takes: a Modrinth category slug or a
 /// CurseForge numeric category id.</summary>
 public sealed record ModBrowseCategory(string Label, string Value);
 
@@ -73,8 +73,8 @@ public sealed record ModProjectDetail(
     string? Description,
     ModProjectLinks Links,
     IReadOnlyList<ModMediaItem> Screenshots,
-    // Modrinth ships Markdown; CurseForge ships HTML. The viewer renders accordingly instead of
-    // guessing from the content (a Markdown body that embeds one HTML tag used to be misread as HTML).
+    // Modrinth ships Markdown and CurseForge ships HTML. The viewer renders by this flag instead of
+    // guessing from the content, which misreads Markdown that embeds an HTML tag.
     bool IsMarkdown = false);
 
 public sealed record InstalledMod(
@@ -107,7 +107,7 @@ public sealed class ModrinthService
             AutomaticDecompression = DecompressionMethods.All
         })
         { Timeout = TimeSpan.FromMinutes(10) };
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; CloudLauncher/1.0)");
+        ApiClient.ApplyUserAgent(client);
         client.DefaultRequestHeaders.Accept.ParseAdd("*/*");
         return client;
     }
@@ -131,8 +131,8 @@ public sealed class ModrinthService
             facets.Add([$"versions:{mcVersion}"]);
         if (!string.IsNullOrEmpty(loader))
             facets.Add([$"categories:{loader.ToLowerInvariant()}"]);
-        // Each category is its own facet group, so results must carry ALL of them (AND) — matching
-        // how selecting several categories narrows on the Modrinth site.
+        // Each category is its own facet group, so results must match all of them (AND), the same
+        // way selecting several categories narrows results on the Modrinth site.
         if (categories is not null)
             foreach (var c in categories)
                 if (!string.IsNullOrWhiteSpace(c))
@@ -140,16 +140,17 @@ public sealed class ModrinthService
 
         var facetsJson = JsonSerializer.Serialize(facets);
         var path = $"search?query={Uri.EscapeDataString(query)}&facets={Uri.EscapeDataString(facetsJson)}&limit={limit}&offset={offset}&index={index}";
-        // Throws on failure: a refused search (rate limited, Modrinth down) used to read as "No results".
+        // Throws on failure so a refused search (rate limited, Modrinth down) doesn't read as "No
+        // results".
         var resp = await ProxyGetJsonStrictAsync<SearchResponse>(path, "search", ct);
         return resp?.Hits?.Select(ToSummary).ToList() ?? new();
     }
 
     private List<ModBrowseCategory>? _categoryCache;
 
-    /// <summary>Modrinth's category tags for the given project type (mod / resourcepack / …), cached
-    /// for the session. The header categories only — loaders and resolutions are filtered out — so
-    /// the filter offers the same list the Modrinth site shows under "Categories".</summary>
+    /// <summary>Modrinth's category tags for a project type (mod, resourcepack, ...), cached for
+    /// the session. Header categories only, with loaders and resolutions filtered out, so the
+    /// filter matches the site's "Categories" list.</summary>
     public async Task<List<ModBrowseCategory>> GetCategoriesAsync(string projectType = "mod", CancellationToken ct = default)
     {
         if (_categoryCache is { } cached) return cached;
@@ -171,7 +172,7 @@ public sealed class ModrinthService
         catch { return new(); }
     }
 
-    /// <summary>"worldgen" → "Worldgen", "game-mechanics" → "Game mechanics".</summary>
+    /// <summary>"worldgen" -> "Worldgen", "game-mechanics" -> "Game mechanics".</summary>
     private static string Prettify(string slug)
     {
         var spaced = slug.Replace('-', ' ').Replace('_', ' ').Trim();
@@ -239,13 +240,16 @@ public sealed class ModrinthService
         return resp?.Select(ToVersion).ToList() ?? new();
     }
 
-    /// <summary>A project's versions — all of them, or only those for a Minecraft version and loader
-    /// (filtered by Modrinth, so it's one small page). Changelogs are left out to keep the list small;
-    /// <see cref="GetVersionChangelogAsync"/> fetches one on demand. Unlike <see cref="GetVersionsAsync"/>
-    /// this throws when the store says no (a 429, an outage), so a caller that caches the answer never
-    /// caches "no versions" for a mod that merely could not be asked right now.</summary>
+    /// <summary>A project's versions, either all of them or only those for a Minecraft version and
+    /// loader (filtered by Modrinth, so it's one small page). Changelogs are left out;
+    /// <see cref="GetVersionChangelogAsync"/> fetches one on demand. Unlike
+    /// <see cref="GetVersionsAsync"/> this throws when the store refuses (a 429, an outage), so a
+    /// caller that caches the answer never caches "no versions" for a mod that just couldn't be
+    /// checked.</summary>
+    /// <param name="pacing"><see cref="ProxyPacing.UpdateCheck"/> for update checks, which are
+    /// paced by their own setting.</param>
     public async Task<List<ModVersion>> GetVersionsStrictAsync(string projectId, string? mcVersion = null,
-        string? loader = null, CancellationToken ct = default)
+        string? loader = null, CancellationToken ct = default, ProxyPacing pacing = ProxyPacing.Default)
     {
         var query = new List<string> { "include_changelog=false" };
         if (!string.IsNullOrEmpty(mcVersion))
@@ -253,8 +257,64 @@ public sealed class ModrinthService
         if (!string.IsNullOrEmpty(loader))
             query.Add("loaders=" + Uri.EscapeDataString(JsonSerializer.Serialize(new[] { loader.ToLowerInvariant() })));
         var list = await ProxyGetJsonStrictAsync<List<VersionResponse>>(
-            $"project/{projectId}/version?{string.Join("&", query)}", "version list", ct);
+            $"project/{projectId}/version?{string.Join("&", query)}", "version list", ct, pacing);
         return list?.Select(ToVersion).ToList() ?? new();
+    }
+
+    /// <summary>The newest version of the project each installed file belongs to, for many files in
+    /// one request (<c>POST /version_files/update</c>), keyed by the SHA-512 it was asked with. The
+    /// project id comes back with each answer so the caller can check it is the mod it meant.</summary>
+    /// <remarks>Lets an update check cover hundreds of mods in one round trip. Modrinth filters by
+    /// <paramref name="mcVersion"/>, <paramref name="loader"/> and <paramref name="versionTypes"/>
+    /// (null = every channel). A hash is absent when no version passes the filters or when Modrinth
+    /// doesn't know the file; asking once without a channel filter tells the two apart. Throws when
+    /// Modrinth or the launcher server refuses, so "could not ask" never reads as "nothing newer".
+    /// The answers include changelogs for the update review.</remarks>
+    public async Task<Dictionary<string, (string ProjectId, ModVersion Version)>> GetLatestVersionsByHashAsync(
+        IReadOnlyCollection<string> sha512Hashes, string? mcVersion, string? loader,
+        IReadOnlyCollection<string>? versionTypes, CancellationToken ct = default)
+    {
+        var result = new Dictionary<string, (string, ModVersion)>(StringComparer.OrdinalIgnoreCase);
+        if (sha512Hashes.Count == 0) return result;
+
+        var body = new UpdateLookupBody
+        {
+            Hashes = sha512Hashes,
+            Loaders = string.IsNullOrWhiteSpace(loader) ? null : [loader.Trim().ToLowerInvariant()],
+            GameVersions = string.IsNullOrWhiteSpace(mcVersion) ? null : [mcVersion.Trim()],
+            VersionTypes = versionTypes is { Count: > 0 } ? versionTypes : null
+        };
+        using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Post, "version_files/update",
+            JsonContent.Create(body, options: Json), ct);
+        if (!resp.IsSuccessStatusCode)
+            throw new HttpRequestException(
+                $"Modrinth update lookup failed: {await DescribeFailureAsync(resp, ct)}", null, resp.StatusCode);
+
+        await using var stream = await resp.Content.ReadAsStreamAsync(ct);
+        using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) return result;
+        foreach (var prop in doc.RootElement.EnumerateObject())
+        {
+            var ver = prop.Value.Deserialize<VersionResponse>(Json);
+            if (ver is null || string.IsNullOrEmpty(ver.Id) || string.IsNullOrEmpty(ver.ProjectId)) continue;
+            result[prop.Name] = (ver.ProjectId, ToVersion(ver));
+        }
+        return result;
+    }
+
+    private sealed class UpdateLookupBody
+    {
+        [JsonPropertyName("hashes")] public required IReadOnlyCollection<string> Hashes { get; init; }
+        [JsonPropertyName("algorithm")] public string Algorithm { get; init; } = "sha512";
+
+        [JsonPropertyName("loaders"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string[]? Loaders { get; init; }
+
+        [JsonPropertyName("game_versions"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string[]? GameVersions { get; init; }
+
+        [JsonPropertyName("version_types"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public IReadOnlyCollection<string>? VersionTypes { get; init; }
     }
 
     /// <summary>One version's changelog (Markdown), for the update review.</summary>
@@ -264,9 +324,10 @@ public sealed class ModrinthService
         return version?.Changelog;
     }
 
-    private async Task<T?> ProxyGetJsonStrictAsync<T>(string pathAndQuery, string operation, CancellationToken ct)
+    private async Task<T?> ProxyGetJsonStrictAsync<T>(string pathAndQuery, string operation, CancellationToken ct,
+        ProxyPacing pacing = ProxyPacing.Default)
     {
-        using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Get, pathAndQuery, null, ct);
+        using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Get, pathAndQuery, null, ct, pacing);
         if (!resp.IsSuccessStatusCode)
             throw new HttpRequestException(
                 $"Modrinth {operation} failed: {await DescribeFailureAsync(resp, ct)}", null, resp.StatusCode);
@@ -344,9 +405,9 @@ public sealed class ModrinthService
         var body = new { hashes, algorithm = "sha512" };
         var content = JsonContent.Create(body, options: Json);
         using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Post, "version_files", content, ct);
-        // Throw rather than return "no matches" — see the note on CurseForge's fingerprint match.
-        // A failed lookup and a genuinely unmatched hash must not look alike, or installed mods
-        // silently present themselves as not installed.
+        // Throw rather than return "no matches" (see the note on CurseForge's fingerprint match): a
+        // failed lookup must not look like an unmatched hash, or installed mods show up as not
+        // installed.
         resp.EnsureSuccessStatusCode();
 
         var result = new Dictionary<string, (ModSummary, ModVersion)>();
@@ -380,11 +441,10 @@ public sealed class ModrinthService
 
     // ── cross-store counterpart ─────────────────────────────────────────────────
 
-    /// <summary>Finds the Modrinth project that corresponds to a mod known on
-    /// CurseForge, for recognising it as installed when the two stores' jars aren't
-    /// byte-identical (so hash matching misses it). Matches by slug first — Modrinth
-    /// resolves slugs on the project endpoint — then by a name search, accepting only
-    /// a candidate whose slug or name lines up (see <see cref="ModMatching"/>).</summary>
+    /// <summary>Finds the Modrinth project for a mod known on CurseForge, to recognise it as
+    /// installed when the two stores' jars differ and hash matching misses it. Tries the slug first
+    /// (Modrinth resolves slugs on the project endpoint), then a name search, accepting only a
+    /// candidate whose slug or name lines up (see <see cref="ModMatching"/>).</summary>
     public async Task<ModSummary?> FindCounterpartAsync(string? slug, string? name, CancellationToken ct = default)
     {
         if (!string.IsNullOrWhiteSpace(slug))
@@ -406,41 +466,68 @@ public sealed class ModrinthService
 
     // ── download ──────────────────────────────────────────────────────────────
 
+    /// <summary>How many times a file may be restarted because a pause dropped its connection. A
+    /// long pause can cost more than one attempt, and giving up early would leave a file missing
+    /// from a pack the import reports as complete.</summary>
+    private const int MaxPauseRetries = 4;
+
+    /// <param name="pause">Held mid-file while the user pauses the transfer this download belongs
+    /// to. A modpack is one big archive, so pausing only between files would do little.</param>
     public async Task DownloadFileAsync(
-        string url, string destPath, IProgress<(long done, long total)>? progress = null, CancellationToken ct = default)
+        string url, string destPath, IProgress<(long done, long total)>? progress = null,
+        CancellationToken ct = default, PauseGate? pause = null)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
-        // Download to a temp file, then atomically rename over destPath. Writing straight to
-        // destPath (as before) meant an interrupted download left a truncated jar at the final
-        // path — which the game then fails to load, and which "skip if exists" logic treats as a
-        // complete file forever. Also verify the byte count against Content-Length.
+        // Download to a temp file, then atomically rename over destPath, so an interrupted download
+        // never leaves a truncated jar that the game fails to load and "skip if exists" treats as
+        // complete. The byte count is also checked against Content-Length.
         var part = destPath + ".part";
-        try
+        for (var attempt = 0; ; attempt++)
         {
-            using var resp = await _downloads.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-            resp.EnsureSuccessStatusCode();
-            var total = resp.Content.Headers.ContentLength ?? -1;
-            await using (var src = await resp.Content.ReadAsStreamAsync(ct))
-            await using (var dst = File.Create(part))
+            // A pause holds the response stream open without reading, which a server or proxy may
+            // drop. If that's what broke the transfer, restart the file instead of reporting a
+            // failed download.
+            var pausedThisAttempt = false;
+            try
             {
-                var buf = new byte[81920];
-                long done = 0;
-                int read;
-                while ((read = await src.ReadAsync(buf, ct)) > 0)
+                using var resp = await _downloads.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                resp.EnsureSuccessStatusCode();
+                var total = resp.Content.Headers.ContentLength ?? -1;
+                await using (var src = await resp.Content.ReadAsStreamAsync(ct))
+                await using (var dst = File.Create(part))
                 {
-                    await dst.WriteAsync(buf.AsMemory(0, read), ct);
-                    done += read;
-                    if (total > 0) progress?.Report((done, total));
+                    var buf = new byte[81920];
+                    long done = 0;
+                    int read;
+                    while ((read = await src.ReadAsync(buf, ct)) > 0)
+                    {
+                        await dst.WriteAsync(buf.AsMemory(0, read), ct);
+                        done += read;
+                        if (total > 0) progress?.Report((done, total));
+                        if (pause is { IsPaused: true })
+                        {
+                            pausedThisAttempt = true;
+                            await pause.WaitAsync(ct);
+                        }
+                    }
+                    if (total > 0 && done != total)
+                        throw new IOException($"Incomplete download: received {done} of {total} bytes from {url}");
                 }
-                if (total > 0 && done != total)
-                    throw new IOException($"Incomplete download: received {done} of {total} bytes from {url}");
+                File.Move(part, destPath, overwrite: true);
+                return;
             }
-            File.Move(part, destPath, overwrite: true);
-        }
-        catch
-        {
-            try { if (File.Exists(part)) File.Delete(part); } catch { /* best effort */ }
-            throw;
+            // Gated on whether this attempt was paused, not on the attempt number: a long pause can
+            // drop the connection more than once.
+            catch (Exception ex) when (pausedThisAttempt && attempt < MaxPauseRetries && ex is not OperationCanceledException)
+            {
+                try { if (File.Exists(part)) File.Delete(part); } catch { /* best effort */ }
+                // Retry from the start.
+            }
+            catch
+            {
+                try { if (File.Exists(part)) File.Delete(part); } catch { /* best effort */ }
+                throw;
+            }
         }
     }
 

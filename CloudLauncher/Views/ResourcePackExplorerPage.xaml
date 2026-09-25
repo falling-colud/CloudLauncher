@@ -1,6 +1,7 @@
 ﻿<Page x:Class="CloudLauncher.Views.ResourcePackExplorerPage"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:views="clr-namespace:CloudLauncher.Views"
       Title="Browse resource packs"
       Background="{DynamicResource Surface0Brush}">
@@ -23,11 +24,11 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <Border Grid.Column="0" Background="{DynamicResource Surface1Brush}"
+                    <slate:SlateBorder Grid.Column="0" Background="{DynamicResource Surface1Brush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                             CornerRadius="6" Padding="8,2" MinHeight="34">
                         <DockPanel>
-                            <TextBlock DockPanel.Dock="Left" Text="&#xE721;" FontFamily="{StaticResource IconFont}"
+                            <TextBlock DockPanel.Dock="Left" Text="&#xE721;" FontFamily="{DynamicResource IconFont}"
                                        FontSize="13" VerticalAlignment="Center" Margin="2,0,8,0"
                                        Foreground="{DynamicResource TextTertiaryBrush}"/>
                             <TextBox x:Name="SearchBox" BorderThickness="0" Background="Transparent"
@@ -35,7 +36,7 @@
                                      KeyDown="OnSearchKeyDown" TextChanged="OnSearchTextChanged"
                                      ToolTip="Search mod name or description"/>
                         </DockPanel>
-                    </Border>
+                    </slate:SlateBorder>
                     <StackPanel Grid.Column="1" Orientation="Horizontal">
                         <ComboBox x:Name="SortBox" Width="126" Margin="6,0,0,0"
                                   SelectionChanged="OnSortChanged"
@@ -46,13 +47,13 @@
                         </ComboBox>
                         <Button Style="{StaticResource IconButton}"
                                 Margin="6,0,0,0" Padding="8,5"
-                                Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                Content="&#xE71C;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                 ToolTip="Filters" Click="OnFiltersClick"/>
                     </StackPanel>
                     <Popup x:Name="FiltersPopup" PlacementTarget="{Binding ElementName=SearchBox}"
                            Placement="Top" StaysOpen="False" AllowsTransparency="True"
                            HorizontalOffset="0" VerticalOffset="-8">
-                        <Border Background="{DynamicResource Surface2Brush}"
+                        <slate:SlateBorder Background="{DynamicResource Surface2Brush}"
                                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                                 CornerRadius="8" Padding="14" MinWidth="260">
                             <StackPanel>
@@ -69,7 +70,7 @@
                                                 Style="{StaticResource LinkButton}" FontSize="11"
                                                 Click="OnClearCategories"/>
                                     </Grid>
-                                    <Border Background="{DynamicResource Surface1Brush}"
+                                    <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
                                             BorderBrush="{DynamicResource BorderBrush}"
                                             BorderThickness="1" CornerRadius="6" MaxHeight="168" Margin="0,0,0,10">
                                         <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,6">
@@ -82,7 +83,7 @@
                                                 </ItemsControl.ItemTemplate>
                                             </ItemsControl>
                                         </ScrollViewer>
-                                    </Border>
+                                    </slate:SlateBorder>
                                 </StackPanel>
                                 <TextBlock Style="{StaticResource Caption}" Text="Minecraft version"/>
                                 <TextBox x:Name="FilterMcBox" Margin="0,4,0,10"
@@ -92,7 +93,7 @@
                                             Click="OnApplyFilters" Padding="14,5"/>
                                 </StackPanel>
                             </StackPanel>
-                        </Border>
+                        </slate:SlateBorder>
                     </Popup>
                 </Grid>
                 <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
@@ -105,7 +106,7 @@
                         </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="0" Margin="0,2,8,2"
+                                <slate:SlateBorder Padding="0" Margin="0,2,8,2"
                                         Cursor="{Binding CursorHint}"
                                         Background="{Binding Background}"
                                         BorderBrush="{Binding BorderColor}" BorderThickness="1"
@@ -113,7 +114,7 @@
                                         MouseLeftButtonUp="OnSourceChipClick"
                                         Visibility="{Binding ChipVisibility}">
                                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <TextBlock Text="{Binding Icon}" FontFamily="{StaticResource IconFont}"
+                                        <TextBlock Text="{Binding Icon}" FontFamily="{DynamicResource IconFont}"
                                                    FontSize="11" Margin="12,0,6,0"
                                                    VerticalAlignment="Center"
                                                    Foreground="{Binding Foreground}"
@@ -124,7 +125,7 @@
                                                    Foreground="{Binding Foreground}"
                                                    FontWeight="{Binding FontWeight}"/>
                                     </StackPanel>
-                                </Border>
+                                </slate:SlateBorder>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -139,7 +140,7 @@
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
-            <Border Grid.Row="0" Margin="18,0,18,8"
+            <slate:SlateBorder Grid.Row="0" Margin="18,0,18,8"
                     Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                     CornerRadius="8">
@@ -158,7 +159,7 @@
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
 
-                                    <Border Grid.Column="0" Width="42" Height="42"
+                                    <slate:SlateBorder Grid.Column="0" Width="42" Height="42"
                                             Background="{DynamicResource Surface3Brush}"
                                             BorderBrush="{DynamicResource BorderBrush}"
                                             BorderThickness="1" CornerRadius="8"
@@ -166,9 +167,13 @@
                                         <Grid>
                                             <TextBlock Text="{Binding Initial}" Style="{StaticResource H3}"
                                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                            <Image Source="{Binding IconUrl}" Stretch="UniformToFill"/>
+                                            <!--  Through the icon cache, never a raw URL on Image.Source: WPF's own downloader
+                                            decodes at native size on the UI thread, which makes scrolling stutter.  -->
+                                            <Image views:IconLoader.Url="{Binding IconUrl}"
+                                                   views:IconLoader.DecodeWidth="42"
+                                                   Stretch="UniformToFill"/>
                                         </Grid>
-                                    </Border>
+                                    </slate:SlateBorder>
 
                                     <StackPanel Grid.Column="1" Margin="0,0,10,0">
                                         <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
@@ -181,12 +186,12 @@
                                             </ItemsControl.ItemsPanel>
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Style="{StaticResource Pill}"
+                                                    <slate:SlateBorder Style="{StaticResource Pill}"
                                                             Background="{DynamicResource TagModrinthBgBrush}"
                                                             Margin="0,0,4,4">
                                                         <TextBlock Text="{Binding}" Style="{StaticResource PillText}"
                                                                    Foreground="{DynamicResource TagModrinthFgBrush}"/>
-                                                    </Border>
+                                                    </slate:SlateBorder>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
@@ -206,7 +211,7 @@
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
-            </Border>
+            </slate:SlateBorder>
 
             <Grid Grid.Row="1" Margin="18,4,18,16">
                 <Grid.RowDefinitions>
@@ -220,7 +225,7 @@
                         <ColumnDefinition Width="52"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <Border Width="42" Height="42"
+                    <slate:SlateBorder Width="42" Height="42"
                             Background="{DynamicResource Surface3Brush}"
                             BorderBrush="{DynamicResource BorderBrush}"
                             BorderThickness="1" CornerRadius="8"
@@ -230,7 +235,7 @@
                                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
                             <Image x:Name="SelectedIconImage" Stretch="UniformToFill"/>
                         </Grid>
-                    </Border>
+                    </slate:SlateBorder>
                     <StackPanel Grid.Column="1">
                         <TextBlock x:Name="ModNameLabel" Style="{StaticResource H2}" TextWrapping="Wrap"/>
                         <TextBlock x:Name="ModMetaLabel" Style="{StaticResource Muted}" Margin="0,2,0,0"/>
@@ -244,13 +249,13 @@
 
                 <TabControl Grid.Row="1" x:Name="ModTabs" Visibility="Collapsed">
                     <TabItem Header="Overview">
-                        <Border CornerRadius="8" ClipToBounds="True" Margin="0,12,0,0"
+                        <slate:SlateBorder CornerRadius="8" ClipToBounds="True" Margin="0,12,0,0"
                                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
                             <Border x:Name="OverviewHost" ClipToBounds="True"
                                     Background="{DynamicResource Surface1Brush}">
                                 <views:RichDescriptionView x:Name="OverviewBrowser"/>
                             </Border>
-                        </Border>
+                        </slate:SlateBorder>
                     </TabItem>
 
                     <TabItem Header="Screenshots">
@@ -267,19 +272,19 @@
                                     </ItemsControl.ItemsPanel>
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <Border Width="220" Margin="0,0,10,10" Style="{StaticResource Card}" Padding="8"
+                                            <slate:SlateBorder Width="220" Margin="0,0,10,10" Style="{StaticResource Card}" Padding="8"
                                                     Cursor="Hand" ToolTip="Open screenshot"
                                                     MouseLeftButtonUp="OnOpenScreenshot">
                                                 <StackPanel>
-                                                    <Border Height="116" Background="{DynamicResource Surface0Brush}"
+                                                    <slate:SlateBorder Height="116" Background="{DynamicResource Surface0Brush}"
                                                             BorderBrush="{DynamicResource BorderBrush}"
                                                             BorderThickness="1" CornerRadius="6" ClipToBounds="True">
                                                         <Image Source="{Binding ImageUrl}" Stretch="UniformToFill"/>
-                                                    </Border>
+                                                    </slate:SlateBorder>
                                                     <TextBlock Text="{Binding Title}" Style="{StaticResource Caption}"
                                                                Margin="0,6,0,0" TextWrapping="Wrap"/>
                                                 </StackPanel>
-                                            </Border>
+                                            </slate:SlateBorder>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
@@ -324,14 +329,17 @@
                                           VerticalAlignment="Center"
                                           Checked="OnShowAllVersionsChanged" Unchecked="OnShowAllVersionsChanged"/>
                             </Grid>
-                            <Border Grid.Row="1" Background="{DynamicResource Surface1Brush}"
+                            <slate:SlateBorder Grid.Row="1" Background="{DynamicResource Surface1Brush}"
                                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                                     CornerRadius="6">
+                                <!--  Right-click selects the row, then offers its changelog.  -->
                                 <DataGrid x:Name="VersionsGrid"
                                           AutoGenerateColumns="False" CanUserAddRows="False"
                                           HeadersVisibility="Column" RowHeaderWidth="0"
                                           SelectionMode="Single" IsReadOnly="True"
-                                          Background="Transparent" BorderThickness="0">
+                                          Background="Transparent" BorderThickness="0"
+                                          PreviewMouseRightButtonDown="OnVersionsGridPreviewRightDown"
+                                          MouseRightButtonUp="OnVersionsGridRightClick">
                                     <DataGrid.Columns>
                                         <DataGridTextColumn Header="Version" Binding="{Binding VersionNumber}" Width="*"/>
                                         <DataGridTextColumn Header="MC" Binding="{Binding McVersions}" Width="150"/>
@@ -350,7 +358,7 @@
                                         </DataGridTemplateColumn>
                                     </DataGrid.Columns>
                                 </DataGrid>
-                            </Border>
+                            </slate:SlateBorder>
                         </Grid>
                     </TabItem>
                 </TabControl>

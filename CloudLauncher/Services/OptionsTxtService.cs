@@ -3,11 +3,9 @@ using System.IO;
 
 namespace CloudLauncher.Services;
 
-/// <summary>
-/// Serialises and deserialises Minecraft's <c>options.txt</c> file.
-/// The format is one <c>key:value</c> pair per line. Boolean values are <c>true</c>/<c>false</c>;
-/// volumes are 0.0–1.0; keybinds are <c>key.keyboard.*</c> or <c>key.mouse.*</c> identifiers.
-/// </summary>
+/// <summary>Reads and writes Minecraft's <c>options.txt</c>: one <c>key:value</c> pair per line.
+/// Booleans are <c>true</c>/<c>false</c>, volumes 0.0 to 1.0, keybinds <c>key.keyboard.*</c> or
+/// <c>key.mouse.*</c> identifiers.</summary>
 public static class OptionsTxtService
 {
     /// <summary>Write a fresh options.txt for the given game directory from defaults.</summary>
@@ -49,10 +47,8 @@ public static class OptionsTxtService
         File.WriteAllText(path, sb.ToString());
     }
 
-    /// <summary>
-    /// Merge the supplied defaults INTO an existing options.txt — preserving any keys
-    /// the user has customised that we don't manage. Only known keys get overwritten.
-    /// </summary>
+    /// <summary>Merges the defaults into an existing options.txt. Only managed keys are overwritten;
+    /// everything else is kept.</summary>
     public static void MergeIntoExisting(string gameDir, McDefaults d)
     {
         var path = Path.Combine(gameDir, "options.txt");
@@ -85,12 +81,8 @@ public static class OptionsTxtService
     public static void EnsureWindowed(string gameDir)
         => SetOption(gameDir, "fullscreen", "false");
 
-    /// <summary>
-    /// Force <c>pauseOnLostFocus:false</c> so the embedded game keeps running while the
-    /// player interacts with the launcher's side panel (e.g. clicking command links).
-    /// Without this, submitting a chat command closes the chat screen and the unfocused
-    /// game would auto-pause.
-    /// </summary>
+    /// <summary>Forces <c>pauseOnLostFocus:false</c> so the game keeps running while the player uses
+    /// the launcher's side panel (clicking command links, for example).</summary>
     public static void EnsureNoPauseOnLostFocus(string gameDir)
         => SetOption(gameDir, "pauseOnLostFocus", "false");
 
@@ -132,23 +124,15 @@ public static class OptionsTxtService
     /// <summary>The built-in pack. Always present, always the bottom of the stack.</summary>
     public const string VanillaEntry = "vanilla";
 
-    /// <summary>
-    /// The enabled resource packs, in the file's own order — <b>lowest priority first</b>.
-    /// </summary>
+    /// <summary>The enabled resource packs in the file's order, lowest priority first.</summary>
     /// <remarks>
-    /// Minecraft keeps them as a one-line JSON array: <c>resourcePacks:["vanilla","file/Foo.zip"]</c>.
-    /// The order is load order, so the LAST element is applied last and therefore wins; the in-game
-    /// screen shows that same stack upside down, highest priority at the top. Entries are
-    /// <c>file/&lt;name&gt;</c> on 1.13+ and a bare <c>&lt;name&gt;</c> on older versions, and both are
-    /// returned verbatim: rewriting someone's 1.12 instance into the modern spelling would turn every
-    /// enabled pack off. An absent file or key gives an empty list, which reads the same as
-    /// "nothing but vanilla" and is the right answer either way.
-    /// <para>
-    /// Note that the game loads options.txt once at startup and rewrites it wholesale on exit, so a
-    /// change written underneath a running instance is discarded when that instance closes. Callers
-    /// check <c>App.State.Instances.IsBusy</c> first, the same rule the rest of the launcher follows
-    /// for files inside a pack.
-    /// </para>
+    /// <para>Stored as a one-line JSON array, e.g. <c>resourcePacks:["vanilla","file/Foo.zip"]</c>. The
+    /// last entry loads last and wins; the in-game screen shows the stack reversed. Entries are
+    /// <c>file/&lt;name&gt;</c> on 1.13+ and a bare <c>&lt;name&gt;</c> before that, and are returned
+    /// as is, since rewriting a 1.12 instance into the modern form would turn every pack off. A missing
+    /// file or key gives an empty list.</para>
+    /// <para>The game rewrites options.txt on exit, so changes made while it runs are lost. Callers
+    /// check <c>App.State.Instances.IsBusy</c> first.</para>
     /// </remarks>
     public static List<string> ReadResourcePacks(string gameDir)
     {
@@ -167,10 +151,8 @@ public static class OptionsTxtService
         return new();
     }
 
-    /// <summary>
-    /// Rewrite the <c>resourcePacks</c> line, leaving every other line — including
-    /// <c>incompatibleResourcePacks</c>, which the game maintains itself — exactly as it was.
-    /// </summary>
+    /// <summary>Rewrites the <c>resourcePacks</c> line and leaves every other line as it was,
+    /// including <c>incompatibleResourcePacks</c>, which the game maintains.</summary>
     /// <param name="entries">The stack in file order, lowest priority first. "vanilla" is forced to
     /// the front if the caller left it out, because a stack without it loads no base textures.</param>
     public static void WriteResourcePacks(string gameDir, IReadOnlyList<string> entries)
@@ -183,18 +165,14 @@ public static class OptionsTxtService
         SetOption(gameDir, ResourcePacksKey, FormatJsonArray(ordered));
     }
 
-    /// <summary>
-    /// True when this instance's options.txt spells its entries <c>file/Name.zip</c>, the 1.13+ form.
-    /// </summary>
+    /// <summary>True when this instance's options.txt spells its entries <c>file/Name.zip</c>, the
+    /// 1.13+ form.</summary>
     /// <param name="minecraftVersion">The instance's Minecraft version, used only when the file itself
-    /// says nothing. Pass it wherever it is known — see <see cref="VersionUsesFilePrefix"/>.</param>
-    /// <remarks>Decided from what is already in the file where possible, because the file is the thing
-    /// the game actually parses. The fallback matters more than it looks: an instance whose stack holds
-    /// nothing but "vanilla" — which is every instance until the first pack is turned on — offers no
-    /// evidence at all, and answering "modern" there wrote <c>file/</c> entries into pre-1.13
-    /// instances, where the game matches the entry against the bare file name and so loaded none of
-    /// them. With no evidence the version decides; with no version either, the modern form is assumed,
-    /// which is right for every version this launcher installs by default.</remarks>
+    /// says nothing. Pass it wherever it is known (see <see cref="VersionUsesFilePrefix"/>).</param>
+    /// <remarks>Decided from the file's existing entries where possible. A stack holding only
+    /// "vanilla" gives no evidence, and assuming the modern form there breaks pre-1.13 instances (the
+    /// game matches bare file names), so the version decides. With no version either, the modern form
+    /// is assumed.</remarks>
     public static bool UsesFilePrefix(string gameDir, string? minecraftVersion = null)
     {
         var existing = ReadResourcePacks(gameDir);
@@ -203,20 +181,16 @@ public static class OptionsTxtService
         return named.Any(e => e.StartsWith("file/", StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>
-    /// True when <paramref name="minecraftVersion"/> is 1.13 or later, the releases that spell
-    /// resource pack entries <c>file/Name.zip</c>.
-    /// </summary>
-    /// <remarks>1.13 is where the prefix arrived: before it, options.txt listed the bare file name and
-    /// nothing else. Only the <c>1.x</c> release form is read — a version string this does not
-    /// understand (a snapshot like <c>23w31a</c>, a loader's own naming, an empty value) is treated as
-    /// modern, since everything that is not a numbered release predates nothing and the launcher only
+    /// <summary>True when <paramref name="minecraftVersion"/> is 1.13 or later, the releases that
+    /// spell resource pack entries <c>file/Name.zip</c>.</summary>
+    /// <remarks>Only the <c>1.x</c> release form is parsed. Anything else (a snapshot like
+    /// <c>23w31a</c>, a loader's naming, an empty value) is treated as modern, since the launcher
     /// installs current versions by default.</remarks>
     public static bool VersionUsesFilePrefix(string? minecraftVersion)
     {
         if (string.IsNullOrWhiteSpace(minecraftVersion)) return true;
 
-        // "1.12.2", "1.13", "1.20.1-pre1" → the number after the first dot is what decides.
+        // "1.12.2", "1.13", "1.20.1-pre1": the number after the first dot decides.
         var parts = minecraftVersion.Trim().Split('.');
         if (parts.Length < 2 || parts[0] != "1") return true;
 
@@ -247,9 +221,8 @@ public static class OptionsTxtService
         }
         catch (System.Text.Json.JsonException)
         {
-            // A truncated or hand-mangled line still tells us which packs were meant to be on, and
-            // reading them out is far better than silently presenting the instance as "nothing enabled"
-            // and then overwriting the line with that.
+            // A truncated or hand-edited line still says which packs were meant to be on. Better than
+            // treating the instance as having none enabled and then writing that back.
             foreach (System.Text.RegularExpressions.Match m in
                      System.Text.RegularExpressions.Regex.Matches(value, "\"((?:[^\"\\\\]|\\\\.)*)\""))
                 result.Add(m.Groups[1].Value.Replace("\\\"", "\"").Replace("\\\\", "\\"));
@@ -257,12 +230,9 @@ public static class OptionsTxtService
         }
     }
 
-    /// <summary>
-    /// Writes the array the way the game does: <c>["a","b"]</c>, no spaces.
-    /// </summary>
-    /// <remarks>Hand-rolled rather than run through JsonSerializer so that non-ASCII pack names stay
-    /// readable instead of turning into \u escapes — options.txt is UTF-8 and the game reads both, but
-    /// a user who opens the file should recognise their own pack names.</remarks>
+    /// <summary>Writes the array the way the game does: <c>["a","b"]</c>, no spaces.</summary>
+    /// <remarks>Hand-rolled so non-ASCII pack names stay readable instead of becoming \u escapes. The
+    /// game reads both, but the user should recognise their pack names in the file.</remarks>
     private static string FormatJsonArray(IReadOnlyList<string> entries)
     {
         var sb = new System.Text.StringBuilder("[");

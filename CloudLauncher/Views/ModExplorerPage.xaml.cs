@@ -1,6 +1,5 @@
 ﻿using System.Collections.ObjectModel;
 using System.IO;
-using System.Diagnostics;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Windows;
@@ -31,6 +30,13 @@ public partial class ModExplorerPage : Page
     private ModSummary? _pendingShowMod; // a mod "Open page" asked to show; honored once the initial browse load lands
     private CancellationTokenSource _cts = new();
 
+    /// <summary>Owns the paging and the load in flight, so a reset waits for the task it actually
+    /// cancelled.</summary>
+    private readonly InfiniteScroll.Pager _pager;
+
+    /// <summary>The list area's state: loading, empty, error or offline.</summary>
+    private readonly PageState _state;
+
     private string _searchText = "";
     private string? _filterMcOverride;
     private string? _filterLoaderOverride;
@@ -52,8 +58,25 @@ public partial class ModExplorerPage : Page
     private bool _hasMore;
     private int _offset;
     private int _indexGeneration;
-    private const int PageSize = 25;
-    private const int MaxResults = 200;
+    private const int PageSize = 50;   // both stores cap a page at 50
+    /// <summary>Safety stop so a runaway pager can't fill memory; not a browsing limit.</summary>
+    private const int MaxResults = 2000;
+    /// <summary>Below this width the detail sits under the results instead of beside them.</summary>
+    private const double NarrowWidth = 700;
+
+    /// <summary>Results and detail side by side when both columns fit, stacked otherwise.</summary>
+    private void LayoutBody(double width)
+    {
+        var narrow = width < NarrowWidth;
+        ResultsColumn.MinWidth = narrow ? 0 : 340;
+        GapColumn.Width = new GridLength(narrow ? 0 : 16);
+        DetailColumn.Width = narrow ? new GridLength(0) : new GridLength(4, GridUnitType.Star);
+        DetailColumn.MinWidth = narrow ? 0 : 340;
+        DetailRow.Height = narrow ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+        Grid.SetColumn(DetailPane, narrow ? 0 : 2);
+        Grid.SetRow(DetailPane, narrow ? 1 : 0);
+        DetailPane.Margin = narrow ? new Thickness(0, 14, 0, 0) : new Thickness(0);
+    }
 
     public ModExplorerPage(MainWindow shell, PackDetail pack)
     {
@@ -66,9 +89,35 @@ public partial class ModExplorerPage : Page
         SourceStrip.ItemsSource = _chips;
         ResultsList.ItemsSource = _rows;
         ModTabs.SelectionChanged += OnModTabsChanged;
+        BodyGrid.SizeChanged += (_, e) => LayoutBody(e.NewSize.Width);
+
+        // Searches go to the stores, so the debounce is longer than a local filter's; 450ms suits the
+        // APIs' pacing.
+        SearchBox.DebounceMilliseconds = 450;
+        SearchBox.TextChangedDebounced += OnSearchSettled;
+        SearchBox.SearchSubmitted += OnSearchSubmitted;
+
+        _pager = new InfiniteScroll.Pager(
+            () => !_isLoading && _hasMore && _activeChip is not null && _rows.Count < MaxResults,
+            () => _rows.Count,
+            LoadMoreAsync);
+
+        // No DisableWhileBusy: every toolbar control cancels and restarts the load anyway, and greying
+        // them out during infinite-scroll top-ups would make them flicker.
+        _state = new PageState(ResultsList, PageStateHost, nameof(ModExplorerPage))
+            .Copy(PageCopy.Results)
+            .Slots(SearchStatus, ListStatus);
+        _state.RetryRequested += () => _ = ResetAndLoadAsync();
 
         Loaded += async (_, _) =>
         {
+            UiScale.Changed -= ApplyModScale;   // re-apply the mod-list zoom live when the slider moves
+            UiScale.Changed += ApplyModScale;
+            ApplyModScale();
+            ThemeService.Changed -= RepaintThemedChips;
+            ThemeService.Changed += RepaintThemedChips;
+            UpdateSortMenuState();
+
             // Fast cache-only pass first so already-known mods are badged immediately,
             // then resolve cross-store identities in the background and refine.
             await SeedInstalledFromCacheAsync();
@@ -77,32 +126,57 @@ public partial class ModExplorerPage : Page
                 await SelectChipAsync(_chips[0], userInitiated: false);
             _ = RefreshInstalledModIndexAsync();
         };
-
-        Loaded += (_, _) =>
-        {
-            UiScale.Changed -= ApplyModScale;   // re-apply the mod-list zoom live when the slider moves
-            UiScale.Changed += ApplyModScale;
-            ApplyModScale();
-            ThemeService.Changed -= RepaintThemedChips;
-            ThemeService.Changed += RepaintThemedChips;
-        };
         Unloaded += (_, _) =>
         {
             UiScale.Changed -= ApplyModScale;
             ThemeService.Changed -= RepaintThemedChips;
+            _cts.Cancel();
         };
     }
 
-    /// <summary>
-    /// Re-paints the source chips after the theme changed.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="ThemeService"/> swaps in brand-new frozen brushes on every apply, so the brushes
-    /// <see cref="ApplyChipStyles"/> and <see cref="StyleSourceChip"/> resolve are snapshots that
-    /// keep whatever the accent was when they ran. The chips are built in code (their colours depend
-    /// on which one is active, which is not expressible as a single DynamicResource), so the fix is
-    /// to run the paint again rather than to bind it.
-    /// </remarks>
+    // ── toolbar ──────────────────────────────────────────────────────────────
+
+    private async void OnRefresh(object sender, RoutedEventArgs e)
+    {
+        try { await ResetAndLoadAsync(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { _state.Error("The search could not be repeated.", ex); }
+    }
+
+    /// <summary>Opens the instance's mods folder; works even with both stores down.</summary>
+    private void OnOpenModsFolder(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dir = Path.Combine(App.State.Packs.GameDir(_pack.Id), "mods");
+            Directory.CreateDirectory(dir);
+            if (!SafeLaunch.OpenFolder(dir)) DownloadStatus.Text = "Could not open the mods folder.";
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ModExplorerPage), ex);
+            DownloadStatus.Text = "Could not open the mods folder.";
+        }
+    }
+
+    private void OnPageKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            SearchBox.Focus();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F5)
+        {
+            _ = ResetAndLoadAsync();
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>Re-paints the source chips after the theme changed.</summary>
+    /// <remarks><see cref="ThemeService"/> swaps in new frozen brushes on every apply, and
+    /// the chips are styled in code (their colours depend on which one is active), so they
+    /// have to be painted again.</remarks>
     private void RepaintThemedChips()
     {
         if (!IsLoaded) return;
@@ -112,8 +186,8 @@ public partial class ModExplorerPage : Page
 
     private void ApplyModScale() => UiScale.ApplyModListScale(ResultsList);
 
-    // The Overview tab hosts a WebView2 whose HWND draws over WPF (airspace), so hide it
-    // off-tab. Scrolling is native — no manual wheel routing.
+    // The Overview tab hosts a WebView2 whose HWND draws over WPF (airspace), so hide it off-tab.
+    // Scrolling is native, no manual wheel routing.
     private void OnModTabsChanged(object sender, SelectionChangedEventArgs e)
     {
         if (e.Source != ModTabs) return;
@@ -138,13 +212,17 @@ public partial class ModExplorerPage : Page
         _chips.Add(NewChip("", "Shared",   ModBrowseSourceKind.CloudLauncherShared));
         _chips.Add(NewChip("", "Public",   ModBrowseSourceKind.CloudLauncherPublic));
 
+        // Paint now as well as after the teams call. Unstyled chips are invisible on the dark theme,
+        // and the teams call can hang for the full HTTP timeout when the server is down.
+        ApplyChipStyles();
+
         try
         {
             var teams = await App.State.Api.ListTeamsAsync();
             foreach (var t in teams)
                 _chips.Add(NewChip("", t.Name, ModBrowseSourceKind.CloudLauncherTeam, t.Id));
         }
-        catch { /* teams unavailable — proceed without */ }
+        catch { /* teams unavailable, proceed without */ }
 
         ApplyChipStyles();
     }
@@ -247,46 +325,31 @@ public partial class ModExplorerPage : Page
 
     // ── search + filters ─────────────────────────────────────────────────────
 
-    // Search as you type: the list reloads on its own a moment after typing stops, so Enter is a
-    // shortcut rather than a requirement. Short enough to feel live, long enough that a word being
-    // typed doesn't fire a store call per keystroke.
-    private System.Windows.Threading.DispatcherTimer? _searchTimer;
+    // Search as you type: CompactSearchBox raises the event 450ms after typing stops, and only if the
+    // text changed. Enter searches immediately.
     private string _lastSearched = "";
 
-    private void OnSearchTextChanged(object s, TextChangedEventArgs e)
+    private async void OnSearchSettled(object? sender, string query)
     {
-        _searchText = SearchBox.Text;
-        _searchTimer ??= MakeSearchTimer();
-        _searchTimer.Stop();
-        _searchTimer.Start();
-    }
-
-    private System.Windows.Threading.DispatcherTimer MakeSearchTimer()
-    {
-        var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
-        timer.Tick += async (_, _) =>
+        try
         {
-            timer.Stop();
-            if (_activeChip is null || string.Equals(_searchText.Trim(), _lastSearched, StringComparison.Ordinal)) return;
-            await ResetAndLoadAsync();
-        };
-        return timer;
-    }
-
-    private async void OnSearchKeyDown(object s, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter)
-        {
-            e.Handled = true;
-            _searchTimer?.Stop();
+            _searchText = query;
+            if (_activeChip is null || string.Equals(query, _lastSearched, StringComparison.Ordinal)) return;
             await ResetAndLoadAsync();
         }
-        else if (e.Key == Key.Escape)
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { _state.Error("That search could not be run.", ex); }
+    }
+
+    private async void OnSearchSubmitted(object? sender, EventArgs e)
+    {
+        try
         {
-            SearchBox.Text = "";
-            _searchText = "";
+            _searchText = SearchBox.Text.Trim();
             await ResetAndLoadAsync();
         }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { _state.Error("That search could not be run.", ex); }
     }
 
     private void OnFiltersClick(object sender, RoutedEventArgs e) => FiltersPopup.IsOpen = !FiltersPopup.IsOpen;
@@ -312,25 +375,30 @@ public partial class ModExplorerPage : Page
 
     private async Task ResetAndLoadAsync(bool userInitiated = true)
     {
-        // A user browse action (search / sort / chip / filter) discards any pending "Open page" request.
-        // The initial load triggered right after ShowModAsync passes userInitiated:false to keep it.
+        // A user browse action (search / sort / chip / filter) discards any pending "Open page"
+        // request. The initial load triggered right after ShowModAsync passes
+        // userInitiated:false to keep it.
         if (userInitiated) _pendingShowMod = null;
 
-        _searchTimer?.Stop();
         _lastSearched = _searchText.Trim();
-        _cts.Cancel(); _cts = new CancellationTokenSource();
+        _cts.Cancel();
+        // Wait for the cancelled load: its finally resets the in-progress flag, and until then the new
+        // load below would return at the guard and leave the list empty.
+        await _pager.DrainAsync();
+        _cts = new CancellationTokenSource();
         var ct = _cts.Token;
         _offset = 0;
         _rows.Clear();
+        _pager.Reset();
         _allSeen.Clear();
         _hasMore = true;
-        SearchStatus.Text = "";
+        // A new query drops the old results, so this is Loading rather than Refreshing.
+        _state.Begin(refreshing: false);
         if (_pendingShowMod is null) ClearSelectedMod(); // keep the requested mod on screen while results load
-        await LoadMoreAsync(ct);
+        await _pager.LoadPageAsync(ct);
         if (ct.IsCancellationRequested) return;
 
-        // An explicit "Open page" wins; otherwise show the first result so the wide right side isn't an
-        // empty void on the full-screen layout — mirrors how real mod browsers feel.
+        // An explicit "Open page" wins; otherwise show the first result so the detail pane isn't empty.
         if (_pendingShowMod is { } pending)
         {
             _pendingShowMod = null;
@@ -344,12 +412,10 @@ public partial class ModExplorerPage : Page
 
     private async void OnResultsScroll(object sender, ScrollChangedEventArgs e)
     {
-        if (_isLoading || !_hasMore || _activeChip is null) return;
-        if (e.OriginalSource is ScrollViewer sv &&
-            sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 80)
-        {
-            await LoadMoreAsync(_cts.Token);
-        }
+        if (e.OriginalSource is not ScrollViewer sv) return;
+        try { await _pager.FillAheadAsync(sv, _cts.Token); }
+        catch (OperationCanceledException) { }
+        catch (Exception) { /* LoadMoreAsync reports its own failures */ }
     }
 
     private async Task LoadMoreAsync(CancellationToken ct)
@@ -358,7 +424,8 @@ public partial class ModExplorerPage : Page
         if (_rows.Count >= MaxResults) { _hasMore = false; return; }
 
         _isLoading = true;
-        SearchStatus.Text = _rows.Count == 0 ? "Searching…" : $"Loading more… ({_rows.Count})";
+        // Loading more under existing rows is a Refresh: a thin bar at the top, and the rows stay.
+        if (_rows.Count > 0) _state.Begin(refreshing: true);
         try
         {
             int added;
@@ -390,20 +457,36 @@ public partial class ModExplorerPage : Page
             }
             _offset += added;
             if (added == 0) _hasMore = false;
-            SearchStatus.Text = _rows.Count == 0 && !_hasMore
-                ? "No results. Try a different search or filter."
-                : $"{_rows.Count} result{(_rows.Count == 1 ? "" : "s")}{(_hasMore ? " — scroll for more" : "")}";
+            if (_rows.Count > 0)
+                _state.Content(_rows.Count, countText:
+                    $"{_rows.Count:N0} result{(_rows.Count == 1 ? "" : "s")}"
+                    + (_hasMore ? " - scroll for more" : " - that is everything"));
+            // Show the empty panel only when there are no rows and no more pages coming.
+            else if (!_hasMore)
+                _state.Content(0);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            SearchStatus.Text = "Error: " + ex.Message;
             _hasMore = false;
+            ReportLoadFailure(ex, ct);
         }
         finally
         {
             _isLoading = false;
         }
+    }
+
+    /// <summary>Separates a store error from being offline. Offline gets its own state and message:
+    /// nothing is broken, and the same search works once the network is back.</summary>
+    private void ReportLoadFailure(Exception ex, CancellationToken ct)
+    {
+        var why = ex is OfflineException offline
+            ? offline.Reason ?? App.State.OfflineReason ?? "the connection failed"
+            : Connectivity.DescribeTransportFailure(ex, ct);
+
+        if (why is not null) _state.Offline(why);
+        else _state.Error("The store answered with an error.", ex);
     }
 
     private async Task<int> LoadCurseForgeAsync(CancellationToken ct)
@@ -466,10 +549,44 @@ public partial class ModExplorerPage : Page
 
     // ── "All" aggregate source + sorting ─────────────────────────────────────────
 
-    private async void OnSortChanged(object sender, SelectionChangedEventArgs e)
+    /// <summary>Opens the sort menu (a glyph button with a menu, as on the other pages).</summary>
+    private void OnSortButtonClick(object sender, RoutedEventArgs e)
     {
-        _sortMode = SortBox.SelectedIndex < 0 ? 0 : SortBox.SelectedIndex;
-        if (IsLoaded && _activeChip is not null) await ResetAndLoadAsync();
+        if (SortButton.ContextMenu is null) return;
+        UpdateSortMenuState();
+        SortButton.ContextMenu.PlacementTarget = SortButton;
+        SortButton.ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        SortButton.ContextMenu.IsOpen = true;
+    }
+
+    private void OnSortMenuOpened(object sender, RoutedEventArgs e) => UpdateSortMenuState();
+
+    private async void OnSortMenuItemClick(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if ((sender as MenuItem)?.Tag is not string tag || !int.TryParse(tag, out var mode)) return;
+            if (mode == _sortMode) { UpdateSortMenuState(); return; }
+            _sortMode = mode;
+            UpdateSortMenuState();
+            // The stores do the sorting, so a new sort order reloads from the first page.
+            if (IsLoaded && _activeChip is not null) await ResetAndLoadAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { AppLog.LogError(nameof(ModExplorerPage), ex); }
+    }
+
+    private void UpdateSortMenuState()
+    {
+        SortRelevanceMenuItem.IsChecked = _sortMode == 0;
+        SortLatestMenuItem.IsChecked = _sortMode == 1;
+        SortDownloadsMenuItem.IsChecked = _sortMode == 2;
+        SortButton.ToolTip = "Sort results: " + _sortMode switch
+        {
+            1 => "Latest",
+            2 => "Downloads",
+            _ => "Relevance"
+        };
     }
 
     private string ModrinthIndex() => _sortMode switch { 1 => "updated", 2 => "downloads", _ => "relevance" };
@@ -489,13 +606,13 @@ public partial class ModExplorerPage : Page
             _searchText, mcArg, ldArg, limit: PageSize, offset: _offset,
             classId: CurseForgeService.ClassIdMods, sortField: CurseSortField(), ct: ct));
 
-        // Hosted (custom) mods are few — pull them once on the first page only.
+        // Hosted (custom) mods are few, so fetch them on the first page only.
         var hosted = _offset == 0 ? await LoadHostedForAllAsync(mcArg, ldArg, ct) : new List<ModSummary>();
         var results = await Task.WhenAll(modrinthTask, curseTask);
 
-        // Blend the two stores instead of listing all Modrinth then all CurseForge. Downloads has a
-        // comparable cross-store number, so order globally by it; relevance/latest don't, so interleave
-        // each store's already-ranked page rank-for-rank (Modrinth a hair ahead → still wins dedupe ties).
+        // Blend the two stores. Download counts are comparable across stores, so sort by them globally;
+        // for relevance and latest, interleave each store's ranked page (Modrinth first, so it wins
+        // dedupe ties).
         var merged = new List<ModSummary>(hosted);
         if (_sortMode == 2)
         {
@@ -540,8 +657,8 @@ public partial class ModExplorerPage : Page
         try { return await search(); } catch { return new List<ModSummary>(); }
     }
 
-    /// <summary>Zipper-merges two already-ranked lists: a[0], b[0], a[1], b[1], … so neither store is
-    /// grouped together. The leftover tail of the longer list follows.</summary>
+    /// <summary>Zipper-merges two ranked lists: a[0], b[0], a[1], b[1], ... then the rest of the longer
+    /// list.</summary>
     private static IEnumerable<ModSummary> Interleave(IReadOnlyList<ModSummary> a, IReadOnlyList<ModSummary> b)
     {
         for (var i = 0; i < a.Count || i < b.Count; i++)
@@ -551,7 +668,7 @@ public partial class ModExplorerPage : Page
         }
     }
 
-    /// <summary>Cross-store dedupe key: a mod with the same name on CurseForge and Modrinth collapses to one.</summary>
+    /// <summary>Cross-store dedupe key: same-named mods on CurseForge and Modrinth merge.</summary>
     private static string DedupeKey(ModSummary m)
     {
         var s = new string((m.Name ?? "").Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
@@ -660,7 +777,7 @@ public partial class ModExplorerPage : Page
         DetailPlaceholder.Visibility = Visibility.Collapsed;
         ModTabs.Visibility = Visibility.Visible;
         ModTabs.SelectedIndex = 0;
-        ShowOverview("Loading…");
+        ShowOverview("Loading...");
         ScreenshotsEmptyText.Text = "Loading screenshots...";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
@@ -690,10 +807,8 @@ public partial class ModExplorerPage : Page
             _ = ResolveDetailCounterpartAsync(mod, gen, ct);
     }
 
-    /// <summary>
-    /// Looks up the same mod on the other store in the background; when found, reveals the
-    /// source toggle so the user can switch which store the versions/download come from.
-    /// </summary>
+    /// <summary>Looks up the same mod on the other store in the background and, if found, shows the
+    /// source toggle.</summary>
     private async Task ResolveDetailCounterpartAsync(ModSummary mod, int gen, CancellationToken ct)
     {
         try
@@ -708,7 +823,7 @@ public partial class ModExplorerPage : Page
             else _detailCurseForge = counterpart;
             UpdateSourceToggle();
         }
-        catch { /* offline or no counterpart — leave the toggle hidden */ }
+        catch { /* offline or no counterpart: leave the toggle hidden */ }
     }
 
     /// <summary>Shows/hides the store toggle and highlights the active store.</summary>
@@ -761,7 +876,7 @@ public partial class ModExplorerPage : Page
         // The list is fetched filtered to the pack; "Show all" needs the rest, fetched once on demand.
         if (showAll && !_versionsUnfiltered && _currentMod is { } mod)
         {
-            VersionFilterNote.Text = "Loading every version…";
+            VersionFilterNote.Text = "Loading every version...";
             try
             {
                 var all = await LoadVersionsForModAsync(mod, applyFilters: false, _cts.Token);
@@ -775,6 +890,40 @@ public partial class ModExplorerPage : Page
         ShowVersions(showAll);
     }
 
+    // Stops a double-click from starting a second dependency resolution behind the first.
+    private bool _installing;
+
+    /// <summary>Runs one install at a time, and marks the control that started it as busy while it
+    /// runs.</summary>
+    /// <remarks>The progress bar is in the detail column, so a row's button needs its own busy state.
+    /// The row's <c>IsEnabled</c> and tooltip are bound to <c>ModResultRow</c>, so other properties are
+    /// used and cleared afterwards: a local Opacity would override the style's <c>IsEnabled</c>
+    /// trigger.</remarks>
+    private async Task RunInstallAsync(Func<Task> install, ContentControl? pressed = null)
+    {
+        if (_installing) return;
+        _installing = true;
+        var content = pressed?.Content;
+        if (pressed is not null)
+        {
+            // An icon button shows "..." while busy; a labelled button is only dimmed.
+            if (content is string { Length: 1 }) pressed.Content = "...";
+            pressed.IsHitTestVisible = false;
+            pressed.Opacity = 0.6;
+        }
+        try { await install(); }
+        finally
+        {
+            _installing = false;
+            if (pressed is not null)
+            {
+                pressed.Content = content;
+                pressed.ClearValue(IsHitTestVisibleProperty);
+                pressed.ClearValue(OpacityProperty);
+            }
+        }
+    }
+
     private async void OnQuickDownloadMod(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement el || el.DataContext is not ModResultRow row) return;
@@ -783,18 +932,13 @@ public partial class ModExplorerPage : Page
             DownloadStatus.Text = $"{row.Name} is already downloaded in this pack.";
             return;
         }
-        await QuickDownloadAsync(row.Source);
+        var mod = row.Source;
+        await RunInstallAsync(() => QuickDownloadAsync(mod), el as ContentControl);
     }
 
-    /// <summary>
-    /// Right-click on a search result: the three download modes plus the link actions.
-    /// </summary>
-    /// <remarks>
-    /// A result row's only action was the round quick-download button, and the grey "Test" and
-    /// orange "Custom" modes lived solely in the detail pane — so flagging a mod on the way in meant
-    /// clicking through to its page first. The download items go flat when the mod is already in the
-    /// pack, and the row's own tooltip supplies the reason.
-    /// </remarks>
+    /// <summary>Right-click on a search result: the three download modes and the links.</summary>
+    /// <remarks>Downloads are disabled when the mod is already in the pack;
+    /// the tooltip says why.</remarks>
     private void OnResultRightClick(object sender, MouseButtonEventArgs e)
     {
         if (sender is not FrameworkElement el || el.DataContext is not ModResultRow row) return;
@@ -815,9 +959,9 @@ public partial class ModExplorerPage : Page
         }
 
         var reason = canDownload ? null : row.DownloadTooltip;
-        Item("Download", () => _ = QuickDownloadAsync(mod), canDownload, reason);
-        Item("Download as test", () => _ = QuickDownloadWithFlagsAsync(mod, m => m.IsTesting = true), canDownload, reason);
-        Item("Download with options…", () => _ = CustomDownloadAsync(mod), canDownload, reason);
+        Item("Download", () => _ = RunInstallAsync(() => QuickDownloadAsync(mod)), canDownload, reason);
+        Item("Download as test", () => _ = RunInstallAsync(() => QuickDownloadWithFlagsAsync(mod, m => m.IsTesting = true)), canDownload, reason);
+        Item("Download with options...", () => _ = RunInstallAsync(() => CustomDownloadAsync(mod)), canDownload, reason);
 
         menu.Items.Add(new Separator());
         Item("Open website", () => OpenModWebsite(mod), ModWebsiteUrl(mod) is not null);
@@ -826,7 +970,8 @@ public partial class ModExplorerPage : Page
         menu.IsOpen = true;
     }
 
-    /// <summary>The mod's page on the store it came from — null for a store we have no URL shape for.</summary>
+    /// <summary>The mod's page on the store it came from, or null for a store with no known URL
+    /// pattern.</summary>
     private static string? ModWebsiteUrl(ModSummary mod) => mod.Source switch
     {
         ModSource.Modrinth => $"https://modrinth.com/mod/{mod.Slug}",
@@ -837,12 +982,11 @@ public partial class ModExplorerPage : Page
     private void OpenModWebsite(ModSummary mod)
     {
         if (ModWebsiteUrl(mod) is not { } url) return;
-        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { DownloadStatus.Text = "Could not open that page: " + ex.Message; }
+        if (!SafeLaunch.OpenUrl(url)) DownloadStatus.Text = "Could not open that page.";
     }
 
-    /// <summary>The "Custom ▾" download for a given mod — shared by the detail pane's button and the
-    /// result row's context menu.</summary>
+    /// <summary>The "Custom" download for a mod, shared by the detail pane's button and the result
+    /// row's context menu.</summary>
     private async Task CustomDownloadAsync(ModSummary mod)
     {
         if (Window.GetWindow(this) is not MainWindow host) return;
@@ -853,10 +997,17 @@ public partial class ModExplorerPage : Page
     private async void OnDownloadVersion(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement el || el.DataContext is not VersionRow row) return;
-        if (_currentMod is null) return;
+        await DownloadVersionRowAsync(row, el as ContentControl);
+    }
+
+    /// <summary>Downloads this specific version into the pack (the row's Download button and its menu
+    /// item).</summary>
+    private async Task DownloadVersionRowAsync(VersionRow row, ContentControl? pressed)
+    {
+        if (_currentMod is not { } mod) return;
         if (row.IsDownloaded)
         {
-            DownloadStatus.Text = $"{_currentMod.Name} is already downloaded in this pack.";
+            DownloadStatus.Text = $"{mod.Name} is already downloaded in this pack.";
             return;
         }
         if (!row.IsCompatible)
@@ -865,7 +1016,55 @@ public partial class ModExplorerPage : Page
             return;
         }
 
-        await DownloadVersionAsync(_currentMod, row.Source);
+        await RunInstallAsync(() => DownloadVersionAsync(mod, row.Source), pressed);
+    }
+
+    // ── versions tab: row menu and changelog ─────────────────────────────────
+
+    private void OnVersionsGridPreviewRightDown(object sender, MouseButtonEventArgs e) =>
+        VersionRowMenu.SelectRowUnder(VersionsGrid, e);
+
+    /// <summary>Right-click on a version: its changelog, a download of that specific version, and
+    /// its number for the clipboard.</summary>
+    private void OnVersionsGridRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (VersionRowMenu.RowAt<VersionRow>(e) is not { } row) return;
+        e.Handled = true;
+        VersionRowMenu.Open(BuildVersionMenu(row));
+    }
+
+    /// <remarks>Hosted mods get no download item, since their row's Download button can't fetch from
+    /// this page either.</remarks>
+    private ContextMenu BuildVersionMenu(VersionRow row)
+    {
+        var menu = VersionRowMenu.Create(VersionsGrid);
+        VersionRowMenu.AddChangelog(menu, () => _ = ShowChangelogAsync(row));
+        if (_currentMod is not null)
+            VersionRowMenu.Add(menu, "Download this version", VersionRowMenu.DownloadGlyph,
+                () => _ = DownloadVersionRowAsync(row, null),
+                row.CanDownload, row.CanDownload ? null : row.DownloadTooltip);
+        menu.Items.Add(new Separator());
+        VersionRowMenu.AddCopyVersion(menu, row.VersionNumber, copied => DownloadStatus.Text = copied
+            ? $"Copied {row.VersionNumber}."
+            : "The clipboard is in use by another program.");
+        return menu;
+    }
+
+    /// <summary>Opens the changelog card on one version, able to step through the rest of the list
+    /// in the order it is on screen.</summary>
+    private async Task ShowChangelogAsync(VersionRow row)
+    {
+        try
+        {
+            var (versions, index) = VersionChangelogCard.FromList(VersionsGrid.Items, row, r => r.Source);
+            var name = _currentMod?.Name ?? ModNameLabel.Text;
+            await VersionChangelogCard.ShowAsync(this, name, versions, index, _currentMod, _shell);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ModExplorerPage), ex);
+            DownloadStatus.Text = "Could not open the changelog.";
+        }
     }
 
     private async Task QuickDownloadAsync(ModSummary mod)
@@ -953,27 +1152,33 @@ public partial class ModExplorerPage : Page
                 PackLoaderTag(),
                 App.State.Modrinth,
                 App.State.CurseForge,
-                PackChannel());
+                PackChannel(),
+                App.State.ModVersions);
             if (downloads.Count == 0)
             {
                 DownloadStatus.Text = "No downloadable file found.";
                 return;
             }
 
-            // "Auto-download and enable required dependencies" (Mods Management → Advanced) off means
-            // exactly this: fetch the mod that was asked for and nothing else. The checkbox is saved
-            // to the pack and shared with collaborators, and this is one of the two places that read
-            // it (the other is enabling a mod in the hub).
+            // "Auto-download and enable required dependencies" (Mods Management -> Advanced). When off,
+            // fetch only the requested mod. It's a per-pack setting shared with collaborators; enabling
+            // a mod in the hub reads it too.
             var autoDeps = App.State.ModMetadata.Advanced(_pack.Id).AutoDownloadDependencies;
 
-            // Work out what actually needs fetching first, so the progress numbers below are the
-            // real count rather than "3 of 12" where nine were already present.
+            // Work out what needs fetching first, so the progress count covers real downloads only.
             var pending = new List<ModDownloadItem>();
+            var refused = new List<string>();
             var skipped = 0;
             foreach (var item in downloads)
             {
                 if (item.IsDependency && !autoDeps) { skipped++; continue; }
-                var dest = Path.Combine(folder, item.File.Filename);
+                // The store supplies the file name; anything but a plain name could escape the folder.
+                if (PathSafety.ResolveFileName(folder, item.File.Filename) is not { } dest)
+                {
+                    AppLog.Log(nameof(ModExplorerPage), $"Skipped {item.Mod.Name}: the store's file name is not a plain file name: {item.File.Filename}");
+                    refused.Add($"{item.Mod.Name} (the store gave an unusable file name)");
+                    continue;
+                }
                 if (item.IsDependency && (File.Exists(dest) || await IsDependencyAlreadyInstalledAsync(item.Mod)))
                 {
                     skipped++;
@@ -983,8 +1188,9 @@ public partial class ModExplorerPage : Page
             }
 
             // A mod plus its dependencies is a handful of small files, each mostly latency. Fetch
-            // them together, up to the user's download concurrency (Settings → Downloads).
+            // them together, up to the user's download concurrency (Settings -> Downloads).
             var saved = 0;
+            var installedPaths = new List<string>();
             var concurrency = App.State.Settings.EffectiveModDownloadConcurrency;
             using (var gate = new SemaphoreSlim(concurrency, concurrency))
             {
@@ -995,25 +1201,27 @@ public partial class ModExplorerPage : Page
                     DownloadProgress.Value = pending.Count == 0 ? 0 : completed * 100.0 / pending.Count;
                     DownloadStatus.Text = pending.Count == 1
                         ? $"Downloading {current ?? pending[0].File.Filename}..."
-                        : $"Downloading {pending.Count} file(s) — {completed} done...";
+                        : $"Downloading {pending.Count} file(s) - {completed} done...";
                 }
                 ReportBatch();
 
-                var failures = new List<string>();
+                var failures = new List<string>(refused);
                 await Task.WhenAll(pending.Select(async item =>
                 {
-                    var dest = Path.Combine(folder, item.File.Filename);
+                    // Checked when pending was built, so this always resolves.
+                    var dest = PathSafety.ResolveFileName(folder, item.File.Filename)!;
                     await gate.WaitAsync();
                     try
                     {
                         // One file at a time still gets a real percentage; several share the count.
                         await App.State.Modrinth.DownloadFileAsync(
                             item.File.DownloadUrl, dest, pending.Count == 1 ? progress : null);
-                        RememberInstalledMod(item, dest);
+                        await RememberInstalledModAsync(item, dest);
+                        lock (installedPaths) installedPaths.Add(dest);
 
-                        // The root mod records the store it was installed from — so a jar that's listed on both
-                        // stores keeps this store's identity (label, page, updates) whatever the pack's default
-                        // store is — plus any requested download-mode flags.
+                        // The root mod records the store it came from, so a jar listed on both
+                        // stores keeps this store's identity (label, page, updates), plus any
+                        // requested download-mode flags.
                         if (!item.IsDependency)
                         {
                             var store = item.Mod.Source is ModSource.CurseForge or ModSource.Modrinth ? item.Mod.Source : (ModSource?)null;
@@ -1022,19 +1230,17 @@ public partial class ModExplorerPage : Page
                                 {
                                     if (store is not null) m.PreferredSource = store;
                                     applyToRoot?.Invoke(m);
-                                });
+                                }, save: false);
                         }
                         else
                         {
-                            // A jar that only came along because something else needed it IS a library
-                            // mod, and the library-aware disable cascade the Advanced tab advertises has
-                            // nothing to clean up unless it is flagged as one. Only brand-new, untouched
-                            // metadata is auto-flagged: a mod the user has already classified keeps
-                            // whatever they decided.
+                            // A jar pulled in as a dependency is a library mod; flag it so the Advanced
+                            // tab's disable cascade can clean it up. Only new, untouched metadata is
+                            // flagged, never a mod the user classified.
                             SetDownloadedMetaFlag(item.Mod, item.File.Filename, m =>
                             {
                                 if (m.IsDefault) m.IsLibrary = true;
-                            });
+                            }, save: false);
                         }
                         Interlocked.Increment(ref saved);
                     }
@@ -1047,6 +1253,10 @@ public partial class ModExplorerPage : Page
                     }
                 }));
 
+                // One save for the whole batch, before the throw, so jars that did download keep
+                // their flags when a sibling fails.
+                if (saved > 0) App.State.ModMetadata.Save(_pack.Id);
+
                 if (failures.Count > 0)
                     throw new InvalidOperationException(string.Join("; ", failures));
             }
@@ -1058,9 +1268,9 @@ public partial class ModExplorerPage : Page
                 : $"Saved {saved} file(s) to {target}{skippedText}";
             App.State.ModFingerprints.Flush();
             RefreshDownloadedState();
-            // Pick up the just-downloaded jar's identity on the *other* store too, so
-            // it stops showing as downloadable there.
-            _ = RefreshInstalledModIndexAsync();
+            // Resolve the new jars on the other store too, so they stop showing as downloadable there.
+            // Only the new jars, not the whole instance.
+            _ = RefreshInstalledModIndexAsync(installedPaths);
         }
         catch (Exception ex) { DownloadStatus.Text = "Download failed: " + ex.Message; }
         finally
@@ -1071,9 +1281,9 @@ public partial class ModExplorerPage : Page
         }
     }
 
-    /// <summary>True if a required dependency is already in the pack — by its own identity, or via
-    /// its cross-store counterpart. Prevents re-downloading e.g. Create from Modrinth when the
-    /// CurseForge copy (or simply a different version's jar) is already installed.</summary>
+    /// <summary>True if a required dependency is already in the pack, by its own identity or via its
+    /// cross-store counterpart. Prevents re-downloading e.g. Create from Modrinth when the CurseForge
+    /// copy (or a different version's jar) is already installed.</summary>
     private async Task<bool> IsDependencyAlreadyInstalledAsync(ModSummary depMod)
     {
         if (IsModInstalled(depMod)) return true;
@@ -1090,14 +1300,15 @@ public partial class ModExplorerPage : Page
 
     private async void OnTestDownload(object sender, RoutedEventArgs e)
     {
-        if (_currentMod is null) { DownloadStatus.Text = "Select a mod first."; return; }
-        await QuickDownloadWithFlagsAsync(_currentMod, m => m.IsTesting = true);
+        if (_currentMod is not { } mod) { DownloadStatus.Text = "Select a mod first."; return; }
+        await RunInstallAsync(() => QuickDownloadWithFlagsAsync(mod, m => m.IsTesting = true),
+                              sender as ContentControl);
     }
 
     private async void OnCustomDownload(object sender, RoutedEventArgs e)
     {
-        if (_currentMod is null) { DownloadStatus.Text = "Select a mod first."; return; }
-        try { await CustomDownloadAsync(_currentMod); }
+        if (_currentMod is not { } mod) { DownloadStatus.Text = "Select a mod first."; return; }
+        try { await RunInstallAsync(() => CustomDownloadAsync(mod), sender as ContentControl); }
         catch (Exception ex) { DownloadStatus.Text = "Download failed: " + ex.Message; }
     }
 
@@ -1129,9 +1340,12 @@ public partial class ModExplorerPage : Page
         catch (Exception ex) { DownloadStatus.Text = "Download failed: " + ex.Message; }
     }
 
-    /// <summary>Applies and persists a flag onto a just-downloaded jar's saved metadata,
-    /// keyed by its source project id (so it survives version updates) with a file-name fallback.</summary>
-    private void SetDownloadedMetaFlag(ModSummary mod, string filename, Action<ModMeta> apply)
+    /// <summary>Applies and persists a flag onto a just-downloaded jar's saved metadata, keyed by its
+    /// source project id (so it survives version updates) with a file-name fallback.</summary>
+    /// <param name="save">False inside a batch, which saves once at the end; <c>SetMeta</c> rewrites
+    /// the whole mods.json each time.</param>
+    private void SetDownloadedMetaFlag(ModSummary mod, string filename, Action<ModMeta> apply,
+                                       bool save = true)
     {
         var keys = ModMetadataService.CandidateKeys(
             mod.Source == ModSource.Modrinth ? mod : null,
@@ -1139,7 +1353,8 @@ public partial class ModExplorerPage : Page
             filename);
         var meta = App.State.ModMetadata.GetMeta(_pack.Id, keys);
         apply(meta);
-        App.State.ModMetadata.SetMeta(_pack.Id, keys, meta);
+        if (save) App.State.ModMetadata.SetMeta(_pack.Id, keys, meta);
+        else App.State.ModMetadata.StoreMeta(_pack.Id, keys, meta);
     }
 
     private ModResultRow CreateResultRow(ModSummary mod) =>
@@ -1150,10 +1365,11 @@ public partial class ModExplorerPage : Page
 
     private void RefreshDownloadedState()
     {
+        // ModResultRow notifies on IsDownloaded, so only the affected row repaints. Items.Refresh()
+        // would re-create every container and lose the scroll position.
         foreach (var row in _rows)
             row.IsDownloaded = IsModInstalled(row.Source);
 
-        ResultsList.Items.Refresh();
         if (_currentMod is not null && _allVersions.Count > 0)
             ShowVersions(ShowAllVersionsBox.IsChecked == true);
     }
@@ -1184,15 +1400,17 @@ public partial class ModExplorerPage : Page
         }
     }
 
-    // Resolve every installed jar to BOTH its Modrinth and CurseForge identity so a
-    // mod grabbed from one store is recognised while browsing the other. Hash-based
-    // (no false positives) and runs in the background — badges refine when it lands.
-    private async Task RefreshInstalledModIndexAsync()
+    // Resolves every installed jar to both its Modrinth and CurseForge identity, so a mod from one
+    // store is recognised while browsing the other. Hash-based, runs in the background.
+    // onlyPaths narrows the pass to newly installed jars: InstalledModResolver stats each path on the
+    // dispatcher, and an instance can hold hundreds of jars. A narrowed pass never clears the key set.
+    private async Task RefreshInstalledModIndexAsync(IReadOnlyCollection<string>? onlyPaths = null)
     {
         var generation = ++_indexGeneration;
         try
         {
-            var jarPaths = await Task.Run(() => EnumeratePackModFiles().ToList());
+            if (onlyPaths is { Count: 0 }) return;   // every download failed; nothing to resolve
+            var jarPaths = onlyPaths ?? await Task.Run(() => EnumeratePackModFiles().ToList());
             var index = await InstalledModResolver.ResolveAsync(
                 jarPaths,
                 App.State.ModFingerprints,
@@ -1215,23 +1433,19 @@ public partial class ModExplorerPage : Page
                     keys.Add(ModKey(cached));
             }
 
-            // Only replace the set when both stores actually answered. A pass that lost a lookup
-            // knows strictly less than we already do, and clearing on it is what made installed
-            // mods flip back to "downloadable" — it also discarded the cross-store counterpart
-            // keys resolved below on earlier passes. Merging keeps a deleted mod badged until a
-            // clean pass drops it, which is much the better way to be wrong.
-            if (index.Complete)
+            // Only replace the set when both stores answered; otherwise merge, so a failed
+            // lookup can't make installed mods look downloadable again. A deleted mod
+            // stays badged until a clean pass.
+            if (index.Complete && onlyPaths is null)
                 _installedModKeys.Clear();
             foreach (var key in keys)
                 _installedModKeys.Add(key);
 
             RefreshDownloadedState();
 
-            // Hash matching only links the two stores when they host a byte-identical
-            // jar. For jars that resolved on one store only, find the matching project on
-            // the other store by slug/name so a CurseForge download stops showing as
-            // downloadable on Modrinth (and vice versa). Runs after the exact-match badges
-            // are up, refreshing again as counterparts resolve.
+            // Hashes only link the stores when both host the identical jar. For jars found
+            // on one store only, look up the other store's project by slug/name. Runs after
+            // the exact-match badges are shown.
             await AddCrossStoreCounterpartKeysAsync(index.Identities, generation);
         }
         catch
@@ -1241,9 +1455,8 @@ public partial class ModExplorerPage : Page
         }
     }
 
-    // Memoises cross-store counterpart lookups (target store + source mod key → the
-    // counterpart's mod key, or null when none exists) so re-running the index after
-    // each download doesn't re-query the same mods.
+    // Memoises cross-store counterpart lookups (target store + source mod key -> counterpart mod key,
+    // or null if none) so re-running the index after each download doesn't re-query the same mods.
     private readonly Dictionary<string, string?> _counterpartKeyCache = new(StringComparer.OrdinalIgnoreCase);
 
     private async Task AddCrossStoreCounterpartKeysAsync(
@@ -1277,9 +1490,8 @@ public partial class ModExplorerPage : Page
         if (_counterpartKeyCache.TryGetValue(memoKey, out var cached))
             return cached;
 
-        // The on-disk cache answers first: a counterpart (or its absence) is a stable fact, and
-        // re-asking the stores for every installed mod each time this page opens is what got the
-        // launcher server rate-limited.
+        // Check the on-disk cache first: counterparts rarely change, and re-asking the stores for every
+        // installed mod on each page open gets the launcher server rate-limited.
         if (App.State.ModCounterparts.TryGet(targetStore, sourceMod, out var remembered))
         {
             var rememberedKey = remembered is not null ? ModKey(remembered) : null;
@@ -1293,13 +1505,13 @@ public partial class ModExplorerPage : Page
                 ? await App.State.Modrinth.FindCounterpartAsync(sourceMod.Slug, sourceMod.Name)
                 : await App.State.CurseForge.FindCounterpartAsync(sourceMod.Slug, sourceMod.Name);
             var key = counterpart is not null ? ModKey(counterpart) : null;
-            _counterpartKeyCache[memoKey] = key; // definitive answer (incl. "none") — don't re-query
+            _counterpartKeyCache[memoKey] = key; // definitive answer (incl. "none"), don't re-query
             App.State.ModCounterparts.Remember(targetStore, sourceMod, counterpart);
             return key;
         }
         catch
         {
-            // Offline or API error — don't memoise, so a later refresh can retry.
+            // Offline or API error: don't memoise, so a later refresh can retry.
             return null;
         }
     }
@@ -1334,12 +1546,16 @@ public partial class ModExplorerPage : Page
         }
     }
 
-    private void RememberInstalledMod(ModDownloadItem item, string path)
+    /// <summary>Records the jar that just landed: its key for the badges, and its two provider
+    /// hashes for the fingerprint cache.</summary>
+    /// <remarks>Hashed off the dispatcher: SHA-512 plus a whitespace-stripped Murmur2 over a big jar is
+    /// a visible freeze.</remarks>
+    private async Task RememberInstalledModAsync(ModDownloadItem item, string path)
     {
         _installedModKeys.Add(ModKey(item.Mod));
         try
         {
-            var (sha512, curseForgeFingerprint) = ModFingerprintCache.ComputeHashes(path);
+            var (sha512, curseForgeFingerprint) = await Task.Run(() => ModFingerprintCache.ComputeHashes(path));
             App.State.ModFingerprints.Store(path, sha512, curseForgeFingerprint, new CachedModMatch
             {
                 Mod = item.Mod,
@@ -1358,9 +1574,9 @@ public partial class ModExplorerPage : Page
 
     private static string ModKey(ModSummary mod) => $"{mod.Source}:{mod.Id}";
 
-    /// <summary>The mod's versions from the shared catalog (cached per mod for a quarter hour, whichever
-    /// view asks): only those for this pack's Minecraft version and loader when <paramref name="applyFilters"/>
-    /// is set — filtered by the store, so it's one small request — otherwise every version.</summary>
+    /// <summary>The mod's versions from the shared catalog (cached per mod for 15 minutes). With
+    /// <paramref name="applyFilters"/>, only those for this pack's Minecraft version and loader,
+    /// filtered by the store; otherwise every version.</summary>
     private async Task<List<ModVersion>> LoadVersionsForModAsync(ModSummary mod, bool applyFilters, CancellationToken ct)
     {
         if (!applyFilters)
@@ -1371,7 +1587,7 @@ public partial class ModExplorerPage : Page
             mc.Length > 0 ? mc : null, loader.Length > 0 ? loader : null, ct: ct)).ToList();
     }
 
-    /// <summary>True when <see cref="_allVersions"/> holds every version, not just the pack-compatible ones.</summary>
+    /// <summary>True when <see cref="_allVersions"/> also holds incompatible versions.</summary>
     private bool _versionsUnfiltered;
 
     private async Task<ModVersionFile?> ResolveDownloadFileAsync(ModSummary mod, ModVersion version)
@@ -1403,7 +1619,7 @@ public partial class ModExplorerPage : Page
     }
 
     /// <summary>The release channel this pack's downloads follow (pack setting, else the launcher
-    /// default in Settings → Mods).</summary>
+    /// default in Settings -> Mods).</summary>
     private string PackChannel() => App.State.ModMetadata.EffectiveUpdateChannel(_pack.Id);
 
     private static bool MatchesFilters(ModVersion version, string mc, string loader) =>
@@ -1473,27 +1689,21 @@ public partial class ModExplorerPage : Page
         ScreenshotPreviewWindow.ShowFor(Window.GetWindow(this), row.FullImageUrl, row.Title);
     }
 
+    /// <summary>Links come from store metadata, so only http and https ones are opened.</summary>
     private void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
 
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { DownloadStatus.Text = ex.Message; }
+        if (!SafeLaunch.OpenUrl(url)) DownloadStatus.Text = "That link could not be opened.";
     }
 
+    /// <summary>The detail pane's icon, via the shared <see cref="IconLoader"/> cache.</summary>
+    /// <remarks>IconLoader caps the decode size, shares downloads with the list and drops late arrivals
+    /// when the selection moves. It owns this element's Source; nothing else should set it.</remarks>
     private void SetSelectedIcon(string? iconUrl)
     {
-        SelectedIconImage.Source = null;
-        if (string.IsNullOrWhiteSpace(iconUrl)) return;
-
-        try
-        {
-            SelectedIconImage.Source = new BitmapImage(new Uri(iconUrl, UriKind.Absolute));
-        }
-        catch
-        {
-            SelectedIconImage.Source = null;
-        }
+        IconLoader.SetDecodeWidth(SelectedIconImage, 52);
+        IconLoader.SetUrl(SelectedIconImage, string.IsNullOrWhiteSpace(iconUrl) ? null : iconUrl);
     }
 
     private void ClearSelectedMod()
@@ -1507,7 +1717,7 @@ public partial class ModExplorerPage : Page
         ModNameLabel.Text = "";
         ModMetaLabel.Text = "";
         SelectedIconFallback.Text = "";
-        SelectedIconImage.Source = null;
+        SetSelectedIcon(null);
         VersionsGrid.ItemsSource = null;
         VersionFilterNote.Text = "";
     }
@@ -1549,6 +1759,12 @@ public partial class ModExplorerPage : Page
 public enum ModBrowseSourceKind
 {
     All,
+
+    /// <summary>What is already in an instance's mods/ folder, read from disk and the identity caches,
+    /// so it works offline. Only <see cref="ModsView"/> offers it; the explorer page is already scoped
+    /// to one instance.</summary>
+    Installed,
+
     CurseForge,
     Modrinth,
     Divider,

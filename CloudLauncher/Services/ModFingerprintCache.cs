@@ -18,11 +18,16 @@ public sealed class ModFingerprintCache
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<long, (ModSummary mod, ModVersion version)> _curseForgeByFingerprint = new();
     private readonly string _cachePath;
+    private readonly object _writeGate = new();
     private bool _dirty;
+    private Timer? _flushTimer;
 
+    private const int FlushDelayMs = 2000;
+
+    /// <summary>Not indented: on a big pack the file runs to about 21 MB indented, and every write
+    /// re-serialises all of it.</summary>
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
-        WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
@@ -30,6 +35,10 @@ public sealed class ModFingerprintCache
     {
         _cachePath = Path.Combine(GetDataRoot(), "mod-fingerprints.json");
         Load();
+        // Backstop for the debounced write (ScanCaches does the same), so hashes computed just before
+        // exit aren't lost and redone next launch.
+        try { AppDomain.CurrentDomain.ProcessExit += (_, _) => WriteNow(); }
+        catch { /* a host that will not let us hook exit still writes on the debounce */ }
     }
 
     public bool TryGet(string path, out ModFingerprintCacheEntry entry)
@@ -206,13 +215,30 @@ public sealed class ModFingerprintCache
     public void RememberCurseForgeMatch(long fingerprint, ModSummary mod, ModVersion version) =>
         _curseForgeByFingerprint[fingerprint] = (mod, version);
 
+    /// <summary>Asks for the cache to be written. The write is debounced onto a thread-pool thread:
+    /// serialising the whole cache can take over 100 ms, too long for the dispatcher. Process exit is the
+    /// backstop.</summary>
     public void Flush()
     {
         if (!_dirty) return;
+        try
+        {
+            lock (_lock)
+            {
+                _flushTimer ??= new Timer(_ => WriteNow(), null, Timeout.Infinite, Timeout.Infinite);
+                _flushTimer.Change(FlushDelayMs, Timeout.Infinite);
+            }
+        }
+        catch { /* the process-exit write is the backstop */ }
+    }
 
+    /// <summary>Serialises and writes now. Only the debounce timer and process exit call it.</summary>
+    private void WriteNow()
+    {
         ModFingerprintCacheFile snapshot;
         lock (_lock)
         {
+            if (!_dirty) return;
             snapshot = new ModFingerprintCacheFile
             {
                 Entries = new Dictionary<string, ModFingerprintCacheEntry>(_entries, StringComparer.OrdinalIgnoreCase)
@@ -222,12 +248,21 @@ public sealed class ModFingerprintCache
 
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(_cachePath)!);
-            var tmp = _cachePath + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(snapshot, JsonOpts));
-            File.Move(tmp, _cachePath, overwrite: true);
+            // The timer and the exit hook can both arrive at once, and they share one .tmp path.
+            lock (_writeGate)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(_cachePath)!);
+                var tmp = _cachePath + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(snapshot, JsonOpts));
+                File.Move(tmp, _cachePath, overwrite: true);
+            }
         }
-        catch { /* best-effort */ }
+        catch
+        {
+            // Not worth failing an install over, but worth retrying: mark it dirty again for the next
+            // debounce or for process exit.
+            lock (_lock) _dirty = true;
+        }
     }
 
     public void Remove(string path)
@@ -286,7 +321,7 @@ public sealed class ModFingerprintCache
                 }
             }
         }
-        catch { /* corrupt cache — start fresh */ }
+        catch { /* corrupt cache: start fresh */ }
     }
 
     private static string NormalizePath(string path) => Path.GetFullPath(path);

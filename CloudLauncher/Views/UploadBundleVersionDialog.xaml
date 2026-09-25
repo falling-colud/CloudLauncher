@@ -1,0 +1,152 @@
+<UserControl x:Class="CloudLauncher.Views.UploadBundleVersionDialog"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:v="clr-namespace:CloudLauncher.Views"
+             xmlns:anim="clr-namespace:CloudLauncher.Animations">
+    <UserControl.Resources>
+        <!--  One file that could go into the bundle. Labelled by its path, since files with the same
+        name can sit in different folders.  -->
+        <DataTemplate x:Key="ComposeFileTemplate">
+            <DockPanel Margin="0,2">
+                <TextBlock DockPanel.Dock="Right" Text="{Binding SizeLabel}" Style="{StaticResource Caption}"
+                           Width="70" TextAlignment="Right" VerticalAlignment="Center"/>
+                <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}" VerticalAlignment="Center"
+                          Checked="OnFileTicked" Unchecked="OnFileTicked">
+                    <TextBlock Text="{Binding EntryPath}" FontFamily="{DynamicResource MonoFont}"
+                               FontSize="11" TextTrimming="CharacterEllipsis"
+                               ToolTip="{Binding RelativePath}"/>
+                </CheckBox>
+            </DockPanel>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="22" Width="680" MaxHeight="700">
+        <slate:SlateBorder.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </slate:SlateBorder.Effect>
+
+        <DockPanel>
+            <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                <TextBlock Text="Publish a version" Style="{StaticResource H2}"/>
+                <TextBlock x:Name="SubtitleLabel" Style="{StaticResource Muted}" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <!--  Buttons pinned to the bottom so the file list can grow into what is left.  -->
+            <Grid DockPanel.Dock="Bottom" Margin="0,14,0,0">
+                <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                           HorizontalAlignment="Left" TextWrapping="Wrap" MaxWidth="380"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="Cancel" Click="OnCancel" Margin="0,0,8,0" Padding="14,5"/>
+                    <Button x:Name="PublishButton" Content="Publish" Style="{StaticResource AccentButton}"
+                            Click="OnPublish" ToolTipService.ShowOnDisabled="True"/>
+                </StackPanel>
+            </Grid>
+
+            <ScrollViewer VerticalScrollBarVisibility="Auto" anim:Animate.SmoothScroll="True">
+                <StackPanel>
+                    <!--  WHERE THE FILE COMES FROM  -->
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                        <RadioButton x:Name="ZipModeRadio" Content="A zip I already have"
+                                     GroupName="BundleSource" IsChecked="True" Margin="0,0,18,0"
+                                     Checked="OnModeChanged"/>
+                        <RadioButton x:Name="ComposeModeRadio" Content="Build one from an instance"
+                                     GroupName="BundleSource" Checked="OnModeChanged"
+                                     ToolTipService.ShowOnDisabled="True"/>
+                    </StackPanel>
+
+                    <!--  (a) A zip on disk  -->
+                    <slate:SlateBorder x:Name="ZipPanel" Background="{DynamicResource Surface1Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="8" Padding="12" Margin="0,0,0,12">
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="Choose a zip..." Padding="12,5"
+                                    Click="OnBrowseZip"/>
+                            <TextBlock x:Name="ZipLabel" Style="{StaticResource Caption}"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                       Text="No file chosen yet."/>
+                        </DockPanel>
+                    </slate:SlateBorder>
+
+                    <!--  (b) Built out of one instance's files  -->
+                    <slate:SlateBorder x:Name="ComposePanel" Background="{DynamicResource Surface1Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="8" Padding="12" Margin="0,0,0,12" Visibility="Collapsed">
+                        <StackPanel>
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ComboBox x:Name="InstanceBox" Grid.Column="0" Margin="0,0,8,0"
+                                          SelectionChanged="OnInstanceChanged"
+                                          ToolTip="Which instance's files to take"/>
+                                <v:CompactSearchBox x:Name="FileSearch" Grid.Column="1"
+                                                    Placeholder="Filter these files..."
+                                                    SearchToolTip="Filter the file list"/>
+                            </Grid>
+
+                            <slate:SlateBorder Background="{DynamicResource Surface0Brush}"
+                                    BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
+                                    CornerRadius="6" Padding="8" MinHeight="150">
+                                <Grid>
+                                    <ScrollViewer MaxHeight="240" VerticalScrollBarVisibility="Auto"
+                                                  anim:Animate.SmoothScroll="True">
+                                        <ItemsControl x:Name="FileList" ItemTemplate="{StaticResource ComposeFileTemplate}"/>
+                                    </ScrollViewer>
+                                    <TextBlock x:Name="FileListNote" Style="{StaticResource Caption}"
+                                               TextWrapping="Wrap" VerticalAlignment="Center"
+                                               HorizontalAlignment="Center" MaxWidth="420"
+                                               TextAlignment="Center" Visibility="Collapsed"/>
+                                </Grid>
+                            </slate:SlateBorder>
+
+                            <DockPanel Margin="0,8,0,0">
+                                <TextBlock x:Name="PickedLabel" DockPanel.Dock="Right"
+                                           Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Content="Select all" Padding="10,4" Margin="0,0,6,0"
+                                            Click="OnSelectAllFiles"/>
+                                    <Button Content="Clear" Padding="10,4" Click="OnSelectNoFiles"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </StackPanel>
+                    </slate:SlateBorder>
+
+                    <!--  WHAT IT IS CALLED  -->
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Margin="0,0,12,0">
+                            <TextBlock Text="Version" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <TextBox x:Name="VersionBox" MaxLength="64" Margin="0,0,0,10"
+                                     TextChanged="OnFormChanged"
+                                     ToolTip="What collaborators see in the version list, e.g. 1.2.0"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Width="190">
+                            <TextBlock Text="Release channel" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                            <ComboBox x:Name="ChannelBox" Margin="0,0,0,10"
+                                      ToolTip="Beta and alpha are still downloadable - the label is how somebody knows what they are taking">
+                                <ComboBoxItem Content="release" IsSelected="True"/>
+                                <ComboBoxItem Content="beta"/>
+                                <ComboBoxItem Content="alpha"/>
+                            </ComboBox>
+                        </StackPanel>
+                    </Grid>
+
+                    <TextBlock Text="Minecraft versions" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                    <TextBox x:Name="McVersionsBox" MaxLength="256" Margin="0,0,0,10"
+                             ToolTip="Comma-separated, e.g. 1.21.1, 1.21 - decides which instances are offered this version"/>
+
+                    <TextBlock Text="What changed" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                    <TextBox x:Name="ChangelogBox" AcceptsReturn="True" TextWrapping="Wrap"
+                             VerticalScrollBarVisibility="Auto" MinHeight="70" MaxLength="4096"
+                             ToolTip="Optional, but it is the only thing that tells somebody whether to take this version"/>
+                </StackPanel>
+            </ScrollViewer>
+        </DockPanel>
+    </slate:SlateBorder>
+</UserControl>

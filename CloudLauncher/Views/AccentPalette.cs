@@ -3,8 +3,8 @@ using System.Windows.Media;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The shared accent choices for user-coloured things — planning cards, links and category swatches.
-/// Hues track <see cref="Services.PriorityPalette"/> so the whole app reads as one system.
+/// Shared accent choices for user-coloured things: planning cards, links and category swatches.
+/// Hues match <see cref="Services.PriorityPalette"/>.
 /// </summary>
 public static class AccentPalette
 {

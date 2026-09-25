@@ -1,6 +1,7 @@
 ﻿<Page x:Class="CloudLauncher.Views.ResourcePackBrowserView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:views="clr-namespace:CloudLauncher.Views"
         Title="Resource pack browser"
       Background="{DynamicResource Surface0Brush}">
@@ -17,7 +18,7 @@
             <StackPanel>
                 <TextBlock Style="{StaticResource H2}" Text="Download a resource pack"/>
                 <TextBlock Style="{StaticResource Muted}"
-                           Text="Browse texture packs from CurseForge, Modrinth, and CloudLauncher. Installs drop a .zip into the instance resourcepacks folder."/>
+                           Text="Browse texture packs from CurseForge, Modrinth, and CloudLauncher. A download asks which instances should get it - tick as many as you like, or none and the launcher keeps it for later."/>
             </StackPanel>
         </Grid>
 
@@ -26,11 +27,11 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <Border Grid.Column="0" Background="{DynamicResource Surface1Brush}"
+            <slate:SlateBorder Grid.Column="0" Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                     CornerRadius="6" Padding="8,2" MinHeight="34">
                 <DockPanel>
-                    <TextBlock DockPanel.Dock="Left" Text="&#xE721;" FontFamily="{StaticResource IconFont}"
+                    <TextBlock DockPanel.Dock="Left" Text="&#xE721;" FontFamily="{DynamicResource IconFont}"
                                FontSize="13" VerticalAlignment="Center" Margin="2,0,8,0"
                                Foreground="{DynamicResource TextTertiaryBrush}"/>
                     <TextBox x:Name="SearchBox" BorderThickness="0" Background="Transparent"
@@ -38,7 +39,7 @@
                              KeyDown="OnSearchKeyDown" TextChanged="OnSearchTextChanged"
                              ToolTip="Search resource packs"/>
                 </DockPanel>
-            </Border>
+            </slate:SlateBorder>
             <StackPanel Grid.Column="1" Orientation="Horizontal">
                 <ComboBox x:Name="SortBox" Width="130" Margin="6,0,0,0"
                           SelectionChanged="OnSortChanged"
@@ -49,23 +50,23 @@
                 </ComboBox>
                 <Button Style="{StaticResource IconButton}"
                         Margin="6,0,0,0" Padding="8,5"
-                        Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        Content="&#xE71C;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                         ToolTip="Filters" Click="OnFiltersClick"/>
                 <Button Style="{StaticResource IconButton}"
                         Margin="4,0,0,0" Padding="8,5"
-                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                        Content="&#xE72C;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                         ToolTip="Refresh (F5)" Click="OnRefresh"/>
             </StackPanel>
             <Popup x:Name="FiltersPopup" PlacementTarget="{Binding ElementName=SearchBox}"
                    Placement="Top" StaysOpen="False" AllowsTransparency="True"
                    HorizontalOffset="0" VerticalOffset="-8">
-                <Border Background="{DynamicResource Surface2Brush}"
+                <slate:SlateBorder Background="{DynamicResource Surface2Brush}"
                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                         CornerRadius="8" Padding="14" MinWidth="240">
                     <StackPanel>
                         <TextBlock Style="{StaticResource H3}" Text="Filters" Margin="0,0,0,10"/>
-                        <!-- Categories come from whichever store the active chip points at, so the
-                             list is the store's own and the labels match its site. -->
+                        <!-- Categories come from the store the active chip points at, so the
+                        labels match its site. -->
                         <StackPanel x:Name="CategoryFilterPanel" Visibility="Collapsed">
                             <Grid Margin="0,0,0,4">
                                 <TextBlock Style="{StaticResource Caption}">
@@ -76,7 +77,7 @@
                                         Style="{StaticResource LinkButton}" FontSize="11"
                                         Click="OnClearCategories"/>
                             </Grid>
-                            <Border Background="{DynamicResource Surface1Brush}"
+                            <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
                                     BorderBrush="{DynamicResource BorderBrush}"
                                     BorderThickness="1" CornerRadius="6" MaxHeight="168" Margin="0,0,0,10">
                                 <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="8,6">
@@ -89,17 +90,17 @@
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
                                 </ScrollViewer>
-                            </Border>
+                            </slate:SlateBorder>
                         </StackPanel>
                         <TextBlock Style="{StaticResource Caption}" Text="Minecraft version"/>
                         <TextBox x:Name="FilterMcBox" Margin="0,4,0,10"
-                                 ToolTip="e.g. 1.20.1 — leave empty for any"/>
+                                 ToolTip="e.g. 1.20.1 - leave empty for any"/>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                             <Button Content="Apply" Style="{StaticResource AccentButton}"
                                     Click="OnApplyFilters" Padding="14,5"/>
                         </StackPanel>
                     </StackPanel>
-                </Border>
+                </slate:SlateBorder>
             </Popup>
         </Grid>
 
@@ -113,7 +114,7 @@
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
                     <DataTemplate>
-                        <Border Padding="0" Margin="0,2,8,2" Cursor="{Binding CursorHint}"
+                        <slate:SlateBorder Padding="0" Margin="0,2,8,2" Cursor="{Binding CursorHint}"
                                 Background="{Binding Background}"
                                 BorderBrush="{Binding BorderColor}" BorderThickness="1"
                                 CornerRadius="14"
@@ -126,7 +127,7 @@
                                            Foreground="{Binding Foreground}"
                                            FontWeight="{Binding FontWeight}"/>
                             </StackPanel>
-                        </Border>
+                        </slate:SlateBorder>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
@@ -139,7 +140,7 @@
                 <ColumnDefinition Width="4*"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0"
+            <slate:SlateBorder Grid.Column="0"
                     Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                     CornerRadius="8">
@@ -159,25 +160,31 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <Border Grid.Column="0" Width="44" Height="44"
+                                        <slate:SlateBorder Grid.Column="0" Width="44" Height="44"
                                                 Background="{DynamicResource Surface3Brush}"
                                                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                                                 CornerRadius="8" ClipToBounds="True" VerticalAlignment="Top">
                                             <Grid>
                                                 <TextBlock Text="{Binding Initial}" Style="{StaticResource H3}"
                                                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                <Image Source="{Binding IconUrl}" Stretch="UniformToFill"/>
+                                                <!--  Loaded through the icon cache. A URL bound
+                                                straight to Image.Source is downloaded and
+                                                decoded at full size on the UI thread, which
+                                                stutters when scrolling fast.  -->
+                                                <Image views:IconLoader.Url="{Binding IconUrl}"
+                                                       views:IconLoader.DecodeWidth="44"
+                                                       Stretch="UniformToFill"/>
                                             </Grid>
-                                        </Border>
+                                        </slate:SlateBorder>
                                         <StackPanel Grid.Column="1" Margin="0,0,12,0">
                                             <DockPanel>
-                                                <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
                                                         Background="{Binding SourceBadgeBackground}"
                                                         Margin="6,0,0,0">
                                                     <TextBlock Text="{Binding SourceBadge}"
                                                                Style="{StaticResource PillText}"
                                                                Foreground="{Binding SourceBadgeForeground}"/>
-                                                </Border>
+                                                </slate:SlateBorder>
                                                 <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="13"
                                                            TextTrimming="CharacterEllipsis"
                                                            Foreground="{DynamicResource TextPrimaryBrush}"/>
@@ -188,13 +195,15 @@
                                             <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
                                                        Margin="0,4,0,0" Foreground="{DynamicResource TextTertiaryBrush}"/>
                                         </StackPanel>
-                                        <!-- Right-edge action, and it says so when a pack of this name
-                                             is already installed: a second click otherwise writes a
-                                             duplicate zip that fights the first in the same stack. -->
+                                        <!-- The label changes when a pack of this name is already
+                                        installed: downloading it again writes a duplicate
+                                        zip into the same stack. -->
                                         <Button Grid.Column="2" Content="{Binding DownloadLabel}"
                                                 Click="OnDownloadRow" Tag="{Binding}"
                                                 Padding="12,5" MinHeight="30" MinWidth="0"
                                                 VerticalAlignment="Center"
+                                                IsEnabled="{Binding CanDownload}"
+                                                ToolTipService.ShowOnDisabled="True"
                                                 ToolTip="{Binding DownloadTooltip}">
                                             <Button.Style>
                                                 <Style TargetType="Button" BasedOn="{StaticResource AccentButton}">
@@ -215,7 +224,7 @@
 
                     <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
                                 Margin="0,80,0,0" Visibility="Collapsed">
-                        <TextBlock Text="&#xE7C9;" FontFamily="{StaticResource IconFont}" FontSize="40"
+                        <TextBlock Text="&#xE7C9;" FontFamily="{DynamicResource IconFont}" FontSize="40"
                                    HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
                         <TextBlock x:Name="EmptyTitle" Style="{StaticResource H3}"
                                    Text="Nothing found"
@@ -226,19 +235,19 @@
                                    Text="Try a different search or pick another source."/>
                     </StackPanel>
                 </Grid>
-            </Border>
+            </slate:SlateBorder>
 
             <Border Grid.Column="1" Width="1"
                     Background="{DynamicResource BorderSubtleBrush}"
                     HorizontalAlignment="Center"/>
 
-            <Border Grid.Column="2"
+            <slate:SlateBorder Grid.Column="2"
                     Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                     CornerRadius="8" Padding="18">
                 <Grid>
                     <TextBlock x:Name="DetailPlaceholder"
-                               Text="Pick a listing to browse overview, screenshots, versions, and install a zip to an instance."
+                               Text="Pick a listing to browse overview, screenshots and versions, and download one into as many instances as you want."
                                Style="{StaticResource Muted}" TextWrapping="Wrap"
                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                TextAlignment="Center" MaxWidth="420"/>
@@ -255,7 +264,11 @@
                                 <ColumnDefinition Width="56"/>
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
-                            <Border Grid.Column="0" Width="44" Height="44"
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <slate:SlateBorder Grid.Column="0" Width="44" Height="44"
                                     Background="{DynamicResource Surface3Brush}"
                                     BorderBrush="{DynamicResource BorderBrush}"
                                     BorderThickness="1" CornerRadius="8"
@@ -265,35 +278,41 @@
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     <Image x:Name="SelectedIconImage" Stretch="UniformToFill"/>
                                 </Grid>
-                            </Border>
+                            </slate:SlateBorder>
                             <StackPanel Grid.Column="1">
-                                <DockPanel>
-                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="10,0,0,0">
-                                        <Button x:Name="OpenProjectButton" Content="Open page"
-                                                Click="OnOpenSelectedProject"
-                                                Padding="10,4" MinWidth="0" MinHeight="0"/>
-                                        <Button x:Name="DownloadSelectedButton" Content="Download"
-                                                Style="{StaticResource AccentButton}"
-                                                Click="OnDownloadSelectedWorld"
-                                                Padding="10,4" MinWidth="0" MinHeight="0"/>
-                                    </StackPanel>
-                                    <TextBlock x:Name="WorldNameLabel" Style="{StaticResource H2}"
-                                               TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
-                                </DockPanel>
+                                <!--  MaxHeight is two lines of H2; longer names are trimmed.  -->
+                                <TextBlock x:Name="WorldNameLabel" Style="{StaticResource H2}"
+                                           TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                           MaxHeight="54"/>
                                 <TextBlock x:Name="WorldMetaLabel" Style="{StaticResource Muted}" Margin="0,2,0,0"
                                            TextWrapping="Wrap"/>
                             </StackPanel>
+
+                            <!--  Actions get their own row: beside the name they squeeze it to a
+                            few characters per line at the minimum window width. WrapPanel so
+                            they stack instead of spilling out of the card.  -->
+                            <WrapPanel Grid.Row="1" Grid.ColumnSpan="2"
+                                       HorizontalAlignment="Right" Margin="0,10,0,0">
+                                <Button x:Name="OpenProjectButton" Content="Open page"
+                                        Click="OnOpenSelectedProject"
+                                        Padding="10,4" MinWidth="0" MinHeight="0"/>
+                                <Button x:Name="DownloadSelectedButton" Content="Download"
+                                        Style="{StaticResource AccentButton}"
+                                        Click="OnDownloadSelectedWorld"
+                                        ToolTipService.ShowOnDisabled="True"
+                                        Padding="10,4" MinWidth="0" MinHeight="0"/>
+                            </WrapPanel>
                         </Grid>
 
                         <TabControl Grid.Row="1" x:Name="PackTabs">
                             <TabItem Header="Overview">
-                                <Border CornerRadius="8" ClipToBounds="True" Margin="0,12,0,0"
+                                <slate:SlateBorder CornerRadius="8" ClipToBounds="True" Margin="0,12,0,0"
                                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
                                     <Border x:Name="OverviewHost" ClipToBounds="True"
                                             Background="{DynamicResource Surface0Brush}">
                                         <views:RichDescriptionView x:Name="OverviewBrowser"/>
                                     </Border>
-                                </Border>
+                                </slate:SlateBorder>
                             </TabItem>
 
                             <TabItem Header="Screenshots">
@@ -311,19 +330,19 @@
                                             </ItemsControl.ItemsPanel>
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
-                                                    <Border Width="210" Margin="0,0,10,10" Style="{StaticResource Card}" Padding="8"
+                                                    <slate:SlateBorder Width="210" Margin="0,0,10,10" Style="{StaticResource Card}" Padding="8"
                                                             Cursor="Hand" ToolTip="Open screenshot"
                                                             MouseLeftButtonUp="OnOpenScreenshot">
                                                         <StackPanel>
-                                                            <Border Height="112" Background="{DynamicResource Surface0Brush}"
+                                                            <slate:SlateBorder Height="112" Background="{DynamicResource Surface0Brush}"
                                                                     BorderBrush="{DynamicResource BorderBrush}"
                                                                     BorderThickness="1" CornerRadius="6" ClipToBounds="True">
                                                                 <Image Source="{Binding ImageUrl}" Stretch="UniformToFill"/>
-                                                            </Border>
+                                                            </slate:SlateBorder>
                                                             <TextBlock Text="{Binding Title}" Style="{StaticResource Caption}"
                                                                        Margin="0,6,0,0" TextWrapping="Wrap"/>
                                                         </StackPanel>
-                                                    </Border>
+                                                    </slate:SlateBorder>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
@@ -347,7 +366,7 @@
                             </TabItem>
 
                             <TabItem Header="Versions">
-                                <Border Background="{DynamicResource Surface0Brush}"
+                                <slate:SlateBorder Background="{DynamicResource Surface0Brush}"
                                         BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                                         CornerRadius="6" Margin="0,12,0,0">
                                     <DataGrid x:Name="VersionsGrid"
@@ -365,13 +384,16 @@
                                                     <DataTemplate>
                                                         <Button Content="Download" Style="{StaticResource AccentButton}"
                                                                 Padding="6,2" MinWidth="0" MinHeight="0" FontSize="11"
+                                                                IsEnabled="{Binding CanDownload}"
+                                                                ToolTip="{Binding DownloadHint}"
+                                                                ToolTipService.ShowOnDisabled="True"
                                                                 Click="OnDownloadVersion"/>
                                                     </DataTemplate>
                                                 </DataGridTemplateColumn.CellTemplate>
                                             </DataGridTemplateColumn>
                                         </DataGrid.Columns>
                                     </DataGrid>
-                                </Border>
+                                </slate:SlateBorder>
                             </TabItem>
                         </TabControl>
 
@@ -379,7 +401,7 @@
                                    Margin="0,14,0,0" VerticalAlignment="Center" TextWrapping="Wrap"/>
                     </Grid>
                 </Grid>
-            </Border>
+            </slate:SlateBorder>
         </Grid>
 
         <Border Grid.Row="4" Background="{DynamicResource Surface1Brush}"

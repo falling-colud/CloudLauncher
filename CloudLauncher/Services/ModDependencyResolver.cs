@@ -8,6 +8,12 @@ public sealed record ModDownloadItem(
 
 public static class ModDependencyResolver
 {
+    /// <summary>Everything one version needs downloaded: itself plus every required dependency,
+    /// transitively, dependencies first.</summary>
+    /// <param name="versionCatalog">The shared version catalog. With it, a dependency's version list is
+    /// fetched filtered to <paramref name="minecraftVersion"/> and <paramref name="loader"/> and shared
+    /// with other callers; without it a CurseForge dependency costs its whole file history (dozens of
+    /// sequential proxy calls for a mod like JEI).</param>
     public static async Task<List<ModDownloadItem>> ResolveRequiredDownloadsAsync(
         ModSummary rootMod,
         ModVersion rootVersion,
@@ -16,11 +22,12 @@ public static class ModDependencyResolver
         ModrinthService modrinth,
         CurseForgeService curseForge,
         string? channel = null,
+        ModVersionCatalog? versionCatalog = null,
         CancellationToken ct = default)
     {
         var result = new List<ModDownloadItem>();
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await VisitAsync(rootMod, rootVersion, isDependency: false, result, visited, minecraftVersion, loader, modrinth, curseForge, channel, ct);
+        await VisitAsync(rootMod, rootVersion, isDependency: false, result, visited, minecraftVersion, loader, modrinth, curseForge, channel, versionCatalog, ct);
         return result;
     }
 
@@ -35,15 +42,16 @@ public static class ModDependencyResolver
         ModrinthService modrinth,
         CurseForgeService curseForge,
         string? channel,
+        ModVersionCatalog? versionCatalog,
         CancellationToken ct)
     {
         if (!visited.Add($"{version.Source}:{version.Id}")) return;
 
         foreach (var dependency in version.Dependencies.Where(IsRequiredDependency))
         {
-            var resolved = await ResolveDependencyAsync(dependency, minecraftVersion, loader, modrinth, curseForge, channel, ct);
+            var resolved = await ResolveDependencyAsync(dependency, minecraftVersion, loader, modrinth, curseForge, channel, versionCatalog, ct);
             if (resolved is not null)
-                await VisitAsync(resolved.Value.Mod, resolved.Value.Version, isDependency: true, result, visited, minecraftVersion, loader, modrinth, curseForge, channel, ct);
+                await VisitAsync(resolved.Value.Mod, resolved.Value.Version, isDependency: true, result, visited, minecraftVersion, loader, modrinth, curseForge, channel, versionCatalog, ct);
         }
 
         var file = await ResolveDownloadFileAsync(mod, version, curseForge, ct);
@@ -62,11 +70,12 @@ public static class ModDependencyResolver
         ModrinthService modrinth,
         CurseForgeService curseForge,
         string? channel,
+        ModVersionCatalog? versionCatalog,
         CancellationToken ct)
     {
         return dependency.Source switch
         {
-            ModSource.CurseForge => await ResolveCurseForgeDependencyAsync(dependency, minecraftVersion, loader, curseForge, channel, ct),
+            ModSource.CurseForge => await ResolveCurseForgeDependencyAsync(dependency, minecraftVersion, loader, curseForge, channel, versionCatalog, ct),
             ModSource.Modrinth => await ResolveModrinthDependencyAsync(dependency, minecraftVersion, loader, modrinth, channel, ct),
             _ => null
         };
@@ -84,8 +93,8 @@ public static class ModDependencyResolver
         {
             var pinned = await modrinth.GetVersionWithProjectAsync(dependency.VersionId, ct);
             if (pinned is not null) return pinned;
-            // The pinned version couldn't be fetched (deleted/region-locked/transient) — rather than
-            // silently dropping a required dependency, fall back to resolving it by project below.
+            // The pinned version couldn't be fetched (deleted, region-locked, transient error): resolve it by
+            // project below rather than drop a required dependency.
         }
 
         if (string.IsNullOrWhiteSpace(dependency.ProjectId)) return null;
@@ -111,6 +120,7 @@ public static class ModDependencyResolver
         string loader,
         CurseForgeService curseForge,
         string? channel,
+        ModVersionCatalog? versionCatalog,
         CancellationToken ct)
     {
         if (!int.TryParse(dependency.ProjectId, out var modId)) return null;
@@ -118,7 +128,19 @@ public static class ModDependencyResolver
         var mod = await curseForge.GetModAsync(modId, ct);
         if (mod is null) return null;
 
-        var versions = await curseForge.GetVersionsAsync(modId, ct);
+        // Ask filtered first and unfiltered only if nothing came back, like the Modrinth path above, so
+        // a dependency listing a different Minecraft version still resolves. The unfiltered history of a
+        // long-lived mod takes many sequential proxy calls.
+        var mc = string.IsNullOrWhiteSpace(minecraftVersion) ? null : minecraftVersion;
+        var loaderTag = string.IsNullOrWhiteSpace(loader) ? null : loader;
+        var versions = versionCatalog is not null
+            ? await versionCatalog.GetVersionsAsync(mod, mc, loaderTag, ct: ct)
+            : await curseForge.GetVersionsAsync(modId, mc, loaderTag, maxPages: 0, ct);
+        if (versions.Count == 0)
+            versions = versionCatalog is not null
+                ? await versionCatalog.GetVersionsAsync(mod, ct: ct)
+                : await curseForge.GetVersionsAsync(modId, ct);
+
         var version = PickCompatibleVersion(versions, minecraftVersion, loader, channel);
         return version is null ? null : (mod, version);
     }
@@ -130,9 +152,8 @@ public static class ModDependencyResolver
         var pick = ModUpdateChannel.PickNewest(compatible, channel, v => v.ReleaseChannel, v => v.DatePublished);
         if (pick is not null) return pick;
 
-        // Nothing matched the exact MC version + loader (e.g. the dependency lists "1.20" while the
-        // pack is "1.20.1"). Rather than silently skip a *required* dependency, fall back to the
-        // newest available version so it still installs.
+        // Nothing matched the MC version and loader (e.g. the dependency lists "1.20", the pack is
+        // "1.20.1"). Fall back to the newest version rather than skip a required dependency.
         return ModUpdateChannel.PickNewest(versions, channel, v => v.ReleaseChannel, v => v.DatePublished);
     }
 

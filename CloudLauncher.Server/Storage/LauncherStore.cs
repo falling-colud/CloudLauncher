@@ -7,6 +7,11 @@ namespace CloudLauncher.Server.Storage;
 public class LauncherStoreOptions
 {
     public string RootPath { get; set; } = "";
+
+    /// <summary>Whether POST /launcher/upload exists (config <c>Launcher:AllowUpload</c>). Off by
+    /// default: releases are published by copying files into <see cref="RootPath"/>, and a route
+    /// that can replace every launcher's update should not exist unless it is used.</summary>
+    public bool AllowUpload { get; set; }
 }
 
 /// <summary>Stores a single "latest" launcher release: the package file plus its metadata.
@@ -20,6 +25,53 @@ public class LauncherStore(LauncherStoreOptions opts)
     private string HistoryPath => Path.Combine(opts.RootPath, "releases.json");
     private string PackagePath => Path.Combine(opts.RootPath, "package.bin");
     private string InstallerPath => Path.Combine(opts.RootPath, "installer.bin");
+
+    /// <summary>Packages stored by content as packages/{sha256}.bin (lowercase hex), so a launcher
+    /// can fetch the build it verified even after package.bin has changed.</summary>
+    private string PackagesDir => Path.Combine(opts.RootPath, "packages");
+
+    public bool AllowUpload => opts.AllowUpload;
+
+    /// <summary>True for 64 hex digits, the only form a package hash may take before it is used in
+    /// a path.</summary>
+    public static bool IsSha256Hex(string? value)
+    {
+        if (value is not { Length: 64 }) return false;
+        foreach (var c in value)
+            if (c is not ((>= '0' and <= '9') or (>= 'a' and <= 'f') or (>= 'A' and <= 'F')))
+                return false;
+        return true;
+    }
+
+    /// <summary>
+    /// Opens the package whose SHA-256 is <paramref name="sha256"/>: packages/{sha256}.bin when the
+    /// publish left one, otherwise package.bin but only while latest.json names that hash.
+    /// Null when neither applies.
+    /// </summary>
+    public Stream? OpenPackageBySha256(string sha256)
+    {
+        if (!IsSha256Hex(sha256)) return null;
+        var hash = sha256.ToLowerInvariant();
+
+        var kept = Path.Combine(PackagesDir, hash + ".bin");
+        lock (_lock)
+        {
+            if (File.Exists(kept))
+            {
+                try { return File.OpenRead(kept); }
+                catch (FileNotFoundException) { /* removed just now: fall through */ }
+                catch (DirectoryNotFoundException) { }
+            }
+        }
+
+        var latest = GetLatest();
+        if (latest is null || !string.Equals(latest.Sha256, hash, StringComparison.OrdinalIgnoreCase)) return null;
+        return OpenPackage();
+    }
+
+    /// <summary>The published release whose package has this SHA-256, newest first, or null.</summary>
+    public LauncherReleaseInfo? FindRelease(string sha256) =>
+        GetHistory().FirstOrDefault(r => string.Equals(r.Sha256, sha256, StringComparison.OrdinalIgnoreCase));
 
     public LauncherReleaseInfo? GetLatest()
     {
@@ -35,11 +87,8 @@ public class LauncherStore(LauncherStoreOptions opts)
     /// file stays a file.</summary>
     private const int MaxHistory = 60;
 
-    /// <summary>
-    /// Every release this server has published, newest first — the launcher's changelog.
-    /// </summary>
-    /// <remarks>Falls back to just the current release when there is no history yet, so a server that
-    /// has never published through this code path still answers with something true.</remarks>
+    /// <summary>All published releases, newest first (the launcher's changelog).</summary>
+    /// <remarks>Falls back to the current release alone when there is no history yet.</remarks>
     public IReadOnlyList<LauncherReleaseInfo> GetHistory()
     {
         lock (_lock)
@@ -59,7 +108,7 @@ public class LauncherStore(LauncherStoreOptions opts)
     }
 
     /// <summary>Records a release at the head of the history, replacing any entry with the same
-    /// version (a re-publish of the same number is a correction, not a second release).</summary>
+    /// version (re-publishing a version number is a correction, not a new release).</summary>
     private void AppendHistory(LauncherReleaseInfo info)
     {
         try
@@ -100,9 +149,9 @@ public class LauncherStore(LauncherStoreOptions opts)
         }
     }
 
-    /// <summary>Atomically replaces the "latest" release. <paramref name="installer"/> is optional:
-    /// when supplied it becomes the setup .exe served at <c>/download</c>; when null the previous
-    /// installer file is removed so a release never serves a stale mismatched installer.</summary>
+    /// <summary>Atomically replaces the "latest" release. When <paramref name="installer"/> is
+    /// given it becomes the setup .exe served at <c>/download</c>; when null the previous installer
+    /// is removed so it never serves a mismatched one.</summary>
     public async Task<LauncherReleaseInfo> StoreAsync(
         Stream input, string version, string fileName, string? notes,
         Stream? installer = null, string? installerFileName = null, CancellationToken ct = default)

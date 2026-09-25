@@ -6,8 +6,8 @@ using CloudLauncher.Services;
 
 namespace CloudLauncher.Views;
 
-/// <summary>An in-window searchable picker over the pack's installed mods (used to add a manual
-/// dependency). The result task yields the chosen <see cref="PackMod"/>, or null if cancelled.</summary>
+/// <summary>An in-window searchable picker over the pack's installed mods, for adding a manual
+/// dependency. The result task yields the chosen <see cref="PackMod"/>, or null if cancelled.</summary>
 public partial class ModPickerDialog : UserControl
 {
     private readonly List<PackMod> _all;

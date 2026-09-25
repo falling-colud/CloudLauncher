@@ -1,5 +1,5 @@
-﻿using System.IO;
-using System.Diagnostics;
+﻿using System.ComponentModel;
+using System.IO;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Windows;
@@ -24,7 +24,7 @@ public partial class ModExplorerWindow : Window
     {
         InitializeComponent();
         _pack = pack;
-        Title = $"Mod Explorer — {pack.Name}";
+        Title = $"Mod Explorer - {pack.Name}";
         PackContextLabel.Text = $"Adding mods to {pack.Name} · {PackVersionLabel()}";
         ModTabs.SelectionChanged += OnModTabsChanged;
 
@@ -32,8 +32,7 @@ public partial class ModExplorerWindow : Window
         Loaded += (_, _) => OnSearch(this, new RoutedEventArgs());
     }
 
-    // The Overview tab hosts a WebView2 whose HWND draws over WPF (airspace), so hide it
-    // off-tab. Scrolling is native — no manual wheel routing.
+    // The Overview tab hosts a WebView2, whose HWND draws over WPF (airspace), so hide it off-tab.
     private void OnModTabsChanged(object sender, SelectionChangedEventArgs e)
     {
         if (e.Source != ModTabs) return;
@@ -106,7 +105,7 @@ public partial class ModExplorerWindow : Window
         DetailPlaceholder.Visibility = Visibility.Collapsed;
         ModTabs.Visibility = Visibility.Visible;
         ModTabs.SelectedIndex = 0;
-        ShowOverview("Loading…");
+        ShowOverview("Loading...");
         ScreenshotsEmptyText.Text = "Loading screenshots...";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
@@ -158,6 +157,52 @@ public partial class ModExplorerWindow : Window
         if (_currentMod is null) return;
 
         await DownloadVersionAsync(_currentMod, row.Source);
+    }
+
+    // ── versions tab: row menu and changelog ─────────────────────────────────
+
+    private void OnVersionsGridPreviewRightDown(object sender, MouseButtonEventArgs e) =>
+        VersionRowMenu.SelectRowUnder(VersionsGrid, e);
+
+    /// <summary>Right-click menu for a version: changelog, download this version, copy its number.
+    /// Same menu as the in-window browse page.</summary>
+    private void OnVersionsGridRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (VersionRowMenu.RowAt<VersionRow>(e) is not { } row) return;
+        e.Handled = true;
+        VersionRowMenu.Open(BuildVersionMenu(row));
+    }
+
+    private ContextMenu BuildVersionMenu(VersionRow row)
+    {
+        var menu = VersionRowMenu.Create(VersionsGrid);
+        VersionRowMenu.AddChangelog(menu, () => _ = ShowChangelogAsync(row));
+        VersionRowMenu.Add(menu, "Download this version", VersionRowMenu.DownloadGlyph, () =>
+        {
+            if (_currentMod is { } mod) _ = DownloadVersionAsync(mod, row.Source);
+        });
+        menu.Items.Add(new Separator());
+        VersionRowMenu.AddCopyVersion(menu, row.VersionNumber, copied => DownloadStatus.Text = copied
+            ? $"Copied {row.VersionNumber}."
+            : "The clipboard is in use by another program.");
+        return menu;
+    }
+
+    /// <summary>Opens the changelog for one version. This window has no card layer, so the card opens
+    /// as a small window owned by this one.</summary>
+    private async Task ShowChangelogAsync(VersionRow row)
+    {
+        try
+        {
+            var (versions, index) = VersionChangelogCard.FromList(VersionsGrid.Items, row, r => r.Source);
+            await VersionChangelogCard.ShowAsync(VersionsGrid, _currentMod?.Name ?? ModNameLabel.Text,
+                versions, index, _currentMod);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ModExplorerWindow), ex);
+            DownloadStatus.Text = "Could not open the changelog.";
+        }
     }
 
     private async Task QuickDownloadAsync(ModSummary mod)
@@ -231,7 +276,8 @@ public partial class ModExplorerWindow : Window
                 PackLoaderTag(),
                 App.State.Modrinth,
                 App.State.CurseForge,
-                PackChannel());
+                PackChannel(),
+                App.State.ModVersions);
             if (downloads.Count == 0)
             {
                 DownloadStatus.Text = "No downloadable file found.";
@@ -240,9 +286,16 @@ public partial class ModExplorerWindow : Window
 
             var saved = 0;
             var skipped = 0;
+            var refused = new List<string>();
             foreach (var item in downloads)
             {
-                var dest = Path.Combine(folder, item.File.Filename);
+                // The file name comes from the store; anything but a plain name could land outside the folder.
+                if (PathSafety.ResolveFileName(folder, item.File.Filename) is not { } dest)
+                {
+                    AppLog.Log(nameof(ModExplorerWindow), $"Skipped {item.Mod.Name}: the store's file name is not a plain file name: {item.File.Filename}");
+                    refused.Add($"{item.Mod.Name} (the store gave an unusable file name)");
+                    continue;
+                }
                 if (item.IsDependency && File.Exists(dest))
                 {
                     skipped++;
@@ -257,6 +310,7 @@ public partial class ModExplorerWindow : Window
                 await App.State.Modrinth.DownloadFileAsync(item.File.DownloadUrl, dest, progress);
                 saved++;
             }
+            if (refused.Count > 0) throw new InvalidOperationException(string.Join("; ", refused));
 
             DownloadProgress.Value = 100;
             var skippedText = skipped > 0 ? $" ({skipped} already present)" : "";
@@ -318,7 +372,7 @@ public partial class ModExplorerWindow : Window
     }
 
     /// <summary>The release channel this pack's downloads follow (pack setting, else the launcher
-    /// default in Settings → Mods).</summary>
+    /// default in Settings > Mods).</summary>
     private string PackChannel() => App.State.ModMetadata.EffectiveUpdateChannel(_pack.Id);
 
     private static bool MatchesFilters(ModVersion version, string mc, string loader) =>
@@ -388,27 +442,20 @@ public partial class ModExplorerWindow : Window
         ScreenshotPreviewWindow.ShowFor(Window.GetWindow(this), row.FullImageUrl, row.Title);
     }
 
+    /// <summary>Links come from store metadata, so only http and https ones are opened.</summary>
     private void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
 
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { DownloadStatus.Text = ex.Message; }
+        if (!SafeLaunch.OpenUrl(url)) DownloadStatus.Text = "That link could not be opened.";
     }
 
+    /// <summary>Sets the detail pane's icon through the shared icon cache. IconLoader owns this
+    /// element's Source, so nothing else should assign it.</summary>
     private void SetSelectedIcon(string? iconUrl)
     {
-        SelectedIconImage.Source = null;
-        if (string.IsNullOrWhiteSpace(iconUrl)) return;
-
-        try
-        {
-            SelectedIconImage.Source = new BitmapImage(new Uri(iconUrl, UriKind.Absolute));
-        }
-        catch
-        {
-            SelectedIconImage.Source = null;
-        }
+        IconLoader.SetDecodeWidth(SelectedIconImage, 52);
+        IconLoader.SetUrl(SelectedIconImage, string.IsNullOrWhiteSpace(iconUrl) ? null : iconUrl);
     }
 
     private void ClearSelectedMod()
@@ -421,7 +468,7 @@ public partial class ModExplorerWindow : Window
         ModNameLabel.Text = "";
         ModMetaLabel.Text = "";
         SelectedIconFallback.Text = "";
-        SelectedIconImage.Source = null;
+        SetSelectedIcon(null);
         VersionsGrid.ItemsSource = null;
         VersionFilterNote.Text = "";
     }
@@ -464,10 +511,29 @@ public partial class ModExplorerWindow : Window
 
 // ── row view-models ──────────────────────────────────────────────────────────
 
-public sealed class ModResultRow(ModSummary src, bool isDownloaded = false)
+/// <summary>
+/// One store search result. <see cref="IsDownloaded"/> raises change notification so a finished
+/// download can grey out its button without refreshing the whole list, which would re-realize every
+/// row and lose the scroll position.
+/// </summary>
+public sealed class ModResultRow(ModSummary src, bool isDownloaded = false) : INotifyPropertyChanged
 {
     public ModSummary Source { get; } = src;
-    public bool IsDownloaded { get; set; } = isDownloaded;
+
+    private bool _isDownloaded = isDownloaded;
+    public bool IsDownloaded
+    {
+        get => _isDownloaded;
+        set
+        {
+            if (_isDownloaded == value) return;
+            _isDownloaded = value;
+            // Null refreshes every binding on the row; CanDownload and DownloadTooltip derive from
+            // this flag.
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+        }
+    }
+
     public bool CanDownload => !IsDownloaded;
     public string DownloadTooltip => IsDownloaded
         ? "Already downloaded in this pack"
@@ -485,6 +551,8 @@ public sealed class ModResultRow(ModSummary src, bool isDownloaded = false)
         n >= 1_000_000 ? $"{n / 1_000_000.0:F1}M"
       : n >= 1_000     ? $"{n / 1000.0:F0}K"
       : n.ToString();
+
+    public event PropertyChangedEventHandler? PropertyChanged;
 }
 
 public sealed class VersionRow(
@@ -502,10 +570,10 @@ public sealed class VersionRow(
         : !IsCompatible ? $"Not compatible with {compatibilityLabel}"
         : "Download this version";
     public string VersionNumber  => Source.VersionNumber;
-    public string McVersions     => string.Join(", ", Source.GameVersions.Take(3)) + (Source.GameVersions.Length > 3 ? "…" : "");
+    public string McVersions     => string.Join(", ", Source.GameVersions.Take(3)) + (Source.GameVersions.Length > 3 ? "..." : "");
     public string LoaderList     => string.Join(", ", Source.Loaders);
     public string ReleaseChannel => Source.ReleaseChannel;
-    public string DateLabel      => Source.DatePublished.LocalDateTime.ToString("yyyy-MM-dd");
+    public string DateLabel      => TimeFormat.Date(Source.DatePublished);
     public string SizeLabel      => Source.Files.FirstOrDefault()?.Size is long s
         ? s > 1024 * 1024 ? $"{s / (1024.0 * 1024):F1} MB" : $"{s / 1024.0:F0} KB"
         : "";

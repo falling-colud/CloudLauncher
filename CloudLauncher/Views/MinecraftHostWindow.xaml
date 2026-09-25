@@ -194,7 +194,7 @@
                                        Style="{StaticResource Caption}"
                                        Margin="0,0,6,0"/>
                             <TextBlock x:Name="ClockLabel"
-                                       FontFamily="{StaticResource MonoFont}"
+                                       FontFamily="{DynamicResource MonoFont}"
                                        FontSize="12"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource TextPrimaryBrush}"
@@ -203,10 +203,10 @@
                                        Style="{StaticResource Caption}"
                                        Margin="0,0,6,0"/>
                             <TextBlock x:Name="ElapsedLabel"
-                                       FontFamily="{StaticResource MonoFont}"
+                                       FontFamily="{DynamicResource MonoFont}"
                                        FontSize="12"
                                        FontWeight="SemiBold"
-                                       Foreground="{DynamicResource AccentBrush}"
+                                       Foreground="{DynamicResource AccentTextBrush}"
                                        Margin="0,1,0,0"/>
                         </StackPanel>
                     </DockPanel>

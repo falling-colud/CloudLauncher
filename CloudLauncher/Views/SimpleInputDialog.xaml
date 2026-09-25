@@ -1,29 +1,34 @@
 ﻿<Window x:Class="CloudLauncher.Views.SimpleInputDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Input" Height="240" Width="440"
-        WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
+        Title="Input" Width="440"
+        SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
         Background="{DynamicResource Surface1Brush}"
         Foreground="{DynamicResource TextPrimaryBrush}">
+    <!-- Height is measured, not fixed: a fixed height clips the Cancel/OK row at larger system text
+    sizes. Every row is Auto so SizeToContent can add them up. -->
     <Grid Margin="24">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
-        <TextBlock Grid.Row="0" x:Name="TitleLabel" Style="{StaticResource H2}" Margin="0,0,0,12"/>
+        <TextBlock Grid.Row="0" x:Name="TitleLabel" Style="{StaticResource H2}" Margin="0,0,0,12"
+                   TextWrapping="Wrap"/>
         <Label Grid.Row="1" x:Name="PromptLabel" Margin="0,0,0,6"/>
         <TextBox Grid.Row="2" x:Name="InputBox"
                  MinHeight="40" Padding="12,8"
                  FontSize="14"
                  Background="{DynamicResource Surface0Brush}"
                  BorderBrush="{DynamicResource BorderStrongBrush}"/>
-        <DockPanel Grid.Row="4" Margin="0,16,0,0">
+        <!-- LastChildFill would stretch Cancel across the whole row. -->
+        <DockPanel Grid.Row="3" Margin="0,20,0,0" LastChildFill="False">
             <Button DockPanel.Dock="Right" Content="OK" Style="{StaticResource AccentButton}"
-                    IsDefault="True" Click="OnOk"/>
-            <Button DockPanel.Dock="Right" Content="Cancel" IsCancel="True" Click="OnCancel"/>
+                    MinWidth="96" IsDefault="True" Click="OnOk"/>
+            <Button DockPanel.Dock="Right" Content="Cancel" MinWidth="96" Margin="0,0,8,0"
+                    IsCancel="True" Click="OnCancel"/>
         </DockPanel>
     </Grid>
 </Window>

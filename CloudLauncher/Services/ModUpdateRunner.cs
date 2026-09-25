@@ -5,17 +5,11 @@ using CloudLauncher.Views;
 
 namespace CloudLauncher.Services;
 
-/// <summary>
-/// Installs a batch of mod updates, several at a time, with per-mod progress.
-/// </summary>
-/// <remarks>
-/// One at a time was leaving most of the connection idle: a mod download is mostly latency —
-/// resolve the CurseForge download URL, then pull a file that is often under a megabyte — so a
-/// 40-mod update spent minutes doing nothing in particular. How many run at once is the user's
-/// choice (Settings → Downloads, 1–9) rather than a number picked here, because the useful ceiling
-/// depends on their connection, and because the stores answer a burst from one address with 403s
-/// and 429s, which is a cost everyone behind the launcher's server shares.
-/// </remarks>
+/// <summary>Installs a batch of mod updates, several at a time, with per-mod progress.</summary>
+/// <remarks>A mod download is mostly latency (resolve the CurseForge URL, then fetch a small file), so
+/// running several at once saves a lot of time. The limit is a user setting (Settings > Downloads, 1-9)
+/// because the useful ceiling depends on the connection, and the stores answer bursts from one address
+/// with 403s and 429s, which hits everyone sharing the launcher's server.</remarks>
 public static class ModUpdateRunner
 {
     public enum JobState { Waiting, Running, Done, Failed, Skipped }
@@ -33,7 +27,7 @@ public static class ModUpdateRunner
         public ModVersion Target { get; }
 
         public string Name => Mod.DisplayName;
-        public string VersionsLabel => $"{Mod.VersionLabel}  →  {Target.VersionNumber}";
+        public string VersionsLabel => $"{Mod.VersionLabel}  >  {Target.VersionNumber}";
 
         private JobState _state = JobState.Waiting;
         public JobState State { get => _state; private set => Set(ref _state, value, nameof(State), nameof(IsRunning), nameof(IsFinished)); }
@@ -42,22 +36,21 @@ public static class ModUpdateRunner
         public bool IsFinished => State is JobState.Done or JobState.Failed or JobState.Skipped;
 
         private double _percent;
-        /// <summary>0–100. Stays at 0 while the download's size is unknown.</summary>
+        /// <summary>0-100. Stays at 0 while the download's size is unknown.</summary>
         public double Percent { get => _percent; private set => Set(ref _percent, value, nameof(Percent)); }
 
-        // Starts false: a job that has not begun shows an empty bar, not the indeterminate crawl,
-        // which otherwise makes forty waiting mods look like forty downloads in flight.
+        // Starts false so waiting jobs show an empty bar instead of looking like active downloads.
         private bool _indeterminate;
         public bool IsIndeterminate { get => _indeterminate; private set => Set(ref _indeterminate, value, nameof(IsIndeterminate)); }
 
-        private string _status = "Waiting…";
+        private string _status = "Waiting...";
         public string Status { get => _status; private set => Set(ref _status, value, nameof(Status)); }
 
         internal void Begin()
         {
             State = JobState.Running;
             IsIndeterminate = true;
-            Status = "Starting…";
+            Status = "Starting...";
         }
 
         internal void Report(long done, long total)
@@ -69,8 +62,8 @@ public static class ModUpdateRunner
                 return;
             }
             var pct = Math.Clamp(done * 100.0 / total, 0, 100);
-            // Only wake the UI on a visible change: a 40-mod batch otherwise fires tens of thousands
-            // of dispatcher callbacks a second and the window stops painting.
+            // Only notify on a visible change, otherwise a big batch floods the dispatcher and the window
+            // stops painting.
             if (IsIndeterminate || Math.Abs(pct - Percent) >= 1 || pct >= 100)
             {
                 IsIndeterminate = false;
@@ -92,10 +85,8 @@ public static class ModUpdateRunner
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
-        /// <summary>
-        /// Assigns and notifies on the UI thread. The runner writes these from worker tasks, and a
-        /// binding updated off the dispatcher is the classic way to end up with a half-drawn list.
-        /// </summary>
+        /// <summary>Assigns and notifies on the UI thread, since the runner writes these from worker
+        /// tasks.</summary>
         private void Set<T>(ref T field, T value, params string[] names)
         {
             if (EqualityComparer<T>.Default.Equals(field, value)) return;

@@ -14,10 +14,12 @@ using Microsoft.Win32;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The pack page's Mods tab: a grid over the pack's installed mods. Reads the same unified
-/// <see cref="PackModInventory"/> the Modpack Management page does, so a mod that is listed on both
-/// stores shows the store it was installed from (or the pack's default store) here exactly as it
-/// does there, and the update check, source filter and "Update all" review share one rule set.
+/// The pack page's Mods tab: a grid over the pack's installed mods. Uses the same
+/// <see cref="PackModInventory"/> as Modpack Management, so store attribution, update checks and
+/// the source filter match it.
+/// <para>Bulk updates live in Modpack Management; here a mod is updated from its row button or
+/// menu. The hub button is on the pack page's Overview tab (<see cref="PackDetailView"/>), not
+/// here.</para>
 /// </summary>
 public partial class ModListView : UserControl
 {
@@ -30,8 +32,8 @@ public partial class ModListView : UserControl
     private string _searchText = "";
     private bool _checkingUpdates;
 
-    private const double SearchCollapsedWidth = 36;
-    private const double SearchExpandedWidth = 240;
+    /// <summary>Loading, empty and error states for the grid area.</summary>
+    private readonly PageState _state;
 
     public ModListView()
     {
@@ -39,23 +41,35 @@ public partial class ModListView : UserControl
         _view = CollectionViewSource.GetDefaultView(_rows);
         _view.Filter = ModFilter;
         ModGrid.ItemsSource = _view;
+
+        // The filter is in memory and cheap, so it also runs on every keystroke, not only after the
+        // box's debounce.
+        SearchBox.TextChanged += (_, _) => ApplyFilter();
+
+        // StatusLabel is a status line, not a count: it shows phases ("identifying...", "checked
+        // 14:02") as well as numbers. This tab has no count label, so PageState gets none.
+        _state = new PageState(ModGrid, PageStateHost, nameof(ModListView))
+            .Copy(PageCopy.Mods)
+            .Slots(null, StatusLabel)
+            .DisableWhileBusy(RefreshButton, SourceFilterBox);
+        _state.RetryRequested += () => _ = ScanModsAsync();
     }
 
     public void Load(PackDetail pack, Window owner)
     {
         _pack = pack;
         _ownerWindow = owner;
-        // Low mode is one modpack's profile, not a general setting — see LowModeService.AppliesTo.
+        // Low mode is one modpack's profile, not a general setting; see LowModeService.AppliesTo.
         var lowModeOffered = LowModeService.AppliesTo(pack, App.State.Settings);
         LowModePanel.Visibility = lowModeOffered ? Visibility.Visible : Visibility.Collapsed;
         LowModeBox.IsChecked = lowModeOffered && LowModeService.IsEnabled(App.State.Settings, pack.Id);
-        _ = ScanModsAsync();
+        // Tab opened or page came back into view: a quiet scan.
+        _ = ScanModsAsync(quiet: true);
     }
 
     /// <summary>
-    /// Records the low-mode preference. The settings themselves are rewritten at launch rather than here, so the
-    /// pack's config files are only ever touched while the game is closed - editing them under a running game would
-    /// simply be overwritten when it exits.
+    /// Records the low-mode preference. The config files are rewritten at launch while the game is
+    /// closed; edits made under a running game would be overwritten when it exits.
     /// </summary>
     private void OnLowModeToggled(object sender, RoutedEventArgs e)
     {
@@ -75,17 +89,33 @@ public partial class ModListView : UserControl
 
     // ── scan + identify + update check ────────────────────────────────────────
 
-    private async Task ScanModsAsync(bool forceUpdateCheck = false)
+    /// <param name="quiet">True when the user didn't ask for it (tab opened, or returning to the
+    /// page). The status line then stays as it was unless the work runs past
+    /// <see cref="PageState.QuietRefreshDelay"/>.</param>
+    private async Task ScanModsAsync(bool forceUpdateCheck = false, bool quiet = false)
     {
         if (_pack is null) return;
         var generation = ++_scanGeneration;
         _cts?.Cancel();
         _cts = new CancellationTokenSource();
+        // The cancelled scan's check never got to clear these, and its frozen "n of N" would show
+        // until this scan's own check starts.
+        _checkingUpdates = false;
+        _checkProgress = null;
+        _identifying = false;
         var ct = _cts.Token;
         var pack = _pack;
 
-        StatusLabel.Text = "Scanning mods...";
-        UpdateAllButton.Visibility = Visibility.Collapsed;
+        var scanning = $"Reading the mods folder in {pack.Name}...";
+        quiet = quiet && !forceUpdateCheck && _rows.Count > 0 && _state.HasData;
+        HoldStatusQuiet(quiet);
+        if (quiet)
+            _state.Begin(scanning, null, quiet: true, onReveal: () => _state.Note(scanning));
+        else
+        {
+            _state.Begin(scanning);
+            _state.Note(scanning);
+        }
         List<PackMod> mods;
         try
         {
@@ -94,68 +124,120 @@ public partial class ModListView : UserControl
         catch (OperationCanceledException) { return; }
         catch (Exception ex)
         {
-            if (generation == _scanGeneration) StatusLabel.Text = "Failed to scan mods: " + ex.Message;
+            // Show a plain message with Retry; the exception goes to the launcher log.
+            if (generation == _scanGeneration)
+                _state.Error("The mods folder could not be read.", ex);
             return;
         }
         if (generation != _scanGeneration) return;
 
         _rows.Clear();
         foreach (var m in mods) _rows.Add(m);
-        if (mods.Count == 0) { StatusLabel.Text = "No mod files found in any mods/ folder."; return; }
-        UpdateStatusLabel(identifying: true);
+        _identifying = mods.Count > 0;
+        UpdateStatusLabel();
+        if (mods.Count == 0) return;
 
         // Second pass: store identities (hashing + cached matching), patched into the rows in place.
         try { await App.State.ModInventory.ResolveIdentitiesAsync(pack.Id, mods, ct); }
         catch (OperationCanceledException) { return; }
-        catch { /* offline — keep the file-name view */ }
+        catch { /* offline: keep the file-name view */ }
         if (generation != _scanGeneration) return;
 
+        _identifying = false;
         _view.Refresh();
         UpdateStatusLabel();
         await CheckUpdatesAsync(mods, generation, ct, forceUpdateCheck);
     }
 
-    /// <summary>Background update check over every identified mod, a few at a time. The lists come
-    /// from the shared version catalog, so re-opening this tab is cheap; the ApiClient paces the
-    /// actual store traffic so a big pack can't trip the stores' rate limits.</summary>
+    /// <summary>Background update check over every identified mod: a few bulk requests answer most
+    /// of the pack at once (see <see cref="ModUpdater.CheckManyAsync"/>), and the rest go one at a time
+    /// at the pace set in Settings. The answers come from the shared version catalog, so re-opening
+    /// this tab is cheap.</summary>
     private async Task CheckUpdatesAsync(IReadOnlyList<PackMod> mods, int generation, CancellationToken ct,
         bool forceRefresh = false)
     {
         if (_pack is null) return;
         var mc = _pack.MinecraftVersion;
         var loader = ModUpdater.LoaderTag(_pack);
+        var pump = new ModUpdateCheckPump(Dispatcher,
+            () => ct.IsCancellationRequested || generation != _scanGeneration,
+            _ => UpdateStatusLabel());
         _checkingUpdates = true;
+        _checkProgress = pump.Progress;
         UpdateStatusLabel();
-        var gate = new SemaphoreSlim(3, 3);
+        ModUpdateCheckSummary? summary = null;
         try
         {
-            await Task.WhenAll(mods.Select(async mod =>
-            {
-                if (mod.PrimaryMod is null || mod.PrimaryVersion is null) return;
-                await gate.WaitAsync(ct);
-                try
-                {
-                    var latest = await ModUpdater.FindUpdateAsync(mod, mc, loader, forceRefresh, ct);
-                    if (ct.IsCancellationRequested || generation != _scanGeneration) return;
-                    await Dispatcher.InvokeAsync(() => { mod.LatestVersion = latest; });
-                }
-                finally { gate.Release(); }
-            }));
+            summary = await ModUpdater.CheckManyAsync(mods, mc, loader, forceRefresh, pump.Progress, pump.Post, ct);
         }
-        catch (OperationCanceledException) { return; }
-        catch { /* individual failures are already swallowed; nothing else to do */ }
-        if (generation != _scanGeneration) return;
+        catch (OperationCanceledException) { /* a newer scan took over */ }
+        catch (Exception ex) { AppLog.LogError(nameof(ModListView), ex); }
+        finally { pump.Stop(); }
+        if (ct.IsCancellationRequested || generation != _scanGeneration) return;
         _checkingUpdates = false;
-        _lastCheckedAt = DateTime.Now;
+        _checkProgress = null;
+        _lastCheckedAt = DateTimeOffset.Now;
         _lastCheckWasFresh = forceRefresh;
+        _lastCheckTook = summary?.Elapsed;
+        _lastCheckFailed = summary?.Failed ?? 0;
         UpdateStatusLabel();
     }
 
-    private DateTime? _lastCheckedAt;
+    /// <summary>When the stores were last asked. A <see cref="DateTimeOffset"/> so it can go to
+    /// <see cref="TimeFormat"/>, which localises the "checked 14:02" stamp.</summary>
+    private DateTimeOffset? _lastCheckedAt;
     private bool _lastCheckWasFresh;
 
-    private void UpdateStatusLabel(bool identifying = false)
+    /// <summary>The running check's counters, for the "n of N" in the status line.</summary>
+    private ModUpdateCheckProgress? _checkProgress;
+
+    /// <summary>How long the last check took, shown after a refresh.</summary>
+    private TimeSpan? _lastCheckTook;
+
+    /// <summary>Mods the last check could not ask about, shown on the status line so they aren't
+    /// taken for up to date.</summary>
+    private int _lastCheckFailed;
+
+    /// <summary>Between the rows landing and their store identities being resolved.</summary>
+    private bool _identifying;
+
+    /// <summary>Until this time a quiet reload keeps the last "checked ..." line instead of showing
+    /// the identify pass and update check, which usually answer from cache.</summary>
+    private DateTime _statusQuietUntil;
+    private System.Windows.Threading.DispatcherTimer? _statusQuietTimer;
+
+    private bool StatusQuiet => DateTime.UtcNow < _statusQuietUntil && _lastCheckedAt is not null;
+
+    /// <summary>Starts (or cancels) the quiet window, and repaints the line when it runs out so work that
+    /// is still going by then says so.</summary>
+    private void HoldStatusQuiet(bool quiet)
     {
+        _statusQuietTimer?.Stop();
+        _statusQuietUntil = quiet ? DateTime.UtcNow + PageState.QuietRefreshDelay : DateTime.MinValue;
+        if (!quiet) return;
+        _statusQuietTimer ??= new System.Windows.Threading.DispatcherTimer();
+        _statusQuietTimer.Interval = PageState.QuietRefreshDelay + TimeSpan.FromMilliseconds(20);
+        _statusQuietTimer.Tick -= OnStatusQuietOver;
+        _statusQuietTimer.Tick += OnStatusQuietOver;
+        _statusQuietTimer.Start();
+    }
+
+    private void OnStatusQuietOver(object? sender, EventArgs e)
+    {
+        _statusQuietTimer?.Stop();
+        if (_identifying || _checkingUpdates) UpdateStatusLabel();
+    }
+
+    /// <summary>
+    /// Writes the summary line through <see cref="PageState"/>, which owns the label. With no visible
+    /// rows it shows the empty panel, worded differently for no mods and for a filter with no matches.
+    /// </summary>
+    private void UpdateStatusLabel()
+    {
+        // During a quiet reload keep showing when the stores were last asked.
+        var quiet = StatusQuiet;
+        var identifying = _identifying && !quiet;
+        var checking = _checkingUpdates && !quiet;
         var total = _rows.Count;
         var curse = _rows.Count(r => r.PrimarySource == ModSource.CurseForge);
         var modrinth = _rows.Count(r => r.PrimarySource == ModSource.Modrinth);
@@ -164,19 +246,32 @@ public partial class ModListView : UserControl
         var updates = _rows.Count(r => r.HasUpdate);
         var visible = _view.Cast<object>().Count();
 
-        var summary = $"{total} mod(s) — {curse} CurseForge, {modrinth} Modrinth, {external} external";
+        var summary = $"{total} mod(s) - {curse} CurseForge, {modrinth} Modrinth, {external} external";
         if (disabled > 0) summary += $", {disabled} disabled";
         if (updates > 0) summary += $", {updates} update(s)";
-        if (visible != total) summary += $" — showing {visible}";
-        if (identifying) summary += " — identifying…";
-        else if (_checkingUpdates) summary += " — checking for updates…";
-        // Say when the stores were last asked, so "did it actually check?" has an answer on screen.
+        if (visible != total) summary += $" - showing {visible}";
+        if (identifying) summary += " - identifying...";
+        else if (checking)
+            summary += _checkProgress is { Asking: false, Total: > 0 } progress
+                ? $" - checking for updates... {progress.Done:N0} of {progress.Total:N0}"
+                : " - checking for updates...";
+        // Show when the stores were last asked.
         else if (_lastCheckedAt is { } at)
-            summary += $" — checked {at:HH:mm}{(_lastCheckWasFresh ? "" : " (cached)")}";
-        StatusLabel.Text = summary;
+        {
+            summary += $" - checked {TimeFormat.Time(at)}";
+            summary += !_lastCheckWasFresh ? " (cached)"
+                : _lastCheckTook is { } took ? $" in {ModUpdater.Duration(took)}" : "";
+            if (_lastCheckFailed > 0)
+                summary += $" - {ModUpdater.Mods(_lastCheckFailed)} could not be checked, try again later";
+        }
 
-        UpdateAllButton.Content = $"Update all ({updates})";
-        UpdateAllButton.Visibility = updates > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (visible == 0 && total > 0)
+            _state.EmptyNext("Nothing matched",
+                "Every mod is still there - the search box or the source filter is hiding them.",
+                "\uE721");
+
+        // An empty instance gets the empty panel and no summary line.
+        _state.Content(visible, note: total == 0 ? null : summary);
     }
 
     // ── filtering ─────────────────────────────────────────────────────────────
@@ -211,68 +306,43 @@ public partial class ModListView : UserControl
         UpdateStatusLabel();
     }
 
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => ApplyFilter();
-
     private void OnSourceFilterChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded || _view is null) return;
         ApplyFilter();
     }
 
-    private void OnSearchToggle(object sender, RoutedEventArgs e)
-    {
-        ExpandSearch();
-        SearchBox.Focus();
-        SearchBox.SelectAll();
-    }
-
-    private void OnSearchPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Escape) return;
-        SearchBox.Text = "";
-        CollapseSearch();
-        e.Handled = true;
-    }
-
-    private void OnSearchLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
-    {
-        if (e.NewFocus is DependencyObject nextFocus && IsDescendantOf(nextFocus, CompactSearchHost))
-            return;
-        CollapseSearch();
-    }
-
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
         {
-            ExpandSearch();
             SearchBox.Focus();
-            SearchBox.SelectAll();
+            e.Handled = true;
+        }
+        // F5 re-scans and re-checks the stores, like the resource-pack list and Modpack Management.
+        else if (e.Key == Key.F5)
+        {
+            _ = ScanModsAsync(forceUpdateCheck: true);
             e.Handled = true;
         }
     }
 
-    private void ExpandSearch()
+    /// <summary>Opens the instance's mods folder. Works with both stores unreachable, which is why it
+    /// sits beside Refresh.</summary>
+    private void OnOpenModsFolder(object sender, RoutedEventArgs e)
     {
-        CompactSearchHost.Width = SearchExpandedWidth;
-        SearchBox.Visibility = Visibility.Visible;
-    }
-
-    private void CollapseSearch()
-    {
-        if (!string.IsNullOrWhiteSpace(SearchBox.Text)) return;
-        CompactSearchHost.Width = SearchCollapsedWidth;
-        SearchBox.Visibility = Visibility.Collapsed;
-        Keyboard.ClearFocus();
-    }
-
-    private static bool IsDescendantOf(DependencyObject child, DependencyObject ancestor)
-    {
-        for (var current = child; current is not null; current = VisualTreeHelper.GetParent(current))
+        if (_pack is null) return;
+        try
         {
-            if (ReferenceEquals(current, ancestor)) return true;
+            var dir = Path.Combine(App.State.Packs.GameDir(_pack.Id), "mods");
+            Directory.CreateDirectory(dir);
+            if (!SafeLaunch.OpenFolder(dir)) _state.Note("The mods folder could not be opened.");
         }
-        return false;
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ModListView), ex);
+            _state.Note("The mods folder could not be opened.");
+        }
     }
 
     // When the mods grid gets narrow (e.g. inside a side panel), shed the less
@@ -283,31 +353,19 @@ public partial class ModListView : UserControl
         if (!e.WidthChanged) return;
         var w = e.NewSize.Width;
         SourceColumn.Visibility  = w < 520 ? Visibility.Collapsed : Visibility.Visible;
-        UpdateColumn.Visibility  = w < 440 ? Visibility.Collapsed : Visibility.Visible;
+        // This column is the tab's only one-click update, and the tab often opens in a ~420 px side
+        // panel, so it outlasts the version text.
+        UpdateColumn.Visibility  = w < 330 ? Visibility.Collapsed : Visibility.Visible;
         VersionColumn.Visibility = w < 360 ? Visibility.Collapsed : Visibility.Visible;
     }
 
     /// <summary>
-    /// Refresh: re-scan the folder AND ask the stores again, rather than reusing the version lists
-    /// the session already has.
+    /// Refresh: re-scans the folder and asks the stores again instead of using cached version lists.
     /// </summary>
     /// <remarks>Version lists are cached for fifteen minutes (see <see cref="ModVersionCatalog"/>) so
-    /// that opening this tab does not cost a store call per mod — which is what got the launcher's
-    /// server throttled in September. The consequence is that leaving the tab and coming back shows
-    /// the same answer as before, which looks like the check never ran. This button is the way to
-    /// actually ask again.</remarks>
+    /// opening this tab doesn't cost a store call per mod, which gets the server throttled. This is how
+    /// to force a fresh check.</remarks>
     private async void OnRefresh(object s, RoutedEventArgs e) => await ScanModsAsync(forceUpdateCheck: true);
-
-    private void OnOpenManagement(object s, RoutedEventArgs e)
-    {
-        if (_pack is null) return;
-        if (_ownerWindow is MainWindow main)
-            main.OpenModManagementForPack(_pack);
-        else if (_ownerWindow is MinecraftHostWindow host)
-            host.OpenModExplorerForPack(_pack); // in-game overlay keeps the lightweight browser
-        else
-            new ModExplorerWindow(_pack) { Owner = _ownerWindow }.Show();
-    }
 
     private async void OnImportModpack(object s, RoutedEventArgs e)
     {
@@ -332,53 +390,12 @@ public partial class ModListView : UserControl
             await UpdateModAsync(mod);
     }
 
-    private async void OnUpdateAll(object sender, RoutedEventArgs e)
-    {
-        if (_pack is null) return;
-        var updatable = _rows.Where(m => m.HasUpdate && m.LatestVersion is not null).ToList();
-        if (updatable.Count == 0) { StatusLabel.Text = "Everything is up to date."; return; }
-
-        List<(PackMod Mod, ModVersion Target)>? chosen;
-        if (_ownerWindow is MainWindow host)
-        {
-            chosen = await ModUpdateReviewDialog.ShowAsync(host, _pack, updatable);
-        }
-        else
-        {
-            // No in-window card host here (the in-game overlay): fall back to a plain confirm that
-            // updates everything except locked mods.
-            var run = updatable.Where(m => !m.Meta.UpdateLocked).ToList();
-            var held = updatable.Count - run.Count;
-            var ok = await AppDialog.ConfirmAsync(_ownerWindow, "Update all",
-                $"Update {run.Count} mod(s)?" + (held > 0 ? $" {held} locked mod(s) will be skipped." : ""),
-                "Update", "Cancel");
-            chosen = ok ? run.Select(m => (m, m.LatestVersion!)).ToList() : null;
-        }
-        if (chosen is null || chosen.Count == 0) return;
-
-        var summary = await RunUpdatesAsync(chosen);
-        StatusLabel.Text = summary.Describe();
-        await ScanModsAsync();
-    }
-
-    /// <summary>Installs a batch of updates several at a time, showing a bar per mod when there is a
-    /// window to show it in (the in-game overlay has none — there the status line reports the result).</summary>
-    private async Task<ModUpdateRunner.Summary> RunUpdatesAsync(IReadOnlyList<(PackMod Mod, ModVersion Target)> chosen)
-    {
-        if (_pack is not null && _ownerWindow is MainWindow host)
-            return await ModUpdateProgressDialog.RunAsync(host, _pack, chosen);
-
-        StatusLabel.Text = $"Updating {chosen.Count} mod(s)…";
-        var jobs = chosen.Select(c => new ModUpdateRunner.Job(c.Mod, c.Target)).ToList();
-        return await ModUpdateRunner.RunAsync(jobs, App.State.Settings.EffectiveModDownloadConcurrency);
-    }
-
     private async Task UpdateModAsync(PackMod mod)
     {
         if (_pack is null || mod.LatestVersion is null) return;
         if (!await ConfirmUpdateGuardsAsync(mod)) return;
 
-        StatusLabel.Text = $"Updating {mod.DisplayName}…";
+        StatusLabel.Text = $"Updating {mod.DisplayName}...";
         try
         {
             if (await ModUpdater.InstallVersionAsync(mod, mod.LatestVersion))
@@ -404,7 +421,7 @@ public partial class ModListView : UserControl
 
         if (mod.Meta.UpdateIncompatible && App.State.ModMetadata.Advanced(_pack.Id).WarnOnUpdateIncompatible &&
             !await AppDialog.ConfirmAsync(_ownerWindow, "Update warning",
-                $"{mod.DisplayName} is marked as update-incompatible — updating it may break your setup.\n\nUpdate anyway?",
+                $"{mod.DisplayName} is marked as update-incompatible - updating it may break your setup.\n\nUpdate anyway?",
                 "Update", "Cancel", danger: true))
             return false;
         return true;
@@ -418,7 +435,7 @@ public partial class ModListView : UserControl
             return;
         }
 
-        StatusLabel.Text = $"Loading versions for {mod.DisplayName}…";
+        StatusLabel.Text = $"Loading versions for {mod.DisplayName}...";
         var versions = await ModUpdater.FetchVersionsAsync(mod.PrimaryMod);
         if (versions.Count == 0) { StatusLabel.Text = $"No versions found for {mod.DisplayName}."; return; }
 
@@ -428,13 +445,13 @@ public partial class ModListView : UserControl
         if (chosen is null) { StatusLabel.Text = ""; return; }
         if (!await ConfirmUpdateGuardsAsync(mod)) { StatusLabel.Text = ""; return; }
 
-        StatusLabel.Text = $"Installing {mod.DisplayName} {chosen.Version.VersionNumber}…";
+        StatusLabel.Text = $"Installing {mod.DisplayName} {chosen.Version.VersionNumber}...";
         try
         {
             if (await ModUpdater.InstallVersionAsync(mod, chosen.Version))
             {
-                // The picker's "Keep this version" box is what pins a deliberate downgrade, so a
-                // later "Update all" does not quietly undo it.
+                // The picker's "Keep this version" box pins a downgrade so a later
+                // "Update all" doesn't undo it.
                 ModVersionPickerDialog.ApplyKeepVersion(_pack.Id, mod, chosen);
                 StatusLabel.Text = $"Installed {mod.DisplayName} {chosen.Version.VersionNumber}.";
                 await ScanModsAsync();
@@ -475,83 +492,105 @@ public partial class ModListView : UserControl
         }
     }
 
-    private void OnModContextMenuOpened(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Right-clicking a row opens the shared <see cref="ModOptionsMenu"/>, as in Modpack Management,
+    /// the planning board and the Categories tab.
+    /// </summary>
+    /// <remarks>Only a click on a row opens it, so the empty space below the last row can't act on a
+    /// stale selection.</remarks>
+    private void OnModGridRightClick(object sender, MouseButtonEventArgs e)
     {
-        var mod = SelectedMod;
-        CtxOpenPage.IsEnabled = mod is { IsExternal: false };
-        CtxOpenWebsite.IsEnabled = mod?.PageUrl is not null;
-        CtxUpdate.IsEnabled = mod is { HasUpdate: true };
-        CtxUpdate.Header = mod is { HasUpdate: true, LatestVersion: { } v } ? $"Update to {v.VersionNumber}" : "Update to latest";
-        CtxUpdateToVersion.IsEnabled = mod is { IsExternal: false } && _ownerWindow is MainWindow;
-        CtxCreateHostedMod.IsEnabled = mod is { IsExternal: true };
-        CtxEnableMod.Visibility = mod is { Enabled: false } ? Visibility.Visible : Visibility.Collapsed;
-        CtxDisableMod.Visibility = mod is { Enabled: true } ? Visibility.Visible : Visibility.Collapsed;
-
-        // The store submenu only means something for a jar known on both stores.
-        CtxStore.Visibility = mod is { IsCrossListed: true } ? Visibility.Visible : Visibility.Collapsed;
-        if (mod is { IsCrossListed: true })
-        {
-            var packDefault = mod.DefaultSource switch
-            {
-                ModSource.CurseForge => "CurseForge",
-                ModSource.Modrinth => "Modrinth",
-                _ => "Modrinth first"
-            };
-            CtxStoreAuto.Header = $"Pack default ({packDefault})";
-            CtxStoreAuto.InputGestureText = mod.Meta.PreferredSource is null ? "✓" : "";
-            CtxStoreCurse.InputGestureText = mod.Meta.PreferredSource == ModSource.CurseForge ? "✓" : "";
-            CtxStoreModrinth.InputGestureText = mod.Meta.PreferredSource == ModSource.Modrinth ? "✓" : "";
-        }
+        if (_pack is null) return;
+        if (FindAncestor<DataGridRow>(e.OriginalSource as DependencyObject) is null) return;
+        if (SelectedMod is not { } mod) return;
+        var menu = ModOptionsMenu.Build(mod, BuildModOptionsContext(mod));
+        menu.PlacementTarget = ModGrid;
+        menu.IsOpen = true;
+        e.Handled = true;
     }
 
-    private void OnCtxOpenPage(object s, RoutedEventArgs e)
+    /// <summary>Clicking a mod's name opens its store page in the browser.</summary>
+    /// <remarks>Single clicks only, so the grid's double-click-opens-the-mod still works.</remarks>
+    private void OnModNameClick(object sender, MouseButtonEventArgs e)
     {
-        if (SelectedMod is { } mod) OpenModPage(mod);
+        if (e.ClickCount != 1) return;
+        if ((sender as FrameworkElement)?.DataContext is not PackMod { PageUrl: { } url }) return;
+        ModOptionsMenu.OpenUrl(url);
+        e.Handled = true;
     }
 
-    private void OnCtxOpenWebsite(object s, RoutedEventArgs e)
+    /// <summary>
+    /// Callbacks for the shared menu, built per right-click. A null callback hides that item.
+    /// </summary>
+    /// <remarks>"Open page" and "Update to version..." are left out for a jar no store knows (the
+    /// latter also when no picker dialog can be shown). "Create hosted mod from jar" is always set;
+    /// the menu greys it out for identified mods.</remarks>
+    private ModOptionsContext BuildModOptionsContext(PackMod mod) => new()
     {
-        if (SelectedMod?.PageUrl is not { } url) return;
-        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
+        PackId = _pack!.Id,
+        Inventory = App.State.ModInventory,
+        Owner = _ownerWindow,
+        AllMods = _rows,
+        OnChanged = () => { _view.Refresh(); UpdateStatusLabel(); },
+        OnOpenPage = mod.IsExternal ? null : OpenModPage,
+        OnUpdate = list => _ = UpdateManyAsync(list),
+        OnUpdateToVersion = mod.IsExternal || _ownerWindow is not MainWindow
+            ? null
+            : m => _ = UpdateToVersionAsync(m),
+        OnDelete = list => _ = DeleteFilesAsync(list),
+        OnReveal = Reveal,
+        OnSetEnabled = (list, enabled) => _ = SetManyEnabledAsync(list, enabled),
+        OnRecheckUpdates = list => _ = RecheckUpdatesAsync(list),
+        OnCreateHostedMod = m => _ = CreateHostedModAsync(m),
+    };
+
+    private async Task UpdateManyAsync(IReadOnlyList<PackMod> mods)
+    {
+        foreach (var mod in mods.Where(m => m.HasUpdate)) await UpdateModAsync(mod);
     }
 
-    private async void OnCtxUpdate(object s, RoutedEventArgs e)
+    private async Task SetManyEnabledAsync(IReadOnlyList<PackMod> mods, bool enabled)
     {
-        if (SelectedMod is { HasUpdate: true } mod) await UpdateModAsync(mod);
+        foreach (var mod in mods.Where(m => m.Enabled != enabled)) await SetModEnabledAsync(mod, enabled);
     }
 
-    private async void OnCtxUpdateToVersion(object s, RoutedEventArgs e)
+    /// <summary>Re-runs the update check for mods whose store or release channel just changed.</summary>
+    private async Task RecheckUpdatesAsync(IReadOnlyList<PackMod> mods)
     {
-        if (SelectedMod is { } mod) await UpdateToVersionAsync(mod);
-    }
-
-    private void OnCtxStoreAuto(object s, RoutedEventArgs e) => SetPreferredSource(null);
-    private void OnCtxStoreCurse(object s, RoutedEventArgs e) => SetPreferredSource(ModSource.CurseForge);
-    private void OnCtxStoreModrinth(object s, RoutedEventArgs e) => SetPreferredSource(ModSource.Modrinth);
-
-    /// <summary>Pins (or un-pins) which store's listing a cross-listed mod follows, then re-checks
-    /// its update against that store's version list.</summary>
-    private async void SetPreferredSource(ModSource? source)
-    {
-        if (_pack is null || SelectedMod is not { } mod) return;
-        mod.Meta.PreferredSource = source;
-        App.State.ModInventory.SaveMeta(_pack.Id, mod);
+        if (_pack is null) return;
         _view.Refresh();
         UpdateStatusLabel();
-        var latest = await ModUpdater.FindUpdateAsync(mod, _pack.MinecraftVersion, ModUpdater.LoaderTag(_pack));
-        mod.LatestVersion = latest;
+        var mc = _pack.MinecraftVersion;
+        var loader = ModUpdater.LoaderTag(_pack);
+        foreach (var mod in mods)
+        {
+            // If the store can't be asked, keep what the mod showed before.
+            var result = await ModUpdater.CheckUpdateAsync(mod, mc, loader);
+            if (!result.Failed) mod.LatestVersion = result.Update;
+        }
         UpdateStatusLabel();
     }
 
-    private async void OnCtxEnable(object s, RoutedEventArgs e)
+    private void Reveal(PackMod mod)
     {
-        if (SelectedMod is { Enabled: false } mod) await SetModEnabledAsync(mod, true);
+        var dir = Path.GetDirectoryName(mod.FilePath);
+        if (dir is null) return;
+        if (!SafeLaunch.OpenFolder(dir)) StatusLabel.Text = "Could not open the folder.";
     }
 
-    private async void OnCtxDisable(object s, RoutedEventArgs e)
+    private async Task DeleteFilesAsync(IReadOnlyList<PackMod> mods)
     {
-        if (SelectedMod is { Enabled: true } mod) await SetModEnabledAsync(mod, false);
+        if (mods.Count == 0) return;
+        var what = mods.Count == 1 ? Path.GetFileName(mods[0].FilePath) : $"{mods.Count} mod files";
+        if (!await AppDialog.ConfirmAsync(_ownerWindow, "Delete mod",
+                $"Delete {what}?", "Delete", "Cancel", danger: true))
+            return;
+        try
+        {
+            foreach (var mod in mods) File.Delete(mod.FilePath);
+            await ScanModsAsync();
+        }
+        catch (Exception ex) { StatusLabel.Text = ex.Message; }
     }
 
     private async void OnModEnabledToggle(object sender, RoutedEventArgs e)
@@ -564,8 +603,8 @@ public partial class ModListView : UserControl
         if (!ok) toggle.IsChecked = mod.Enabled;
     }
 
-    /// <summary>Flips a mod on disk (<c>.jar</c> ⇄ <c>.jar.disabled</c>) and applies the same dependency
-    /// cascade the Modpack Management page uses, so the two never disagree about what a disable means.</summary>
+    /// <summary>Toggles a mod on disk (<c>.jar</c> / <c>.jar.disabled</c>) with the same dependency
+    /// cascade as the Modpack Management page.</summary>
     private Task<bool> SetModEnabledAsync(PackMod mod, bool enabled)
     {
         if (_pack is null) return Task.FromResult(false);
@@ -591,9 +630,8 @@ public partial class ModListView : UserControl
         }
         else
         {
-            // Honours the pack's "Auto-download and enable required dependencies" switch, the same
-            // way the Modpack Management page does — the two must not disagree about what enabling
-            // a mod pulls in with it.
+            // Honours the pack's "Auto-download and enable required dependencies" switch, like the Modpack
+            // Management page.
             var deps = adv.AutoDownloadDependencies
                 ? ModGraphService.PlanEnable(all, mod)
                 : Array.Empty<PackMod>();
@@ -612,10 +650,10 @@ public partial class ModListView : UserControl
         return Task.FromResult(true);
     }
 
-    private async void OnCtxCreateHostedMod(object sender, RoutedEventArgs e)
+    /// <summary>Publishes a jar no store recognises as a hosted mod on the launcher's own server.</summary>
+    private async Task CreateHostedModAsync(PackMod mod)
     {
         if (_pack is null) return;
-        if (SelectedMod is not { } mod) return;
         if (!mod.IsExternal)
         {
             StatusLabel.Text = "This jar is already linked to a known mod.";
@@ -691,29 +729,6 @@ public partial class ModListView : UserControl
         {
             StatusLabel.Text = "Create hosted mod failed: " + ex.Message;
         }
-    }
-
-    private void OnCtxReveal(object s, RoutedEventArgs e)
-    {
-        if (SelectedMod is not { } mod) return;
-        var dir = Path.GetDirectoryName(mod.FilePath);
-        if (dir is null) return;
-        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true }); }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
-    }
-
-    private async void OnCtxDelete(object s, RoutedEventArgs e)
-    {
-        if (SelectedMod is not { } mod) return;
-        if (!await AppDialog.ConfirmAsync(_ownerWindow, "Delete mod",
-                $"Delete {Path.GetFileName(mod.FilePath)}?", "Delete", "Cancel", danger: true))
-            return;
-        try
-        {
-            File.Delete(mod.FilePath);
-            await ScanModsAsync();
-        }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
     }
 
     private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject

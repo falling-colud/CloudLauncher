@@ -1,10 +1,18 @@
-﻿<Page x:Class="CloudLauncher.Views.ResourcePacksView"
+<Page x:Class="CloudLauncher.Views.ResourcePacksView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:views="clr-namespace:CloudLauncher.Views"
-      xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Resource packs"
       Background="{DynamicResource Surface0Brush}">
+
+    <!--  The standard six-row page (header, actions, divider, strip, content, status), laid out
+    like Worlds and Shaders so matching buttons sit in the same places. Lists every resource pack
+    you have, in your own folders, with one "on by default" switch per row: on means every
+    compatible instance gets it. A row opens the pack's page, where the instances can be narrowed.
+    Folders are named lists in AppSettings.ResourcePackFolders, managed from the chip and row
+    menus. Load order lives in each instance's options.txt, so it is on that instance's
+    Resources tab (the row menu's "Load order for ...").  -->
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -15,724 +23,165 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <Grid Grid.Row="0" Margin="28,24,28,18">
-            <StackPanel>
+        <!-- ── Row 0: title and one line saying what the page is. No buttons, no count. ── -->
+        <DockPanel Grid.Row="0" Style="{StaticResource PageHeaderPanel}">
+            <StackPanel VerticalAlignment="Center">
                 <TextBlock Style="{StaticResource H1}" Text="Resource packs"/>
-                <TextBlock Style="{StaticResource Muted}"
-                           Text="Organize installed zips across instances or browse texture packs from CurseForge, Modrinth, and CloudLauncher hosting."/>
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           Text="Every pack on this PC, across all your instances. File them into folders, and click one to open its own page."/>
             </StackPanel>
-        </Grid>
+        </DockPanel>
 
-        <Grid Grid.Row="1" Margin="28,12,28,10">
+        <!-- ── Row 1: the canonical actions bar ────────────────────────────── -->
+        <Grid Grid.Row="1" Style="{StaticResource PageFilterBar}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button Style="{StaticResource AccentButton}" Click="OnCreateResourcePack">
-                    <Button.ContentTemplate>
-                        <DataTemplate>
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="&#xE710;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                                           Margin="0,0,6,0" VerticalAlignment="Center"/>
-                                <TextBlock Text="Create resource pack" VerticalAlignment="Center" FontWeight="SemiBold"/>
-                            </StackPanel>
-                        </DataTemplate>
-                    </Button.ContentTemplate>
+            <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,-3,0,-3">
+                <!--  The page's one accent button. Import picks the file, optionally the
+                instances, and can publish it in the same flow.  -->
+                <Button x:Name="ImportButton" Style="{StaticResource AccentButton}"
+                        Margin="0,3,8,3" Click="OnImport"
+                        ToolTip="Bring a .zip (or an unpacked pack folder) in, and into any instances you choose. You can also drop one onto this page.">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE898;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Import" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                    </StackPanel>
                 </Button>
-                <Button Style="{StaticResource IconButton}" Click="OnImportZip"
-                        Content="&#xE898;" FontFamily="{StaticResource IconFont}" FontSize="14"
-                        ToolTip="Import zip into resourcepacks/ folder"/>
-                <Button Style="{StaticResource IconButton}" Click="OnOpenDownloadBrowser"
-                        Content="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="14"
-                        ToolTip="Download packs from the web catalog"/>
-                <Button Style="{StaticResource IconButton}" Click="OnCreateFolder"
-                        Content="&#xE8F1;" FontFamily="{StaticResource IconFont}" FontSize="14"
-                        ToolTip="Create folder"/>
-            </StackPanel>
+                <Button x:Name="BrowseButton" Style="{StaticResource HeaderActionButton}"
+                        Click="OnOpenDownloadBrowser"
+                        ToolTip="Browse CurseForge, Modrinth and CloudLauncher for a resource pack" Margin="0,3,8,3">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE896;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Browse" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </WrapPanel>
 
-            <StackPanel Grid.Column="1" Orientation="Horizontal">
-                <Border x:Name="CompactSearchHost"
-                        Background="{DynamicResource Surface1Brush}"
-                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                        CornerRadius="6" MinHeight="36" Width="36"
-                        HorizontalAlignment="Right" Margin="0,0,8,0">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <Button x:Name="SearchToggleButton" Grid.Column="0"
-                                Style="{StaticResource IconButton}" Click="OnSearchToggle"
-                                Content="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                                ToolTip="Search"/>
-                        <TextBox x:Name="SearchBox" Grid.Column="1" Background="Transparent" BorderThickness="0"
-                                 VerticalAlignment="Center" Margin="0,0,10,0"
-                                 Visibility="Collapsed"
-                                 TextChanged="OnSearchTextChanged"
-                                 PreviewKeyDown="OnSearchPreviewKeyDown"
-                                 LostKeyboardFocus="OnSearchLostKeyboardFocus"
-                                 ToolTip="Search or filter packs">
-                            <TextBox.Template>
-                                <ControlTemplate TargetType="TextBox">
-                                    <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
-                                </ControlTemplate>
-                            </TextBox.Template>
-                        </TextBox>
-                    </Grid>
-                </Border>
-                <Border x:Name="BrowseExtrasHost" Visibility="Collapsed">
-                    <Button Style="{StaticResource IconButton}" Click="OnFiltersClick"
-                            Content="&#xE71C;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                            ToolTip="Filters"/>
-                </Border>
-                <Button Style="{StaticResource IconButton}" Click="OnRefresh"
-                        Content="&#xE72C;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                        ToolTip="Refresh"/>
-                <Popup x:Name="FiltersPopup" PlacementTarget="{Binding ElementName=SearchBox}"
-                       Placement="Top" StaysOpen="False" AllowsTransparency="True"
-                       HorizontalOffset="0" VerticalOffset="-8">
-                    <Border Background="{DynamicResource Surface2Brush}"
-                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                            CornerRadius="8" Padding="14" MinWidth="240">
-                        <StackPanel>
-                            <TextBlock Style="{StaticResource H3}" Text="Filters" Margin="0,0,0,10"/>
-                            <TextBlock Style="{StaticResource Caption}" Text="Minecraft version"/>
-                            <TextBox x:Name="FilterMcBox" Margin="0,4,0,10"
-                                     ToolTip="e.g. 1.21.1"/>
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                                <Button Content="Apply" Style="{StaticResource AccentButton}"
-                                        Click="OnApplyFilters" Padding="14,5"/>
-                            </StackPanel>
-                        </StackPanel>
-                    </Border>
-                </Popup>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <views:CompactSearchBox x:Name="SearchBox" Margin="0,0,8,0"
+                                        Placeholder="Filter packs"
+                                        SearchToolTip="Filter by name, file or instance (Ctrl+F)"/>
+                <!--  Icon-only utilities, always in this order: open folder, then refresh.
+                     "Open folder" has no global meaning here because resourcepacks/ is per instance,
+                     so it resolves one first - see OnOpenFolder.  -->
+                <Button x:Name="OpenFolderButton" Style="{StaticResource HeaderIconButton}"
+                        Click="OnOpenFolder"
+                        Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}"
+                        ToolTip="Open an instance's resourcepacks folder"/>
+                <Button x:Name="RefreshButton" Style="{StaticResource HeaderIconButton}"
+                        Click="OnRefresh"
+                        Content="&#xE72C;" FontFamily="{DynamicResource IconFont}"
+                        ToolTip="Re-read every instance's resourcepacks folder and your own packs (F5)"/>
             </StackPanel>
         </Grid>
 
-        <Border Grid.Row="2" Height="1" Margin="28,4,28,10"
-                Background="{DynamicResource BorderSubtleBrush}"/>
+        <Border Grid.Row="2" Style="{StaticResource PageDivider}"/>
 
-        <ScrollViewer Grid.Row="3" Margin="28,4,28,16"
-                      HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-            <ItemsControl x:Name="SourceStrip">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate>
-                        <StackPanel Orientation="Horizontal"/>
-                    </ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Border Padding="0" Margin="0,2,8,2"
-                                Cursor="{Binding CursorHint}"
-                                Background="{Binding Background}"
-                                BorderBrush="{Binding BorderColor}" BorderThickness="1"
-                                CornerRadius="14"
-                                MouseLeftButtonUp="OnSourceChipClick"
-                                Visibility="{Binding ChipVisibility}">
-                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                <TextBlock Text="{Binding Icon}" FontFamily="{StaticResource IconFont}"
-                                           FontSize="11" Margin="12,0,6,0"
-                                           VerticalAlignment="Center"
-                                           Foreground="{Binding Foreground}"
-                                           Visibility="{Binding IconVisibility}"/>
-                                <TextBlock Text="{Binding Label}" Margin="0,0,12,0"
-                                           Padding="0,5,0,5"
-                                           VerticalAlignment="Center"
-                                           Foreground="{Binding Foreground}"
-                                           FontWeight="{Binding FontWeight}"/>
-                            </StackPanel>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
+        <!-- ── Row 3: sort, instance scope, folders ─────────────────────── -->
+        <Grid Grid.Row="3" Margin="28,4,28,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
 
-        <Grid Grid.Row="4" Margin="28,0,28,16">
-            <!-- Installed local library -->
-            <Grid x:Name="InstalledPane">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center"
+                        Margin="0,0,12,0">
+                <Button x:Name="SortButton" Style="{StaticResource ToolbarIconButton}"
+                        Click="OnSortButtonClick"
+                        Content="&#xE8CB;" FontFamily="{DynamicResource IconFont}"
+                        ToolTip="Sort resource packs">
+                    <Button.ContextMenu>
+                        <ContextMenu Opened="OnSortMenuOpened">
+                            <MenuItem x:Name="SortModifiedMenuItem" Header="Last modified" Tag="Modified"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortNameMenuItem" Header="Name" Tag="Name"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortSizeMenuItem" Header="Size" Tag="Size"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortPackMenuItem" Header="Instances using it" Tag="Pack"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+                <ComboBox x:Name="PackScopeBox" Width="240" Margin="0,0,8,0"
+                          SelectionChanged="OnPackScopeChanged"
+                          ToolTip="Narrow the page to one instance - only that instance's packs are listed, and the status line reports which of them override each other"/>
+            </StackPanel>
 
-                <Grid Grid.Row="0" Margin="0,0,0,12">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-
-                    <Button x:Name="SortButton" Grid.Column="0"
-                            Style="{StaticResource IconButton}" Click="OnSortButtonClick"
-                            Content="&#xE8CB;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                            Margin="0,2,8,2" Padding="8,5"
-                            ToolTip="Sort resource packs">
-                        <Button.ContextMenu>
-                            <ContextMenu Opened="OnSortMenuOpened">
-                                <MenuItem x:Name="SortModifiedMenuItem" Header="Last modified" Tag="Modified"
-                                          IsCheckable="True" Click="OnSortMenuItemClick"/>
-                                <MenuItem x:Name="SortNameMenuItem" Header="Name" Tag="Name"
-                                          IsCheckable="True" Click="OnSortMenuItemClick"/>
-                                <MenuItem x:Name="SortSizeMenuItem" Header="Size" Tag="Size"
-                                          IsCheckable="True" Click="OnSortMenuItemClick"/>
-                                <MenuItem x:Name="SortPackMenuItem" Header="Source instance" Tag="Pack"
-                                          IsCheckable="True" Click="OnSortMenuItemClick"/>
-                            </ContextMenu>
-                        </Button.ContextMenu>
-                    </Button>
-
-                    <ScrollViewer Grid.Column="1"
-                                  HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
-                        <ItemsControl x:Name="FolderStrip">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <StackPanel Orientation="Horizontal"/>
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Padding="0" Margin="0,2,8,2" Cursor="Hand"
-                                            Background="{Binding Background}"
-                                            BorderBrush="{Binding BorderColor}" BorderThickness="1"
-                                            CornerRadius="14"
-                                            MouseLeftButtonUp="OnFolderChipClick"
-                                            MouseRightButtonUp="OnFolderChipRightClick">
-                                        <Border.ContextMenu>
-                                            <ContextMenu>
-                                                <MenuItem Header="Rename folder" Click="OnFolderRename"/>
-                                                <MenuItem Header="Delete folder" Click="OnFolderDelete"/>
-                                            </ContextMenu>
-                                        </Border.ContextMenu>
-                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                            <TextBlock Text="{Binding Icon}" FontFamily="{StaticResource IconFont}" FontSize="11"
-                                                       Margin="12,0,6,0" VerticalAlignment="Center"
-                                                       Foreground="{Binding Foreground}"/>
-                                            <TextBlock Text="{Binding Label}" Margin="0,0,4,0"
-                                                       Padding="0,5,0,5"
-                                                       VerticalAlignment="Center"
-                                                       Foreground="{Binding Foreground}"
-                                                       FontWeight="{Binding FontWeight}"/>
-                                            <TextBlock Text="{Binding CountLabel}" Margin="0,0,12,0"
-                                                       VerticalAlignment="Center"
-                                                       Foreground="{Binding CountForeground}"
-                                                       FontSize="11"/>
-                                        </StackPanel>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
-                </Grid>
-
-                <ScrollViewer Grid.Row="1" Padding="0,14,0,0" VerticalScrollBarVisibility="Auto"
-                              anim:Animate.SmoothScroll="True"
-                              AllowDrop="True" DragOver="OnInstalledDragOver" Drop="OnInstalledDrop"
-                              SizeChanged="OnRpListContainerSizeChanged">
-                    <Grid>
-                        <ItemsControl x:Name="RpList" HorizontalAlignment="Stretch"
-                                      anim:Animate.EntranceStagger="True">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <UniformGrid x:Name="RpGrid" Columns="4" Loaded="OnRpGridLoaded"/>
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Margin="6" Cursor="Hand"
-                                            Height="240" VerticalAlignment="Top"
-                                            Background="{DynamicResource Surface2Brush}"
-                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                                            CornerRadius="10"
-                                            anim:Animate.HoverLift="True"
-                                            ToolTip="{Binding CardTooltip}"
-                                            MouseLeftButtonUp="OnRpCardClick">
-                                        <Border.ContextMenu>
-                                            <ContextMenu Opened="OnCardMenuOpened">
-                                                <MenuItem Header="{Binding ToggleMenuHeader}" Click="OnCtxToggleEnabled">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <Separator/>
-                                                <MenuItem Header="Edit details…" Click="OnCtxEdit">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <MenuItem Header="Rename…" Click="OnCtxRename" InputGestureText="F2">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <MenuItem Header="Rename file on disk…" Click="OnCtxRenameFile">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE8E5;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <MenuItem Header="Reveal in Explorer" Click="OnCtxReveal">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <Separator/>
-                                                <MenuItem Header="Copy to compatible instance…"
-                                                          Click="OnCtxCopyInstance">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <MenuItem Header="Add to folder"
-                                                          SubmenuOpened="OnCtxAddToFolderOpened">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE8F1;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                    <MenuItem Header="(placeholder)"/>
-                                                </MenuItem>
-                                                <Separator/>
-                                                <MenuItem Header="Copy pack key" Click="OnCtxCopyKey"/>
-                                                <MenuItem Header="Delete…" Click="OnCtxDelete" InputGestureText="Del"
-                                                          Foreground="{DynamicResource DangerBrush}">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                            </ContextMenu>
-                                        </Border.ContextMenu>
-                                        <Grid ClipToBounds="True">
-                                            <Grid.RowDefinitions>
-                                                <RowDefinition Height="*"/>
-                                                <RowDefinition Height="Auto"/>
-                                            </Grid.RowDefinitions>
-
-                                            <Border Grid.Row="0" Background="{Binding CoverBackground}"
-                                                    CornerRadius="9,9,0,0" ClipToBounds="True"
-                                                    MinHeight="100">
-                                                <Grid>
-                                                    <Border Background="{DynamicResource AccentGlowBrush}" Opacity="0.05"/>
-                                                    <TextBlock Text="{Binding Initial}"
-                                                               FontFamily="{StaticResource HeadingFont}"
-                                                               FontSize="56" FontWeight="Bold"
-                                                               Foreground="White" Opacity="0.92"
-                                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                    <!-- The pack's own pack.png, over the generated letter tile: with
-                                                         six texture packs installed the letter told you nothing. -->
-                                                    <Image Source="{Binding IconSource}" Stretch="UniformToFill"
-                                                           RenderOptions.BitmapScalingMode="HighQuality"/>
-                                                    <Border Style="{StaticResource Pill}"
-                                                            Background="{DynamicResource Surface4Brush}"
-                                                            Margin="0,10,10,0"
-                                                            HorizontalAlignment="Right" VerticalAlignment="Top">
-                                                        <TextBlock Text="{Binding SourcePackName}" Style="{StaticResource PillText}"
-                                                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
-                                                    </Border>
-                                                    <StackPanel Orientation="Horizontal" Margin="10,0,0,10"
-                                                                HorizontalAlignment="Left" VerticalAlignment="Bottom">
-                                                        <Border Background="#66000000" CornerRadius="4" Padding="6,2">
-                                                            <TextBlock Text="{Binding KindLabel}" FontSize="10" FontWeight="SemiBold"
-                                                                       Foreground="White"/>
-                                                        </Border>
-                                                        <Border Background="{DynamicResource AccentBrush}" CornerRadius="4"
-                                                                Padding="6,2" Margin="6,0,0,0"
-                                                                ToolTip="Listed in this instance's options.txt"
-                                                                Visibility="{Binding EnabledVisibility}">
-                                                            <TextBlock Text="{Binding EnabledLabel}" FontSize="10" FontWeight="SemiBold"
-                                                                       Foreground="{DynamicResource TextOnAccentBrush}"/>
-                                                        </Border>
-                                                    </StackPanel>
-                                                </Grid>
-                                            </Border>
-
-                                            <Grid Grid.Row="1" Margin="12,10,12,12">
-                                                <Grid.RowDefinitions>
-                                                    <RowDefinition Height="Auto"/>
-                                                    <RowDefinition Height="Auto"/>
-                                                    <RowDefinition Height="Auto"/>
-                                                </Grid.RowDefinitions>
-                                                <TextBlock Grid.Row="0" Text="{Binding DisplayName}"
-                                                           FontWeight="SemiBold" FontSize="14"
-                                                           TextTrimming="CharacterEllipsis"
-                                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                                <TextBlock Grid.Row="1" Text="{Binding MetaLabel}"
-                                                           Style="{StaticResource Caption}" Margin="0,2,0,0"
-                                                           TextTrimming="CharacterEllipsis"/>
-                                                <!-- Primary action bottom-right, where the world and instance cards
-                                                     put Play. -->
-                                                <DockPanel Grid.Row="2" Margin="0,8,0,0" LastChildFill="True">
-                                                    <Button DockPanel.Dock="Right" Content="Copy to…"
-                                                            Click="OnCardCopyTo" Tag="{Binding}"
-                                                            Padding="10,3" MinWidth="0" MinHeight="0" FontSize="11"
-                                                            VerticalAlignment="Bottom"
-                                                            ToolTip="Copy this pack into another instance"/>
-                                                    <StackPanel>
-                                                        <TextBlock Text="{Binding CompatibilityLabel}"
-                                                                   Style="{StaticResource Caption}"
-                                                                   TextTrimming="CharacterEllipsis"/>
-                                                        <TextBlock Text="{Binding SizeLabel}" Style="{StaticResource Caption}"
-                                                                   TextTrimming="CharacterEllipsis"/>
-                                                    </StackPanel>
-                                                </DockPanel>
-                                            </Grid>
-                                        </Grid>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-
-                        <StackPanel x:Name="RpEmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                    Margin="0,80,0,0" Visibility="Collapsed">
-                            <TextBlock Text="&#xE7C9;" FontFamily="{StaticResource IconFont}" FontSize="48"
-                                       HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                            <TextBlock Style="{StaticResource H2}" Text="No resource packs scanned"
-                                       HorizontalAlignment="Center" Margin="0,12,0,4"/>
-                            <TextBlock Style="{StaticResource Muted}" HorizontalAlignment="Center"
-                                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="420"
-                                       Text="Drop .zip packs into resourcepacks/ inside an instance, or browse and install."/>
-                        </StackPanel>
-
-                        <StackPanel x:Name="RpEmptyFolderState" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                    Margin="0,80,0,0" Visibility="Collapsed">
-                            <TextBlock Text="&#xE8B7;" FontFamily="{StaticResource IconFont}" FontSize="48"
-                                       HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                            <TextBlock Style="{StaticResource H2}" x:Name="RpEmptyFolderTitle"
-                                       Text="Folder is empty"
-                                       HorizontalAlignment="Center" Margin="0,12,0,4"/>
-                            <TextBlock Style="{StaticResource Muted}" HorizontalAlignment="Center"
-                                       TextWrapping="Wrap" MaxWidth="380" TextAlignment="Center"
-                                       Text="Use the installed card context menu • Add to folder to link packs here."/>
-                        </StackPanel>
-                    </Grid>
-                </ScrollViewer>
-            </Grid>
-
-            <!-- Browse + detail -->
-            <Grid x:Name="BrowsePane" Visibility="Collapsed">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="5*"/>
-                    <ColumnDefinition Width="14"/>
-                    <ColumnDefinition Width="4*"/>
-                </Grid.ColumnDefinitions>
-
-                <Border Grid.Column="0"
-                        Background="{DynamicResource Surface1Brush}"
-                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                        CornerRadius="8">
-                    <Grid>
-                        <ListBox x:Name="ResultsList"
-                                 SelectionChanged="OnResultSelected"
-                                 MouseDoubleClick="OnResultDoubleClick"
-                                 Background="Transparent" BorderThickness="0"
-                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                 ScrollViewer.ScrollChanged="OnResultsScroll">
-                            <ListBox.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Padding="10" Background="Transparent"
-                                            ToolTip="{Binding RowTooltip}">
-                                        <Border.ContextMenu>
-                                            <ContextMenu Opened="OnBrowseMenuOpened">
-                                                <MenuItem Header="Install…" Click="OnCtxBrowseInstall">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <MenuItem x:Name="BrowseCtxManage" Header="Manage" Click="OnCtxBrowseManage">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <MenuItem x:Name="BrowseCtxOpenPage" Header="Open page" Click="OnCtxBrowseOpenPage">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE774;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                                <MenuItem x:Name="BrowseCtxCopyUrl" Header="Copy project URL" Click="OnCtxBrowseCopyUrl"/>
-                                                <Separator x:Name="BrowseCtxDeleteSeparator"/>
-                                                <MenuItem x:Name="BrowseCtxDelete" Header="Delete hosted pack…"
-                                                          Click="OnCtxBrowseDelete"
-                                                          Foreground="{DynamicResource DangerBrush}">
-                                                    <MenuItem.Icon>
-                                                        <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                    </MenuItem.Icon>
-                                                </MenuItem>
-                                            </ContextMenu>
-                                        </Border.ContextMenu>
-                                        <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="56"/>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-
-                                            <Border Grid.Column="0" Width="44" Height="44"
-                                                    Background="{DynamicResource Surface3Brush}"
-                                                    BorderBrush="{DynamicResource BorderBrush}"
-                                                    BorderThickness="1" CornerRadius="8"
-                                                    ClipToBounds="True" VerticalAlignment="Top">
-                                                <Grid>
-                                                    <TextBlock Text="{Binding Initial}" Style="{StaticResource H3}"
-                                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                    <Image Source="{Binding IconUrl}" Stretch="UniformToFill"/>
-                                                </Grid>
-                                            </Border>
-
-                                            <StackPanel Grid.Column="1" Margin="0,0,12,0">
-                                                <DockPanel>
-                                                    <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
-                                                            Background="{Binding SourceBadgeBackground}"
-                                                            Margin="6,0,0,0">
-                                                        <TextBlock Text="{Binding SourceBadge}"
-                                                                   Style="{StaticResource PillText}"
-                                                                   Foreground="{Binding SourceBadgeForeground}"/>
-                                                    </Border>
-                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
-                                                               FontSize="13" TextTrimming="CharacterEllipsis"
-                                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                                </DockPanel>
-                                                <TextBlock Text="{Binding Summary}" Style="{StaticResource Caption}"
-                                                           TextWrapping="Wrap" Margin="0,2,0,0"
-                                                           MaxHeight="36" TextTrimming="CharacterEllipsis"/>
-                                                <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
-                                                           Margin="0,4,0,0" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                                            </StackPanel>
-
-                                            <!-- Right-edge action, and it says so when the pack is already
-                                                 in an instance: clicking Install twice used to leave two
-                                                 copies fighting in the same stack. -->
-                                            <Button Grid.Column="2" Content="{Binding InstallLabel}"
-                                                    Click="OnQuickInstallRp" Tag="{Binding}"
-                                                    Padding="12,5" MinHeight="30" MinWidth="0"
-                                                    VerticalAlignment="Center"
-                                                    ToolTip="{Binding InstallTooltip}"
-                                                    IsEnabled="{Binding IsInstallable}">
-                                                <Button.Style>
-                                                    <Style TargetType="Button" BasedOn="{StaticResource AccentButton}">
-                                                        <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding IsInstalled}" Value="True">
-                                                                <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
-                                                                <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
-                                                            </DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </Button.Style>
-                                            </Button>
-                                        </Grid>
-                                    </Border>
-                                </DataTemplate>
-                            </ListBox.ItemTemplate>
-                        </ListBox>
-
-                        <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                    Margin="0,80,0,0" Visibility="Collapsed">
-                            <TextBlock Text="&#xE7C9;" FontFamily="{StaticResource IconFont}" FontSize="48"
-                                       HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                            <TextBlock x:Name="EmptyTitle" Style="{StaticResource H2}" Text="No packs found"
-                                       HorizontalAlignment="Center" Margin="0,12,0,4"/>
-                            <TextBlock x:Name="EmptyDetail" Style="{StaticResource Muted}" HorizontalAlignment="Center"
-                                       TextWrapping="Wrap" MaxWidth="380" TextAlignment="Center"
-                                       Text="Try a different search or source chip."/>
-                        </StackPanel>
-
-                        <ProgressBar x:Name="LoadingBar" Height="2" VerticalAlignment="Top"
-                                     IsIndeterminate="True" Visibility="Collapsed"
-                                     Background="Transparent"/>
-                    </Grid>
-                </Border>
-
-                <Border Grid.Column="1" Width="1"
-                        Background="{DynamicResource BorderSubtleBrush}"
-                        HorizontalAlignment="Center"/>
-
-                <Border Grid.Column="2"
-                        Background="{DynamicResource Surface1Brush}"
-                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                        CornerRadius="8" Padding="18">
-                    <Grid>
-                        <TextBlock x:Name="DetailPlaceholder"
-                                   Text="Select a texture pack to read its overview, screenshots, links, Minecraft versions, and install a zip."
-                                   Style="{StaticResource Muted}" TextWrapping="Wrap"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center"
-                                   TextAlignment="Center" MaxWidth="420"/>
-
-                        <Grid x:Name="DetailPanel" Visibility="Collapsed">
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto"/>
-                                <RowDefinition Height="*"/>
-                                <RowDefinition Height="Auto"/>
-                            </Grid.RowDefinitions>
-
-                            <Grid Grid.Row="0" Margin="0,0,0,12">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="56"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <Border Grid.Column="0" Width="44" Height="44"
-                                        Background="{DynamicResource Surface3Brush}"
-                                        BorderBrush="{DynamicResource BorderBrush}"
-                                        BorderThickness="1" CornerRadius="8"
-                                        ClipToBounds="True" VerticalAlignment="Top">
-                                    <Grid>
-                                        <TextBlock x:Name="SelectedIconFallback" Style="{StaticResource H3}"
-                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                        <Image x:Name="SelectedIconImage" Stretch="UniformToFill"/>
-                                    </Grid>
-                                </Border>
-                                <StackPanel Grid.Column="1">
-                                    <DockPanel>
-                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="10,0,0,0">
-                                            <Button x:Name="OpenProjectButton" Content="Open page"
-                                                    Click="OnOpenSelectedProject"
-                                                    Padding="10,4" MinWidth="0" MinHeight="0"/>
-                                            <Button x:Name="ManageHostedButton" Content="Manage"
-                                                    Style="{StaticResource AccentButton}"
-                                                    Click="OnManageHostedRp"
-                                                    Padding="10,4" MinWidth="0" MinHeight="0"/>
-                                            <Button x:Name="InstallSelectedButton" Content="Install"
-                                                    Style="{StaticResource AccentButton}"
-                                                    Click="OnInstallSelectedRp"
-                                                    Padding="10,4" MinWidth="0" MinHeight="0"/>
-                                        </StackPanel>
-                                        <TextBlock x:Name="ModNameLabel" Style="{StaticResource H2}"
-                                                   TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
-                                    </DockPanel>
-                                    <TextBlock x:Name="ModMetaLabel" Style="{StaticResource Muted}" Margin="0,2,0,0"
-                                               TextWrapping="Wrap"/>
+            <ScrollViewer Grid.Column="1" VerticalAlignment="Center"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <ItemsControl x:Name="FolderStrip">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <!--  Active state is an accent border and a bolder label, from
+                            DataTriggers on DynamicResource brushes. ThemeService hands out
+                            new brushes on every apply, so a brush stored on the row would
+                            keep the old accent.  -->
+                            <slate:SlateBorder Style="{StaticResource FolderChipBorder}"
+                                    ToolTip="{Binding ToolTipText}"
+                                    MouseLeftButtonUp="OnFolderChipClick"
+                                    MouseRightButtonUp="OnFolderChipRightClick">
+                                <slate:SlateBorder.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Rename folder..." Click="OnFolderRename"/>
+                                        <MenuItem Header="Delete folder..." Click="OnFolderDelete"/>
+                                    </ContextMenu>
+                                </slate:SlateBorder.ContextMenu>
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Icon}" Style="{StaticResource FolderChipGlyph}"/>
+                                    <TextBlock Text="{Binding Label}" Style="{StaticResource FolderChipLabel}"/>
+                                    <TextBlock Text="{Binding CountLabel}" Style="{StaticResource FolderChipCount}"/>
+                                    <!--  Rename and delete are on the chip's right-click menu;
+                                    adding a pack is on the pack's row menu.  -->
                                 </StackPanel>
-                            </Grid>
-
-                            <TabControl Grid.Row="1" x:Name="ModTabs">
-                                <TabItem Header="Overview">
-                                    <Border CornerRadius="8" ClipToBounds="True" Margin="0,12,0,0"
-                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
-                                        <Border x:Name="OverviewHost" ClipToBounds="True"
-                                                Background="{DynamicResource Surface0Brush}">
-                                            <views:RichDescriptionView x:Name="OverviewBrowser"/>
-                                        </Border>
-                                    </Border>
-                                </TabItem>
-
-                                <TabItem Header="Screenshots">
-                                    <Grid Margin="0,12,0,0">
-                                        <TextBlock x:Name="ScreenshotsEmptyText" Style="{StaticResource Muted}"
-                                                   Text="No screenshots loaded."
-                                                   HorizontalAlignment="Center" VerticalAlignment="Center"
-                                                   TextWrapping="Wrap" TextAlignment="Center"/>
-                                        <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                            <ItemsControl x:Name="ScreenshotList">
-                                                <ItemsControl.ItemsPanel>
-                                                    <ItemsPanelTemplate>
-                                                        <WrapPanel/>
-                                                    </ItemsPanelTemplate>
-                                                </ItemsControl.ItemsPanel>
-                                                <ItemsControl.ItemTemplate>
-                                                    <DataTemplate>
-                                                        <Border Width="210" Margin="0,0,10,10" Style="{StaticResource Card}" Padding="8"
-                                                                Cursor="Hand" ToolTip="Open screenshot"
-                                                                MouseLeftButtonUp="OnOpenScreenshot">
-                                                            <StackPanel>
-                                                                <Border Height="112" Background="{DynamicResource Surface0Brush}"
-                                                                        BorderBrush="{DynamicResource BorderBrush}"
-                                                                        BorderThickness="1" CornerRadius="6" ClipToBounds="True">
-                                                                    <Image Source="{Binding ImageUrl}" Stretch="UniformToFill"/>
-                                                                </Border>
-                                                                <TextBlock Text="{Binding Title}" Style="{StaticResource Caption}"
-                                                                           Margin="0,6,0,0" TextWrapping="Wrap"/>
-                                                            </StackPanel>
-                                                        </Border>
-                                                    </DataTemplate>
-                                                </ItemsControl.ItemTemplate>
-                                            </ItemsControl>
-                                        </ScrollViewer>
-                                    </Grid>
-                                </TabItem>
-
-                                <TabItem Header="Links">
-                                    <StackPanel Margin="0,14,0,0">
-                                        <TextBlock Text="Project links" Style="{StaticResource H3}" Margin="0,0,0,8"/>
-                                        <WrapPanel Margin="0,2,0,0">
-                                            <Button x:Name="ProjectPageButton" Content="Project page" Click="OnOpenLink" Margin="0,0,14,12" Padding="18,8"/>
-                                            <Button x:Name="IssuesButton" Content="Issues" Click="OnOpenLink" Margin="0,0,14,12" Padding="18,8"/>
-                                            <Button x:Name="SourceButton" Content="Source" Click="OnOpenLink" Margin="0,0,14,12" Padding="18,8"/>
-                                            <Button x:Name="WikiButton" Content="Wiki" Click="OnOpenLink" Margin="0,0,14,12" Padding="18,8"/>
-                                            <Button x:Name="DiscordButton" Content="Discord" Click="OnOpenLink" Margin="0,0,14,12" Padding="18,8"/>
-                                        </WrapPanel>
-                                        <TextBlock x:Name="LinksEmptyText" Style="{StaticResource Muted}"
-                                                   Text="This project has no extra outbound links exposed here."
-                                                   TextWrapping="Wrap" Margin="0,4,0,0"/>
-                                    </StackPanel>
-                                </TabItem>
-
-                                <TabItem Header="Versions">
-                                    <Grid Margin="0,12,0,0">
-                                        <Grid.RowDefinitions>
-                                            <RowDefinition Height="Auto"/>
-                                            <RowDefinition Height="*"/>
-                                        </Grid.RowDefinitions>
-                                        <Grid Grid.Row="0" Margin="0,0,0,6">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
-                                            <StackPanel Grid.Column="0" Orientation="Horizontal" Margin="0,0,12,0">
-                                                <TextBlock Text="Versions" Style="{StaticResource H3}"/>
-                                                <TextBlock x:Name="VersionFilterNote" Style="{StaticResource Caption}"
-                                                           Margin="8,0,0,0" VerticalAlignment="Center"
-                                                           TextTrimming="CharacterEllipsis"/>
-                                            </StackPanel>
-                                            <CheckBox x:Name="ShowAllVersionsBox" Grid.Column="1" Content="Show all"
-                                                      VerticalAlignment="Center"
-                                                      Checked="OnShowAllVersionsChanged" Unchecked="OnShowAllVersionsChanged"/>
-                                        </Grid>
-                                        <Border Grid.Row="1" Background="{DynamicResource Surface0Brush}"
-                                                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                                                CornerRadius="6">
-                                            <DataGrid x:Name="VersionsGrid"
-                                                      AutoGenerateColumns="False" CanUserAddRows="False"
-                                                      HeadersVisibility="Column" RowHeaderWidth="0"
-                                                      SelectionMode="Single" IsReadOnly="True"
-                                                      Background="Transparent" BorderThickness="0">
-                                                <DataGrid.Columns>
-                                                    <DataGridTextColumn Header="Version" Binding="{Binding VersionNumber}" Width="*"/>
-                                                    <DataGridTextColumn Header="MC" Binding="{Binding McVersions}" Width="132"/>
-                                                    <DataGridTextColumn Header="Channel" Binding="{Binding ReleaseChannel}" Width="74"/>
-                                                    <DataGridTextColumn Header="Date" Binding="{Binding DateLabel}" Width="92"/>
-                                                    <DataGridTextColumn Header="Size" Binding="{Binding SizeLabel}" Width="74"/>
-                                                    <DataGridTemplateColumn Width="92">
-                                                        <DataGridTemplateColumn.CellTemplate>
-                                                            <DataTemplate>
-                                                                <Button Content="Install" Style="{StaticResource AccentButton}"
-                                                                        Padding="6,2" MinWidth="0" MinHeight="0" FontSize="11"
-                                                                        Click="OnDownloadVersionClick"/>
-                                                            </DataTemplate>
-                                                        </DataGridTemplateColumn.CellTemplate>
-                                                    </DataGridTemplateColumn>
-                                                </DataGrid.Columns>
-                                            </DataGrid>
-                                        </Border>
-                                    </Grid>
-                                </TabItem>
-                            </TabControl>
-
-                            <DockPanel Grid.Row="2" Margin="0,14,0,0">
-                                <TextBlock x:Name="DownloadStatus" Style="{StaticResource Caption}"
-                                           VerticalAlignment="Center" TextWrapping="Wrap"/>
-                                <ProgressBar x:Name="DownloadProgress" DockPanel.Dock="Bottom" Height="3"
-                                             Margin="0,0,0,-8" VerticalAlignment="Bottom"
-                                             Visibility="Collapsed" IsIndeterminate="False"/>
-                            </DockPanel>
-                        </Grid>
-                    </Grid>
-                </Border>
-            </Grid>
+                            </slate:SlateBorder>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
         </Grid>
 
-        <Border Grid.Row="5" Background="{DynamicResource Surface1Brush}"
-                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0"
-                Padding="24,8">
+        <!-- ── Row 4: the list ────────────────────────────────────────────── -->
+        <!--  AllowDrop is on this Grid rather than the list because PageState collapses the list
+        while the page is empty, and the empty panel invites dropping a zip.  -->
+        <Grid Grid.Row="4" Margin="28,0,28,16"
+              Background="Transparent"
+              AllowDrop="True" DragOver="OnListDragOver" Drop="OnListDrop">
+            <views:ContentListView x:Name="PackList"/>
+
+            <!--  Last child so it draws over the list. Loading, empty, filtered-empty, error and
+            offline states all come from this control, driven by Views/PageState.cs.  -->
+            <views:PageStateView x:Name="PageStateHost"/>
+        </Grid>
+
+        <!-- ── Row 5: status left, count and progress right ───────────────── -->
+        <!--  The count lives here rather than in the header, where nobody would see it change.  -->
+        <Border Grid.Row="5" Style="{StaticResource PageStatusBar}">
             <DockPanel>
-                <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
-                           VerticalAlignment="Center" Foreground="{DynamicResource DangerBrush}"/>
                 <TextBlock x:Name="CountLabel" DockPanel.Dock="Right"
-                           Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                           Style="{StaticResource Caption}" VerticalAlignment="Center"
+                           Margin="12,0,0,0"/>
+                <!--  No Click handler: PageState.Slots routes this button to its own
+                     CancelRequested, and a handler here as well would cancel twice.  -->
+                <Button x:Name="BusyCancelButton" DockPanel.Dock="Right" Content="Cancel"
+                        Padding="10,2" MinHeight="0" MinWidth="0" Margin="12,0,0,0"
+                        Visibility="Collapsed" VerticalAlignment="Center"
+                        ToolTip="Stop the operation in progress"/>
+                <ProgressBar x:Name="BusyBar" DockPanel.Dock="Right" Width="140" Height="4"
+                             IsIndeterminate="True" Visibility="Collapsed"
+                             VerticalAlignment="Center" Margin="12,0,0,0"/>
+                <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
+                           VerticalAlignment="Center" TextWrapping="Wrap"/>
             </DockPanel>
         </Border>
     </Grid>

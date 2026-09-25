@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json.Serialization;
 using CloudLauncher.Server.Data;
 using CloudLauncher.Shared;
@@ -17,6 +16,10 @@ public sealed class GoogleAuthPendingResult
     public TokenResponse? Tokens { get; init; }
     public string? Error { get; init; }
     public DateTimeOffset ExpiresAt { get; init; }
+
+    /// <summary>The terms version the launcher showed before starting, when the user accepted
+    /// them. Recorded on the account only if this sign-in creates it.</summary>
+    public string? AcceptedTermsVersion { get; init; }
 }
 
 public sealed class GoogleAuthService(
@@ -24,12 +27,27 @@ public sealed class GoogleAuthService(
     AppOptions app,
     IHttpClientFactory httpFactory,
     UserManager<AppUser> users,
-    JwtTokenService tokens)
+    JwtTokenService tokens,
+    AppDbContext db,
+    ILogger<GoogleAuthService> log)
 {
     private static readonly ConcurrentDictionary<string, GoogleAuthPendingResult> Pending = new();
 
-    private const string Provider = "Google";
+    /// <summary>Started flows, oldest first, so expired ones are found at the front instead of by
+    /// walking the whole dictionary on every start. Guarded by <see cref="StartOrderLock"/>.</summary>
+    private static readonly Queue<(string State, DateTimeOffset ExpiresAt)> StartOrder = new();
+    private static readonly object StartOrderLock = new();
+
+    /// <summary>How many sign-ins may be waiting at once. Every start holds a little memory until it
+    /// expires, so the total needs a ceiling.</summary>
+    private const int MaxPending = 2000;
+
+    public const string Provider = "Google";
     private static readonly TimeSpan PendingTtl = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan ResultTtl = TimeSpan.FromMinutes(2);
+
+    private const string GenericFailure = "Could not complete Google sign-in. Try again from CloudLauncher.";
+    private const string UsernameAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
 
     public bool IsConfigured =>
         !string.IsNullOrWhiteSpace(google.ClientId) && !string.IsNullOrWhiteSpace(google.ClientSecret);
@@ -37,27 +55,34 @@ public sealed class GoogleAuthService(
     public string RedirectUri =>
         $"{app.PublicBaseUrl.TrimEnd('/')}/auth/google/callback";
 
-    public (string AuthUrl, string State) Start()
+    /// <summary>Begins a sign-in, or returns null when too many are already waiting.</summary>
+    /// <param name="acceptedTermsVersion">The terms version the user accepted in the launcher, if it
+    /// asked. Null from launchers that do not.</param>
+    public (string AuthUrl, string State)? TryStart(string? acceptedTermsVersion = null)
     {
         if (!IsConfigured)
             throw new InvalidOperationException("Google sign-in is not configured on the server.");
 
-        // Opportunistically evict expired pending flows so abandoned sign-ins (user never
-        // polls, callback never fires) don't accumulate in the static dictionary forever.
         var now = DateTimeOffset.UtcNow;
-        foreach (var kv in Pending)
-            if (kv.Value.ExpiresAt < now)
-                Pending.TryRemove(kv.Key, out _);
+        string state;
+        lock (StartOrderLock)
+        {
+            EvictExpired(now);
+            if (Pending.Count >= MaxPending) return null;
 
-        var state = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
-        Pending[state] = new GoogleAuthPendingResult { ExpiresAt = DateTimeOffset.UtcNow.Add(PendingTtl) };
+            state = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
+            var expires = now.Add(PendingTtl);
+            Pending[state] = new GoogleAuthPendingResult { ExpiresAt = expires, AcceptedTermsVersion = acceptedTermsVersion };
+            StartOrder.Enqueue((state, expires));
+        }
 
         var query = new Dictionary<string, string?>
         {
             ["client_id"] = google.ClientId,
             ["redirect_uri"] = RedirectUri,
             ["response_type"] = "code",
-            ["scope"] = "openid email profile",
+            // Only the account id and address. The display name is not used, so it is not asked for.
+            ["scope"] = "openid email",
             ["state"] = state,
             ["access_type"] = "online",
             ["prompt"] = "select_account"
@@ -76,62 +101,101 @@ public sealed class GoogleAuthService(
 
         if (result.ExpiresAt < DateTimeOffset.UtcNow)
         {
-            Pending.TryRemove(state, out _);
+            Pending.TryRemove(new KeyValuePair<string, GoogleAuthPendingResult>(state, result));
             return new GoogleAuthPendingResult { Complete = true, Error = "Sign-in session expired." };
         }
+
+        // A finished sign-in is handed out once. The state also sits in the browser's history, so
+        // leaving the tokens collectable would let anyone who reads it sign in as well.
+        if (result.Complete)
+            Pending.TryRemove(new KeyValuePair<string, GoogleAuthPendingResult>(state, result));
 
         return result;
     }
 
-    public async Task HandleCallbackAsync(string? code, string? state, string? error, CancellationToken ct)
+    /// <summary>Removes every expired flow. Run now and then by <see cref="AuthMaintenance"/>, so
+    /// flows nobody comes back for do not wait for the next sign-in to be cleared.</summary>
+    public static int RemoveExpired()
     {
-        if (string.IsNullOrEmpty(state) || !Pending.ContainsKey(state))
-            return;
+        var now = DateTimeOffset.UtcNow;
+        var removed = 0;
+        foreach (var entry in Pending)
+            if (entry.Value.ExpiresAt < now && Pending.TryRemove(entry))
+                removed++;
+        lock (StartOrderLock) EvictExpired(now);
+        return removed;
+    }
 
-        void Fail(string message)
+    /// <summary>Drops expired flows from the front of <see cref="StartOrder"/>. Call under the lock.</summary>
+    private static void EvictExpired(DateTimeOffset now)
+    {
+        while (StartOrder.TryPeek(out var head) && head.ExpiresAt < now)
         {
-            Pending[state] = new GoogleAuthPendingResult
-            {
-                Complete = true,
-                Error = message,
-                ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2)
-            };
+            StartOrder.Dequeue();
+            if (!Pending.TryGetValue(head.State, out var entry)) continue;
+            if (entry.ExpiresAt < now)
+                Pending.TryRemove(new KeyValuePair<string, GoogleAuthPendingResult>(head.State, entry));
+            else
+                // It finished late and its result is still waiting to be collected.
+                StartOrder.Enqueue((head.State, entry.ExpiresAt));
         }
+    }
+
+    /// <summary>Finishes a sign-in from Google's redirect.</summary>
+    /// <returns>Null when it worked, otherwise the sentence for the browser page. The launcher gets
+    /// the same sentence from its next poll.</returns>
+    public async Task<string?> HandleCallbackAsync(string? code, string? state, string? error, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(state)
+            || !Pending.TryGetValue(state, out var pending)
+            || pending.ExpiresAt < DateTimeOffset.UtcNow)
+            return "This sign-in has expired. Start again from CloudLauncher.";
+
+        // The page was reloaded after the sign-in already finished.
+        if (pending.Complete)
+            return pending.Error;
 
         if (!string.IsNullOrEmpty(error))
-        {
-            Fail("Google sign-in was cancelled.");
-            return;
-        }
+            return Fail(state, "Google sign-in was cancelled.");
 
         if (string.IsNullOrEmpty(code))
-        {
-            Fail("Missing authorization code from Google.");
-            return;
-        }
+            return Fail(state, "Missing authorization code from Google.");
 
         try
         {
             var profile = await ExchangeCodeAsync(code, ct);
             if (profile is null)
-            {
-                Fail("Could not complete Google sign-in.");
-                return;
-            }
+                return Fail(state, GenericFailure);
 
-            var user = await FindOrCreateUserAsync(profile, ct);
+            var (user, refusal) = await FindOrCreateUserAsync(profile, pending.AcceptedTermsVersion, ct);
+            if (user is null)
+                return Fail(state, refusal ?? GenericFailure);
+
             var tokenResponse = await tokens.IssueAsync(user, ct);
             Pending[state] = new GoogleAuthPendingResult
             {
                 Complete = true,
                 Tokens = tokenResponse,
-                ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2)
+                ExpiresAt = DateTimeOffset.UtcNow.Add(ResultTtl)
             };
+            return null;
         }
         catch (Exception ex)
         {
-            Fail(ex.Message);
+            log.LogError(ex, "Google sign-in failed.");
+            return Fail(state, GenericFailure);
         }
+    }
+
+    private static string Fail(string state, string message)
+    {
+        Pending[state] = new GoogleAuthPendingResult
+        {
+            Complete = true,
+            Error = message,
+            ExpiresAt = DateTimeOffset.UtcNow.Add(ResultTtl)
+        };
+        return message;
     }
 
     private async Task<GoogleProfile?> ExchangeCodeAsync(string code, CancellationToken ct)
@@ -151,7 +215,10 @@ public sealed class GoogleAuthService(
 
         using var tokenResp = await http.SendAsync(tokenReq, ct);
         if (!tokenResp.IsSuccessStatusCode)
+        {
+            log.LogWarning("Google token exchange answered {Status}.", (int)tokenResp.StatusCode);
             return null;
+        }
 
         var tokenPayload = await tokenResp.Content.ReadFromJsonAsync<GoogleTokenResponse>(ct);
         if (string.IsNullOrEmpty(tokenPayload?.AccessToken))
@@ -161,91 +228,99 @@ public sealed class GoogleAuthService(
         userReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenPayload.AccessToken);
         using var userResp = await http.SendAsync(userReq, ct);
         if (!userResp.IsSuccessStatusCode)
+        {
+            log.LogWarning("Google userinfo answered {Status}.", (int)userResp.StatusCode);
             return null;
+        }
 
         var info = await userResp.Content.ReadFromJsonAsync<GoogleUserInfoResponse>(ct);
         if (info is null || string.IsNullOrEmpty(info.Sub))
             return null;
 
-        return new GoogleProfile(info.Sub, info.Email, info.Name, info.EmailVerified);
+        return new GoogleProfile(info.Sub, info.Email, info.EmailVerified);
     }
 
-    private async Task<AppUser> FindOrCreateUserAsync(GoogleProfile profile, CancellationToken ct)
+    /// <summary>The account this Google identity signs in to, creating one on first use.</summary>
+    /// <returns>The user, or null with the sentence to show (null there means the generic one).</returns>
+    private async Task<(AppUser? User, string? Refusal)> FindOrCreateUserAsync(
+        GoogleProfile profile, string? acceptedTermsVersion, CancellationToken ct)
     {
-        var login = await users.FindByLoginAsync(Provider, profile.Sub);
-        if (login is not null)
-            return login;
+        var linked = await users.FindByLoginAsync(Provider, profile.Sub);
+        if (linked is not null)
+            return AccountStatus.IsDisabled(linked) ? (null, "This account has been disabled.") : (linked, null);
 
-        // Only auto-link a Google identity to an existing local account when Google has
-        // actually verified the email. Without this check, an attacker holding a Google
-        // token whose email is unverified could bind their login to a victim account that
-        // happens to share that address and then sign in as the victim (account takeover).
-        if (profile.EmailVerified && !string.IsNullOrWhiteSpace(profile.Email))
+        if (string.IsNullOrWhiteSpace(profile.Email))
+            return (null, "Google did not share an email address for this account.");
+
+        // A matching address is never enough to attach a Google identity to an existing account:
+        // whoever controls the Google side would get into it. The owner signs in the usual way.
+        var existing = await users.FindByEmailAsync(profile.Email);
+        if (existing is not null)
         {
-            var byEmail = await users.FindByEmailAsync(profile.Email);
-            if (byEmail is not null)
-            {
-                await users.AddLoginAsync(byEmail, new UserLoginInfo(Provider, profile.Sub, Provider));
-                if (!byEmail.EmailConfirmed)
-                {
-                    byEmail.EmailConfirmed = true;
-                    await users.UpdateAsync(byEmail);
-                }
-                return byEmail;
-            }
+            // An address Google has not verified proves nothing, so it is told nothing either.
+            if (!profile.EmailVerified) return (null, null);
+            return (null, await users.HasPasswordAsync(existing)
+                ? "An account with this email already exists. Sign in with your username and password instead."
+                : "This email is already used by a different CloudLauncher account.");
         }
 
-        var username = await AllocateUsernameAsync(profile);
+        if (await AccountSignups.AreClosedAsync(db, ct))
+            return (null, "Sign-ups are closed right now.");
+
+        var username = await NewUsernameAsync();
+        if (username is null)
+        {
+            log.LogWarning("Could not find a free generated username for a new Google account.");
+            return (null, null);
+        }
+
         var user = new AppUser
         {
             UserName = username,
             Email = profile.Email,
-            // Trust the address only if Google verified it; an unverified email must not
-            // silently confirm a new account.
-            EmailConfirmed = profile.EmailVerified
+            // Only an address Google verified counts as confirmed.
+            EmailConfirmed = profile.EmailVerified,
+            TermsAcceptedAt = acceptedTermsVersion is null ? null : DateTimeOffset.UtcNow,
+            TermsVersion = acceptedTermsVersion
         };
 
         var create = await users.CreateAsync(user);
         if (!create.Succeeded)
-            throw new InvalidOperationException(string.Join("; ", create.Errors.Select(e => e.Description)));
-
-        await users.AddLoginAsync(user, new UserLoginInfo(Provider, profile.Sub, Provider));
-        return user;
-    }
-
-    private async Task<string> AllocateUsernameAsync(GoogleProfile profile)
-    {
-        var seed = profile.Name?.Trim();
-        if (string.IsNullOrWhiteSpace(seed) && !string.IsNullOrWhiteSpace(profile.Email))
-            seed = profile.Email.Split('@')[0];
-
-        seed ??= "user";
-        seed = SanitizeUsername(seed);
-        if (seed.Length < 3)
-            seed = "user";
-
-        var candidate = seed;
-        for (var i = 0; i < 100; i++)
         {
-            if (await users.FindByNameAsync(candidate) is null)
-                return candidate;
-            candidate = $"{seed}{RandomNumberGenerator.GetInt32(1000, 9999)}";
-            if (candidate.Length > 32)
-                candidate = candidate[..32];
+            log.LogWarning("Creating an account for a Google sign-in failed: {Codes}",
+                string.Join(", ", create.Errors.Select(e => e.Code)));
+            return (null, null);
         }
 
-        return $"user{Guid.NewGuid():N}"[..12];
+        var link = await users.AddLoginAsync(user, new UserLoginInfo(Provider, profile.Sub, Provider));
+        if (!link.Succeeded)
+        {
+            // An account nobody can sign in to is worse than none.
+            await users.DeleteAsync(user);
+            log.LogWarning("Linking a new account to its Google sign-in failed: {Codes}",
+                string.Join(", ", link.Errors.Select(e => e.Code)));
+            return (null, null);
+        }
+
+        return (user, null);
     }
 
-    private static string SanitizeUsername(string value)
+    /// <summary>"player" plus six random letters and digits.</summary>
+    /// <remarks>New Google accounts are not named after the Google profile: usernames are public
+    /// through search and every share list, and a real name should not end up there unasked.
+    /// People can rename themselves afterwards.</remarks>
+    private async Task<string?> NewUsernameAsync()
     {
-        var chars = value
-            .Where(c => char.IsLetterOrDigit(c) || c is '_' or '-')
-            .ToArray();
-        return new string(chars);
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            var candidate = "player" + RandomNumberGenerator.GetString(UsernameAlphabet, 6);
+            if (await users.FindByNameAsync(candidate) is null)
+                return candidate;
+        }
+        return null;
     }
 
-    private sealed record GoogleProfile(string Sub, string? Email, string? Name, bool EmailVerified);
+    private sealed record GoogleProfile(string Sub, string? Email, bool EmailVerified);
 
     private sealed class GoogleTokenResponse
     {
@@ -256,7 +331,6 @@ public sealed class GoogleAuthService(
     {
         [JsonPropertyName("sub")] public string? Sub { get; set; }
         [JsonPropertyName("email")] public string? Email { get; set; }
-        [JsonPropertyName("name")] public string? Name { get; set; }
         [JsonPropertyName("email_verified")] public bool EmailVerified { get; set; }
     }
 }

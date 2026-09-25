@@ -1,0 +1,37 @@
+<Page x:Class="CloudLauncher.Views.FileManagementView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="File Management"
+      Background="{DynamicResource Surface0Brush}">
+    <DockPanel Margin="20">
+        <!--  PageHeaderPanelSide has a 34 px right inset because the shell draws its floating
+        close and back buttons over the rightmost 42 px of any side-panel page.  -->
+        <DockPanel DockPanel.Dock="Top" Style="{StaticResource PageHeaderPanelSide}">
+            <StackPanel>
+                <TextBlock Text="File Management" Style="{StaticResource H2}"/>
+                <TextBlock x:Name="PackNameLabel" Style="{StaticResource Muted}"/>
+            </StackPanel>
+        </DockPanel>
+
+        <TabControl x:Name="Tabs" SelectionChanged="OnTabChanged">
+            <TabItem Header="Files">
+                <Grid x:Name="FilesHost"/>
+            </TabItem>
+            <TabItem Header="Editor">
+                <Grid x:Name="EditorHost"/>
+            </TabItem>
+            <TabItem Header="Share &amp; sync">
+                <Grid x:Name="ShareHost"/>
+            </TabItem>
+            <TabItem Header="Hosting">
+                <Grid x:Name="HostingHost"/>
+            </TabItem>
+            <TabItem Header="Cleanup">
+                <Grid x:Name="CleanupHost"/>
+            </TabItem>
+            <TabItem Header="Compare">
+                <Grid x:Name="CompareHost"/>
+            </TabItem>
+        </TabControl>
+    </DockPanel>
+</Page>

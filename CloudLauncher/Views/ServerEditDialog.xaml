@@ -1,11 +1,12 @@
 ﻿<UserControl x:Class="CloudLauncher.Views.ServerEditDialog"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls">
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="22" Width="470">
-        <Border.Effect>
+        <slate:SlateBorder.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
-        </Border.Effect>
+        </slate:SlateBorder.Effect>
         <StackPanel>
             <TextBlock x:Name="TitleLabel" Style="{StaticResource H2}" Text="Add server"/>
             <TextBlock x:Name="SubLabel" Style="{StaticResource Muted}" Margin="0,2,0,16" TextWrapping="Wrap"
@@ -17,7 +18,7 @@
 
             <TextBlock Text="Address" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
             <TextBox x:Name="AddressBox" Padding="8,6" TextChanged="OnAddressChanged"
-                     ToolTip="host, or host:port — Minecraft's default port is 25565"/>
+                     ToolTip="host, or host:port - Minecraft's default port is 25565"/>
             <TextBlock x:Name="AddressHint" Style="{StaticResource Caption}" Margin="0,4,0,14"
                        Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"
                        Text="Leave the port off for 25565."/>
@@ -27,7 +28,7 @@
                       ToolTip="Which instance's server list this entry goes into"/>
             <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,4" TextWrapping="Wrap"
                        Foreground="{DynamicResource TextTertiaryBrush}"
-                       Text="Server lists are per-machine — servers.dat is never synced to a shared pack, so this only changes your own copy."/>
+                       Text="Server lists are per-machine - servers.dat is never synced to a shared pack, so this only changes your own copy."/>
 
             <TextBlock x:Name="ErrorLabel" Style="{StaticResource Caption}" Margin="0,10,0,0" TextWrapping="Wrap"
                        Foreground="{DynamicResource DangerBrush}" Visibility="Collapsed"/>
@@ -37,5 +38,5 @@
                 <Button x:Name="SaveButton" Content="Add" Style="{StaticResource AccentButton}" Click="OnSave"/>
             </StackPanel>
         </StackPanel>
-    </Border>
+    </slate:SlateBorder>
 </UserControl>

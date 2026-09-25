@@ -1,0 +1,5 @@
+User-agent: *
+Disallow: /invitations/
+Disallow: /launcher/
+Disallow: /proxy/
+Disallow: /auth/

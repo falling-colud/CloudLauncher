@@ -1,0 +1,164 @@
+<Page x:Class="CloudLauncher.Views.ShaderPackDetailView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
+      Title="Shader pack"
+      Background="{DynamicResource Surface0Brush}">
+    <!--  The shader pack's own page, laid out like the resource pack's: a hero card, an Overview
+    tab with the editable part, and an Instances tab listing where the pack goes. The page states
+    what differs: an instance loads only one shader pack, and an instance without Iris loads
+    none.  -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <slate:SlateBorder Grid.Row="0" Style="{StaticResource ElevatedCard}"
+                Margin="24,18,24,16" Padding="20">
+            <StackPanel>
+                <DockPanel Margin="0,0,0,8">
+                    <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                            Background="{DynamicResource Surface4Brush}">
+                        <TextBlock x:Name="SourcePackLabel" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </slate:SlateBorder>
+                    <!--  Shader packs have no icon (no pack.png), so the letter tile is all there is. -->
+                    <slate:SlateBorder DockPanel.Dock="Left" Width="44" Height="44" Margin="0,0,12,0"
+                            Background="{DynamicResource Surface3Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="8" ClipToBounds="True" VerticalAlignment="Top">
+                        <TextBlock x:Name="PackInitialLabel" Style="{StaticResource H3}"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </slate:SlateBorder>
+                    <TextBlock x:Name="PackNameLabel" Style="{StaticResource H2}"
+                               TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                </DockPanel>
+                <TextBlock x:Name="MetaLabel" Style="{StaticResource Muted}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                    <slate:SlateBorder x:Name="EnabledPill" Style="{StaticResource Pill}"
+                            Background="{DynamicResource AccentSoftBrush}" Margin="0,0,6,0"
+                            Visibility="Collapsed"
+                            ToolTip="Named in this instance's shader config - the game loads it">
+                        <TextBlock x:Name="EnabledPillText" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource AccentTextBrush}"/>
+                    </slate:SlateBorder>
+                    <!--  Replaces the LOADED HERE pill when the page is for the launcher's own copy, which
+                    has no instance: it shows how many instances hold the file instead.  -->
+                    <slate:SlateBorder x:Name="PlacementPill" Style="{StaticResource Pill}"
+                            Background="{DynamicResource Surface4Brush}" Margin="0,0,6,0"
+                            Visibility="Collapsed">
+                        <TextBlock x:Name="PlacementPillText" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </slate:SlateBorder>
+                    <slate:SlateBorder x:Name="LoaderPill" Style="{StaticResource Pill}"
+                            Background="{DynamicResource Surface4Brush}" Margin="0,0,6,0"
+                            Visibility="Collapsed"
+                            ToolTip="This instance has no Iris, Oculus or OptiFine, so a shader pack there does nothing at all - the game renders vanilla and never says why">
+                        <TextBlock Text="NEEDS IRIS" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource WarningBrush}"/>
+                    </slate:SlateBorder>
+                    <slate:SlateBorder x:Name="KindPill" Style="{StaticResource Pill}"
+                            Background="{DynamicResource Surface4Brush}"
+                            Visibility="Collapsed">
+                        <TextBlock x:Name="KindPillText" Style="{StaticResource PillText}"
+                                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+                    </slate:SlateBorder>
+                </StackPanel>
+
+                <!--  LastChildFill off, or a single docked button stretches across the whole card.  -->
+                <DockPanel Margin="0,14,0,0" LastChildFill="False">
+                    <Button DockPanel.Dock="Right" Content="Open file location" Click="OnOpenFolder"/>
+                </DockPanel>
+            </StackPanel>
+        </slate:SlateBorder>
+
+        <TabControl Grid.Row="1" Margin="24,0,24,0" Padding="0,12,0,0"
+                    Background="Transparent" BorderThickness="0">
+            <TabItem Header="Overview">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="0,18,0,18">
+                        <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="Display name" Margin="0,0,0,8"/>
+                                <DockPanel>
+                                    <Button DockPanel.Dock="Right" Content="Save" Click="OnSaveName"/>
+                                    <TextBox x:Name="NameBox" Margin="0,0,8,0"/>
+                                </DockPanel>
+                            </StackPanel>
+                        </slate:SlateBorder>
+
+                        <slate:SlateBorder Style="{StaticResource Card}">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="Local file" Margin="0,0,0,8"/>
+                                <TextBlock x:Name="FilePathLabel" Style="{StaticResource Muted}"
+                                           TextWrapping="Wrap" Margin="0,0,0,10"/>
+                                <!--  Provenance is what makes "Update..." on the list's row menu possible; a
+                                pack added by hand has none. -->
+                                <TextBlock x:Name="ProvenanceLabel" Style="{StaticResource Body}"
+                                           TextWrapping="Wrap" Margin="0,0,0,10"
+                                           Visibility="Collapsed"/>
+                                <!--  Which copy the path above is, when it isn't an instance's. The button
+                                below opens a real file either way.  -->
+                                <TextBlock x:Name="FileScopeNote" Style="{StaticResource Body}"
+                                           TextWrapping="Wrap" Margin="0,0,0,10"
+                                           Visibility="Collapsed"/>
+                                <Button Content="Reveal in Explorer" HorizontalAlignment="Left" Click="OnOpenFolder"/>
+                            </StackPanel>
+                        </slate:SlateBorder>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Instances">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <slate:SlateBorder Style="{StaticResource Card}" Margin="0,18,0,18">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource H3}" Text="Where this goes" Margin="0,0,0,4"/>
+                            <TextBlock x:Name="InstanceStateNote" Style="{StaticResource Muted}"
+                                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+                            <slate:SlateBorder x:Name="PackListWrap" Background="{DynamicResource Surface1Brush}"
+                                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                    CornerRadius="6" Padding="6">
+                                <ItemsControl x:Name="PackCheckList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <!--  The sentence is a sibling of the CheckBox, not its content, so it can wrap
+                                            (a CheckBox measures its content at infinite width). The version pill shares the
+                                            name's line rather than the whole row, so the sentence isn't squeezed at the side
+                                            panel's minimum width.  -->
+                                            <StackPanel Margin="6,4">
+                                                <DockPanel>
+                                                    <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                            Margin="6,0,0,0">
+                                                        <TextBlock Text="{Binding VersionLabel}" Style="{StaticResource PillText}"/>
+                                                    </slate:SlateBorder>
+                                                    <CheckBox IsChecked="{Binding IsCompatible, Mode=TwoWay}"
+                                                              IsEnabled="{Binding IsEditable}"
+                                                              Click="OnPackCompatibilityChanged"
+                                                              Tag="{Binding PackId}"
+                                                              Content="{Binding PackName}"
+                                                              ToolTip="{Binding StateLine}"
+                                                              VerticalContentAlignment="Center"/>
+                                                </DockPanel>
+                                                <TextBlock Text="{Binding StateLine}" Style="{StaticResource Caption}"
+                                                           TextWrapping="Wrap" Margin="28,2,0,0"
+                                                           Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </slate:SlateBorder>
+                        </StackPanel>
+                    </slate:SlateBorder>
+                </ScrollViewer>
+            </TabItem>
+        </TabControl>
+
+        <TextBlock x:Name="StatusLabel" Grid.Row="2" Style="{StaticResource Caption}"
+                   Margin="24,8,24,18" TextWrapping="Wrap"/>
+    </Grid>
+</Page>

@@ -4,17 +4,16 @@ using System.Text.Json.Serialization;
 
 namespace CloudLauncher.Services;
 
-/// <summary>A submenu's worth of group cards to offer — one header with the values present in this pack.</summary>
+/// <summary>A submenu's worth of group cards to offer: one header with the values present in
+/// this pack.</summary>
 public sealed record PlanGroupOption(string Header, IReadOnlyList<PlanGroupQuery> Options);
 
 /// <summary>
-/// Loads and saves the pack's planning boards from <c>game/.cloudlauncher/plans.json</c>. That
-/// folder is routed to Shared by the default rules, so boards travel to collaborators exactly like
-/// mod flags do — the plan is part of the modpack, not a local scratch file.
+/// Loads and saves the pack's planning boards from <c>game/.cloudlauncher/plans.json</c>. The default
+/// rules route that folder to Shared, so boards travel to collaborators like mod flags do.
 ///
-/// Also owns the two things a board needs to stay *live*: resolving a mod card back to its
-/// <see cref="PackMod"/> (migrating the stored key forward when a jar's identity firms up), and
-/// evaluating a group card's query against the current inventory.
+/// Also resolves mod cards back to their <see cref="PackMod"/> (migrating the stored key when a
+/// jar's identity firms up) and evaluates group card queries against the current inventory.
 /// </summary>
 public sealed class ModPlanService
 {
@@ -66,8 +65,8 @@ public sealed class ModPlanService
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                // Same temp + atomic rename as mods.json: a torn write would leave an unparseable
-                // file, which Load() resets to empty — silently destroying every board.
+                // Temp file plus atomic rename, as for mods.json: a torn write would leave an unparseable
+                // file, which Load() resets to empty, losing every board.
                 var tmp = path + ".tmp";
                 File.WriteAllText(tmp, JsonSerializer.Serialize(doc, JsonOpts));
                 File.Move(tmp, path, overwrite: true);
@@ -117,9 +116,8 @@ public sealed class ModPlanService
         return board;
     }
 
-    /// <summary>Copies a board — its cards, links, viewport and category — under a new name. Every
-    /// card is re-id'd and the links are remapped onto the new ids, so the copy is fully independent:
-    /// nothing is shared with the original, and its cards, sections and connections all belong to it.</summary>
+    /// <summary>Copies a board (cards, links, viewport and category) under a new name. Cards get new
+    /// ids and links are remapped, so the copy shares nothing with the original.</summary>
     public PlanBoard DuplicateBoard(Guid packId, PlanBoard source)
     {
         var doc = Load(packId);
@@ -147,7 +145,7 @@ public sealed class ModPlanService
             if (!idMap.TryGetValue(e.FromId, out var from) || !idMap.TryGetValue(e.ToId, out var to)) continue;
             copy.Edges.Add(e.CopyBetween(from, to));
         }
-        copy.SectionMembershipSet = true; // cloned from a (migrated) board — membership is already explicit
+        copy.SectionMembershipSet = true; // cloned from a migrated board; membership is already explicit
 
         // Drop the copy right after its source, then re-group so it sits inside the same category.
         var at = doc.Boards.IndexOf(source);
@@ -247,7 +245,7 @@ public sealed class ModPlanService
         Save(packId);
     }
 
-    /// <summary>Deletes a category; its boards fall back to uncategorized (the boards themselves stay).</summary>
+    /// <summary>Deletes a category; its boards stay and fall back to uncategorized.</summary>
     public void RemoveBoardCategory(Guid packId, string name)
     {
         var doc = Load(packId);
@@ -313,9 +311,8 @@ public sealed class ModPlanService
         return mod;
     }
 
-    /// <summary>Repoints every category group card at a renamed category. Without this a rename
-    /// would leave those cards querying a name nothing carries any more — they'd quietly go empty
-    /// instead of following the category. Call alongside
+    /// <summary>Repoints every category group card at a renamed category, so those cards follow the
+    /// rename instead of going empty. Call alongside
     /// <see cref="ModMetadataService.RenameCategory"/>.</summary>
     public void RenameCategoryReferences(Guid packId, string oldName, string newName)
     {
@@ -399,15 +396,15 @@ public sealed class ModPlanService
                    .ToList();
     }
 
-    /// <summary>The group cards worth offering for this pack — only values that actually match
-    /// something (plus every declared category, so a fresh empty category can still be planned for).</summary>
+    /// <summary>The group cards worth offering for this pack: only values that match something, plus
+    /// every declared category so a new empty category can still be planned for.</summary>
     public IReadOnlyList<PlanGroupOption> GroupOptions(Guid packId, IReadOnlyList<PackMod> all,
         ModMetadataService metadata)
     {
         var options = new List<PlanGroupOption>();
 
-        // Declared categories keep their stored order (the user's arrangement); any name found only
-        // on a mod — e.g. carried in from a collaborator — trails behind it.
+        // Declared categories keep their stored order (the user's arrangement); names found only on a
+        // mod (e.g. from a collaborator) come after.
         var categories = metadata.Categories(packId).Select(c => c.Name)
             .Concat(all.SelectMany(m => m.Meta.Categories))
             .Distinct(StringComparer.OrdinalIgnoreCase)

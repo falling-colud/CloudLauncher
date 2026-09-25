@@ -10,19 +10,12 @@ namespace CloudLauncher.Views;
 
 /// <summary>
 /// In-window card for publishing a new version of a hosted mod: pick (or drop) the jar, then fill in
-/// the version string, release channel, changelog and the compatibility this particular build has.
+/// the version string, release channel, changelog and this build's compatibility.
 /// </summary>
 /// <remarks>
-/// The card owns the upload rather than handing the values back to its caller, because the four
-/// things a long upload needs — a determinate bar, a byte counter, a working Cancel, and a place to
-/// put the error when it fails — all live here. Callers get the finished
-/// <see cref="HostedModVersionInfo"/> (or null when the user backed out) and simply refresh.
-/// <para>
-/// All four metadata fields matter: before this dialog existed the client sent a hard-coded
-/// "release" channel, a null changelog and a copy of the mod's own compatibility CSVs, so a beta
-/// build was indistinguishable from a release and per-build compatibility could never differ from
-/// the mod's.
-/// </para>
+/// The card does the upload itself, since the progress bar, byte counter, Cancel and error display
+/// all live here. Callers get the finished <see cref="HostedModVersionInfo"/> (or null when the user
+/// backed out) and refresh.
 /// </remarks>
 public partial class UploadModVersionDialog : UserControl
 {
@@ -31,18 +24,16 @@ public partial class UploadModVersionDialog : UserControl
 
     /// <summary>The version being corrected, or null when this is a fresh upload.</summary>
     /// <remarks>
-    /// Edit mode reuses this card rather than growing a second form: the fields are the same four,
-    /// and one card means the rules about what a publishable version looks like are stated once. The
-    /// difference is entirely in what the button does — a PATCH instead of a multipart POST — plus
-    /// hiding the file picker, because editing the details deliberately leaves the jar alone.
+    /// Edit mode reuses this card: the button sends a PATCH instead of a multipart POST, and the file
+    /// picker is hidden because editing the details leaves the jar alone.
     /// </remarks>
     private readonly HostedModVersionInfo? _editing;
 
     /// <summary>The chosen jar. Null until the user browses or drops one; Upload stays disabled.</summary>
     private string? _filePath;
 
-    /// <summary>Non-null only while bytes are in flight — also the flag that turns Cancel from
-    /// "close the card" into "abort the upload".</summary>
+    /// <summary>Non-null only while an upload is running. It also switches Cancel from closing the
+    /// card to aborting the upload.</summary>
     private CancellationTokenSource? _uploadCts;
 
     /// <param name="initialFilePath">A jar already chosen elsewhere (the create-mod dialog), so the
@@ -70,8 +61,8 @@ public partial class UploadModVersionDialog : UserControl
             TitleLabel.Text = "Edit version";
             SubLabel.Text = $"{editing.VersionString} of {mod.Name} · {editing.FileName}";
             UploadButton.Content = "Save changes";
-            // No drop zone: this is the one path that must not touch the file. Replacing a jar is
-            // still "upload a version", which keeps its own publish date and changelog.
+            // No drop zone: editing never touches the file. Replacing a jar means uploading a new
+            // version, with its own publish date and changelog.
             DropZone.Visibility = Visibility.Collapsed;
 
             VersionBox.Text = editing.VersionString;
@@ -86,8 +77,7 @@ public partial class UploadModVersionDialog : UserControl
     }
 
     /// <summary>Picks the channel combo entry matching a stored channel string.</summary>
-    /// <remarks>A channel this build has never heard of leaves "release" selected rather than
-    /// clearing the box and quietly making the user re-pick something they never changed.</remarks>
+    /// <remarks>An unknown channel leaves "release" selected instead of clearing the box.</remarks>
     private void SelectChannel(string channel)
     {
         foreach (var item in ChannelBox.Items.OfType<ComboBoxItem>())
@@ -101,8 +91,8 @@ public partial class UploadModVersionDialog : UserControl
     /// <summary>Completes with the uploaded version, or null if the user cancelled.</summary>
     public Task<HostedModVersionInfo?> Result => _tcs.Task;
 
-    /// <summary>Backdrop/Escape cancel. Ignored while an upload is running so a stray click on the
-    /// scrim cannot leave a half-sent jar behind with no UI attached to it.</summary>
+    /// <summary>Backdrop/Escape cancel. Ignored while an upload is running, so a stray click on the
+    /// backdrop can't leave a half-sent jar with no UI attached to it.</summary>
     public void Cancel()
     {
         if (_uploadCts is not null) return;
@@ -151,8 +141,8 @@ public partial class UploadModVersionDialog : UserControl
         if (DroppedJar(e) is { } path) SetFile(path);
     }
 
-    /// <summary>The single jar in a drag payload — dropping a folder, a zip or several files at once
-    /// is ignored rather than guessed at, since a version is exactly one file.</summary>
+    /// <summary>The single jar in a drag payload. A folder, a zip or several files are ignored, since
+    /// a version is one file.</summary>
     private static string? DroppedJar(DragEventArgs e)
     {
         if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return null;
@@ -180,7 +170,7 @@ public partial class UploadModVersionDialog : UserControl
 
     /// <summary>Best-effort version string from a jar's file name: everything from the first
     /// digit-led token onwards, which covers "sodium-fabric-0.5.8+mc1.20.1.jar" and
-    /// "JEI-1.20.1-15.2.0.27.jar" alike. The user can always correct it — it only saves typing.</summary>
+    /// "JEI-1.20.1-15.2.0.27.jar" alike. Only saves typing; the user can correct it.</summary>
     private static string GuessVersion(string fileName)
     {
         var stem = Path.GetFileNameWithoutExtension(fileName);
@@ -216,8 +206,8 @@ public partial class UploadModVersionDialog : UserControl
         LoaderQuilt.IsChecked = set.Contains("quilt");
     }
 
-    /// <summary>The ticked loaders as the server's CSV, or null when none are ticked (which is not a
-    /// publishable state — a build with no loader matches no instance).</summary>
+    /// <summary>The ticked loaders as the server's CSV, or null when none are ticked. That state can't
+    /// be published, since a build with no loader matches no instance.</summary>
     private string? LoadersCsv()
     {
         var loaders = new List<string>(4);
@@ -239,7 +229,7 @@ public partial class UploadModVersionDialog : UserControl
         var file = new FileInfo(_filePath);
         if (!file.Exists)
         {
-            SetStatus("That file is no longer there — pick it again.", error: true);
+            SetStatus("That file is no longer there - pick it again.", error: true);
             return;
         }
 
@@ -285,10 +275,8 @@ public partial class UploadModVersionDialog : UserControl
 
     /// <summary>Sends the edited details as a patch and closes with what the server stored.</summary>
     /// <remarks>
-    /// All four fields are sent, not only the ones that changed: the card was seeded with the
-    /// current values and the user has had the chance to alter any of them, so what is on screen is
-    /// the intended state of all of them. An empty changelog goes as an empty string, which is how
-    /// the server is told to clear one — null there means "leave it alone".
+    /// All four fields are sent, since the form was seeded with the current values. An empty changelog
+    /// is sent as an empty string, which clears it; null would mean "leave it alone".
     /// </remarks>
     private async Task SaveEditAsync()
     {
@@ -302,7 +290,7 @@ public partial class UploadModVersionDialog : UserControl
             LoadersCsv() ?? "");
 
         UploadButton.IsEnabled = false;
-        SetStatus("Saving…", error: false);
+        SetStatus("Saving...", error: false);
         try
         {
             var saved = await App.State.Api.UpdateModVersionAsync(_modId, _editing.Id, req);
@@ -317,8 +305,8 @@ public partial class UploadModVersionDialog : UserControl
 
     private void OnCancel(object sender, RoutedEventArgs e)
     {
-        // Mid-upload the same button aborts the transfer and leaves the card open, so the user can
-        // fix whatever made them stop and try again without re-entering everything.
+        // During an upload the same button aborts it and keeps the card open, so the user can retry
+        // without re-entering everything.
         if (_uploadCts is { } cts) { cts.Cancel(); return; }
         _tcs.TrySetResult(null);
     }

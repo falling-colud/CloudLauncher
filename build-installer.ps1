@@ -14,6 +14,9 @@
     The version is read from <Version> in CloudLauncher.csproj unless -Version is passed,
     so the usual flow is: bump <Version> in the csproj, then run this script.
 
+    CloudLauncher.exe and the setup .exe are signed with Authenticode when CL_SIGN_THUMBPRINT, or
+    CL_SIGN_PFX and CL_SIGN_PFX_PASSWORD, are set (see tools\release\release-common.ps1).
+
 .EXAMPLE
     ./build-installer.ps1
 
@@ -39,22 +42,10 @@ $iss  = Join-Path $root "installer\CloudLauncher.iss"
 $icon = Join-Path $root "CloudLauncher\Assets\appicon.ico"
 if (-not (Test-Path $proj)) { throw "Cannot find project at $proj" }
 if (-not (Test-Path $iss))  { throw "Cannot find installer script at $iss" }
+. (Join-Path $root "tools\release\release-common.ps1")
 
 # 1. Locate the Inno Setup compiler.
-if (-not $Iscc) {
-    $candidates = @(
-        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-    )
-    $Iscc = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-    if (-not $Iscc) {
-        $onPath = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-        if ($onPath) { $Iscc = $onPath.Source }
-    }
-}
-if (-not $Iscc -or -not (Test-Path $Iscc)) {
-    throw "ISCC.exe (Inno Setup 6) not found. Install it from https://jrsoftware.org/isdl.php or pass -Iscc <path>."
-}
+$Iscc = Find-Iscc $Iscc
 
 # 2. Resolve the version (from the csproj unless overridden).
 if (-not $Version) {
@@ -77,6 +68,9 @@ if (-not $NoPublish) {
 }
 $exe = Join-Path $staging "CloudLauncher.exe"
 if (-not (Test-Path $exe)) { throw "Publish output missing $exe (run without -NoPublish)." }
+# Signed before it goes into the installer, so the installed exe carries the signature too. With
+# -NoPublish the exe is used exactly as that publish left it.
+if (-not $NoPublish) { Invoke-CodeSign $exe }
 
 # 4. Compile the installer. /D defines override the #ifndef defaults in the .iss.
 $defines = @(
@@ -91,6 +85,7 @@ if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)." }
 
 $setup = Join-Path $artifacts "CloudLauncher-Setup-$Version.exe"
 if (-not (Test-Path $setup)) { throw "Installer was not produced at $setup." }
+Invoke-CodeSign $setup
 $sizeMb = [Math]::Round((Get-Item $setup).Length / 1MB, 1)
 Write-Host ""
 Write-Host "Installer built: $setup ($sizeMb MB)" -ForegroundColor Green

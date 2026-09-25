@@ -2,31 +2,17 @@ using System.IO;
 
 namespace CloudLauncher.Services;
 
-/// <summary>
-/// Files that never leave this machine when a pack is uploaded, and that a sync from the server is
-/// never allowed to overwrite or delete.
-///
-/// <para><b>Why this exists.</b> The Arleana character mod keeps its models and textures - the whole
-/// converted glTF bundle, ~2 GB of the author's own work - under <c>config/arleana/bundle/</c>, i.e.
-/// inside a folder the pack rules share wholesale. Sharing the pack once uploaded the bundle to every
-/// collaborator. A <c>.rules.json</c> "local" rule would exclude it, but rules are data: the server
-/// copy of a shared pack's rules overwrites the local file whenever the pack page opens, a re-import
-/// recreates the pack with defaults, and a mod update never touches rules at all. This policy is code,
-/// applied at the sync boundary itself, so it holds no matter how the rules end up.</para>
-///
-/// <para><b>What the other side sees.</b> The mod jar still ships (it is in <c>mods/</c>), so a friend's
-/// client has the same mod set as the server and joins normally; without a bundle folder the mod finds
-/// no <c>character.glb</c> and simply reports "no bundle" on first use. Nothing else in the pack depends
-/// on the bundle's contents.</para>
-///
-/// <para><b>Why the download side matters too.</b> A manifest that lacks these paths would make the
-/// sync-lock pruning delete the owner's own bundle ("previously server-managed, no longer on the
-/// server"), and a manifest that contains stubs for them would overwrite it. Both are refused here.</para>
-///
-/// <para>Patterns use the same syntax as pack rules: a trailing <c>/</c> means "everything under this
-/// folder"; otherwise an exact path or a glob. Built-in entries always apply; users can add more in
-/// settings via <see cref="AppSettings.PrivatePathPatterns"/>.</para>
-/// </summary>
+/// <summary>Files that never leave this machine when a pack is uploaded, and that a sync from the
+/// server is never allowed to overwrite or delete.</summary>
+/// <remarks>
+/// <para>Enforced in code at the sync boundary, since pack rules are data that the server copy, a
+/// re-import or a mod update can change. On download, a manifest without these paths would make
+/// sync-lock pruning delete them, and one with stubs would overwrite them. The built-in entry keeps
+/// the Arleana character mod's model bundle (~2 GB of the author's own assets) private; without it
+/// the mod just reports "no bundle".</para>
+/// <para>Patterns use the pack-rule syntax (trailing <c>/</c> = whole folder, otherwise an exact path
+/// or a glob). Users can add more via <see cref="AppSettings.PrivatePathPatterns"/>.</para>
+/// </remarks>
 public static class PrivateAssetPolicy
 {
     /// <summary>Always-on entries. Keep these folder-shaped (trailing slash) so a renamed or

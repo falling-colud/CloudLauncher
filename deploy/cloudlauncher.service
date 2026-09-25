@@ -1,9 +1,9 @@
 [Unit]
 Description=CloudLauncher API
 After=network.target docker.service
-# Wants, not Requires: if docker fails at boot, Requires marks this unit
-# dependency-failed and it never retries (that outage happened 2026-08-23).
-# The server retries its DB connection, so starting before docker is safe.
+# Wants rather than Requires: if docker fails at boot, Requires marks this unit
+# dependency-failed and it is never retried. The server retries its DB connection,
+# so starting before docker is safe.
 Wants=docker.service
 StartLimitIntervalSec=0
 
@@ -21,6 +21,17 @@ RestartSec=10
 StandardOutput=append:/home/opc/everything/cloud/cloudlauncher/logs/server.log
 StandardError=append:/home/opc/everything/cloud/cloudlauncher/logs/server.err.log
 LimitNOFILE=65536
+# Hardening that works without mount namespaces (PrivateTmp and the Protect* options fail on this
+# host, see nginx-launcher-https.conf). NoNewPrivileges also keeps a compromised process from using
+# the account's sudo.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+UMask=0027
 
 [Install]
 WantedBy=multi-user.target

@@ -7,12 +7,9 @@ namespace CloudLauncher.Server.Net;
 /// 500.
 /// </summary>
 /// <remarks>
-/// On 2026-09-19 the host's disk filled; Postgres PANICked mid-checkpoint and spent minutes
-/// restarting, answering every connection with <c>57P03: the database system is not yet accepting
-/// connections</c>. The API itself was fine, so it kept accepting requests and failing them one by
-/// one — and the launcher, which cannot tell a 500 from a permanent failure, showed people an empty
-/// instance list ("my modpack disappeared"). A 503 is the truthful answer: nothing is wrong with the
-/// request, come back shortly. The client keeps what it already had and retries.
+/// While Postgres restarts or recovers (after a full disk, for example) it answers every connection
+/// with <c>57P03</c>. A 500 looks permanent to the launcher, which would show an empty instance list;
+/// a 503 tells it to keep what it has and retry.
 /// </remarks>
 public sealed class DbUnavailableMiddleware(RequestDelegate next, ILogger<DbUnavailableMiddleware> log)
 {
@@ -36,7 +33,7 @@ public sealed class DbUnavailableMiddleware(RequestDelegate next, ILogger<DbUnav
             context.Response.Headers.RetryAfter = ((int)RetryAfter.TotalSeconds).ToString();
             await context.Response.WriteAsJsonAsync(new
             {
-                error = "The launcher server's database is restarting. Nothing is lost — try again in a few seconds.",
+                error = "The launcher server's database is restarting. Nothing is lost - try again in a few seconds.",
                 code = "db_unavailable",
                 retryAfterSeconds = (int)RetryAfter.TotalSeconds
             });

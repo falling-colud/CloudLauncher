@@ -25,7 +25,7 @@
 
             <TextBlock Style="{StaticResource Caption}" Text="Release channel" Margin="0,0,0,4"/>
             <ComboBox x:Name="ChannelBox" Margin="0,0,0,12"
-                      ToolTip="Beta and alpha are still downloadable — the label is how somebody knows what they are taking">
+                      ToolTip="Beta and alpha are still downloadable - the label is how somebody knows what they are taking">
                 <ComboBoxItem Content="release" IsSelected="True"/>
                 <ComboBoxItem Content="beta"/>
                 <ComboBoxItem Content="alpha"/>
@@ -33,7 +33,7 @@
 
             <TextBlock Style="{StaticResource Caption}" Text="Minecraft versions" Margin="0,0,0,4"/>
             <TextBox x:Name="McVersionsBox" Margin="0,0,0,12" MaxLength="256"
-                     ToolTip="Comma-separated, e.g. 1.21.1, 1.21 — decides which instances are offered this version"/>
+                     ToolTip="Comma-separated, e.g. 1.21.1, 1.21 - decides which instances are offered this version"/>
 
             <TextBlock Style="{StaticResource Caption}" Text="Changelog" Margin="0,0,0,4"/>
             <TextBox x:Name="ChangelogBox" Margin="0,0,0,12"

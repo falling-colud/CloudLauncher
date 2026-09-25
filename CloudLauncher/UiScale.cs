@@ -4,9 +4,8 @@ using System.Windows.Media;
 namespace CloudLauncher;
 
 /// <summary>
-/// The user's UI-scale preferences plus a live "re-apply" signal. The global launcher scale is a
-/// layout zoom applied to the whole main window; the mod-list scale is an extra zoom applied to the
-/// mod-entry containers in the list and browse views (so it stacks on top of the launcher scale).
+/// UI scale settings. The launcher scale zooms the whole main window; the mod-list scale is an
+/// extra zoom on the mod entries in the list and browse views, on top of the launcher scale.
 /// </summary>
 public static class UiScale
 {
@@ -17,7 +16,7 @@ public static class UiScale
 
     public static double Clamp(double v) => double.IsFinite(v) ? Math.Clamp(v, Min, Max) : 1.0;
 
-    /// <summary>Raised after either scale changes, so the open window and views can re-apply at once.</summary>
+    /// <summary>Raised after either scale changes so open views can re-apply it.</summary>
     public static event Action? Changed;
     public static void NotifyChanged() => Changed?.Invoke();
 

@@ -5,15 +5,8 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// Collects everything a hosted resource pack version carries: the version string, the release
-/// channel, the Minecraft versions it is for, and a changelog.
-/// </summary>
-/// <remarks>
-/// Both upload paths used to chain a single input box for the version string and then hard-code
-/// <c>"release"</c> with a null changelog — so every upload was filed as a release nobody could tell
-/// apart, even though the server stores and returns both fields. One dialog covers both callers.
-/// </remarks>
+/// <summary>Collects what a hosted resource pack version carries: the version string, release
+/// channel, Minecraft versions and changelog. Used by both upload paths.</summary>
 public partial class UploadResourcePackVersionDialog : Window
 {
     /// <summary>The request to post, or null if the dialog was cancelled.</summary>
@@ -22,8 +15,8 @@ public partial class UploadResourcePackVersionDialog : Window
     private readonly string _fileName;
 
     /// <param name="filePath">The zip being uploaded; its name is shown and sent as the file name.</param>
-    /// <param name="suggestedVersion">Pre-filled version string — a date stamp or the next number up.</param>
-    /// <param name="mcVersionsCsv">Pre-filled Minecraft versions, normally the source instance's.</param>
+    /// <param name="suggestedVersion">Pre-filled version: a date stamp or the next number up.</param>
+    /// <param name="mcVersionsCsv">Pre-filled Minecraft versions, usually the source instance's.</param>
     public UploadResourcePackVersionDialog(string filePath, string suggestedVersion, string? mcVersionsCsv)
     {
         InitializeComponent();

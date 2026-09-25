@@ -4,12 +4,10 @@ using System.Text.Json;
 namespace CloudLauncher.Services;
 
 /// <summary>
-/// Temporarily narrows a pack's enabled mods to a chosen "test set" for the §3 Run-as-Test launch,
-/// then restores the exact prior state. Non-test enabled jars are parked with a <c>.cltest</c>
-/// suffix and any disabled test mods are switched on; every move is journaled to a sidecar
-/// (<c>.test-scope.json</c>) so the original layout is restored even if the launcher is killed
-/// mid-test. CmlLib always launches from <c>game/mods</c>, so swapping files on disk is how a
-/// subset launch is achieved.
+/// Narrows a pack's enabled mods to a test set for a Run-as-Test launch, then restores the prior
+/// state. CmlLib always launches from <c>game/mods</c>, so other enabled jars get a <c>.cltest</c>
+/// suffix and disabled test mods are enabled. Each move is journaled to <c>.test-scope.json</c> so
+/// the layout can be restored even if the launcher is killed mid-test.
 /// </summary>
 public sealed class TestLaunchScope
 {
@@ -24,9 +22,9 @@ public sealed class TestLaunchScope
 
     public bool IsActive(Guid packId) => File.Exists(SidecarPath(packId));
 
-    /// <summary>Park every enabled jar that isn't in <paramref name="testFileNames"/> and switch on
-    /// any disabled jar that is, journaling each move. <paramref name="testFileNames"/> holds the
-    /// normalised <c>name.jar</c> of each mod in the test closure (test mods + their dependencies).</summary>
+    /// <summary>Parks every enabled jar not in <paramref name="testFileNames"/> and enables any
+    /// disabled jar that is, journaling each move. <paramref name="testFileNames"/> holds the
+    /// normalised <c>name.jar</c> of each test mod and its dependencies.</summary>
     public void Apply(Guid packId, ISet<string> testFileNames)
     {
         var moves = new List<TestScopeMove>();
@@ -92,7 +90,7 @@ public sealed class TestLaunchScope
             File.Move(from, to);
             journal.Add(new TestScopeMove { From = from, To = to });
         }
-        catch { /* locked file — leave it; not fatal to the test run */ }
+        catch { /* locked file: leave it, the test run can still go ahead */ }
     }
 
     private void Write(Guid packId, List<TestScopeMove> moves)

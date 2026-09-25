@@ -1,32 +1,22 @@
 namespace CloudLauncher.Services;
 
-/// <summary>The platform identities a single installed jar resolves to. A jar that
-/// is published to both stores carries one identity per store; recording both lets
-/// callers recognise the mod as already installed no matter which store's listing
-/// the user is browsing.</summary>
+/// <summary>The platform identities one installed jar resolves to. A jar published to both
+/// stores gets one identity per store, so it shows as installed in either store's listing.</summary>
 public sealed record InstalledModIdentity(
     string Path,
     (ModSummary Mod, ModVersion Version)? Modrinth,
     (ModSummary Mod, ModVersion Version)? CurseForge);
 
-/// <summary>The outcome of one resolve pass.
-///
-/// <see cref="Complete"/> is false when a store lookup failed, which makes a missing identity mean
-/// "not known yet" rather than "not installed". Callers must not treat a degraded pass as an
-/// authoritative picture and overwrite what they already knew — doing so is what made installed
-/// mods flip back to "downloadable" whenever an API hiccupped. It covers the two network lookups
-/// only: a single unreadable jar leaves its own identity empty without invalidating the rest.</summary>
+/// <summary>The outcome of one resolve pass.</summary>
+/// <remarks><see cref="Complete"/> is false when a store lookup failed. A missing identity then means
+/// "not known yet" rather than "not installed", so callers should keep what they already had.
+/// An unreadable jar only leaves its own identity empty.</remarks>
 public sealed record InstalledModIndex(IReadOnlyList<InstalledModIdentity> Identities, bool Complete);
 
-/// <summary>
-/// Resolves installed mod jars to their Modrinth <em>and</em> CurseForge identities.
-///
-/// Matching is hash-based — SHA-512 for Modrinth, Murmur2 for CurseForge — so it
-/// never mistakes one mod for another. It is cache-first with a network fallback,
-/// and guards against the fingerprint cache's single-match entries (which can carry
-/// the <em>other</em> store's identity) by re-querying when the cached match's source
-/// doesn't line up with the store being resolved.
-/// </summary>
+/// <summary>Resolves installed mod jars to their Modrinth and CurseForge identities.</summary>
+/// <remarks>Matches by hash (SHA-512 for Modrinth, Murmur2 for CurseForge), cache first. A cached
+/// single match can carry the other store's identity, so it is re-queried when its source doesn't
+/// match the store being resolved.</remarks>
 public static class InstalledModResolver
 {
     public static async Task<InstalledModIndex> ResolveAsync(
@@ -69,7 +59,7 @@ public static class InstalledModResolver
                             lock (pathToSha) pathToSha[path] = sha512;
                             lock (pathToFingerprint) pathToFingerprint[path] = fingerprint;
                         }
-                        catch { /* locked or unreadable jar — leave it unmatched */ }
+                        catch { /* locked or unreadable jar: leave it unmatched */ }
                     });
             }, ct);
         }
@@ -94,9 +84,8 @@ public static class InstalledModResolver
                 && cf.mod.Source == ModSource.CurseForge
                     ? cf : null;
 
-            // Warm the shared cache so other views and later sessions resolve this jar without a
-            // network round-trip: a primary match (Modrinth preferred, kept for older readers) plus
-            // the identity on each store, which is what lets a cross-listed jar load with both.
+            // Warm the shared cache so other views skip the network for this jar: a primary match
+            // (Modrinth preferred, kept for older readers) plus the identity on each store.
             if (modrinthId is { } m) cache.StoreMatch(path, m.Mod, m.Version);
             else if (curseForgeId is { } c) cache.StoreMatch(path, c.Mod, c.Version);
             cache.StoreStoreMatches(path, modrinthId, curseForgeId);
@@ -128,8 +117,8 @@ public static class InstalledModResolver
                     cache.RememberModrinthMatch(hash, match.mod, match.version);
                 }
             }
-            // Offline or API error — keep whatever resolved from cache, but say the pass is partial
-            // so the caller treats the gaps as unknown rather than as "not installed".
+            // Offline or API error: keep what the cache resolved but report the pass as partial, so the
+            // caller treats the gaps as unknown rather than "not installed".
             catch { return (matches, false); }
         }
         return (matches, true);

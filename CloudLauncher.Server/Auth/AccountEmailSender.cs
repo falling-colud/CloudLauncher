@@ -21,16 +21,14 @@ public sealed class AccountEmailSender(EmailOptions opts, IHostEnvironment env, 
 
         if (!opts.IsConfigured)
         {
-            // The confirmation link embeds a valid one-time token — treat it as a secret.
-            // Only echo it to the log in Development (convenience for local testing); in any
-            // other environment, log the failure without leaking the token.
+            // The link contains a one-time token, so it is only logged in Development (for local testing).
+            // Elsewhere the failure is logged without it.
             if (env.IsDevelopment())
                 log.LogWarning(
-                    "SMTP is not configured — email confirmation for {Email} was not sent. Link: {Link}",
-                    to, confirmationLink);
+                    "SMTP is not configured, so a confirmation email was not sent. Link: {Link}",
+                    confirmationLink);
             else
-                log.LogError(
-                    "SMTP is not configured — email confirmation for {Email} could not be sent.", to);
+                log.LogError("SMTP is not configured, so a confirmation email could not be sent.");
             return;
         }
 
@@ -51,6 +49,14 @@ public sealed class AccountEmailSender(EmailOptions opts, IHostEnvironment env, 
         };
         message.To.Add(to);
 
-        await client.SendMailAsync(message, ct);
+        try
+        {
+            await client.SendMailAsync(message, ct);
+        }
+        catch (SmtpException ex)
+        {
+            // Logged without the exception: the relay's reply often quotes the recipient's address.
+            log.LogError("Sending a confirmation email failed (SMTP status {Status}).", ex.StatusCode);
+        }
     }
 }

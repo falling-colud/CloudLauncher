@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
@@ -29,21 +28,36 @@ public partial class WorldBrowserView : Page
     private CancellationTokenSource _cts = new();
 
     /// <summary>
-    /// Cancels a download in flight, separately from <see cref="_cts"/>.
+    /// The paging state machine: what may load, how much is loaded, and the page load in flight.
     /// </summary>
-    /// <remarks>Downloads used to run on the search token, so clicking another row mid-download
-    /// cancelled the download along with the detail fetch — with no message, because the cancellation
-    /// was swallowed as a normal navigation.</remarks>
+    private readonly InfiniteScroll.Pager _pager;
+
+    /// <summary>
+    /// Cancels a download in flight. Separate from <see cref="_cts"/> so selecting another row does
+    /// not cancel the download.
+    /// </summary>
     private CancellationTokenSource? _downloadCts;
 
     /// <summary>0 popularity, 1 downloads, 2 last updated, 3 name. Mirrors the SortBox order.</summary>
     private int _sortMode;
 
+    /// <summary>The hosted world the page was asked to open on, until it has done so.</summary>
+    private Guid? _focusWorldId;
+
+    /// <summary>The selected hosted world as the server describes it (its access list and what this
+    /// person may do), or null while nothing hosted is selected.</summary>
+    private SharedWorldDetail? _currentHosted;
+
+    /// <summary>The teams this person is on, for deciding which list a hosted world
+    /// belongs in.</summary>
+    private HashSet<Guid> _myTeamIds = new();
+
     private bool _isLoading;
     private bool _hasMore;
     private int _offset;
-    private const int PageSize = 25;
-    private const int MaxResults = 200;
+    private const int PageSize = 50;   // both stores cap a page at 50
+    /// <summary>A safety stop so a runaway pager cannot fill memory, not a browsing limit.</summary>
+    private const int MaxResults = 2000;
 
     public WorldBrowserView(MainWindow shell)
     {
@@ -52,6 +66,10 @@ public partial class WorldBrowserView : Page
         SourceStrip.ItemsSource = _chips;
         ResultsList.ItemsSource = _rows;
         WorldTabs.SelectionChanged += OnWorldTabsChanged;
+        _pager = new InfiniteScroll.Pager(
+            () => !_isLoading && _hasMore && _activeChip is not null && _rows.Count < MaxResults,
+            () => _rows.Count,
+            LoadMoreAsync);
         Loaded += async (_, _) =>
         {
             await InitAsync();
@@ -62,6 +80,17 @@ public partial class WorldBrowserView : Page
             if (Window.GetWindow(this) is Window w) w.PreviewKeyDown -= OnShellKeyDown;
             _downloadCts?.Cancel();
         };
+    }
+
+    /// <summary>The browser, opened straight onto one hosted world.</summary>
+    /// <remarks>
+    /// Picks the list the world belongs in (Personal worlds, then Shared with me, then All teams,
+    /// then the public list), selects its row and shows its detail. A world not on that list's
+    /// first page is inserted at the top instead of paged for.
+    /// </remarks>
+    public WorldBrowserView(MainWindow shell, Guid focusWorldId) : this(shell)
+    {
+        _focusWorldId = focusWorldId;
     }
 
     /// <summary>F5 re-runs the current search, matching every other list screen.</summary>
@@ -99,8 +128,7 @@ public partial class WorldBrowserView : Page
     /// <summary>
     /// Writes the status line in the colour that matches the message.
     /// </summary>
-    /// <remarks>Set by resource reference rather than assignment so a theme or accent change
-    /// repaints it — an assigned brush is frozen at the moment it was resolved.</remarks>
+    /// <remarks>Set by resource reference so a theme or accent change repaints it.</remarks>
     private void SetStatus(string text, bool danger = false, bool success = false)
     {
         StatusLabel.Text = text;
@@ -115,8 +143,8 @@ public partial class WorldBrowserView : Page
             danger ? "DangerBrush" : success ? "AccentBrush" : "TextSecondaryBrush");
     }
 
-    // Render rich HTML/markdown descriptions in an embedded WebView2. Its HWND draws over
-    // WPF (airspace), so hide it off-tab. Scrolling is native — no manual wheel routing.
+    // Rich HTML/markdown descriptions render in an embedded WebView2. Its HWND draws over WPF
+    // (airspace), so hide it off-tab.
     private void OnWorldTabsChanged(object sender, SelectionChangedEventArgs e)
     {
         if (e.Source != WorldTabs) return;
@@ -130,9 +158,63 @@ public partial class WorldBrowserView : Page
     private async Task InitAsync()
     {
         await BuildChipsAsync();
+        // Once only: Loaded fires again whenever the page is navigated back to.
+        if (_focusWorldId is { } focus)
+        {
+            _focusWorldId = null;
+            if (await FocusWorldAsync(focus)) return;
+        }
         if (_activeChip is null && _chips.Count > 0)
             await SelectChipAsync(_chips.First(c => !c.IsDivider));
     }
+
+    /// <summary>Shows one hosted world: its list, its row, its detail. False when it
+    /// could not.</summary>
+    private async Task<bool> FocusWorldAsync(Guid worldId)
+    {
+        SharedWorldDetail detail;
+        try { detail = await App.State.Api.GetSharedWorldAsync(worldId); }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(WorldBrowserView), ex);
+            SetStatus("That world could not be opened: " + ContentBundleService.Explain(ex, ex.Message), danger: true);
+            return false;
+        }
+
+        if (ChipFor(detail) is not { } chip) return false;
+        await SelectChipAsync(chip);
+
+        var row = _rows.FirstOrDefault(r => r.Internal?.Id == worldId);
+        if (row is null)
+        {
+            row = RowFromCloud(SummaryOf(detail));
+            _rows.Insert(0, row);
+            EmptyState.Visibility = Visibility.Collapsed;
+        }
+        ResultsList.SelectedItem = row;
+        ResultsList.ScrollIntoView(row);
+        return true;
+    }
+
+    /// <summary>Which list a hosted world belongs in, for this person.</summary>
+    /// <remarks>Decided from the world's access list. Older servers send that list only to the world's
+    /// managers; a world that cannot be placed is then most likely shared with this person.</remarks>
+    private WorldSourceChipRow? ChipFor(SharedWorldDetail detail)
+    {
+        var me = App.State.Settings.UserId;
+        var kind =
+            me is { } owner && detail.OwnerId == owner ? WorldSourceKind.CloudLauncherPersonal
+            : me is { } person && detail.Collaborators.Any(c => c.UserId == person) ? WorldSourceKind.CloudLauncherShared
+            : detail.Teams.Any(t => _myTeamIds.Contains(t.TeamId)) ? WorldSourceKind.CloudLauncherTeam
+            : detail.Visibility == PackVisibility.Public ? WorldSourceKind.CloudLauncherPublic
+            : WorldSourceKind.CloudLauncherShared;
+        return _chips.FirstOrDefault(c => !c.IsDivider && c.Kind == kind && c.TeamId is null);
+    }
+
+    /// <summary>The list row's shape of a world the page only has the detail of.</summary>
+    private static SharedWorldSummary SummaryOf(SharedWorldDetail d) => new(
+        d.Id, d.Slug, d.Name, d.Summary, d.OwnerId, d.OwnerUsername, d.Visibility, d.IconBlobHash,
+        d.McVersion, d.CreatedAt, d.UpdatedAt, d.EffectivePermissions, d.Versions.Count);
 
     private async Task BuildChipsAsync()
     {
@@ -147,6 +229,7 @@ public partial class WorldBrowserView : Page
         try
         {
             var teams = await App.State.Api.ListTeamsAsync();
+            _myTeamIds = teams.Select(t => t.Id).ToHashSet();
             foreach (var t in teams.OrderBy(t => t.Name))
                 _chips.Add(NewChip(t.Name, WorldSourceKind.CloudLauncherTeam, t.Id));
         }
@@ -236,24 +319,30 @@ public partial class WorldBrowserView : Page
     private async Task ResetAndLoadAsync()
     {
         _cts.Cancel(); _cts = new CancellationTokenSource();
+        // Wait for the cancelled load before clearing anything. Its finally resets the in-progress
+        // flag, and until then the fresh load below would return at the guard and leave the list
+        // empty. It also stops a late page from appending to the list we are about to clear.
+        await _pager.DrainAsync();
         _offset = 0;
         _rows.Clear();
+        _pager.Reset();
         _hasMore = true;
         SetStatus("");
         EmptyState.Visibility = Visibility.Collapsed;
         CountLabel.Text = "";
         ClearDetail();
-        await LoadMoreAsync(_cts.Token);
+        await _pager.LoadPageAsync(_cts.Token);
     }
 
     private async void OnResultsScroll(object sender, ScrollChangedEventArgs e)
     {
-        if (_isLoading || !_hasMore || _activeChip is null) return;
-        if (e.OriginalSource is ScrollViewer sv &&
-            sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 200)
+        if (e.OriginalSource is not ScrollViewer sv) return;
+        try
         {
-            await LoadMoreAsync(_cts.Token);
+            await _pager.FillAheadAsync(sv, _cts.Token);
         }
+        catch (OperationCanceledException) { }
+        catch (Exception) { /* LoadMoreAsync reports its own failures */ }
     }
 
     private async Task LoadMoreAsync(CancellationToken ct)
@@ -291,7 +380,14 @@ public partial class WorldBrowserView : Page
             UpdateEmpty();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Error: " + ex.Message, danger: true); _hasMore = false; }
+        catch (Exception ex)
+        {
+            SetStatus("Error: " + ex.Message, danger: true);
+            _hasMore = false;
+            // Show the failure in the list too, not only in the status bar.
+            _isLoading = false;
+            UpdateEmpty();
+        }
         finally { _isLoading = false; }
     }
 
@@ -316,8 +412,8 @@ public partial class WorldBrowserView : Page
             limit: PageSize, offset: _offset,
             classId: CurseForgeService.ClassIdWorlds,
             sortField: CurseSortField(), ct: ct);
-        // CurseForge has no name sort, so apply it to the page we were given. Sorting a page rather
-        // than the whole result set is the honest limit of an endlessly-scrolling list.
+        // CurseForge has no name sort, so sort the page we were given. With endless scrolling that
+        // is per page, not the whole result set.
         var ordered = _sortMode == 3
             ? hits.OrderBy(m => m.Name, StringComparer.CurrentCultureIgnoreCase).ToList()
             : hits;
@@ -329,8 +425,7 @@ public partial class WorldBrowserView : Page
     {
         var page = await App.State.Api.BrowseWorldsAsync(source, teamId, _searchText, _filterMcVersion,
             offset: _offset, limit: PageSize, ct: ct);
-        // The hosted catalog has no sort parameter, so order the page here — otherwise the sort box
-        // would silently do nothing on every CloudLauncher source.
+        // The hosted catalog has no sort parameter, so order the page here.
         IEnumerable<SharedWorldSummary> items = page.Items;
         items = _sortMode switch
         {
@@ -338,7 +433,11 @@ public partial class WorldBrowserView : Page
             3 => items.OrderBy(w => w.Name, StringComparer.CurrentCultureIgnoreCase),
             _ => items
         };
-        foreach (var w in items) _rows.Add(RowFromCloud(w));
+        // A world the page was opened on may already sit at the top of the list; its own page would
+        // otherwise list it a second time.
+        foreach (var w in items)
+            if (!_rows.Any(r => r.Internal?.Id == w.Id))
+                _rows.Add(RowFromCloud(w));
         _hasMore = _offset + page.Items.Count < page.Total;
         return page.Items.Count;
     }
@@ -467,42 +566,38 @@ public partial class WorldBrowserView : Page
         });
 
     /// <summary>
-    /// Downloads a world and extracts it into the instance the user picks.
+    /// Downloads a world, then asks <see cref="ImportContentCard"/> which instances (possibly
+    /// none) should get a copy.
     /// </summary>
     /// <remarks>
-    /// Both halves report progress: the transfer drives a determinate bar off the known length, and
-    /// the extract runs on a worker thread through <see cref="WorldService.ImportZipAsync"/>, which
-    /// also flattens the single wrapper folder most world zips carry and refuses entries that point
-    /// outside the save. Before this, extraction ran on the dispatcher and a 300 MB adventure map
-    /// looked like a hang.
+    /// Each ticked instance gets its own copy. This page's bar covers the transfer, and the card
+    /// extracts each copy off the dispatcher via <see cref="WorldService.ImportZipAsync"/>.
     /// </remarks>
     private async Task DownloadRowAsync(WorldBrowseRow row, Button? button, WorldVersionRow? version = null)
     {
         if (!row.CanDownload)
         {
-            await AppDialog.MessageAsync(_shell, "Nothing to download", row.DownloadToolTip);
+            await AppDialog.MessageAsync(_shell,
+                row.HasFile ? "Download not available" : "Nothing to download", row.DownloadToolTip);
             return;
         }
 
+        // No instances is fine: the card can keep the save as a library template only.
         var packs = await App.State.Api.ListPacksAsync();
-        if (packs.Count == 0)
-        {
-            await AppDialog.MessageAsync(_shell, "No instance",
-                "You have no instances yet. Create one before downloading a world.");
-            return;
-        }
-        var picker = new PackPickerDialog(packs,
-            "Pick an instance",
-            "The world will land in this instance's saves/ folder.",
-            "Pick") { Owner = _shell };
-        if (picker.ShowDialog() != true || picker.SelectedPackId is null) return;
-        var packId = picker.SelectedPackId.Value;
-        var pack = packs.First(p => p.Id == packId);
+
+        // What each instance's saves/ held before the card writes anything, so the copies it makes
+        // can be told apart from existing saves (see LinkCopies).
+        var savesBefore = row.Internal is not null
+            ? await Task.Run(() => SaveFoldersByInstance(packs))
+            : null;
+
+        // Named after the listing, since the library template and each save folder take this
+        // name. Staged before the button is disabled and the bar shown, so a failure here
+        // leaves neither stuck.
+        using var staged = StagedDownload.For(LibraryKind.World, ZipNameFor(row.Title));
 
         // Each download owns its source. The field only points at the newest one, so a download
-        // that finishes late must not dispose or clear whatever is in the field by then — doing
-        // that killed the Cancel button for the download still running and threw
-        // ObjectDisposedException out of it.
+        // that finishes late must not dispose or clear whatever the field holds by then.
         var cts = new CancellationTokenSource();
         _downloadCts?.Cancel();
         _downloadCts = cts;
@@ -510,25 +605,43 @@ public partial class WorldBrowserView : Page
 
         if (button is not null) button.IsEnabled = false;
         ShowDownloadProgress(true);
-        string? zipPath = null;
         try
         {
+            // Null for a hosted world: a shared world is not a store listing, and ModSource has no
+            // CloudLauncher member to file one under.
+            ModVersion? fetched = null;
             if (row.Kind == WorldBrowseRowKind.CurseForge && row.External is { } ext)
-                zipPath = await DownloadCurseZipAsync(ext, version?.ExternalVersion, ct);
+                fetched = await DownloadCurseZipAsync(ext, version?.ExternalVersion, staged.FilePath, ct);
             else if (row.Kind == WorldBrowseRowKind.CloudLauncher && row.Internal is { } w)
-                zipPath = await DownloadCloudZipAsync(w, version?.CloudVersion, ct);
+                await DownloadCloudZipAsync(w, version?.CloudVersion, staged.FilePath, ct);
+            else throw new InvalidOperationException("Download failed.");
 
-            if (zipPath is null) throw new InvalidOperationException("Download failed.");
+            // The card owns the window from here, so hide this page's transfer controls first.
+            ShowDownloadProgress(false);
+            // No PreferredPackId: this page is not scoped to an instance, and the card pre-ticks
+            // the only instance when there is one. The origin fields go on the library template,
+            // which outlives the copies, so the save can be matched back to its listing.
+            var outcome = await ImportContentCard.ShowAsync(_shell, new ImportRequest(
+                ImportContentKind.World, packs, PrePickedPath: staged.FilePath,
+                SourceIsFixed: true,
+                DisplayName: row.Title,
+                OriginSource: row.External?.Source, OriginProjectId: row.External?.Id,
+                OriginVersionId: fetched?.Id, OriginVersionNumber: fetched?.VersionNumber));
 
-            SetDownloadStatus($"Extracting into {pack.Name}...");
-            DownloadProgress.IsIndeterminate = false;
-            var extract = new Progress<double>(f => DownloadProgress.Value = f);
-            var folderName = await App.State.Worlds.ImportZipAsync(
-                zipPath, pack.Id, pack.Name, row.Title, extract, ct);
+            if (outcome is null)
+            {
+                SetStatus("Nothing was imported - the download was thrown away.");
+                SetDownloadStatus("Nothing was imported - the download was thrown away.");
+                return;
+            }
 
-            var landed = Path.Combine(App.State.Worlds.SavesDir(pack.Id, pack.Name), folderName);
-            SetStatus($"Saved to {landed}", success: true);
-            SetDownloadStatus($"Saved to {landed}", success: true);
+            if (row.Internal is { } hostedWorld && savesBefore is not null)
+                await LinkCopiesAsync(hostedWorld.Id, outcome.Targets, savesBefore);
+
+            // The card invalidates the worlds scan for every instance it wrote to, so the Worlds page
+            // re-reads from disk; its receipt already names what happened per instance.
+            SetStatus(outcome.Summary, success: true);
+            SetDownloadStatus(outcome.Summary, success: true);
         }
         catch (OperationCanceledException)
         {
@@ -542,7 +655,6 @@ public partial class WorldBrowserView : Page
         }
         finally
         {
-            if (zipPath is not null) { try { File.Delete(zipPath); } catch { /* best effort */ } }
             ShowDownloadProgress(false);
             if (button is not null) button.IsEnabled = true;
             if (ReferenceEquals(_downloadCts, cts)) _downloadCts = null;
@@ -550,7 +662,71 @@ public partial class WorldBrowserView : Page
         }
     }
 
-    private async Task<string> DownloadCurseZipAsync(ModSummary mod, ModVersion? selectedVersion, CancellationToken ct)
+    /// <summary>The zip name a listing's title gives the download, or a plain stand-in when
+    /// the title would not make a usable file name, such as one that is a device name (CON,
+    /// NUL, COM1...).</summary>
+    private static string ZipNameFor(string title)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var cleaned = new string((title ?? "").Select(c => Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray()).Trim();
+        if (PathSafety.IsSafeFileName(cleaned + ".zip")) return $"{title}.zip";
+        AppLog.Log(nameof(WorldBrowserView), $"A listing title does not make a usable file name, so the download is named world.zip: {title}");
+        return "world.zip";
+    }
+
+    /// <summary>The save folders each instance holds right now, by instance id.</summary>
+    /// <remarks>Read without creating anything: an instance with no folder on this PC yet has no
+    /// saves, and resolving it by name would make one.</remarks>
+    private static Dictionary<Guid, HashSet<string>> SaveFoldersByInstance(IEnumerable<PackSummary> packs)
+    {
+        var map = new Dictionary<Guid, HashSet<string>>();
+        foreach (var pack in packs) map[pack.Id] = SaveFolders(pack.Id);
+        return map;
+    }
+
+    private static HashSet<string> SaveFolders(Guid packId)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var dir = App.State.Worlds.SavesDir(packId);
+            if (Directory.Exists(dir))
+                foreach (var sub in Directory.EnumerateDirectories(dir))
+                    names.Add(Path.GetFileName(sub));
+        }
+        catch (Exception) { /* no folder for this instance yet, so no saves in it */ }
+        return names;
+    }
+
+    /// <summary>
+    /// Links every save the import just made to the hosted world it was downloaded from.
+    /// </summary>
+    /// <remarks>
+    /// Once linked, the save's page publishes new versions to that world and manages its sharing
+    /// instead of uploading a separate copy. The card does not report which folders it made, so
+    /// they are found by diffing each instance's saves against the earlier snapshot.
+    /// </remarks>
+    private static async Task LinkCopiesAsync(
+        Guid worldId, IReadOnlyList<Guid> targets, Dictionary<Guid, HashSet<string>> before)
+    {
+        var made = await Task.Run(() => targets
+            .Distinct()
+            .SelectMany(packId => SaveFolders(packId)
+                .Where(folder => !before.TryGetValue(packId, out var had) || !had.Contains(folder))
+                .Select(folder => (packId, folder)))
+            .ToList());
+
+        foreach (var (packId, folder) in made)
+            App.State.Worlds.LinkSharedWorld(WorldService.Key(packId, folder), worldId);
+        if (made.Count > 0)
+            AppLog.Log("worlds", $"Linked {made.Count} downloaded save(s) to hosted world {worldId}.");
+    }
+
+    /// <summary>Fetches the save and returns the version it actually took.</summary>
+    /// <remarks>The row's Download button pins no version, so the newest is resolved here, and the
+    /// provenance must name that one.</remarks>
+    private async Task<ModVersion> DownloadCurseZipAsync(ModSummary mod, ModVersion? selectedVersion, string destPath,
+                                                         CancellationToken ct)
     {
         SetDownloadStatus($"Fetching '{mod.Name}'...");
         if (!int.TryParse(mod.Id, out var cfModId)) throw new InvalidOperationException("Bad CurseForge id.");
@@ -569,26 +745,24 @@ public partial class WorldBrowserView : Page
         var url = await App.State.CurseForge.GetDownloadUrlAsync(cfModId, cfFileId);
         if (string.IsNullOrEmpty(url)) throw new InvalidOperationException("No download URL.");
 
-        var tmp = Path.Combine(Path.GetTempPath(), $"cl-world-{Guid.NewGuid():N}.zip");
         SetDownloadStatus($"Downloading '{mod.Name}'...");
-        await App.State.Modrinth.DownloadFileAsync(url, tmp, ByteProgress($"Downloading '{mod.Name}'"), ct);
-        return tmp;
+        await App.State.Modrinth.DownloadFileAsync(url, destPath, ByteProgress($"Downloading '{mod.Name}'"), ct);
+        return latest;
     }
 
-    private async Task<string> DownloadCloudZipAsync(SharedWorldSummary w, SharedWorldVersionInfo? selectedVersion,
-                                                     CancellationToken ct)
+    private async Task DownloadCloudZipAsync(SharedWorldSummary w, SharedWorldVersionInfo? selectedVersion,
+                                             string destPath, CancellationToken ct)
     {
         var detail = await App.State.Api.GetSharedWorldAsync(w.Id, ct);
         var version = selectedVersion ?? detail.Versions.OrderByDescending(v => v.PublishedAt).FirstOrDefault()
             ?? throw new InvalidOperationException("This world has no versions yet.");
-        var tmp = Path.Combine(Path.GetTempPath(), $"cl-world-{Guid.NewGuid():N}.zip");
         SetDownloadStatus($"Downloading '{w.Name}'...");
 
         // Copied in chunks rather than with CopyToAsync so the bar can move: the version record
         // already carries the total, so this is determinate from the first byte.
         var progress = ByteProgress($"Downloading '{w.Name}'");
         await using var stream = await App.State.Api.DownloadSharedWorldVersionAsync(w.Id, version.Id, ct);
-        await using (var fs = File.Create(tmp))
+        await using (var fs = File.Create(destPath))
         {
             var buffer = new byte[81920];
             long done = 0;
@@ -600,7 +774,6 @@ public partial class WorldBrowserView : Page
                 progress.Report((done, version.FileSize));
             }
         }
-        return tmp;
     }
 
     private async void OnResultSelected(object sender, SelectionChangedEventArgs e)
@@ -628,7 +801,7 @@ public partial class WorldBrowserView : Page
         _currentProjectUrl = BuildProjectUrl(world);
         OpenProjectButton.Visibility = Visibility.Visible;
         ConfigureLinks(new ModProjectLinks(_currentProjectUrl, null, null, null, null));
-        ShowOverview("Loading…");
+        ShowOverview("Loading...");
         ScreenshotsEmptyText.Text = "Loading screenshots...";
         VersionsGrid.ItemsSource = null;
         _externalVersions.Clear();
@@ -665,7 +838,7 @@ public partial class WorldBrowserView : Page
         _currentProjectUrl = null;
         OpenProjectButton.Visibility = Visibility.Collapsed;
         ConfigureLinks(new ModProjectLinks(null, null, null, null, null));
-        ShowOverview("Loading…");
+        ShowOverview("Loading...");
         ScreenshotsEmptyText.Text = "CloudLauncher world screenshots are not supported yet.";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
@@ -675,17 +848,116 @@ public partial class WorldBrowserView : Page
         try
         {
             var detail = await App.State.Api.GetSharedWorldAsync(world.Id, ct);
+            if (ct.IsCancellationRequested) return;
             ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
+
+            var canDownload = detail.EffectivePermissions.HasFlag(PackPermissions.Download);
+            var hint = canDownload
+                ? "Download this version"
+                : $"You can see this world but not download it. Ask {detail.OwnerUsername} for download access.";
             VersionsGrid.ItemsSource = detail.Versions
                 .OrderByDescending(v => v.PublishedAt)
-                .Select(WorldVersionRow.FromCloud)
+                .Select(v => WorldVersionRow.FromCloud(v, canDownload, hint))
                 .ToList();
+            ShowHostedActions(detail);
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
             ShowOverview("Error: " + ex.Message);
         }
+    }
+
+    // -- managing a hosted world ----------------------------------------------
+
+    /// <summary>Offers Manage access to whoever may manage the selected world, and Leave to somebody
+    /// it was shared with directly.</summary>
+    private void ShowHostedActions(SharedWorldDetail detail)
+    {
+        _currentHosted = detail;
+        var me = App.State.Settings.UserId;
+        var isOwner = me is { } owner && detail.OwnerId == owner;
+        var canManage = isOwner || detail.EffectivePermissions.HasFlag(PackPermissions.ManageCollaborators);
+        var direct = !isOwner && me is { } person && detail.Collaborators.Any(c => c.UserId == person);
+
+        ManageAccessButton.Visibility = canManage ? Visibility.Visible : Visibility.Collapsed;
+        LeaveWorldButton.Visibility = direct ? Visibility.Visible : Visibility.Collapsed;
+        LeaveWorldButton.ToolTip =
+            $"Give back the access {detail.OwnerUsername} gave you. Saves you already downloaded stay where they are.";
+    }
+
+    private void HideHostedActions()
+    {
+        _currentHosted = null;
+        ManageAccessButton.Visibility = Visibility.Collapsed;
+        LeaveWorldButton.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>Opens the selected world's access list (the same dialog its own page opens).</summary>
+    private async void OnManageAccess(object sender, RoutedEventArgs e)
+    {
+        if (_currentHosted is not { } shown) return;
+        try
+        {
+            // Read again first: the dialog edits the list it is handed, and the one on screen may be
+            // minutes old.
+            var detail = await App.State.Api.GetSharedWorldAsync(shown.Id);
+            new PermissionsDialog(detail) { Owner = _shell }.ShowDialog();
+            if (_currentRow is { Internal: { } w } row && w.Id == shown.Id) await LoadCloudDetailAsync(row);
+        }
+        catch (Exception ex)
+        {
+            SetDownloadStatus("Its access list could not be opened: " + ContentBundleService.Explain(ex, ex.Message), danger: true);
+        }
+    }
+
+    /// <summary>Gives back the access the owner granted, after asking.</summary>
+    /// <remarks>If this person can no longer see the world at all, saves on this PC linked to
+    /// it are unlinked so their pages stop offering controls for it. The saves themselves are
+    /// not touched.</remarks>
+    private async void OnLeaveWorld(object sender, RoutedEventArgs e)
+    {
+        if (_currentHosted is not { } detail || App.State.Settings.UserId is not { } me) return;
+        try
+        {
+            if (!await AppDialog.ConfirmAsync(_shell, "Leave world",
+                    $"Leave '{detail.Name}'? You lose the access {detail.OwnerUsername} gave you, and only they "
+                    + "can give it back. Saves you already downloaded stay on this PC. If one of your teams "
+                    + "also has the world, you keep what the team gives.",
+                    "Leave", "Cancel", danger: true))
+                return;
+
+            LeaveWorldButton.IsEnabled = false;
+            await App.State.Api.RemoveSharedWorldCollaboratorAsync(detail.Id, me);
+        }
+        catch (Exception ex)
+        {
+            SetDownloadStatus("Could not leave: " + ContentBundleService.Explain(ex, ex.Message), danger: true);
+            return;
+        }
+        finally { LeaveWorldButton.IsEnabled = true; }
+
+        var stillVisible = true;
+        try { await App.State.Api.GetSharedWorldAsync(detail.Id); }
+        catch (Exception) { stillVisible = false; }
+
+        if (!stillVisible)
+        {
+            foreach (var key in App.State.Settings.Worlds
+                         .Where(kv => kv.Value.SharedWorldId == detail.Id)
+                         .Select(kv => kv.Key)
+                         .ToList())
+            {
+                App.State.Worlds.UnlinkSharedWorld(key);
+                App.State.Worlds.SetSharingEnabled(key, false);
+            }
+        }
+
+        SetStatus(stillVisible
+            ? $"You left {detail.Name}. What is left comes from a team or from it being public."
+            : $"You left {detail.Name}. Saves you downloaded stay on this PC as ordinary local worlds.",
+            success: true);
+        await ResetAndLoadAsync();
     }
 
     private void ShowDetailShell(WorldBrowseRow row)
@@ -698,6 +970,10 @@ public partial class WorldBrowserView : Page
         SelectedIconFallback.Text = row.Initial;
         SetSelectedIcon(row.IconUrl);
         DownloadStatus.Text = "";
+        DownloadSelectedButton.IsEnabled = row.CanDownload;
+        DownloadSelectedButton.ToolTip = row.DownloadToolTip;
+        // Until the hosted detail arrives nothing says what this person may do with it.
+        HideHostedActions();
     }
 
     private void ClearDetail()
@@ -705,6 +981,7 @@ public partial class WorldBrowserView : Page
         _currentRow = null;
         _currentProjectUrl = null;
         _externalVersions.Clear();
+        HideHostedActions();
         DetailPanel.Visibility = Visibility.Collapsed;
         DetailPlaceholder.Visibility = Visibility.Visible;
         WorldNameLabel.Text = "";
@@ -771,16 +1048,25 @@ public partial class WorldBrowserView : Page
     private void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { DownloadStatus.Text = ex.Message; }
+        if (!SafeLaunch.OpenUrl(url)) DownloadStatus.Text = "That link could not be opened.";
     }
 
-    private void SetSelectedIcon(string? iconUrl)
+    /// <summary>
+    /// Puts the selected world's icon in the detail header.
+    /// </summary>
+    /// <remarks>Uses the shared cache, since the list has already decoded this URL. A late result is
+    /// checked against the URL still selected, so a slow icon cannot overwrite a newer one.</remarks>
+    private async void SetSelectedIcon(string? iconUrl)
     {
         SelectedIconImage.Source = null;
         if (string.IsNullOrWhiteSpace(iconUrl)) return;
 
-        try { SelectedIconImage.Source = new BitmapImage(new Uri(iconUrl, UriKind.Absolute)); }
+        try
+        {
+            var wanted = iconUrl;
+            var image = await ModIconCache.LoadAsync(wanted, 44);
+            if (_currentRow?.IconUrl == wanted) SelectedIconImage.Source = image;
+        }
         catch { SelectedIconImage.Source = null; }
     }
 
@@ -866,18 +1152,24 @@ public partial class WorldBrowserView : Page
         public Brush SourceBadgeForeground { get; set; } = Brushes.White;
 
         /// <summary>
-        /// False for a hosted world page that has no uploaded version behind it.
+        /// False for a hosted world that has no uploaded version yet (a world can be created on the
+        /// server before anything is uploaded).
         /// </summary>
-        /// <remarks>A world can be created on the server before anything is uploaded to it, and the
-        /// Download button used to look identical on those rows and fail with "This world has no
-        /// versions yet" only after the instance picker had been filled in.</remarks>
-        public bool CanDownload => Internal is null || Internal.VersionCount > 0;
+        public bool HasFile => Internal is null || Internal.VersionCount > 0;
 
-        public string DownloadLabel => CanDownload ? "Download" : "No file";
+        /// <summary>False for a hosted world shared with this person as "can view" only; the server
+        /// refuses those downloads.</summary>
+        public bool MayDownload => Internal is null || Internal.EffectivePermissions.HasFlag(PackPermissions.Download);
 
-        public string DownloadToolTip => CanDownload
-            ? "Download this world into one of your instances"
-            : "The owner has published this world's page but has not uploaded a save to it yet.";
+        public bool CanDownload => HasFile && MayDownload;
+
+        public string DownloadLabel => HasFile ? "Download" : "No file";
+
+        public string DownloadToolTip =>
+            !HasFile ? "The owner has published this world's page but has not uploaded a save to it yet."
+            : !MayDownload ? $"You can see this world but not download it. Ask {Internal!.OwnerUsername} for download access."
+            : "Download it, then tick the instances that should get a copy - or none, and keep it as a "
+            + "template for new instances";
 
         /// <summary>The whole row, for the cases where the description was trimmed away.</summary>
         public string RowToolTip
@@ -902,22 +1194,29 @@ public partial class WorldBrowserView : Page
         public string DateLabel { get; init; } = "";
         public string SizeLabel { get; init; } = "";
 
+        /// <summary>Whether this person may download this version; a hosted world shared as "can view"
+        /// may not.</summary>
+        public bool CanDownload { get; init; } = true;
+        public string DownloadHint { get; init; } = "Download this version";
+
         public static WorldVersionRow FromExternal(ModVersion version) => new()
         {
             ExternalVersion = version,
             VersionNumber = version.VersionNumber,
             McVersion = string.Join(", ", version.GameVersions.Take(2)) + (version.GameVersions.Length > 2 ? "..." : ""),
-            DateLabel = version.DatePublished.LocalDateTime.ToString("yyyy-MM-dd"),
+            DateLabel = TimeFormat.Date(version.DatePublished),
             SizeLabel = version.Files.FirstOrDefault()?.Size is long size ? FormatSize(size) : ""
         };
 
-        public static WorldVersionRow FromCloud(SharedWorldVersionInfo version) => new()
+        public static WorldVersionRow FromCloud(SharedWorldVersionInfo version, bool canDownload, string hint) => new()
         {
             CloudVersion = version,
             VersionNumber = version.VersionString,
             McVersion = version.McVersion ?? "",
-            DateLabel = version.PublishedAt.LocalDateTime.ToString("yyyy-MM-dd"),
-            SizeLabel = FormatSize(version.FileSize)
+            DateLabel = TimeFormat.Date(version.PublishedAt),
+            SizeLabel = FormatSize(version.FileSize),
+            CanDownload = canDownload,
+            DownloadHint = hint
         };
     }
 }

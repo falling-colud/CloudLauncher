@@ -1,0 +1,15 @@
+<Project>
+  <!-- Self-contained publishes bundle the latest .NET 10 servicing release instead of the one the
+       installed SDK happens to know about. Framework-dependent builds are unaffected. -->
+  <PropertyGroup>
+    <CloudLauncherRuntimePatch>10.0.12</CloudLauncherRuntimePatch>
+  </PropertyGroup>
+  <ItemGroup>
+    <KnownFrameworkReference Update="Microsoft.NETCore.App" LatestRuntimeFrameworkVersion="$(CloudLauncherRuntimePatch)" />
+    <KnownFrameworkReference Update="Microsoft.WindowsDesktop.App" LatestRuntimeFrameworkVersion="$(CloudLauncherRuntimePatch)" />
+    <KnownFrameworkReference Update="Microsoft.WindowsDesktop.App.WPF" LatestRuntimeFrameworkVersion="$(CloudLauncherRuntimePatch)" />
+    <KnownFrameworkReference Update="Microsoft.WindowsDesktop.App.WindowsForms" LatestRuntimeFrameworkVersion="$(CloudLauncherRuntimePatch)" />
+    <KnownFrameworkReference Update="Microsoft.AspNetCore.App" LatestRuntimeFrameworkVersion="$(CloudLauncherRuntimePatch)" />
+    <KnownAppHostPack Update="Microsoft.NETCore.App" AppHostPackVersion="$(CloudLauncherRuntimePatch)" />
+  </ItemGroup>
+</Project>

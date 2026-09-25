@@ -7,18 +7,14 @@ using CloudLauncher.Services;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The in-window card that collects a server's RCON details, with a Test button that proves them
-/// before they are saved.
+/// In-window card that collects a server's RCON details, with a Test button to check them before
+/// they are saved.
 /// </summary>
 /// <remarks>
-/// <para>The Test button is the point of this card. RCON has four ways to fail — the port is closed,
-/// <c>enable-rcon</c> is false, the password is wrong, or something else entirely is listening — and
-/// without a test they all look the same later, from inside a console that simply will not connect.
-/// Testing here names the actual problem while the fields are still on screen.</para>
-/// <para>The password is shown through a <see cref="PasswordBox"/> and is never written to
-/// <see cref="AppLog"/>, put in a status message, or echoed into the console scrollback. It is still
-/// stored in clear in settings.json, which the card says plainly rather than leaving the user to
-/// assume otherwise.</para>
+/// <para>Testing here tells the usual failures apart (port closed, <c>enable-rcon</c> false, wrong
+/// password, something else listening) while the fields are still on screen.</para>
+/// <para>The password is never written to <see cref="AppLog"/>, a status message or the console
+/// scrollback. It is still stored in clear in settings.json, and the card says so.</para>
 /// </remarks>
 public partial class ServerConsoleSetupDialog : UserControl
 {
@@ -48,7 +44,7 @@ public partial class ServerConsoleSetupDialog : UserControl
         Loaded += (_, _) =>
         {
             Animate.SlideFadeIn(this, 0, 14, 200);
-            HostBox.ToolTip = $"Blank means {_gameHost} — the same host as the game address.";
+            HostBox.ToolTip = $"Blank means {_gameHost} - the same host as the game address.";
             (PasswordInput.Password.Length == 0 ? PasswordInput : (Control)LabelBox).Focus();
         };
         Unloaded += (_, _) => _testCts?.Cancel();
@@ -88,11 +84,11 @@ public partial class ServerConsoleSetupDialog : UserControl
             _testCts?.Cancel();
             _testCts = new CancellationTokenSource();
             TestButton.IsEnabled = false;
-            Say($"Connecting to {EffectiveHost}:{port}…");
+            Say($"Connecting to {EffectiveHost}:{port}...");
 
             using var client = await RconClient.ConnectAsync(EffectiveHost, port, PasswordInput.Password,
                                                              ct: _testCts.Token);
-            Say("Connected — the password works.", success: true);
+            Say("Connected - the password works.", success: true);
         }
         catch (OperationCanceledException) { }
         catch (RconAuthenticationException ex) { Say(ex.Message, danger: true); }
@@ -104,8 +100,8 @@ public partial class ServerConsoleSetupDialog : UserControl
     private void Say(string message, bool danger = false, bool success = false)
     {
         StatusLabel.Text = message;
-        // SetResourceReference rather than a fetched brush: the colour has to follow a live theme
-        // change, and a Brush pulled out of the resources here would be a snapshot of one theme.
+        // SetResourceReference so the colour follows a live theme change; a fetched brush would be a
+        // snapshot of the current theme.
         StatusLabel.SetResourceReference(TextBlock.ForegroundProperty,
             danger ? "DangerBrush" : success ? "SuccessBrush" : "TextSecondaryBrush");
     }
@@ -122,7 +118,7 @@ public partial class ServerConsoleSetupDialog : UserControl
         if (!TryReadPort(out var port)) { Say("That port is not a number between 1 and 65535.", danger: true); return; }
         if (PasswordInput.Password.Length == 0)
         {
-            Say("Without a password there is nothing to connect with — use “Remove console” to forget this server instead.",
+            Say("Without a password there is nothing to connect with - use 'Remove console' to forget this server instead.",
                 danger: true);
             return;
         }

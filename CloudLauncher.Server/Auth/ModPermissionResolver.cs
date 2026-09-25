@@ -33,6 +33,12 @@ public class ModPermissionResolver(AppDbContext db)
         foreach (var p in teamPerms)
             perms |= p;
 
+        // Team visibility, same rule as instances and bundles: anyone on a team the mod is shared with
+        // may see and download it, whatever that team's grant says. Only ReadOnly, so a View-only grant
+        // is not raised above downloading.
+        if (mod.Visibility == PackVisibility.Team && teamPerms.Count > 0)
+            perms |= PackPermissions.ReadOnly;
+
         return perms;
     }
 }

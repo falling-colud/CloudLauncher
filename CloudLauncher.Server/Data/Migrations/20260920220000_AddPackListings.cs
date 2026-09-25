@@ -12,10 +12,8 @@ namespace CloudLauncher.Server.Data.Migrations
     /// Separates "I have access to this pack" from "this pack is in my instance list".
     /// </summary>
     /// <remarks>
-    /// Until now a collaborator or team grant did both, so the moment somebody shared a pack with you
-    /// it appeared in your library unasked — and taking it out meant deleting the grant. The backfill
-    /// below lists every pack every user can currently see, so nobody's library changes when this
-    /// lands; from here on, a share grants access and the user adds it themselves.
+    /// A share only grants access; the user adds the pack to their list themselves. The backfill lists
+    /// every pack each user can already see, so existing libraries don't change.
     /// </remarks>
     [DbContext(typeof(AppDbContext))]
     [Migration("20260920220000_AddPackListings")]
@@ -54,8 +52,8 @@ namespace CloudLauncher.Server.Data.Migrations
                 table: "PackListings",
                 column: "UserId");
 
-            // Backfill: everything that was listed a moment ago stays listed. Collaborator grants
-            // first, then team grants, skipping the pack's owner (owners are listed by ownership).
+            // Backfill: every pack a user can see now stays listed. Collaborator grants first, then team
+            // grants, skipping the owner (owners are listed by ownership).
             migrationBuilder.Sql("""
                 INSERT INTO "PackListings" ("PackId", "UserId", "AddedAt")
                 SELECT c."PackId", c."UserId", now()

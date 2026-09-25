@@ -7,8 +7,8 @@ public enum PlanNodeKind
 {
     /// <summary>One specific installed mod, resolved live by its metadata key.</summary>
     Mod = 0,
-    /// <summary>A live query over a mod property ("everything tagged Magic") — members update
-    /// themselves as flags change, so the board never goes stale.</summary>
+    /// <summary>A live query over a mod property ("everything tagged Magic"); members update as flags
+    /// change.</summary>
     Group = 1,
     /// <summary>Free-text card: the actual planning prose.</summary>
     Note = 2,
@@ -29,7 +29,7 @@ public enum PlanGroupProperty
     Source   = 5,
     /// <summary>The pack folder the jar lives in (game / local).</summary>
     Folder   = 6,
-    /// <summary>Every installed mod — a whole-pack card.</summary>
+    /// <summary>Every installed mod (a whole-pack card).</summary>
     All      = 7,
     /// <summary>How much content the mod adds (see <see cref="ModContentSize"/>).</summary>
     ContentSize = 8
@@ -67,8 +67,8 @@ public sealed class PlanGroupQuery
 {
     public PlanGroupProperty Property { get; set; } = PlanGroupProperty.Category;
 
-    /// <summary>The matched value — a category name, a priority number, "client", "library",
-    /// "disabled", "modrinth", "local"… Interpreted per <see cref="Property"/>. Unused for
+    /// <summary>The matched value: a category name, a priority number, "client", "library", "disabled",
+    /// "modrinth", "local" and so on, interpreted per <see cref="Property"/>. Unused for
     /// <see cref="PlanGroupProperty.All"/>.</summary>
     public string Value { get; set; } = "";
 
@@ -121,16 +121,16 @@ public sealed class PlanNode
     public double H { get; set; }
 
     /// <summary>For <see cref="PlanNodeKind.Mod"/>: the mod's metadata key
-    /// (<c>modrinth:…</c> / <c>curseforge:…</c> / <c>file:…</c>). Migrated forward automatically
+    /// (<c>modrinth:...</c>, <c>curseforge:...</c> or <c>file:...</c>). Migrated forward automatically
     /// when a jar's identity resolves to a more stable key.</summary>
     public string? ModKey { get; set; }
 
     /// <summary>For <see cref="PlanNodeKind.Group"/>: the live selection.</summary>
     public PlanGroupQuery? Query { get; set; }
 
-    /// <summary>The section this card belongs to (its <see cref="Id"/>), or null when loose. Explicit
-    /// membership — set when a card is dropped onto a section — so overlapping sections never steal
-    /// each other's cards. Not used by section nodes themselves.</summary>
+    /// <summary>The section this card belongs to (its <see cref="Id"/>), or null when loose. Set when a
+    /// card is dropped onto a section, so overlapping sections never steal each other's cards. Not used
+    /// by section nodes.</summary>
     public string? SectionId { get; set; }
 
     /// <summary>Note/section heading, or a user override for a group card's heading.</summary>
@@ -150,8 +150,8 @@ public sealed class PlanNode
     /// Independent of <see cref="Collapsed"/>, which hides the list entirely.</summary>
     public bool Expanded { get; set; }
 
-    // Note-card tracking. Left out of the JSON while unused, so cards that never track anything (every
-    // mod, group and section card) are written exactly as before.
+    // Note-card tracking. Omitted from the JSON while unused, so cards without it serialize the same
+    // as in older versions.
 
     /// <summary>Note cards: the completion control shown on the card, if any.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -161,7 +161,7 @@ public sealed class PlanNode
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool Done { get; set; }
 
-    /// <summary>Note cards with a <see cref="PlanNoteTracker.Progress"/> bar: 0–100.</summary>
+    /// <summary>Note cards with a <see cref="PlanNoteTracker.Progress"/> bar: 0-100.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int Progress { get; set; }
 
@@ -184,8 +184,8 @@ public sealed class PlanNode
     };
 }
 
-/// <summary>A fixed spot on a card's outline, as fractions of the card's width and height — one of
-/// them 0 or 1 — so it stays on the same part of the outline when the card is moved or resized.</summary>
+/// <summary>A fixed spot on a card's outline, as fractions of the card's width and height (one of
+/// them 0 or 1), so it stays on the same part of the outline when the card is moved or resized.</summary>
 public sealed class PlanAnchor
 {
     public double X { get; set; }
@@ -194,7 +194,7 @@ public sealed class PlanAnchor
     public PlanAnchor Clone() => new() { X = X, Y = Y };
 }
 
-/// <summary>A labelled connection between two cards — what turns a board into a concept map.</summary>
+/// <summary>A labelled connection between two cards.</summary>
 public sealed class PlanEdge
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -237,7 +237,7 @@ public sealed class PlanBoard
     /// position-based model to explicit <see cref="PlanNode.SectionId"/>.</summary>
     public bool SectionMembershipSet { get; set; }
 
-    /// <summary>Saved viewport so a board reopens exactly where it was left.</summary>
+    /// <summary>Saved viewport so a board reopens where it was left.</summary>
     public double PanX { get; set; }
     public double PanY { get; set; }
     public double Zoom { get; set; } = 1;

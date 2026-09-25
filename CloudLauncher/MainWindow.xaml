@@ -3,6 +3,9 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         xmlns:anim="clr-namespace:CloudLauncher.Animations"
+        xmlns:views="clr-namespace:CloudLauncher.Views"
+        xmlns:svc="clr-namespace:CloudLauncher.Services"
+        xmlns:slate="clr-namespace:CloudLauncher.Controls"
         Title="CloudLauncher" Height="720" Width="1180" MinWidth="780" MinHeight="500"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource Surface0Brush}"
@@ -26,6 +29,23 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
         </Style>
+        <!--  Nav icons. In the Slate style the selected item's icon takes the accent. The size is
+        a resource because the pixel icon set is crisp at 16 but soft at 15.  -->
+        <Style x:Key="NavIcon" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{DynamicResource IconFont}"/>
+            <Setter Property="FontSize" Value="{DynamicResource NavIconSize}"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Style.Triggers>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding IsChecked, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Value="True"/>
+                        <Condition Binding="{Binding IsSlate, Source={x:Static svc:LookState.Current}}" Value="True"/>
+                    </MultiDataTrigger.Conditions>
+                    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+                </MultiDataTrigger>
+            </Style.Triggers>
+        </Style>
         <!-- Reusable label column for nav items so labels share the same Margin/style.  -->
         <Style x:Key="NavLabel" TargetType="TextBlock">
             <Setter Property="VerticalAlignment" Value="Center"/>
@@ -46,6 +66,9 @@
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
                 <RowDefinition Height="40"/>
+                <!--  Offline banner. Auto height, and the banner is collapsed while online, so the
+                row takes no space then.  -->
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
@@ -70,16 +93,17 @@
                     <!-- Brand (left edge of the title bar) -->
                     <StackPanel DockPanel.Dock="Left" Orientation="Horizontal"
                                 VerticalAlignment="Center" Margin="20,0,16,0">
-                        <Ellipse Width="8" Height="8" Fill="{DynamicResource AccentBrush}"
-                                 VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <slate:SlateBorder Width="8" Height="8" CornerRadius="4" Background="{DynamicResource AccentBrush}"
+                                           VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <TextBlock Text="CloudLauncher"
-                                   FontSize="13" FontWeight="SemiBold"
+                                   FontFamily="{DynamicResource BrandFont}"
+                                   FontSize="{DynamicResource BrandFontSize}" FontWeight="{DynamicResource BrandFontWeight}"
                                    Foreground="{DynamicResource TextPrimaryBrush}"
                                    VerticalAlignment="Center"/>
                     </StackPanel>
 
                     <!-- Minecraft-account chip -->
-                    <Border DockPanel.Dock="Right" Margin="0,4,12,4"
+                    <slate:SlateBorder DockPanel.Dock="Right" Margin="0,4,12,4"
                             Background="{DynamicResource Surface3Brush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                             CornerRadius="16" Padding="2"
@@ -89,12 +113,12 @@
                                 Click="OnMcAccountChip" Cursor="Hand"
                                 ToolTip="Switch Minecraft account">
                             <StackPanel Orientation="Horizontal">
-                                <Border Width="22" Height="22" CornerRadius="11"
+                                <slate:SlateBorder Width="22" Height="22" CornerRadius="11"
                                         Background="{DynamicResource AccentSoftBrush}">
-                                    <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}"
-                                               FontSize="11" Foreground="{DynamicResource AccentBrush}"
+                                    <TextBlock Text="&#xE77B;" FontFamily="{DynamicResource IconFont}"
+                                               FontSize="11" Foreground="{DynamicResource AccentTextBrush}"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                </Border>
+                                </slate:SlateBorder>
                                 <TextBlock x:Name="McAccountChipLabel"
                                            Text="No MC account"
                                            Margin="8,0,8,0" VerticalAlignment="Center"
@@ -102,22 +126,24 @@
                                            Foreground="{DynamicResource TextSecondaryBrush}"/>
                             </StackPanel>
                         </Button>
-                    </Border>
+                    </slate:SlateBorder>
 
                     <Grid Background="Transparent"/>
                 </DockPanel>
             </Border>
 
+            <!-- ════════════════ OFFLINE BANNER ════════════════ -->
+            <views:OfflineBanner x:Name="OfflineBar" Grid.Row="1" Grid.ColumnSpan="2"/>
+
             <!-- ════════════════ SIDEBAR ════════════════ -->
-            <!-- Layout key: every row inside is a Grid with a fixed 60-px icon column and a
-                 flexible label column. Icons stay anchored at the same X when the sidebar
-                 collapses (60 px) or expands (240 px) — only the label column shrinks. -->
-            <Border Grid.Row="1" Grid.Column="0"
+            <!-- Every row inside is a Grid with a fixed 60 px icon column and a flexible label
+            column, so the icons stay put when the sidebar collapses (60 px) or expands (240 px). -->
+            <Border Grid.Row="2" Grid.Column="0"
                     Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                 <DockPanel x:Name="Sidebar">
 
-                    <!-- ── TOP: hamburger + LIBRARY label (expands rightward) ────────── -->
+                    <!-- ── TOP: hamburger + sidebar header (expands rightward) ────────── -->
                     <Button x:Name="SidebarToggle" DockPanel.Dock="Top"
                             Click="OnSidebarToggle" ToolTip="Toggle sidebar"
                             Background="Transparent" BorderThickness="0"
@@ -142,11 +168,11 @@
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="&#xE700;"
-                                       FontFamily="{StaticResource IconFont}" FontSize="16"
+                                       FontFamily="{DynamicResource IconFont}" FontSize="16"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"
                                        Foreground="{DynamicResource TextSecondaryBrush}"/>
                             <TextBlock x:Name="SidebarHeaderLabel" Grid.Column="1"
-                                       Style="{StaticResource SidebarHeader}" Text="LIBRARY"/>
+                                       Style="{StaticResource SidebarHeader}" Text="YOUR MINECRAFT"/>
                         </Grid>
                     </Button>
 
@@ -157,18 +183,33 @@
                     <StackPanel DockPanel.Dock="Bottom" Margin="0,0,0,12">
                         <Border Height="1" Background="{DynamicResource BorderSubtleBrush}" Margin="0,4,0,4"/>
 
-                        <ToggleButton x:Name="NavTeams" Style="{StaticResource NavButton}"
-                                      Click="OnNavTeams" ToolTip="Teams">
+                        <!--  Storage sits with the other launcher-wide screens, not in the
+                        scrolled rail. Unlike Sharing and Account it needs no account, so it
+                        is never gated.  -->
+                        <ToggleButton x:Name="NavStorage" Style="{StaticResource NavButton}"
+                                      Click="OnNavStorage" ToolTip="Storage">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="60"/>
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE716;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavTeamsLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Teams"/>
+                                <TextBlock Grid.Column="0" Text="&#xEDA2;"
+                                           Style="{StaticResource NavIcon}"/>
+                                <TextBlock x:Name="NavStorageLabel" Grid.Column="1"
+                                           Style="{StaticResource NavLabel}" Text="Storage"/>
+                            </Grid>
+                        </ToggleButton>
+                        <ToggleButton x:Name="NavSharing" Style="{StaticResource NavButton}"
+                                      Click="OnNavSharing" ToolTip="Sharing">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="60"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="&#xE72D;"
+                                           Style="{StaticResource NavIcon}"/>
+                                <TextBlock x:Name="NavSharingLabel" Grid.Column="1"
+                                           Style="{StaticResource NavLabel}" Text="Sharing"/>
                             </Grid>
                         </ToggleButton>
 
@@ -180,8 +221,7 @@
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0" Text="&#xE77B;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                           Style="{StaticResource NavIcon}"/>
                                 <TextBlock x:Name="NavAccountLabel" Grid.Column="1"
                                            Style="{StaticResource NavLabel}" Text="Account"/>
                             </Grid>
@@ -195,8 +235,7 @@
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0" Text="&#xE713;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                           Style="{StaticResource NavIcon}"/>
                                 <TextBlock x:Name="NavSettingsLabel" Grid.Column="1"
                                            Style="{StaticResource NavLabel}" Text="Settings"/>
                             </Grid>
@@ -210,8 +249,7 @@
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock Grid.Column="0" Text="&#xE7BA;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           Style="{StaticResource NavIcon}"
                                            Foreground="{DynamicResource WarningBrush}"/>
                                 <TextBlock x:Name="NavDevLabel" Grid.Column="1"
                                            Style="{StaticResource NavLabel}" Text="Dev tools"
@@ -220,126 +258,125 @@
                         </ToggleButton>
                     </StackPanel>
 
-                    <!-- ── TOP GROUP: master + secondary library views ───────────────── -->
-                    <StackPanel DockPanel.Dock="Top">
-                        <ToggleButton x:Name="NavPacks" Style="{StaticResource NavButton}"
-                                      Click="OnNavPacks" IsChecked="True" ToolTip="Instances">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="60"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE7C3;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavPacksLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Instances"/>
-                            </Grid>
-                        </ToggleButton>
+                    <!-- ── TOP GROUP: master + secondary library views ──
+                    Scrolls instead of clipping: as the DockPanel's fill child it would
+                    otherwise cut off the last rows at small window heights or with RootScale
+                    above 100%. LastChildFill makes it fill, so no Dock attribute. -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel>
+                            <ToggleButton x:Name="NavPacks" Style="{StaticResource NavButton}"
+                                          Click="OnNavPacks" IsChecked="True" ToolTip="Instances">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="&#xE7C3;"
+                                               Style="{StaticResource NavIcon}"/>
+                                    <TextBlock x:Name="NavPacksLabel" Grid.Column="1"
+                                               Style="{StaticResource NavLabel}" Text="Instances"/>
+                                </Grid>
+                            </ToggleButton>
 
-                        <ToggleButton x:Name="NavWorlds" Style="{StaticResource NavButton}"
-                                      Click="OnNavWorlds" ToolTip="Worlds">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="60"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE909;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavWorldsLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Worlds"/>
-                            </Grid>
-                        </ToggleButton>
+                            <ToggleButton x:Name="NavMods" Style="{StaticResource NavButton}"
+                                          Click="OnNavMods" ToolTip="Mods">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="&#xEC4A;"
+                                               Style="{StaticResource NavIcon}"/>
+                                    <TextBlock x:Name="NavModsLabel" Grid.Column="1"
+                                               Style="{StaticResource NavLabel}" Text="Mods"/>
+                                </Grid>
+                            </ToggleButton>
 
-                        <ToggleButton x:Name="NavMods" Style="{StaticResource NavButton}"
-                                      Click="OnNavMods" ToolTip="Mods">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="60"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xEC4A;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavModsLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Mods"/>
-                            </Grid>
-                        </ToggleButton>
+                            <ToggleButton x:Name="NavWorlds" Style="{StaticResource NavButton}"
+                                          Click="OnNavWorlds" ToolTip="Worlds">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="&#xE909;"
+                                               Style="{StaticResource NavIcon}"/>
+                                    <TextBlock x:Name="NavWorldsLabel" Grid.Column="1"
+                                               Style="{StaticResource NavLabel}" Text="Worlds"/>
+                                </Grid>
+                            </ToggleButton>
 
-                        <ToggleButton x:Name="NavResourcePacks" Style="{StaticResource NavButton}"
-                                      Click="OnNavResourcePacks" ToolTip="Resource packs">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="60"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE7C9;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavResourcePacksLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Resource packs"/>
-                            </Grid>
-                        </ToggleButton>
+                            <ToggleButton x:Name="NavResourcePacks" Style="{StaticResource NavButton}"
+                                          Click="OnNavResourcePacks" ToolTip="Resource packs">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="&#xE7C9;"
+                                               Style="{StaticResource NavIcon}"/>
+                                    <TextBlock x:Name="NavResourcePacksLabel" Grid.Column="1"
+                                               Style="{StaticResource NavLabel}" Text="Resource packs"/>
+                                </Grid>
+                            </ToggleButton>
 
-                        <ToggleButton x:Name="NavServers" Style="{StaticResource NavButton}"
-                                      Click="OnNavServers" ToolTip="Servers">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="60"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE774;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavServersLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Servers"/>
-                            </Grid>
-                        </ToggleButton>
+                            <ToggleButton x:Name="NavShaders" Style="{StaticResource NavButton}"
+                                          Click="OnNavShaders" ToolTip="Shader packs">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="&#xE706;"
+                                               Style="{StaticResource NavIcon}"/>
+                                    <TextBlock x:Name="NavShadersLabel" Grid.Column="1"
+                                               Style="{StaticResource NavLabel}" Text="Shader packs"/>
+                                </Grid>
+                            </ToggleButton>
 
-                        <ToggleButton x:Name="NavConfigs" Style="{StaticResource NavButton}"
-                                      Click="OnNavConfigs" ToolTip="Config &amp; scripts">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="60"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE943;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavConfigsLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Config &amp; scripts"/>
-                            </Grid>
-                        </ToggleButton>
+                            <ToggleButton x:Name="NavServers" Style="{StaticResource NavButton}"
+                                          Click="OnNavServers" ToolTip="Servers">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="&#xE968;"
+                                               Style="{StaticResource NavIcon}"/>
+                                    <TextBlock x:Name="NavServersLabel" Grid.Column="1"
+                                               Style="{StaticResource NavLabel}" Text="Servers"/>
+                                </Grid>
+                            </ToggleButton>
 
-                        <ToggleButton x:Name="NavShaders" Style="{StaticResource NavButton}"
-                                      Click="OnNavShaders" ToolTip="Shader packs">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="60"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE706;"
-                                           FontFamily="{StaticResource IconFont}" FontSize="15"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="NavShadersLabel" Grid.Column="1"
-                                           Style="{StaticResource NavLabel}" Text="Shaders"/>
-                            </Grid>
-                        </ToggleButton>
-                    </StackPanel>
+                            <ToggleButton x:Name="NavConfigs" Style="{StaticResource NavButton}"
+                                          Click="OnNavConfigs" ToolTip="Config &amp; scripts">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="60"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="&#xE943;"
+                                               Style="{StaticResource NavIcon}"/>
+                                    <TextBlock x:Name="NavConfigsLabel" Grid.Column="1"
+                                               Style="{StaticResource NavLabel}" Text="Config &amp; scripts"/>
+                                </Grid>
+                            </ToggleButton>
+
+                        </StackPanel>
+                    </ScrollViewer>
                 </DockPanel>
             </Border>
 
             <!-- ════════════════ CONTENT REGION ════════════════ -->
-            <Grid Grid.Row="1" Grid.Column="1">
+            <Grid Grid.Row="2" Grid.Column="1">
                 <Grid.ColumnDefinitions>
-                    <!--  Master list — always visible; minimum so it stays readable  -->
+                    <!--  Master list - always visible; minimum so it stays readable  -->
                     <ColumnDefinition x:Name="MainColumn" Width="*" MinWidth="360"/>
-                    <!--  Drag handle — 5 px when side panel is open, 0 when closed  -->
+                    <!--  Drag handle - 5 px when side panel is open, 0 when closed  -->
                     <ColumnDefinition x:Name="SplitterColumn" Width="0"/>
-                    <!--  Side panel — star-based so ratio is maintained on resize.
-                         MinWidth is set in code only when the panel is actually open
-                         (otherwise it leaves a 280-px gap when closed).  -->
+                    <!--  Side panel - star-based so the ratio holds on resize. MinWidth is set in
+                    code only while the panel is open, otherwise it leaves a 280 px gap.  -->
                     <ColumnDefinition x:Name="SidePanelColumn" Width="0"/>
                 </Grid.ColumnDefinitions>
 
@@ -408,7 +445,7 @@
                                 BorderBrush="{DynamicResource BorderBrush}"
                                 BorderThickness="1"
                                 Content="&#xE8BB;"
-                                FontFamily="{StaticResource IconFont}"
+                                FontFamily="{DynamicResource IconFont}"
                                 FontSize="10"
                                 Click="OnFullCloseSidePanel"
                                 ToolTip="Close panel"/>
@@ -424,7 +461,7 @@
                                 BorderBrush="{DynamicResource BorderBrush}"
                                 BorderThickness="1"
                                 Content="&#xE72B;"
-                                FontFamily="{StaticResource IconFont}"
+                                FontFamily="{DynamicResource IconFont}"
                                 FontSize="10"
                                 Click="OnBackSidePanel"
                                 ToolTip="Back"
@@ -434,7 +471,7 @@
             </Grid>
 
             <!-- In-window modal dialog overlay (themed; replaces OS message boxes) -->
-            <Grid x:Name="DialogLayer" Grid.Row="0" Grid.RowSpan="2" Grid.Column="0" Grid.ColumnSpan="2"
+            <Grid x:Name="DialogLayer" Grid.Row="0" Grid.RowSpan="3" Grid.Column="0" Grid.ColumnSpan="2"
                   Panel.ZIndex="100" Visibility="Collapsed"/>
         </Grid>
     </Border>

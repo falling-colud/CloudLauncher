@@ -11,11 +11,8 @@ namespace CloudLauncher.Views;
 /// the user chose in <see cref="SelectedPackId"/>, or nothing if they cancelled.
 /// </summary>
 /// <remarks>
-/// Used from seven places (Mods, Worlds, the world browser, Resource packs, the resource-pack browser,
-/// Shaders and the Minecraft defaults panel), which is why the constructor takes its wording as
-/// arguments rather than knowing any of them: every caller asks the same question about a different
-/// noun. The rows it binds are a projection, not the <see cref="PackSummary"/> objects themselves, so
-/// the filter can match on the version label the user can actually see.
+/// Used from several pages, so callers pass in the wording. Rows are a projection of
+/// <see cref="PackSummary"/> so the filter can match the version label shown on screen.
 /// </remarks>
 public partial class PackPickerDialog : Window
 {
@@ -47,12 +44,8 @@ public partial class PackPickerDialog : Window
     /// of them.
     /// </summary>
     /// <remarks>
-    /// The selection is what makes the dialog work by keyboard: Apply is the default button, so Enter
-    /// reaches it from anywhere including the search box — but <see cref="Accept"/> only closes when
-    /// something is selected, and this dialog used to open with nothing selected, so Enter and a click
-    /// on Apply both did nothing at all until the user thought to click a row. Selecting the first
-    /// match after every filter means the obvious gesture (type two letters, press Enter) picks the
-    /// obvious instance.
+    /// Apply is the default button but <see cref="Accept"/> needs a selection, so this lets the user type
+    /// a few letters and press Enter.
     /// </remarks>
     private void ApplyFilter()
     {
@@ -86,17 +79,15 @@ public partial class PackPickerDialog : Window
         if (e.Key != Key.Down) return;
         if (PackList.Items.Count == 0) return;
         if (PackList.SelectedIndex < 0) PackList.SelectedIndex = 0;
-        // The container only exists once the list has been laid out; on a freshly filtered list it has
-        // not been, so ask for it after the current layout pass rather than failing silently.
+        // The item container doesn't exist until the filtered list has been laid out.
         PackList.UpdateLayout();
         (PackList.ItemContainerGenerator.ContainerFromIndex(PackList.SelectedIndex) as ListBoxItem)?.Focus();
         e.Handled = true;
     }
 
     /// <summary>
-    /// Double-clicking a row picks it. The hit test matters: the list now opens with a row selected,
-    /// so a double-click on the empty space below the last row would otherwise apply whatever happened
-    /// to be selected — a destination the user never pointed at.
+    /// Double-clicking a row picks it. Clicks on empty space are ignored: the list always has a
+    /// selection, so they would apply a row the user never pointed at.
     /// </summary>
     private void OnListDoubleClick(object sender, MouseButtonEventArgs e)
     {
@@ -111,8 +102,8 @@ public partial class PackPickerDialog : Window
 
     private void OnCancel(object sender, RoutedEventArgs e) { DialogResult = false; Close(); }
 
-    /// <summary>Takes the selected row as the answer and closes. A no-op when the filter matched
-    /// nothing, which is the one case where there is genuinely nothing to apply.</summary>
+    /// <summary>Takes the selected row as the answer and closes. Does nothing when the filter matched
+    /// nothing.</summary>
     private void Accept()
     {
         if (PackList.SelectedItem is not PackPickerRow row) return;
@@ -138,9 +129,8 @@ public sealed class PackPickerRow
                 : $"MC {p.MinecraftVersion} · {p.Loader}";
     }
 
-    /// <summary>Whether this row survives the search box. Matches the version label as well as the
-    /// name, because "1.21.1" or "neoforge" is how someone with four copies of a pack tells them
-    /// apart — those are the only words on the row, and both are visible.</summary>
+    /// <summary>Whether this row matches the search box. Checks the version label as well as the name,
+    /// so copies of a pack can be told apart by "1.21.1" or "neoforge".</summary>
     public bool Matches(string query) =>
         Name.Contains(query, StringComparison.OrdinalIgnoreCase)
         || VersionLabel.Contains(query, StringComparison.OrdinalIgnoreCase);

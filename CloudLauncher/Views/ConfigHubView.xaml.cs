@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -13,25 +12,17 @@ using GroupState = CloudLauncher.Services.ConfigHubService.GroupState;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The Config and scripts page: one place to read, edit, compare and copy the config files and KubeJS
-/// scripts that live inside each instance, instead of opening each instance's folder in turn.
+/// The Config and scripts page: read, edit, compare and copy the config files and KubeJS scripts
+/// inside each instance from one place.
 /// </summary>
 /// <remarks>
-/// <para><b>The page is organised around a relative path, not a file.</b> The user runs several
-/// instances of the same modpack lineage, so the question he actually has is "is this config the same
-/// in all of them, and if not, which one is right?". Every row therefore stands for a game-relative
-/// path — <c>config/jei/jei-client.ini</c> — and carries the list of instances that have a file there,
-/// whether their copies match, and the actions to compare and to push one copy over the others. With a
-/// single instance selected in the filter the rows happen to be that instance's files, but they are
-/// still built the same way, so the cross-instance badge is present either way.</para>
-///
-/// <para><b>Nothing touches the disk on the UI thread.</b> The scan, the hashing that decides
-/// "identical" or "differs", the content grep, the preview read and every copy run in
-/// <see cref="Task.Run"/> behind <see cref="_workCts"/>, which the Cancel button trips. Scans are
-/// cached per instance by <see cref="ConfigHubService"/>, so switching filters is instant and only
-/// Refresh (or a write of our own) pays for a re-walk.</para>
+/// Each row is a game-relative path (<c>config/jei/jei-client.ini</c>) with the instances that have
+/// a file there and whether their copies match. All disk work runs in <see cref="Task.Run"/> behind
+/// <see cref="_workCts"/>; <see cref="ConfigHubService"/> remembers scans across launches so the
+/// first frame shows the last results. Counts and empty panels go through <see cref="PageState"/>,
+/// and nothing is shown before a scan has finished.
 /// </remarks>
-public partial class ConfigHubView : Page
+public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
 {
     private readonly MainWindow _shell;
 
@@ -39,6 +30,21 @@ public partial class ConfigHubView : Page
     private readonly ObservableCollection<KindChip> _kindChips = new();
     private readonly ObservableCollection<CopyRow> _copies = new();
     private readonly ObservableCollection<HitRow> _hits = new();
+
+    /// <summary>Owns every count, empty panel, error and busy affordance on this page.</summary>
+    private readonly PageState _state;
+
+    /// <summary>Held while the instance ComboBox is being filled, so the SelectionChanged it raises
+    /// synchronously is not mistaken for the user picking an instance.</summary>
+    private readonly Reentrancy _filling = new();
+
+    /// <summary>True once a scan, remembered or fresh, has completed. Until then
+    /// <see cref="Refresh"/> leaves the screen to <see cref="_state"/>.</summary>
+    private bool _scanned;
+
+    /// <summary>The standing note under the list: how old the remembered scan is, or why the server
+    /// isn't answering. Re-applied on every rebuild so a filter change doesn't drop it.</summary>
+    private string? _note;
 
     private List<PackSummary> _packs = new();
     private List<Entry> _scan = new();
@@ -56,8 +62,8 @@ public partial class ConfigHubView : Page
     private bool _differsOnly;
     private bool _loading;
 
-    /// <summary>Cancels whatever background work the page is doing — one at a time by design, because
-    /// a scan and a copy racing over the same tree is how you lose a config.</summary>
+    /// <summary>Cancels the page's background work. Only one job runs at a time, since a scan and a
+    /// copy racing over the same tree could lose a config.</summary>
     private CancellationTokenSource? _workCts;
 
     /// <summary>Guards the async detail load against a stale result arriving after the user has moved
@@ -74,79 +80,119 @@ public partial class ConfigHubView : Page
         KindStrip.ItemsSource = _kindChips;
         CopiesList.ItemsSource = _copies;
         HitsList.ItemsSource = _hits;
+
+        _state = new PageState(FileList, PageStateHost, nameof(ConfigHubView))
+            .Copy(PageCopy.ConfigFiles)
+            .Slots(CountLabel, StatusLabel, BusyBar, BusyCancelButton)
+            .DisableWhileBusy(RefreshButton, SortButton, DiffersToggle, PackFilterBox);
+        _state.RetryRequested += () => _ = LoadAsync(force: true);
+        _state.CancelRequested += () => _workCts?.Cancel();
+
+        // Filters an in-memory list, so a short debounce is fine.
+        SearchBox.DebounceMilliseconds = 200;
+        SearchBox.TextChanged += (_, _) => Refresh();
+
         RestoreFilter();
+        DiffersToggle.IsChecked = _differsOnly;
         Loaded += OnLoaded;
         Unloaded += (_, _) => _workCts?.Cancel();
     }
 
-    private async void OnLoaded(object sender, RoutedEventArgs e)
-    {
-        try { await LoadAsync(force: false); }
-        catch (Exception ex) { StatusLabel.Text = "Could not open the config list: " + ex.Message; }
-    }
+    private async void OnLoaded(object sender, RoutedEventArgs e) => await LoadAsync(force: false);
 
     // ── loading ──────────────────────────────────────────────────────────────
 
-    private async Task LoadAsync(bool force)
+    /// <summary>Re-runs the load in place, keeping the rows and the scroll position (offline banner's
+    /// Retry, page reopen).</summary>
+    public Task RefreshAsync() => LoadAsync(force: true);
+
+    private async Task LoadAsync(bool force, string? note = null)
     {
         if (_loading) return;
         _loading = true;
         _workCts?.Cancel();
         _workCts = new CancellationTokenSource();
         var ct = _workCts.Token;
-        SetBusy(true, "Reading instances…");
 
         try
         {
-            _packs = (await App.State.Api.ListPacksAsync())
+            // Shows the remembered scan first (first load only), then re-reads every instance. Without
+            // force (a reopen) this is quiet: nothing moves unless the walk runs long or finds a change.
+            _state.Begin(null, null, quiet: !force);
+
+            // ListPacksAsync falls back to its cache or the folders on this PC when the server is
+            // unreachable, so this works offline.
+            _packs = (await (force ? App.State.Api.ListPacksAsync(ct) : App.State.Api.ListPacksQuickAsync(ct)))
                 .Where(p => !App.State.Settings.IsPackHidden(p.Id))
                 .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            RebuildPackFilter();
+            using (_filling.Hold()) RebuildPackFilter();
 
             var packs = _packs;
             var settings = App.State.Settings;
             var folders = App.State.Packs;
-            var progress = new Progress<string>(name => StatusLabel.Text = $"Scanning {name}…");
 
-            var (scan, states, errors) = await Task.Run(() =>
+            // First load only; later loads already have rows on screen.
+            if (!force && !_scanned)
             {
-                var files = ConfigHubService.Scan(packs, folders, settings, force, progress, ct);
-                // Only paths that exist in more than one instance need comparing, and only those whose
-                // copies are the same length need reading — see CompareGroups.
-                var groups = files.GroupBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase)
-                                  .Where(g => g.Count() > 1);
-                var compared = ConfigHubService.CompareGroups(groups, ct);
-
-                var kube = new Dictionary<Guid, Dictionary<string, List<string>>>();
-                foreach (var pack in packs)
+                await ConfigHubService.WarmAsync();
+                // Throw rather than return, or the busy bar keeps running after Cancel.
+                ct.ThrowIfCancellationRequested();
+                if (ConfigHubService.Cached(packs, folders) is { } remembered)
                 {
-                    ct.ThrowIfCancellationRequested();
-                    try { kube[pack.Id] = ConfigHubService.ReadKubeJsErrors(folders.GameDir(pack.Id), ct); }
-                    catch { /* an instance with no logs folder is the normal case */ }
+                    Apply(remembered);
+                    var rememberedNote = remembered.ScannedUtc is { } when && PackListCache.Describe(when) is { } age
+                        ? $"Scanned {age}. Re-reading every instance now."
+                        : null;
+                    // The "scanned X ago" note only shows with the refresh bar, if the walk is still running.
+                    _note = null;
+                    Refresh();
+                    // Keep the remembered rows on screen while re-reading.
+                    _state.Begin(null, refreshing: true, quiet: true, onReveal: () =>
+                    {
+                        _note = rememberedNote;
+                        _state.Note(rememberedNote);
+                    });
                 }
-                return (files, compared, kube);
-            }, ct);
+            }
 
-            _scan = scan;
-            _groupStates = states;
-            _kubeErrors = errors;
-            _contentHits = null;
+            var progress = new Progress<string>(name => _state.Progress($"Scanning {name}..."));
+            var result = await Task.Run(
+                () => ConfigHubService.Rescan(packs, folders, settings, force, progress, ct), ct);
+
+            Apply(result);
+            var stale = App.State.Api.PackListStale is { Length: > 0 } why
+                ? $"Showing your last known instances - the server is not answering ({why}). " +
+                  "The files on this PC are still readable and editable."
+                : null;
+            _note = string.Join("  ·  ",
+                new[] { note, stale }.Where(p => !string.IsNullOrEmpty(p)));
+            if (_note.Length == 0) _note = null;
             Refresh();
-
-            StatusLabel.Text = App.State.Api.PackListStale is { Length: > 0 } why
-                ? $"Showing your last known instances — the server is not answering ({why})."
-                : "";
         }
-        catch (OperationCanceledException) { StatusLabel.Text = "Scan cancelled."; }
-        catch (Exception ex) { StatusLabel.Text = "Scan failed: " + ex.Message; }
-        finally
+        catch (OperationCanceledException) { _state.Cancelled("Scan cancelled."); }
+        catch (OfflineException ex)
         {
-            _loading = false;
-            SetBusy(false);
+            _state.Offline(ex.Reason ?? "the server is not answering");
         }
+        catch (Exception ex)
+        {
+            _state.Error("The config, kubejs and defaultconfigs folders could not be read.", ex);
+        }
+        finally { _loading = false; }
     }
 
+    private void Apply(ConfigHubService.ScanResult result)
+    {
+        _scan = result.Files;
+        _groupStates = result.Groups;
+        _kubeErrors = result.KubeErrors;
+        _contentHits = null;
+        _scanned = true;
+    }
+
+    /// <summary>Fills the instance ComboBox. Callers hold <see cref="_filling"/>, since assigning
+    /// ItemsSource and SelectedItem raises SelectionChanged synchronously.</summary>
     private void RebuildPackFilter()
     {
         var items = new List<PackFilterItem> { new(null, "All instances") };
@@ -168,29 +214,31 @@ public partial class ConfigHubView : Page
     // ── building the list ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Rebuilds the rows from the cached scan. Pure in-memory work — no disk access — so it is safe to
-    /// call from every filter, sort and search change.
+    /// Rebuilds the rows from the scan in memory. No disk access, so it is safe to call on every
+    /// filter, sort and search change.
     /// </summary>
+    /// <remarks>Does nothing until a scan has completed, so no count or empty state is shown for a list
+    /// that hasn't been filled yet.</remarks>
     private void Refresh()
     {
+        if (!_scanned) return;
+
         var previous = SelectedRow is { } sel ? (sel.PackId, sel.RelativePath) : ((Guid, string)?)null;
 
         var scope = SelectedPackId is { } packId
             ? _scan.Where(e => e.PackId == packId).ToList()
             : _scan;
 
-        // Group across the whole scan even when one instance is selected: "this file is in 5 instances,
-        // 2 of them differ" is the answer the page exists to give, and it must not vanish when the user
-        // narrows the list down to the instance they are editing.
+        // Group across the whole scan even with one instance selected, so "in 5 instances, 2 differ"
+        // still shows.
         var byPath = _scan.GroupBy(e => e.RelativePath, StringComparer.OrdinalIgnoreCase)
                           .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
         var query = SearchBox.Text?.Trim() ?? "";
         var pins = App.State.Settings.ConfigHubPins;
 
-        // With "All instances" chosen, one row per relative path: the first instance alphabetically
-        // becomes the row's own copy and the rest show up in the detail pane. A content search is the
-        // exception — there the user is looking for occurrences, so each instance's hit earns a row.
+        // With "All instances", one row per relative path: the first instance alphabetically is the
+        // row's copy and the rest appear in the detail pane. A content search lists every hit.
         var candidates = scope;
         if (SelectedPackId is null && _contentHits is null)
         {
@@ -198,9 +246,8 @@ public partial class ConfigHubView : Page
             candidates = scope.Where(e => seen.Add(e.RelativePath)).ToList();
         }
 
-        // The chip counts describe the rows this filter can produce, so they are taken after the
-        // de-duplication and before the kind and search filters — otherwise "Config 4,812" would sit
-        // above a list of 1,204 rows.
+        // Chip counts are taken after de-duplication and before the kind and search filters, so they
+        // match the rows each chip would show.
         var counts = candidates.GroupBy(e => e.Kind).ToDictionary(g => g.Key, g => g.Count());
 
         var rows = new List<FileRow>();
@@ -224,8 +271,7 @@ public partial class ConfigHubView : Page
                 hitCount: hits?.Count ?? 0));
         }
 
-        // A pin whose file has gone is shown greyed rather than dropped — the instance may just be
-        // mid-sync, and silently losing a pin is worse than showing a dead one.
+        // A pin whose file is gone is shown greyed rather than dropped; the instance may be mid-sync.
         if (!_differsOnly && _contentHits is null) rows.AddRange(MissingPinRows(rows, query));
 
         Sort(rows);
@@ -233,8 +279,8 @@ public partial class ConfigHubView : Page
         foreach (var row in rows) _rows.Add(row);
 
         RebuildKindChips(counts, candidates.Count);
-        UpdateEmptyState(query);
-        UpdateSubLabel(candidates.Count);
+        if (_rows.Count == 0) ChooseEmptyCopy(query);
+        _state.Content(_rows.Count, countText: ScopeLabel(candidates.Count), note: _note);
 
         if (previous is { } key)
         {
@@ -270,7 +316,7 @@ public partial class ConfigHubView : Page
 
     private void Sort(List<FileRow> rows)
     {
-        // Pins always float to the top whatever the sort: the point of pinning is not having to look.
+        // Pins always go to the top, whatever the sort.
         Comparison<FileRow> comparison = _sort switch
         {
             SortMode.Name => (a, b) => string.Compare(a.FileName, b.FileName, StringComparison.OrdinalIgnoreCase),
@@ -297,75 +343,65 @@ public partial class ConfigHubView : Page
         _ => 3
     };
 
-    private void RebuildKindChips(Dictionary<Kind, int> counts, int total)
+    /// <summary>The kind strip. Null counts mean not counted yet and show as a dash, not 0.</summary>
+    private void RebuildKindChips(Dictionary<Kind, int>? counts, int? total)
     {
+        int? For(Kind kind) => counts?.GetValueOrDefault(kind);
         var chips = new List<KindChip>
         {
             new(null, "All", total, _kindFilter is null, "Every config file, script and default config"),
-            new(Kind.Config, "Config", counts.GetValueOrDefault(Kind.Config), _kindFilter == Kind.Config,
-                "game/config — the mod settings for this instance"),
-            new(Kind.KubeJs, "KubeJS", counts.GetValueOrDefault(Kind.KubeJs), _kindFilter == Kind.KubeJs,
-                "game/kubejs — startup, server and client scripts, plus the data and assets they generate"),
-            new(Kind.DefaultConfigs, "Defaults", counts.GetValueOrDefault(Kind.DefaultConfigs),
+            new(Kind.Config, "Config", For(Kind.Config), _kindFilter == Kind.Config,
+                "game/config - the mod settings for this instance"),
+            new(Kind.KubeJs, "KubeJS", For(Kind.KubeJs), _kindFilter == Kind.KubeJs,
+                "game/kubejs - startup, server and client scripts, plus the data and assets they generate"),
+            new(Kind.DefaultConfigs, "Defaults", For(Kind.DefaultConfigs),
                 _kindFilter == Kind.DefaultConfigs,
-                "game/defaultconfigs — what the pack copies into each NEW world, not what the game is using now"),
-            new(Kind.KubeJsLog, "KubeJS logs", counts.GetValueOrDefault(Kind.KubeJsLog),
+                "game/defaultconfigs - what the pack copies into each NEW world, not what the game is using now"),
+            new(Kind.KubeJsLog, "KubeJS logs", For(Kind.KubeJsLog),
                 _kindFilter == Kind.KubeJsLog,
-                "game/logs/kubejs — where a script error is reported")
+                "game/logs/kubejs - where a script error is reported")
         };
         _kindChips.Clear();
         foreach (var chip in chips) _kindChips.Add(chip);
     }
 
-    private void UpdateSubLabel(int scopeCount)
+    /// <summary>The count slot text for the current filter. Only called with counts from a
+    /// completed scan.</summary>
+    private string ScopeLabel(int scopeCount)
     {
-        if (_packs.Count == 0)
-        {
-            SubLabel.Text = "Every instance's config files and KubeJS scripts, side by side.";
-            return;
-        }
+        if (_packs.Count == 0) return "";
         var differing = _groupStates.Count(kv => kv.Value == GroupState.Differs);
-        SubLabel.Text = (SelectedPackId is { } id
-                            ? $"{scopeCount:N0} file(s) in {PackName(id)}"
-                            : $"{scopeCount:N0} distinct path(s) across {_packs.Count} instances") +
-                        (differing > 0
-                            ? $" · {differing:N0} path(s) differ between instances"
-                            : _groupStates.Count > 0 ? " · every shared path matches" : "");
+        return (SelectedPackId is { } id
+                   ? $"{scopeCount:N0} file(s) in {PackName(id)}"
+                   : $"{scopeCount:N0} distinct path(s) across {_packs.Count} instances") +
+               (differing > 0
+                   ? $" · {differing:N0} path(s) differ between instances"
+                   : _groupStates.Count > 0 ? " · every shared path matches" : "");
     }
 
-    private void UpdateEmptyState(string query)
+    /// <summary>
+    /// Picks the empty-state wording for this pass.
+    /// </summary>
+    /// <remarks>Chosen per pass so "nothing matched that filter" doesn't linger after the filter is
+    /// cleared.</remarks>
+    private void ChooseEmptyCopy(string query)
     {
-        EmptyState.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (_rows.Count > 0) return;
-
         if (_packs.Count == 0)
-        {
-            EmptyTitle.Text = "No instances yet";
-            EmptyBody.Text = "Create or download an instance and its config files and KubeJS scripts appear here.";
-        }
+            _state.EmptyNext("No instances yet",
+                "Create or download an instance and its config files and KubeJS scripts appear here.",
+                PageCopy.ConfigFiles.Glyph);
         else if (_contentHits is not null)
-        {
-            EmptyTitle.Text = "Nothing matched";
-            EmptyBody.Text = $"No config or script contains “{ContentQueryBox.Text.Trim()}”. " +
-                             "Very large files are skipped — the status line says how many.";
-        }
+            _state.EmptyNext("Nothing matched",
+                $"No config or script contains '{ContentQueryBox.Text.Trim()}'. " +
+                "Very large files are skipped - the status line says how many.");
         else if (_differsOnly)
-        {
-            EmptyTitle.Text = "Everything matches";
-            EmptyBody.Text = "No file at the same path differs between your instances. " +
-                             "Turn the filter off in the sort menu to see them all.";
-        }
+            _state.EmptyNext("Everything matches",
+                "No file at the same path differs between your instances. " +
+                "Turn the differences filter off to see them all.");
         else if (query.Length > 0 || _kindFilter is not null)
-        {
-            EmptyTitle.Text = "Nothing matched";
-            EmptyBody.Text = "No file matched that filter. Clear the search or pick a different kind.";
-        }
-        else
-        {
-            EmptyTitle.Text = "No config files here yet";
-            EmptyBody.Text = "This instance has no config, kubejs or defaultconfigs folder. " +
-                             "That is normal until it has been launched or synced once.";
-        }
+            _state.EmptyFiltered();
+        // Otherwise the default wording from PageCopy.ConfigFiles applies: no instance has these
+        // folders yet.
     }
 
     private List<string> ErrorsFor(Entry entry)
@@ -409,13 +445,13 @@ public partial class ConfigHubView : Page
         ErrorText.Text = string.Join("\n", errors);
 
         CopiesHeader.Text = row.Copies.Count > 1
-            ? $"ACROSS INSTANCES — {row.Copies.Count}"
-            : "ACROSS INSTANCES — ONLY THIS ONE";
+            ? $"ACROSS INSTANCES - {row.Copies.Count}"
+            : "ACROSS INSTANCES - ONLY THIS ONE";
 
         if (_contentHits?.GetValueOrDefault(row.Entry.FullPath) is { Count: > 0 } hits)
         {
             HitsPanel.Visibility = Visibility.Visible;
-            HitsHeader.Text = $"MATCHES — {hits.Count}";
+            HitsHeader.Text = $"MATCHES - {hits.Count}";
             foreach (var hit in hits) _hits.Add(new HitRow(hit));
         }
         else
@@ -469,8 +505,8 @@ public partial class ConfigHubView : Page
         }
     }
 
-    /// <summary>How much of a file the preview shows. Enough to recognise any hand-written config;
-    /// past that the built-in editor is the right tool and a WPF TextBox is not.</summary>
+    /// <summary>How much of a file the preview shows. Enough for any hand-written config; bigger
+    /// files belong in the editor, not a WPF TextBox.</summary>
     private const int PreviewCharCap = 200_000;
 
     private static string ReadPreview(string path)
@@ -481,7 +517,7 @@ public partial class ConfigHubView : Page
             if (info.Length > ConfigHubService.MaxInspectBytes) return "";
             var text = File.ReadAllText(path);
             return text.Length > PreviewCharCap
-                ? text[..PreviewCharCap] + "\n\n… preview truncated — open it in the editor to see the rest."
+                ? text[..PreviewCharCap] + "\n\n... preview truncated - open it in the editor to see the rest."
                 : text;
         }
         catch { return ""; }
@@ -494,7 +530,7 @@ public partial class ConfigHubView : Page
             var info = new FileInfo(path);
             if (!info.Exists) return "This file is no longer on disk.";
             if (info.Length > ConfigHubService.MaxInspectBytes)
-                return $"{ConfigHubService.FormatSize(info.Length)} — too large to preview. " +
+                return $"{ConfigHubService.FormatSize(info.Length)} - too large to preview. " +
                        "This is almost always generated data rather than something to hand-edit.";
             if (info.Length == 0) return "This file is empty.";
             return null;
@@ -504,9 +540,11 @@ public partial class ConfigHubView : Page
 
     // ── filters, sort, search ────────────────────────────────────────────────
 
+    /// <remarks>Guarded by <see cref="_filling"/> rather than <c>IsLoaded</c>, which is already true
+    /// inside the Loaded handler where the ComboBox is filled.</remarks>
     private void OnPackFilterChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded) return;
+        if (_filling.Busy) return;
         Refresh();
         SaveFilter();
     }
@@ -533,7 +571,6 @@ public partial class ConfigHubView : Page
         SortModifiedMenuItem.IsChecked = _sort == SortMode.Modified;
         SortSizeMenuItem.IsChecked = _sort == SortMode.Size;
         SortDiffMenuItem.IsChecked = _sort == SortMode.Diff;
-        DiffersOnlyMenuItem.IsChecked = _differsOnly;
     }
 
     private void OnSortMenuItemClick(object sender, RoutedEventArgs e)
@@ -546,38 +583,9 @@ public partial class ConfigHubView : Page
 
     private void OnDiffersOnlyClick(object sender, RoutedEventArgs e)
     {
-        _differsOnly = DiffersOnlyMenuItem.IsChecked;
+        _differsOnly = DiffersToggle.IsChecked == true;
         Refresh();
         SaveFilter();
-    }
-
-    private void OnSearchToggle(object sender, RoutedEventArgs e) => OpenSearch(!IsSearchOpen);
-
-    private bool IsSearchOpen => SearchBox.Visibility == Visibility.Visible;
-
-    private void OpenSearch(bool open)
-    {
-        SearchBox.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
-        CompactSearchHost.Width = open ? 240 : 36;
-        if (open) SearchBox.Focus();
-        else if (SearchBox.Text.Length > 0) { SearchBox.Text = ""; Refresh(); }
-    }
-
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
-    {
-        if (IsLoaded) Refresh();
-    }
-
-    private void OnSearchPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Escape) return;
-        OpenSearch(false);
-        e.Handled = true;
-    }
-
-    private void OnSearchLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
-    {
-        if (SearchBox.Text.Length == 0) OpenSearch(false);
     }
 
     // ── content search ───────────────────────────────────────────────────────
@@ -586,13 +594,12 @@ public partial class ConfigHubView : Page
     {
         var opening = ContentSearchBar.Visibility != Visibility.Visible;
         ContentSearchBar.Visibility = opening ? Visibility.Visible : Visibility.Collapsed;
-        SearchInFilesButton.Content = opening ? "Close file search" : "Search in files";
+        SearchInFilesLabel.Text = opening ? "Close file search" : "Search in files";
         if (opening) { ContentQueryBox.Focus(); return; }
 
         if (_contentHits is null) return;
         _contentHits = null;
         Refresh();
-        StatusLabel.Text = "";
     }
 
     private void OnContentQueryKey(object sender, KeyEventArgs e)
@@ -605,14 +612,15 @@ public partial class ConfigHubView : Page
         var query = ContentQueryBox.Text?.Trim() ?? "";
         if (query.Length < 2)
         {
-            StatusLabel.Text = "Type at least two characters to search inside files.";
+            Say("Type at least two characters to search inside files.");
             return;
         }
 
         _workCts?.Cancel();
         _workCts = new CancellationTokenSource();
         var ct = _workCts.Token;
-        SetBusy(true, $"Searching {_scan.Count:N0} files for “{query}”…");
+        // A new search, not a refresh: the rows on screen don't answer it, so they aren't kept.
+        _state.Begin($"Searching {_scan.Count:N0} file(s) for '{query}'...", refreshing: false);
         ContentSearchGoButton.Visibility = Visibility.Collapsed;
         ContentSearchCancelButton.Visibility = Visibility.Visible;
 
@@ -623,7 +631,7 @@ public partial class ConfigHubView : Page
                 : _scan;
             var total = files.Count;
             var progress = new Progress<int>(done =>
-                StatusLabel.Text = $"Searching… {done:N0} of {total:N0} files");
+                _state.Progress($"{done:N0} of {total:N0} files read"));
 
             var result = await Task.Run(
                 () => ConfigHubService.SearchContents(files, query, maxHits: 2000, progress, ct), ct);
@@ -631,27 +639,25 @@ public partial class ConfigHubView : Page
             _contentHits = result.Hits
                 .GroupBy(h => h.File.FullPath)
                 .ToDictionary(g => g.Key, g => g.ToList());
-            Refresh();
 
-            StatusLabel.Text =
+            _note =
                 $"{result.Hits.Count:N0} match(es) in {_contentHits.Count:N0} file(s) " +
                 $"of {result.FilesRead:N0} read" +
                 (result.Skipped > 0
                     ? $" · {result.Skipped:N0} skipped (too large, unreadable, or past the 2,000-match limit)"
                     : "");
+            Refresh();
         }
-        catch (OperationCanceledException) { StatusLabel.Text = "Search cancelled."; }
-        catch (Exception ex) { StatusLabel.Text = "Search failed: " + ex.Message; }
+        catch (OperationCanceledException) { _state.Cancelled("Search cancelled."); }
+        catch (Exception ex) { _state.Error("Those files could not be searched.", ex, "Search failed"); }
         finally
         {
-            SetBusy(false);
             ContentSearchGoButton.Visibility = Visibility.Visible;
             ContentSearchCancelButton.Visibility = Visibility.Collapsed;
         }
     }
 
     private void OnCancelContentSearch(object sender, RoutedEventArgs e) => _workCts?.Cancel();
-    private void OnCancelWork(object sender, RoutedEventArgs e) => _workCts?.Cancel();
 
     // ── list events ──────────────────────────────────────────────────────────
 
@@ -678,12 +684,11 @@ public partial class ConfigHubView : Page
                     break;
             }
         }
-        catch (Exception ex) { StatusLabel.Text = "That did not work: " + ex.Message; }
+        catch (Exception ex) { Failed("That did not work.", ex); }
     }
 
     /// <summary>
-    /// Page-level shortcuts. Ctrl+F opens the name filter, Ctrl+Shift+F the content search and F5
-    /// re-scans — the three things this page is used for repeatedly.
+    /// Page shortcuts: Ctrl+F opens the name filter, Ctrl+Shift+F the content search, F5 re-scans.
     /// </summary>
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
@@ -697,7 +702,7 @@ public partial class ConfigHubView : Page
         }
         else if (ctrl && e.Key == Key.F)
         {
-            OpenSearch(true);
+            SearchBox.Focus();
             e.Handled = true;
         }
         else if (e.Key == Key.F5)
@@ -755,9 +760,9 @@ public partial class ConfigHubView : Page
         {
             FileEditorWindow.OpenFileFor(_shell, entry.PackId, entry.PackName, entry.FullPath);
             HookEditorClose(entry.PackId, entry.PackName);
-            StatusLabel.Text = $"Opened {entry.FileName} from {entry.PackName} in the editor.";
+            Say($"Opened {entry.FileName} from {entry.PackName} in the editor.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not open the editor: " + ex.Message; }
+        catch (Exception ex) { Failed("The editor could not be opened for that file.", ex); }
     }
 
     /// <summary>Editor windows this page has already subscribed to, so opening a second file in the
@@ -765,17 +770,14 @@ public partial class ConfigHubView : Page
     private readonly HashSet<FileEditorWindow> _hookedEditors = new();
 
     /// <summary>
-    /// Re-reads the edited instance once its editor window closes, so its rows stop showing the size
-    /// and age the files had before they were edited.
+    /// Re-reads the edited instance once its editor window closes, so its rows show the new size and
+    /// age.
     /// </summary>
     /// <remarks>
-    /// <para>The editor saves without announcing it, and nothing else notices: the cheap folder stamp
-    /// the scan cache is validated against only covers each root and its immediate children, so saving
-    /// <c>config/jei/jei-client.ini</c> — an existing file, in a nested folder — changes neither. The
-    /// row would keep its pre-edit numbers until somebody pressed Refresh.</para>
-    /// <para>The window is found by its title instead of being handed to us because
-    /// <see cref="FileEditorWindow"/> owns its one-window-per-instance table and this page must not
-    /// reach into it. Two instances sharing a display name would at worst cost one extra refresh.</para>
+    /// The remembered scan's fingerprint (per root: exists, mtime, file and folder counts, total
+    /// bytes) can miss an in-place edit. The window is found by title because
+    /// <see cref="FileEditorWindow"/> owns its window table; two instances with the same name only
+    /// cost an extra refresh.
     /// </remarks>
     private void HookEditorClose(Guid packId, string packName)
     {
@@ -789,7 +791,7 @@ public partial class ConfigHubView : Page
         {
             window.Closed -= OnEditorClosed;
             _hookedEditors.Remove(window);
-            // Drop the cached walk either way — a later visit to this page must not read it back.
+            // Drop the cached walk either way so a later visit doesn't read it back.
             ConfigHubService.Invalidate(packId);
             // force: false so only the invalidated instance is re-walked; the others stay cached.
             if (IsLoaded) _ = LoadAsync(force: false);
@@ -802,16 +804,7 @@ public partial class ConfigHubView : Page
     private void Reveal(Entry? entry)
     {
         if (entry is null || entry.FullPath.Length == 0) return;
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = $"/select,\"{entry.FullPath}\"",
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
+        if (!SafeLaunch.RevealFile(entry.FullPath)) Say("Explorer could not be opened at that file.");
     }
 
     private void OnRowCopyPath(object sender, RoutedEventArgs e)
@@ -819,9 +812,9 @@ public partial class ConfigHubView : Page
         var rows = RowsFor(sender);
         if (rows.Count == 0) return;
         var text = string.Join(Environment.NewLine, rows.Select(r => r.Entry.FullPath));
-        StatusLabel.Text = ClipboardHelper.TrySetText(text)
+        Say(ClipboardHelper.TrySetText(text)
             ? $"Copied {rows.Count} path(s) to the clipboard."
-            : "The clipboard is locked by another program — try again in a moment.";
+            : "The clipboard is locked by another program - try again in a moment.");
     }
 
     private void OnDetailMore(object sender, RoutedEventArgs e)
@@ -838,8 +831,7 @@ public partial class ConfigHubView : Page
         try
         {
             var pins = App.State.Settings.ConfigHubPins;
-            // A mixed selection pins everything rather than toggling each one, which would leave the
-            // user unsure what happened.
+            // A mixed selection pins everything rather than toggling each row.
             var pinAll = rows.Any(r => !r.Pinned);
             foreach (var row in rows)
             {
@@ -848,12 +840,13 @@ public partial class ConfigHubView : Page
                 else pins.Remove(key);
             }
             App.State.Settings.Save();
-            StatusLabel.Text = pinAll
-                ? $"Pinned {rows.Count} file(s) to the top of the list."
-                : $"Unpinned {rows.Count} file(s).";
+            // Refresh first: it resets the note line, so Say() has to come after it.
             Refresh();
+            Say(pinAll
+                ? $"Pinned {rows.Count} file(s) to the top of the list."
+                : $"Unpinned {rows.Count} file(s).");
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not save the pin: " + ex.Message; }
+        catch (Exception ex) { Failed("That pin could not be saved.", ex); }
     }
 
     // ── compare ──────────────────────────────────────────────────────────────
@@ -861,13 +854,13 @@ public partial class ConfigHubView : Page
     private async void OnRowCompare(object sender, RoutedEventArgs e)
     {
         try { await CompareAsync(RowFor(sender), null); }
-        catch (Exception ex) { StatusLabel.Text = "Compare failed: " + ex.Message; }
+        catch (Exception ex) { Failed("Those copies could not be compared.", ex); }
     }
 
     private async void OnDetailCompare(object sender, RoutedEventArgs e)
     {
         try { await CompareAsync(SelectedRow, null); }
-        catch (Exception ex) { StatusLabel.Text = "Compare failed: " + ex.Message; }
+        catch (Exception ex) { Failed("Those copies could not be compared.", ex); }
     }
 
     private async void OnCopyCompare(object sender, RoutedEventArgs e)
@@ -877,7 +870,7 @@ public partial class ConfigHubView : Page
             if (sender is FrameworkElement { Tag: CopyRow copy })
                 await CompareAsync(SelectedRow, copy.Entry);
         }
-        catch (Exception ex) { StatusLabel.Text = "Compare failed: " + ex.Message; }
+        catch (Exception ex) { Failed("Those copies could not be compared.", ex); }
     }
 
     private async Task CompareAsync(FileRow? row, Entry? against)
@@ -887,7 +880,7 @@ public partial class ConfigHubView : Page
         {
             await AppDialog.MessageAsync(_shell, "Nothing to compare",
                 $"Only {row.Entry.PackName} has a file at {row.RelativePath}. " +
-                "Use “Copy to other instances” to put it somewhere else first.");
+                "Use 'Copy to other instances' to put it somewhere else first.");
             return;
         }
 
@@ -906,19 +899,19 @@ public partial class ConfigHubView : Page
     private async void OnRowCopyTo(object sender, RoutedEventArgs e)
     {
         try { await CopyAsync(RowsFor(sender), wholeFolder: false); }
-        catch (Exception ex) { StatusLabel.Text = "Copy failed: " + ex.Message; }
+        catch (Exception ex) { Failed("Those files could not be copied.", ex); }
     }
 
     private async void OnDetailCopyTo(object sender, RoutedEventArgs e)
     {
         try { await CopyAsync(SelectedRows(), wholeFolder: false); }
-        catch (Exception ex) { StatusLabel.Text = "Copy failed: " + ex.Message; }
+        catch (Exception ex) { Failed("Those files could not be copied.", ex); }
     }
 
     private async void OnRowCopyFolder(object sender, RoutedEventArgs e)
     {
         try { await CopyAsync(RowsFor(sender), wholeFolder: true); }
-        catch (Exception ex) { StatusLabel.Text = "Copy failed: " + ex.Message; }
+        catch (Exception ex) { Failed("Those files could not be copied.", ex); }
     }
 
     private async Task CopyAsync(List<FileRow> rows, bool wholeFolder)
@@ -946,7 +939,7 @@ public partial class ConfigHubView : Page
             paths = paths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             if (paths.Count == 0)
             {
-                StatusLabel.Text = "That file is not inside a folder that can be copied whole.";
+                Say("That file is not inside a folder that can be copied whole.");
                 return;
             }
         }
@@ -993,14 +986,14 @@ public partial class ConfigHubView : Page
                 danger: shared.Count > 0))
             return;
 
-        SetBusy(true, "Copying…");
+        _state.Begin("Copying...", refreshing: true);
         try
         {
-            var progress = new Progress<string>(what => StatusLabel.Text = "Copying " + what);
+            var progress = new Progress<string>(what => _state.Progress("Copying " + what));
             var result = await Task.Run(() => ConfigHubService.Copy(
                 sourceGameDir, paths, chosen, App.State.Packs, progress, ct), ct);
 
-            StatusLabel.Text =
+            var copiedNote =
                 $"Copied {result.Copied} file(s) into {chosen.Count} instance(s)" +
                 (result.BackedUp > 0 ? $" · {result.BackedUp} replaced file(s) backed up" : "") +
                 (result.Failures.Count > 0 ? $" · {result.Failures.Count} failed" : "") + ".";
@@ -1008,15 +1001,19 @@ public partial class ConfigHubView : Page
             if (result.Failures.Count > 0)
                 await AppDialog.MessageAsync(_shell, "Some files did not copy",
                     string.Join("\n", result.Failures.Take(12)) +
-                    (result.Failures.Count > 12 ? $"\n… and {result.Failures.Count - 12} more." : ""));
+                    (result.Failures.Count > 12 ? $"\n... and {result.Failures.Count - 12} more." : ""));
 
-            await LoadAsync(force: true);
+            await LoadAsync(force: true, note: copiedNote);
         }
         catch (OperationCanceledException)
         {
-            StatusLabel.Text = "Copy cancelled — files already written were left in place and backed up.";
+            _state.Cancelled("Copy cancelled - files already written were left in place and backed up.");
         }
-        finally { SetBusy(false); }
+        catch (Exception ex)
+        {
+            // The page is mid-refresh; letting this escape would leave the busy bar running.
+            _state.Error("Those files could not all be copied.", ex, "Copy failed");
+        }
     }
 
     // ── housekeeping: new, rename, delete, restore ───────────────────────────
@@ -1027,48 +1024,47 @@ public partial class ConfigHubView : Page
         {
             if (TargetPackId is not { } packId)
             {
-                StatusLabel.Text = "There is no instance to create a file in.";
+                Say("There is no instance to create a file in.");
                 return;
             }
 
             var seed = SelectedRow is { Missing: false } row ? row.Entry.FolderPath + "/" : "config/";
             var entered = await _shell.PromptAsync("New config file",
-                "Path inside the instance's game folder — e.g. kubejs/server_scripts/recipes.js. " +
+                "Path inside the instance's game folder - e.g. kubejs/server_scripts/recipes.js. " +
                 "End it with a / to create an empty folder instead.", seed);
             if (string.IsNullOrWhiteSpace(entered)) return;
 
             var rel = entered.Trim().Replace('\\', '/').TrimStart('/');
-            if (rel.Contains("..", StringComparison.Ordinal))
+            var gameDir = App.State.Packs.GameDir(packId);
+            // Drive letters, "..", device names and the like would land outside the game folder.
+            if (PathSafety.ResolveInside(gameDir, rel.TrimEnd('/')) is not { } full)
             {
-                StatusLabel.Text = "That path steps outside the instance folder.";
+                Say("That path steps outside the instance folder or uses a name Windows does not allow.");
                 return;
             }
-
-            var gameDir = App.State.Packs.GameDir(packId);
-            var full = Path.Combine(gameDir, rel.Replace('/', Path.DirectorySeparatorChar));
 
             if (rel.EndsWith('/'))
             {
                 Directory.CreateDirectory(full);
-                StatusLabel.Text = $"Created folder {rel} in {PackName(packId)}.";
+                Say($"Created folder {rel} in {PackName(packId)}.");
             }
             else if (File.Exists(full))
             {
-                StatusLabel.Text = $"{rel} already exists in {PackName(packId)}.";
+                Say($"{rel} already exists in {PackName(packId)}.");
                 return;
             }
             else
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(full)!);
                 await File.WriteAllTextAsync(full, "");
-                StatusLabel.Text = $"Created {rel} in {PackName(packId)}.";
+                Say($"Created {rel} in {PackName(packId)}.");
                 FileEditorWindow.OpenFileFor(_shell, packId, PackName(packId), full);
             }
 
             ConfigHubService.Invalidate(packId);
             await LoadAsync(force: true);
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not create that: " + ex.Message; }
+        catch (Exception ex) { Failed("That file or folder could not be created.", ex); }
     }
 
     private async void OnRowRename(object sender, RoutedEventArgs e)
@@ -1081,33 +1077,32 @@ public partial class ConfigHubView : Page
             if (string.IsNullOrWhiteSpace(entered) || entered == row.FileName) return;
 
             var name = entered.Trim();
-            if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            var dir = Path.GetDirectoryName(row.Entry.FullPath)!;
+            if (PathSafety.ResolveFileName(dir, name) is not { } dest)
             {
-                StatusLabel.Text = "That name contains characters Windows does not allow in a file name.";
+                Say("Windows does not allow that as a file name.");
                 return;
             }
 
-            var dir = Path.GetDirectoryName(row.Entry.FullPath)!;
-            var dest = Path.Combine(dir, name);
             if (File.Exists(dest))
             {
-                StatusLabel.Text = $"{name} already exists in that folder.";
+                Say($"{name} already exists in that folder.");
                 return;
             }
 
             File.Move(row.Entry.FullPath, dest);
             ConfigHubService.Invalidate(row.PackId);
-            StatusLabel.Text = $"Renamed {row.FileName} to {name}. " +
-                               "Remember that most mods look for an exact config file name.";
-            await LoadAsync(force: true);
+            await LoadAsync(force: true,
+                note: $"Renamed {row.FileName} to {name}. " +
+                      "Remember that most mods look for an exact config file name.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Rename failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That file could not be renamed.", ex); }
     }
 
     private async void OnRowDelete(object sender, RoutedEventArgs e)
     {
         try { await DeleteAsync(RowsFor(sender)); }
-        catch (Exception ex) { StatusLabel.Text = "Delete failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That file could not be deleted.", ex); }
     }
 
     private async Task DeleteAsync(List<FileRow> rows)
@@ -1121,8 +1116,8 @@ public partial class ConfigHubView : Page
                 App.State.Settings.ConfigHubPins.Remove(
                     ConfigHubService.PinKey(ghost.PackId, ghost.RelativePath));
             App.State.Settings.Save();
-            StatusLabel.Text = $"Removed {ghosts.Count} pin(s) whose file no longer exists.";
             Refresh();
+            Say($"Removed {ghosts.Count} pin(s) whose file no longer exists.");
         }
         if (rows.Count == 0) return;
 
@@ -1131,8 +1126,8 @@ public partial class ConfigHubView : Page
             : $"Delete {rows.Count} files?";
         var body = what + "\n\n" +
                    (rows.Count > 1
-                       ? string.Join("\n", rows.Take(8).Select(r => $"· {r.RelativePath} — {r.Entry.PackName}"))
-                         + (rows.Count > 8 ? $"\n… and {rows.Count - 8} more." : "") + "\n\n"
+                       ? string.Join("\n", rows.Take(8).Select(r => $"· {r.RelativePath} - {r.Entry.PackName}"))
+                         + (rows.Count > 8 ? $"\n... and {rows.Count - 8} more." : "") + "\n\n"
                        : "") +
                    "A mod usually rewrites a missing config with its defaults on the next launch, but any " +
                    "settings in it are lost. This cannot be undone from here.";
@@ -1148,12 +1143,12 @@ public partial class ConfigHubView : Page
             catch (Exception ex) { failures.Add($"{row.RelativePath}: {ex.Message}"); }
         }
 
-        StatusLabel.Text = $"Deleted {deleted} file(s)." +
-                           (failures.Count > 0 ? $" {failures.Count} could not be deleted." : "");
+        var deletedNote = $"Deleted {deleted} file(s)." +
+                          (failures.Count > 0 ? $" {failures.Count} could not be deleted." : "");
         if (failures.Count > 0)
             await AppDialog.MessageAsync(_shell, "Some files were not deleted",
                 string.Join("\n", failures.Take(10)));
-        await LoadAsync(force: true);
+        await LoadAsync(force: true, note: deletedNote);
     }
 
     private async void OnRowRestoreBackup(object sender, RoutedEventArgs e)
@@ -1170,8 +1165,7 @@ public partial class ConfigHubView : Page
                 return;
             }
 
-            // Most recently taken, not newest by mtime — a backup inherits its source file's
-            // last-write time, so mtime is the age of the content, not of the backup.
+            // Most recently taken, not newest by mtime: a backup keeps its source file's last-write time.
             var newest = backups[0];
             if (!await AppDialog.ConfirmAsync(_shell, "Restore backup",
                     $"Restore {row.FileName} in {row.Entry.PackName} from the backup taken " +
@@ -1186,48 +1180,53 @@ public partial class ConfigHubView : Page
             var source = newest.FullName;
             await Task.Run(() =>
             {
-                File.Copy(path, $"{path}.bak-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: true);
+                // Invariant: BackupTakenUtc reads this stamp back to order the backups.
+                File.Copy(path, $"{path}.bak-{TimeFormat.StampNow()}", overwrite: true);
                 File.Copy(source, path, overwrite: true);
             });
             ConfigHubService.Invalidate(row.PackId);
-            StatusLabel.Text = $"Restored {row.FileName} in {row.Entry.PackName}.";
-            await LoadAsync(force: true);
+            await LoadAsync(force: true,
+                note: $"Restored {row.FileName} in {row.Entry.PackName}.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Restore failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That backup could not be restored.", ex); }
     }
 
     private void OnOpenFolder(object sender, RoutedEventArgs e)
     {
-        if (TargetPackId is not { } packId) { StatusLabel.Text = "There is no instance to open."; return; }
+        if (TargetPackId is not { } packId) { Say("There is no instance to open."); return; }
         try
         {
             var dir = Path.Combine(App.State.Packs.GameDir(packId), "config");
             if (!Directory.Exists(dir)) dir = App.State.Packs.GameDir(packId);
             if (!Directory.Exists(dir))
             {
-                StatusLabel.Text = $"{PackName(packId)} has no game folder yet — launch or sync it once.";
+                Say($"{PackName(packId)} has no game folder yet - launch or sync it once.");
                 return;
             }
-            Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
+            if (!SafeLaunch.OpenFolder(dir)) Say("That folder could not be opened in Explorer.");
         }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
+        catch (Exception ex) { Failed("That folder could not be opened in Explorer.", ex); }
     }
 
     // ── odds and ends ────────────────────────────────────────────────────────
 
-    private void SetBusy(bool busy, string? status = null)
+    /// <summary>A one-line note under the list about what just happened. The next rebuild replaces
+    /// it with the standing note.</summary>
+    private void Say(string text) => _state.Note(text);
+
+    /// <summary>Reports a failed user action: a plain sentence on screen, the exception to the
+    /// launcher log.</summary>
+    private void Failed(string plain, Exception ex)
     {
-        BusyBar.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-        BusyCancelButton.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
-        if (status is not null) StatusLabel.Text = status;
+        AppLog.LogError(nameof(ConfigHubView), ex);
+        Say(plain);
     }
 
     private Guid? _restoredPackId;
 
     /// <summary>
-    /// Restores the filter the page was left on. The stored form is
-    /// <c>kind|packId|sort|differsOnly</c> — this page owns the string, so it is kept deliberately
-    /// forgiving: anything it cannot parse falls back to the default rather than throwing.
+    /// Restores the filter the page was left on, stored as <c>kind|packId|sort|differsOnly</c>.
+    /// Anything that doesn't parse falls back to the default.
     /// </summary>
     private void RestoreFilter()
     {
@@ -1257,12 +1256,13 @@ public partial class ConfigHubView : Page
 
     private sealed record PackFilterItem(Guid? Id, string Label);
 
-    /// <summary>One chip in the kind strip.</summary>
-    private sealed class KindChip(Kind? kind, string label, int count, bool selected, string hint)
+    /// <summary>One chip in the kind strip. A null count means not counted yet and shows as a
+    /// dash.</summary>
+    private sealed class KindChip(Kind? kind, string label, int? count, bool selected, string hint)
     {
         public Kind? Kind { get; } = kind;
         public string Label { get; } = label;
-        public string CountLabel { get; } = count.ToString("N0");
+        public string CountLabel { get; } = count is { } n ? n.ToString("N0") : "-";
         public bool IsSelected { get; } = selected;
         public string Hint { get; } = hint;
     }
@@ -1272,10 +1272,9 @@ public partial class ConfigHubView : Page
     /// has a file at the same path.
     /// </summary>
     /// <remarks>
-    /// The labels are computed once here rather than bound through converters because the list is
-    /// rebuilt wholesale on every filter change. Nothing on this class holds a <c>Brush</c> — the row
-    /// exposes <see cref="StateName"/> and the XAML picks the colour with a DynamicResource, so a theme
-    /// change repaints the list instead of leaving stale colours behind.
+    /// Labels are computed once here since the list is rebuilt on every filter change. No Brush is
+    /// stored: the XAML colours rows from <see cref="StateName"/> with DynamicResource, so theme
+    /// changes repaint them.
     /// </remarks>
     private sealed class FileRow
     {
@@ -1305,7 +1304,7 @@ public partial class ConfigHubView : Page
             FullPathHint = missing ? entry.RelativePath : entry.FullPath;
             ErrorVisibility = errorCount > 0 ? Visibility.Visible : Visibility.Collapsed;
             ErrorHint = errorCount > 0
-                ? $"KubeJS logged {errorCount} error line(s) naming this script — open it to see them."
+                ? $"KubeJS logged {errorCount} error line(s) naming this script - open it to see them."
                 : "";
         }
 
@@ -1387,7 +1386,7 @@ public partial class ConfigHubView : Page
             : same switch
             {
                 true => "Byte-for-byte identical to the copy shown above.",
-                false => "Differs from the copy shown above — compare to see how.",
+                false => "Differs from the copy shown above - compare to see how.",
                 _ => "Could not be read to compare: too large, or locked by a running game."
             };
 

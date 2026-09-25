@@ -4,27 +4,25 @@ using CloudLauncher.Services;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The shared "Categories" submenu — create, rename and delete a pack's mod categories.
-///
-/// Built in one place so the List view, the Graph view and the planning board offer the same actions
-/// with the same safeguards: the managed "Library" category can't be edited, a rename follows through
-/// to any planning board's group cards, and a delete says how many mods it will untag before doing it.
+/// The shared "Categories" submenu (create, rename, delete) used by the List view, the Graph view
+/// and the planning board.
 /// </summary>
+/// <remarks>The built-in "Library" category can't be edited, a rename also updates planning-board
+/// group cards, and a delete says how many mods it will untag first.</remarks>
 public static class ModCategoryMenu
 {
-    /// <param name="onChanged">Called after any edit lands, so the calling view can re-render.</param>
-    /// <param name="onCreated">Optional extra step for a freshly created category — the planning
-    /// board uses it to drop a group card, since a new category matches nothing and would otherwise
-    /// be invisible.</param>
+    /// <param name="onChanged">Called after any edit, so the caller can re-render.</param>
+    /// <param name="onCreated">Optional step after a category is created. The planning board uses it to
+    /// drop a group card, since a new, empty category would otherwise be invisible.</param>
     public static MenuItem Build(Guid packId, IReadOnlyList<PackMod> mods, MainWindow? owner,
         Action? onChanged, Action<string>? onCreated = null)
     {
         var parent = new MenuItem { Header = "Categories" };
-        parent.Items.Add(Item("New category…", () => _ = NewAsync(packId, owner, onChanged, onCreated)));
+        parent.Items.Add(Item("New category...", () => _ = NewAsync(packId, owner, onChanged, onCreated)));
 
         var cats = App.State.ModMetadata.Categories(packId)
-            .Where(c => !c.Builtin)   // "Library" mirrors the IsLibrary flag — not editable by hand
-            .ToList();                // stored order — matches the Categories page
+            .Where(c => !c.Builtin)   // "Library" mirrors the IsLibrary flag, not editable by hand
+            .ToList();                // stored order, same as the Categories page
         if (cats.Count == 0) return parent;
 
         parent.Items.Add(new Separator());
@@ -42,8 +40,7 @@ public static class ModCategoryMenu
         return parent;
     }
 
-    /// <summary>Prompts for a name, creates the category and gives it the next unused palette colour
-    /// so a fresh category is visually distinct from the start.</summary>
+    /// <summary>Prompts for a name, creates the category and gives it the next unused palette colour.</summary>
     public static async Task NewAsync(Guid packId, MainWindow? owner, Action? onChanged, Action<string>? onCreated = null)
     {
         var input = await PromptAsync(owner, "New category", "Category name", "");
@@ -90,8 +87,8 @@ public static class ModCategoryMenu
 
         if (owner is not null && !await AppDialog.ConfirmAsync(owner, "Delete category",
                 members == 0
-                    ? $"Delete the category “{name}”?"
-                    : $"Delete “{name}” and untag {members} mod(s)?\n\nThe mods themselves aren't touched.",
+                    ? $"Delete the category '{name}'?"
+                    : $"Delete '{name}' and untag {members} mod(s)?\n\nThe mods themselves aren't touched.",
                 "Delete", "Cancel", danger: true))
             return;
 

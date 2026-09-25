@@ -58,7 +58,7 @@ public partial class MinecraftHostWindow : Window
     private const uint SwpAsyncWindowPos = 0x4000;
     private const int WhKeyboardLl = 13;
     private const int VkTab = 0x09;
-    // LLKHF_ALTDOWN — set in the low-level hook flags while Alt is held.
+    // LLKHF_ALTDOWN: set in the low-level hook flags while Alt is held.
     private const int LlkhfAltDown = 0x20;
     private const long WsChild = 0x40000000L;
     private const long WsVisible = 0x10000000L;
@@ -299,12 +299,10 @@ public partial class MinecraftHostWindow : Window
         _minecraftHwnd = handle;
         _originalStyle = GetWindowLongPtr(_minecraftHwnd, GwlStyle);
 
-        // Keep MC as its own top-level window (WS_POPUP, not WS_CHILD). Reparenting
-        // it as a child made MC's process non-foreground, so GLFW's disabled-cursor
-        // mode (SetCursor(NULL) + ClipCursor) silently failed and the cursor stayed
-        // visible and escaped the window. As an owned popup, MC is still tied to the
-        // host (minimizes/closes with it, stays above it in z-order) but acts as its
-        // own foreground window — GLFW's cursor handling works natively.
+        // Keep MC as an owned top-level popup (WS_POPUP), not a WS_CHILD. As a child, MC's process is
+        // never foreground, so GLFW's disabled-cursor mode (SetCursor(NULL) + ClipCursor) fails and the
+        // cursor stays visible and escapes the window. An owned popup still minimizes and closes with the
+        // host and stays above it.
         var style = _originalStyle.ToInt64();
         style &= ~WsChild;
         style &= ~WsCaption;
@@ -381,11 +379,9 @@ public partial class MinecraftHostWindow : Window
         var width = Math.Max(1, (int)Math.Round(deviceBottomRight.X - deviceTopLeft.X));
         var height = Math.Max(1, (int)Math.Round(deviceBottomRight.Y - deviceTopLeft.Y));
 
-        // If a borderless WS_POPUP top-level window's bounds exactly match the
-        // monitor, Windows engages "fullscreen optimization" and the app behaves
-        // like exclusive fullscreen (taskbar lost, DWM bypass, mode flicker).
-        // Shrink by one invisible pixel so MC stays in true borderless-windowed
-        // mode covering the taskbar.
+        // A borderless popup whose bounds match the monitor triggers Windows' fullscreen optimization
+        // and behaves like exclusive fullscreen (DWM bypass, mode flicker). Shrink by one pixel to stay
+        // borderless-windowed over the taskbar.
         if (TryGetMonitorBounds(new WindowInteropHelper(this).Handle, out var monitor) &&
             x <= monitor.Left &&
             y <= monitor.Top &&
@@ -446,9 +442,8 @@ public partial class MinecraftHostWindow : Window
         if (_minecraftHwnd == IntPtr.Zero || string.IsNullOrWhiteSpace(command))
             return;
 
-        // Don't steal foreground or move the cursor. The sender posts everything to the
-        // Minecraft window's message queue (open chat → type → submit → reopen chat),
-        // which works while the launcher panel keeps focus and the cursor stays put.
+        // Don't steal foreground or move the cursor. The sender posts everything to Minecraft's message
+        // queue (open chat, type, submit, reopen chat), which works while the launcher keeps focus.
         _ = SendMinecraftCommandAsync(command);
     }
 
@@ -518,14 +513,10 @@ public partial class MinecraftHostWindow : Window
             if (requireCursorOverGameSurface && !IsCursorOverGameSurface())
                 return;
 
-            // Activation-triggered focus (WM_ACTIVATE / WM_SETFOCUS) must never yank
-            // focus to Minecraft while the user is interacting with the launcher chrome
-            // (right instance panel, title bar, etc.). The cursor being off the game
-            // surface is the reliable signal for that. IsKeyboardFocusWithin is NOT
-            // reliable here: the description WebBrowser holds raw Win32 focus in its own
-            // hosted HWND, which WPF does not report as keyboard focus — so the old check
-            // let the game steal focus mid-click, eating the click before IE saw it and
-            // making command links require repeated/spam clicking.
+            // Activation (WM_ACTIVATE / WM_SETFOCUS) must not move focus to Minecraft while the user is in
+            // the launcher chrome; the cursor being off the game surface is the reliable signal for that.
+            // IsKeyboardFocusWithin alone misses the description WebBrowser, which holds Win32 focus in its
+            // own HWND, so the game would steal focus mid-click and swallow the click.
             if (onlyWhenWpfDoesNotHaveFocus && (IsKeyboardFocusWithin || !IsCursorOverGameSurface()))
                 return;
 
@@ -775,9 +766,7 @@ public partial class MinecraftHostWindow : Window
 
     private void ApplyInitialWindowState()
     {
-        // Match the F8 toggle: from a default state, pressing F8 collapses both
-        // the right instance page and the bottom bar (fully hiding launcher chrome).
-        // The "start collapsed" setting should produce the same end state.
+        // "Start collapsed" matches F8: hide both the instance page and the bottom bar.
         var collapsed = App.State.Settings.GetMinecraftWindowPackPageCollapsedByDefault(_pack.Id);
         _rightCollapsed = collapsed;
         _bottomCollapsed = collapsed;
@@ -914,8 +903,8 @@ public partial class MinecraftHostWindow : Window
         if (wrapperHandle == IntPtr.Zero)
             return;
 
-        // Stay topmost for the entire borderless session, even when MC owns
-        // foreground — otherwise the taskbar pops back above the host.
+        // Stay topmost for the whole borderless session, even when MC has the foreground, or the
+        // taskbar pops back above the host.
         var keepTopmost = _isBorderlessFullscreen;
         Topmost = keepTopmost;
         SetWindowPos(wrapperHandle,
@@ -994,25 +983,15 @@ public partial class MinecraftHostWindow : Window
 
     private bool IsMinecraftInMouseLook()
     {
-        // GLFW's disabled-cursor mode (what Minecraft uses for camera look) does
-        // two things on Windows: it sets the cursor image to NULL via SetCursor,
-        // and it confines the cursor with ClipCursor(window-rect). Neither the
-        // CURSOR_SHOWING flag nor CURSORINFO.hCursor reflects SetCursor(NULL)
-        // reliably from another process, so detect the clip instead.
-        //
-        // When MC opens a menu it calls ClipCursor(NULL), which also releases
-        // any clip we previously applied — that's how we know to stop clipping.
+        // GLFW's disabled-cursor mode (camera look) calls SetCursor(NULL) and ClipCursor(window rect).
+        // SetCursor(NULL) can't be read reliably from another process, so detect the clip instead.
+        // Opening a menu calls ClipCursor(NULL), which also releases any clip we applied.
         if (!GetClipCursor(out var clip))
             return false;
 
-        // Reference the clip against the monitor Minecraft is on, NOT the whole
-        // virtual desktop. With two monitors the virtual screen spans both, while
-        // the default (unconfined) clip stays a single monitor — so comparing the
-        // clip width against the virtual width made an ordinary, unconfined cursor
-        // look "smaller than the screen" and register as camera look. That pinned
-        // the cursor to the window centre and clipped it to the host every frame,
-        // with no way to move or click free — which is why this only ever broke on
-        // multi-monitor setups.
+        // Compare the clip with Minecraft's monitor, not the virtual desktop. With several monitors the
+        // default clip is one monitor, which is narrower than the virtual screen and would be taken for
+        // camera look, pinning the cursor to the game.
         if (!TryGetMonitorBounds(_minecraftHwnd, out var monitor))
             return false;
 
@@ -1113,9 +1092,8 @@ public partial class MinecraftHostWindow : Window
         if (virtualKey != VkTab)
             return false;
 
-        // Alt+Tab surfaces as WM_SYSKEYDOWN for VK_TAB with the ALT-down flag set.
-        // Only override it while the host or the embedded game owns the foreground —
-        // otherwise the normal task switcher must keep working for the rest of Windows.
+        // Alt+Tab arrives as WM_SYSKEYDOWN for VK_TAB with the Alt flag set. Only override it while the
+        // host or the game has the foreground, so the normal task switcher works everywhere else.
         var altDown = (hookFlags & LlkhfAltDown) != 0;
         if (!altDown || !IsHostOrMinecraftForeground())
         {
@@ -1143,9 +1121,8 @@ public partial class MinecraftHostWindow : Window
         if (!IsGameRunning() || WindowState == WindowState.Minimized)
             return;
 
-        // Minimizing the host hides the owned MC popup with it (see AttachMinecraftWindow).
-        // Drop the borderless topmost flag first so the host can't linger above the
-        // taskbar / other apps once it is restored from the task bar.
+        // Minimizing the host hides the owned MC popup too (see AttachMinecraftWindow). Drop topmost
+        // first so the restored host doesn't sit above the taskbar and other apps.
         if (_isBorderlessFullscreen)
         {
             Topmost = false;
@@ -1186,7 +1163,9 @@ public partial class MinecraftHostWindow : Window
     private void UpdateClock()
     {
         var now = DateTimeOffset.Now;
-        ClockLabel.Text = now.ToString("HH:mm:ss");
+        // Follows the Windows locale (12-hour clock where that is the norm). ClockLabel isn't fixed
+        // width, so a longer time pushes "Playing" right instead of clipping.
+        ClockLabel.Text = TimeFormat.TimeWithSeconds(now);
         ElapsedLabel.Text = FormatElapsed(now - _startedAt);
     }
 

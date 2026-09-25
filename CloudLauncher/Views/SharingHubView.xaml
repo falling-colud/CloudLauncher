@@ -1,0 +1,92 @@
+﻿<Page x:Class="CloudLauncher.Views.SharingHubView"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      Title="Sharing"
+      Background="{DynamicResource Surface0Brush}">
+    <!--  Standard master-page rows: 0 PageHeaderPanel, 1 PageFilterBar, 2 PageDivider,
+    3 content, 4 PageStatusBar  -->
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ── HEADER ───────────────────────────────────────────────────────── -->
+                <DockPanel Grid.Row="0" Style="{StaticResource PageHeaderPanel}">
+            <StackPanel>
+                <TextBlock Text="Sharing" Style="{StaticResource H1}"/>
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           Text="What you share, what other people share with you, and who can reach it."/>
+            </StackPanel>
+        </DockPanel>
+
+        <!-- ── ACTION ROW ────────────────────────────────────────────── -->
+        <!--  Actions left, utilities right, like the other master pages. There are no sort or filter
+        controls here, so no strip under the divider.  -->
+        <Grid Grid.Row="1" Style="{StaticResource PageFilterBar}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,-3,0,-3">
+                <!--  Share opens a menu: an instance goes to its Share & sync tab, hosted content (mod, world,
+                resource pack, shader pack) to its access list.  -->
+                <Button x:Name="ShareButton" Content="Share..."
+                        Style="{StaticResource AccentButton}" Click="OnShare"
+                        ToolTip="Share an instance, or something you host, with other people" Margin="0,3,8,3"/>
+                <!--  Paste a share link someone sent you. Team invite codes work too.  -->
+                <Button x:Name="RedeemButton" Style="{StaticResource HeaderActionButton}" Click="OnRedeem"
+                        ToolTip="Paste a share link or invite code somebody sent you" Margin="0,3,8,3">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE71B;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                   Margin="0,0,7,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Redeem a link" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </WrapPanel>
+
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock x:Name="ConnectionNote"
+                           Style="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"
+                           Visibility="Collapsed"
+                           Text="Offline - sharing lives on the server, so this is its last known state."/>
+                <!--  Icon-only utilities last. No open-folder button: nothing on this page is on disk.  -->
+                <Button x:Name="RefreshButton" Style="{StaticResource HeaderIconButton}"
+                        FontFamily="{DynamicResource IconFont}" Content="&#xE72C;"
+                        Click="OnRefresh" ToolTip="Reload this tab"/>
+            </StackPanel>
+        </Grid>
+
+        <Border Grid.Row="2" Style="{StaticResource PageDivider}"/>
+
+        <!-- ── CONTENT ──────────────────────────────────────────────────────── -->
+        <Grid Grid.Row="3" Margin="28,0,28,16">
+            <TabControl x:Name="Tabs" SelectionChanged="OnTabChanged">
+                <!--  One list of everything shared, in either direction and of any kind.  -->
+                <TabItem Header="Overview">
+                    <Grid x:Name="OverviewHost"/>
+                </TabItem>
+                <TabItem Header="People &amp; teams">
+                    <Grid x:Name="PeopleHost"/>
+                </TabItem>
+                <TabItem Header="Activity">
+                    <Grid x:Name="ActivityHost"/>
+                </TabItem>
+                <!--  Copies of your content stored on the server. Local disk usage has its own page in the
+                sidebar.  -->
+                <TabItem Header="Cloud storage">
+                    <Grid x:Name="CloudStorageHost"/>
+                </TabItem>
+            </TabControl>
+        </Grid>
+
+        <!-- ── STATUS BAR ───────────────────────────────────────────────────── -->
+        <Border Grid.Row="4" Style="{StaticResource PageStatusBar}">
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Muted}" Text="Sharing"/>
+        </Border>
+    </Grid>
+</Page>

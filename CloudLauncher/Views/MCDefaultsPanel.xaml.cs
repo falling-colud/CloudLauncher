@@ -8,11 +8,7 @@ namespace CloudLauncher.Views;
 /// <summary>
 /// The Minecraft options stamped into every new instance's <c>options.txt</c>.
 /// </summary>
-/// <remarks>
-/// Saves on every change, like Settings one screen up. It used to hide behind a Save button and
-/// throw the whole page away when you navigated off it — the one page in the launcher that did, and
-/// the one where a lost edit (thirteen keybinds) costs the most to redo.
-/// </remarks>
+/// <remarks>Saves on every change, like the Settings page, so nothing is lost on navigating away.</remarks>
 public partial class MCDefaultsPanel : Page
 {
     private readonly MainWindow _shell;
@@ -102,8 +98,7 @@ public partial class MCDefaultsPanel : Page
     }
 
     /// <summary>Writes every control's current value into the stored defaults.</summary>
-    /// <remarks>Called from each control's own handler, so the page has no unsaved state at any
-    /// point and nothing to warn about on the way out.</remarks>
+    /// <remarks>Called from each control's own handler, so the page never has unsaved state.</remarks>
     private void SaveNow()
     {
         var d = App.State.Settings.McDefaults;
@@ -144,7 +139,7 @@ public partial class MCDefaultsPanel : Page
         {
             if (!await AppDialog.ConfirmAsync(_shell, "Reset defaults",
                     "Put every option on this page back to vanilla Minecraft's defaults?\n\n"
-                    + "Instances you already created keep their own options.txt — only new ones are affected.",
+                    + "Instances you already created keep their own options.txt - only new ones are affected.",
                     "Reset", "Cancel", danger: true))
                 return;
 

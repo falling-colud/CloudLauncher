@@ -5,6 +5,18 @@
     </ItemGroup>
 
     <ItemGroup>
+      <!-- The Slate style's fonts: Pixelify Sans (OFL, static weights built by tools/fonts) and the
+           Slate pixel icon set mapped onto Segoe MDL2 codepoints (tools/slate-icons). -->
+      <Resource Include="Assets\Fonts\*.ttf" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- Shipped next to the exe; Settings > About opens them. -->
+      <None Include="..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+      <None Include="..\THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+
+    <ItemGroup>
       <PackageReference Include="CmlLib.Core" Version="4.0.6" />
       <PackageReference Include="CmlLib.Core.Auth.Microsoft" Version="3.3.1" />
       <PackageReference Include="CmlLib.Core.Auth.Microsoft.UI.Wpf" Version="2.0.2" />
@@ -26,14 +38,15 @@
              installer for shortcuts. Because the self-updater rebuilds from this same project,
              every self-updated exe keeps the icon too. -->
         <ApplicationIcon>Assets\appicon.ico</ApplicationIcon>
-        <!-- Product metadata surfaced in Explorer's file properties and by the installer. -->
-        <Product>CloudLauncher</Product>
-        <Company>CloudLauncher</Company>
-        <Description>CloudLauncher — a cloud-synced Minecraft launcher.</Description>
+        <!-- Shown in Explorer's file properties. Authors, company and copyright come from
+             Directory.Build.props. -->
+        <Description>CloudLauncher, a cloud-synced Minecraft launcher</Description>
+        <!-- English-only app: skip the translated resource folders dependencies bring along. -->
+        <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
         <!-- Launcher version. Bump this before publishing an update or building the installer;
-             publish-update.ps1 / build-installer.ps1 read it and the in-app updater compares
+             publish-release.ps1 and build-installer.ps1 read it and the in-app updater compares
              against it. -->
-        <Version>1.4.0</Version>
+        <Version>0.9.0</Version>
     </PropertyGroup>
 
 </Project>

@@ -6,7 +6,7 @@ using CloudLauncher.Animations;
 
 namespace CloudLauncher.Views;
 
-/// <summary>A themed, in-window modal dialog (backdrop + card) — the replacement for OS message
+/// <summary>A themed, in-window modal dialog (backdrop + card) used instead of OS message
 /// boxes. Configured for a confirm (two buttons) or a message (one button), awaited via
 /// <see cref="Result"/>.</summary>
 public partial class DialogOverlay : UserControl

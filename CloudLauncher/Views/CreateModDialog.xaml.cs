@@ -11,11 +11,9 @@ public partial class CreateModDialog : Window
     public HostedModSummary? Created { get; private set; }
 
     /// <summary>The jar the user picked to publish as this mod's first version, if any.</summary>
-    /// <remarks>
-    /// The upload itself is not done here: a version can only be uploaded once the mod exists, and
-    /// the upload card lives in the shell's dialog layer, which this window is not part of. The
-    /// caller reads this after a successful create and opens that card with the file pre-selected.
-    /// </remarks>
+    /// <remarks>Not uploaded here: a version needs the mod to exist first, and the upload card lives in
+    /// the shell's dialog layer. The caller opens that card with this file after a successful
+    /// create.</remarks>
     public string? FirstJarPath { get; private set; }
 
     private bool _isCreating;

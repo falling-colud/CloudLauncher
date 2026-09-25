@@ -5,14 +5,12 @@ using System.Text.Json.Serialization;
 namespace CloudLauncher.Services;
 
 /// <summary>
-/// Remembers, across sessions, which project on the <em>other</em> store corresponds to an installed
-/// mod — and, just as importantly, which mods have no counterpart at all.
+/// Remembers across sessions which project on the <em>other</em> store matches an installed mod,
+/// and which mods have no counterpart at all.
 ///
-/// <para>The browse page used to look this up afresh every time it opened: one or two search calls
-/// per installed mod that resolved on a single store, which for a CurseForge pack of four hundred mods
-/// is hundreds of Modrinth searches in a burst — the pattern that got the launcher server rate-limited.
-/// A counterpart is a stable fact, so it is worth keeping on disk: a hit for a month, a miss for a few
-/// days (a mod may get published on the other store later).</para>
+/// <para>Looking these up on every page open means hundreds of searches for a big pack, which gets
+/// the launcher server rate-limited. Hits are kept for a month, misses for a few days (a mod may be
+/// published on the other store later).</para>
 /// </summary>
 public sealed class ModCounterpartCache
 {
@@ -93,7 +91,7 @@ public sealed class ModCounterpartCache
                 foreach (var (k, v) in loaded) _entries[k] = v;
             }
         }
-        catch { /* corrupt cache — start fresh */ }
+        catch { /* corrupt cache, start fresh */ }
     }
 
     private static string DataRoot() => Path.Combine(

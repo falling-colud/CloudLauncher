@@ -6,17 +6,11 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// The in-window "change password" card, shown through <c>MainWindow.ShowCardAsync</c>.
-/// </summary>
-/// <remarks>
-/// <para>The card runs the request itself rather than handing three strings back to the caller. A
-/// wrong current password is the common case, and the only useful place to say so is next to the box
-/// that holds it — returning to the Account page and printing the refusal on a status line would mean
-/// re-typing all three fields to try again.</para>
-/// <para><see cref="Result"/> completes with true only when the server accepted the change; Cancel
-/// and Escape complete it with false.</para>
-/// </remarks>
+/// <summary>The in-window "change password" card, shown through
+/// <c>MainWindow.ShowCardAsync</c>.</summary>
+/// <remarks>The card sends the request itself, so a wrong current password can be shown next to its
+/// box without retyping everything. <see cref="Result"/> is true only when the server accepted the
+/// change; Cancel and Escape give false.</remarks>
 public partial class ChangePasswordCard : UserControl
 {
     private readonly TaskCompletionSource<bool> _tcs = new();
@@ -101,7 +95,7 @@ public partial class ChangePasswordCard : UserControl
     {
         _busy = busy;
         SubmitButton.IsEnabled = !busy;
-        SubmitButton.Content = busy ? "Changing…" : "Change password";
+        SubmitButton.Content = busy ? "Changing..." : "Change password";
         CancelButton.IsEnabled = !busy;
     }
 

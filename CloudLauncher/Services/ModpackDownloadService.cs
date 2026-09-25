@@ -42,18 +42,26 @@ public sealed class ModpackDownloadService(
 
         packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
         NotifyPackAdded(pack);
-        ProgressHub.Indeterminate(pack.Id, $"Preparing {mod.Name}…");
+        ProgressHub.Indeterminate(pack.Id, $"Preparing {mod.Name}...");
 
+        // The caller's token only covers creating the instance. The transfer outlives this call and is
+        // stopped from wherever it shows on screen.
+        var job = PackJobs.Start(pack.Id, PackJobKind.Download, mod.Name);
         _ = Task.Run(async () =>
         {
             try
             {
-                await RunExternalImportAsync(pack.Id, mod, selectedVersion, metadata, CancellationToken.None);
+                await RunExternalImportAsync(pack.Id, mod, selectedVersion, metadata, job);
+            }
+            catch (OperationCanceledException)
+            {
+                await MarkImportStoppedAsync(pack.Id, job);
             }
             catch (Exception ex)
             {
                 await MarkImportFailedAsync(pack.Id, ex.Message, CancellationToken.None);
             }
+            finally { PackJobs.Finish(job); }
         });
 
         return pack;
@@ -67,9 +75,14 @@ public sealed class ModpackDownloadService(
 
         packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
         NotifyPackAdded(pack);
-        ProgressHub.Indeterminate(pack.Id, $"Preparing {packName}…");
+        ProgressHub.Indeterminate(pack.Id, $"Preparing {packName}...");
 
-        _ = Task.Run(() => RunLocalImportAsync(pack.Id, filePath, CancellationToken.None));
+        var job = PackJobs.Start(pack.Id, PackJobKind.Download, packName);
+        _ = Task.Run(async () =>
+        {
+            try { await RunLocalImportAsync(pack.Id, filePath, job); }
+            finally { PackJobs.Finish(job); }
+        });
 
         return pack;
     }
@@ -77,9 +90,8 @@ public sealed class ModpackDownloadService(
     public async Task<PackSummary> SubscribeInternalPackAsync(PackSummary browsed, CancellationToken ct = default)
     {
         var pack = await api.SubscribePackAsync(browsed.Id, ct);
-        // Re-subscribing must clear any prior local "hidden" flag, otherwise the pack stays
-        // filtered out of the instance list (a non-owner removal hides + unsubscribes) and the
-        // browser keeps showing it as already-shared with no working way to add it back.
+        // Clear any local "hidden" flag (a non-owner removal hides and unsubscribes), or the pack stays
+        // out of the instance list with no way to add it back.
         settings.UnhidePack(pack.Id);
         packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
         NotifyPackAdded(pack);
@@ -89,14 +101,11 @@ public sealed class ModpackDownloadService(
     }
 
     /// <summary>
-    /// Subscribes a brand-new install to the pack it ships for, exactly once.
+    /// Subscribes a new install to the pack it ships for, once.
     /// </summary>
     /// <remarks>
-    /// This is a seed, not a policy: the "done" flag is written whether or not the subscribe
-    /// succeeded, so a player who later leaves the pack stays left instead of having it reappear on
-    /// every launch, and a server that is down at first launch costs one attempt rather than an
-    /// error on every start. Failures are swallowed for the same reason - a pack that cannot be
-    /// fetched must not stop the pack list from loading.
+    /// The done flag is written even if the subscribe fails, so a player who leaves the pack doesn't
+    /// get it back on every launch. Failures are swallowed so they can't stop the pack list loading.
     /// </remarks>
     public async Task<PackSummary?> EnsureDefaultPackAsync(CancellationToken ct = default)
     {
@@ -138,15 +147,16 @@ public sealed class ModpackDownloadService(
         ModSummary mod,
         ModVersion? selectedVersion,
         PackImportMetadata? metadata,
-        CancellationToken ct)
+        PackJob job)
     {
+        var ct = job.Token;
         string? tempPath = null;
         try
         {
             metadata = await ResolveMetadataAsync(mod, metadata, ct);
             await SavePackAssetsAsync(packId, MetadataToFields(metadata, mod), metadata, ct);
 
-            ProgressHub.Report(packId, 0, $"Resolving {mod.Name}…");
+            ProgressHub.Report(packId, 0, $"Resolving {mod.Name}...");
 
             var version = selectedVersion ?? await ResolveLatestVersionAsync(mod, ct);
             var file = version.Files.FirstOrDefault(f => f.IsPrimary) ?? version.Files.FirstOrDefault()
@@ -155,23 +165,28 @@ public sealed class ModpackDownloadService(
             file = await ResolveDownloadFileAsync(mod, version, file, ct);
             if (string.IsNullOrWhiteSpace(file.DownloadUrl))
                 throw new InvalidOperationException("No download URL.");
+            if (!SafeLaunch.IsWebUrl(file.DownloadUrl, out _))
+            {
+                AppLog.Log("download", $"Refused to download {mod.Name}: its link is not http or https.");
+                throw new InvalidOperationException("The download link is not an http or https address.");
+            }
 
             tempPath = Path.Combine(Path.GetTempPath(), $"cloudlauncher-{Guid.NewGuid():N}.zip");
 
-            ProgressHub.Report(packId, 0, $"Downloading {mod.Name}…", 0, file.Filename);
+            ProgressHub.Report(packId, 0, $"Downloading {mod.Name}...", 0, file.Filename);
             var downloadProgress = new Progress<(long done, long total)>(p =>
             {
                 if (p.total <= 0)
                 {
-                    ProgressHub.Indeterminate(packId, $"Downloading {mod.Name}…", file.Filename);
+                    ProgressHub.Indeterminate(packId, $"Downloading {mod.Name}...", file.Filename);
                     return;
                 }
 
                 var frac = Math.Min(1.0, p.done / (double)p.total);
-                ProgressHub.Report(packId, frac * 0.15, $"Downloading {mod.Name}…", frac, file.Filename);
+                ProgressHub.Report(packId, frac * 0.15, $"Downloading {mod.Name}...", frac, file.Filename);
             });
 
-            await modrinth.DownloadFileAsync(file.DownloadUrl, tempPath, downloadProgress, ct);
+            await modrinth.DownloadFileAsync(file.DownloadUrl, tempPath, downloadProgress, ct, job.Gate);
             ValidateDownloadedArchive(tempPath);
 
             var importProgress = new Progress<ImportProgress>(p =>
@@ -182,17 +197,23 @@ public sealed class ModpackDownloadService(
 
             PackSummary result;
             if (IsMrpackArchive(tempPath))
-                result = await import.ImportMrpackIntoPackAsync(tempPath, packId, null, importProgress, metadata, ct);
+                result = await import.ImportMrpackIntoPackAsync(tempPath, packId, null, importProgress, metadata, ct, job);
             else
-                result = await import.ImportCurseForgeZipIntoPackAsync(tempPath, packId, null, importProgress, metadata, ct);
+                result = await import.ImportCurseForgeZipIntoPackAsync(tempPath, packId, null, importProgress, metadata, ct, job);
 
             NotifyPackAdded(result);
             ProgressHub.Report(packId, 1, $"Ready: {result.Name}");
             ProgressHub.Clear(packId);
         }
+        catch (OperationCanceledException)
+        {
+            // Stopped by the user, not a failure. The job's token is already cancelled, so the rollback
+            // doesn't use it.
+            await MarkImportStoppedAsync(packId, job);
+        }
         catch (Exception ex)
         {
-            await MarkImportFailedAsync(packId, ex.Message, ct);
+            await MarkImportFailedAsync(packId, ex.Message, CancellationToken.None);
         }
         finally
         {
@@ -203,8 +224,9 @@ public sealed class ModpackDownloadService(
         }
     }
 
-    private async Task RunLocalImportAsync(Guid packId, string filePath, CancellationToken ct)
+    private async Task RunLocalImportAsync(Guid packId, string filePath, PackJob job)
     {
+        var ct = job.Token;
         try
         {
             var importProgress = new Progress<ImportProgress>(p =>
@@ -212,18 +234,43 @@ public sealed class ModpackDownloadService(
 
             PackSummary result;
             if (filePath.EndsWith(".mrpack", StringComparison.OrdinalIgnoreCase))
-                result = await import.ImportMrpackIntoPackAsync(filePath, packId, null, importProgress, null, ct);
+                result = await import.ImportMrpackIntoPackAsync(filePath, packId, null, importProgress, null, ct, job);
             else
-                result = await import.ImportCurseForgeZipIntoPackAsync(filePath, packId, null, importProgress, null, ct);
+                result = await import.ImportCurseForgeZipIntoPackAsync(filePath, packId, null, importProgress, null, ct, job);
 
             NotifyPackAdded(result);
             ProgressHub.Report(packId, 1, $"Ready: {result.Name}");
             ProgressHub.Clear(packId);
         }
+        catch (OperationCanceledException)
+        {
+            await MarkImportStoppedAsync(packId, job);
+        }
         catch (Exception ex)
         {
-            await MarkImportFailedAsync(packId, ex.Message, ct);
+            await MarkImportFailedAsync(packId, ex.Message, CancellationToken.None);
         }
+    }
+
+    /// <summary>
+    /// Rolls back a stopped download: deletes the files it brought in and resets the instance to an
+    /// empty placeholder. Unlike a failure, a stop isn't noted in the pack description.
+    /// </summary>
+    private async Task MarkImportStoppedAsync(Guid packId, PackJob job)
+    {
+        var removed = job.RollbackCreatedFiles();
+        AppLog.Log("download", $"Stopped; removed {removed} downloaded file(s) from {packId}.");
+
+        try
+        {
+            // Mark it empty so it shows as not downloaded yet. The icon, summary and description stay.
+            var updated = await api.UpdatePackAsync(packId, new UpdatePackRequest(
+                null, null, null, null, IsEmpty: true, null, null, null), CancellationToken.None);
+            NotifyPackAdded(updated);
+        }
+        catch { /* the local rollback is what matters; the flag catches up on the next refresh */ }
+
+        ProgressHub.Clear(packId);
     }
 
     private async Task MarkImportFailedAsync(Guid packId, string message, CancellationToken ct)
@@ -344,10 +391,9 @@ public sealed class ModpackDownloadService(
 
         var named = string.IsNullOrWhiteSpace(file.Filename) ? file with { Filename = "modpack.zip" } : file;
 
-        // The version listing already carries a download URL for everything CurseForge lets us
-        // fetch, so only ask /download-url when it didn't. Calling it regardless spends a second
-        // API request that can fail on its own — a CDN block, or an author who opted out of
-        // third-party distribution — and fails the download while holding a URL that works.
+        // Only call /download-url when the version listing had no URL. That extra request can fail on
+        // its own (a CDN block, or an author who opted out of third-party downloads) even though the
+        // listed URL works.
         if (!string.IsNullOrWhiteSpace(named.DownloadUrl))
             return named;
 

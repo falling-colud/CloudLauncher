@@ -6,29 +6,16 @@ namespace CloudLauncher.Services;
 /// Send a chat command to a Minecraft Java Edition window.
 /// </summary>
 /// <remarks>
-/// Everything is delivered with <see cref="PostMessage"/> — we never call
-/// <c>SetForegroundWindow</c>/<c>SetFocus</c> or move the cursor. The command runs while
-/// our launcher window keeps the OS focus and the player's cursor stays put.
-///
-/// <para>
-/// LWJGL/GLFW (which Minecraft Java uses) pumps its message queue every frame, calling
-/// <c>TranslateMessage</c> and <c>DispatchMessage</c>, so it processes <c>WM_KEYDOWN</c>/
-/// <c>WM_KEYUP</c> as key events (driving keybinds like "Open Chat") and <c>WM_CHAR</c> as
-/// text — even when the window is not the foreground window.
-/// </para>
-///
-/// <para>
-/// Because GLFW calls <c>TranslateMessage</c>, a posted key-down for a printable key ALSO
-/// generates a character. Opening chat with the chat key therefore types one stray character
-/// (e.g. <c>t</c>) into the chat field, so we delete it with a single backspace before typing
-/// the actual command.
-/// </para>
-///
-/// <para>
-/// Pausing is handled separately by disabling Minecraft's <c>pauseOnLostFocus</c> option at
-/// launch (see <see cref="OptionsTxtService"/>), so submitting a command — which closes the
-/// chat screen — does not pause the (unfocused) game.
-/// </para>
+/// <para>Everything goes through <see cref="PostMessage"/>. We never call
+/// <c>SetForegroundWindow</c>/<c>SetFocus</c> or move the cursor, so the launcher keeps the OS focus
+/// and the player's cursor stays put.</para>
+/// <para>GLFW pumps its message queue every frame with <c>TranslateMessage</c> and
+/// <c>DispatchMessage</c>, so posted <c>WM_KEYDOWN</c>/<c>WM_KEYUP</c> drive keybinds like "Open Chat"
+/// and <c>WM_CHAR</c> types text, even when the window is not in the foreground.</para>
+/// <para>Because of <c>TranslateMessage</c>, posting the chat key also types that character (e.g.
+/// <c>t</c>) into the chat field, so one backspace removes it before the command is typed.</para>
+/// <para>Pausing is avoided by turning off Minecraft's <c>pauseOnLostFocus</c> at launch (see
+/// <see cref="OptionsTxtService"/>), so closing the chat screen doesn't pause the unfocused game.</para>
 /// </remarks>
 public static class MinecraftCommandSender
 {
@@ -73,7 +60,7 @@ public static class MinecraftCommandSender
         PostKey(minecraftHwnd, chatVirtualKey);
         await Task.Delay(60, ct);
 
-        // 2. Delete that single stray character so the command is not prefixed by it.
+        // 2. Delete the stray character so it doesn't prefix the command.
         PostKey(minecraftHwnd, VkBack);
         await Task.Delay(20, ct);
 

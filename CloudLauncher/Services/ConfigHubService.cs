@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
@@ -9,17 +10,17 @@ namespace CloudLauncher.Services;
 /// The scanning, diffing and cross-instance copying behind the Config and scripts page.
 /// </summary>
 /// <remarks>
-/// <para><b>Why this is its own class.</b> The page's whole reason to exist is comparing the same
-/// relative path across several instances, so nothing here is written per-pack: a scan produces a flat
-/// list of <see cref="Entry"/> records keyed by a game-relative path, and the page groups them. Keeping
-/// the file work out of the view also keeps it off the UI thread by construction — every public method
-/// here is either pure or safe to call from <c>Task.Run</c>.</para>
-///
-/// <para><b>Why the cache is static.</b> The page is constructed fresh on every navigation, and a
-/// config tree across a dozen large instances is thousands of files; re-walking it each time the user
-/// clicks "Config &amp; scripts" would make the page feel broken. The cache is keyed by instance and
-/// validated against a cheap folder stamp (see <see cref="Stamp"/>), so an edit made in Explorer is
-/// picked up without a manual refresh in the common case, and the Refresh button forces the rest.</para>
+/// <para>A scan produces a flat list of <see cref="Entry"/> records keyed by game-relative path, and
+/// the page groups them. Every public method is either pure or safe to call from <c>Task.Run</c>.</para>
+/// <para>Scans, the cross-instance compare (<see cref="CompareGroups"/>, which hashes same-length
+/// copies) and <see cref="ReadKubeJsErrors"/> are cached on disk per profile in
+/// <see cref="ScanCache{T}"/>, since re-walking thousands of files on every page open is too slow.
+/// <see cref="Cached"/> returns the last result without touching a folder; <see cref="Rescan"/>
+/// re-walks behind it and publishes only what changed.</para>
+/// <para>Each root is validated by <see cref="RootFingerprint"/> (exists, mtime, recursive file and
+/// dir count, total bytes), which catches a create, delete or resize at any depth. It can't see an
+/// in-place edit that keeps a file's length: Refresh covers that, and <see cref="Invalidate"/>
+/// covers our own writes.</para>
 /// </remarks>
 public static class ConfigHubService
 {
@@ -27,14 +28,15 @@ public static class ConfigHubService
     /// badge on each row.</summary>
     public enum FileKind
     {
-        /// <summary><c>config/</c> — the per-instance mod settings people actually edit.</summary>
+        /// <summary><c>config/</c>: the per-instance mod settings people actually edit.</summary>
         Config,
-        /// <summary><c>kubejs/</c> — startup/server/client scripts plus the data and assets they generate.</summary>
+        /// <summary><c>kubejs/</c>: startup, server and client scripts plus the data and assets they
+        /// generate.</summary>
         KubeJs,
-        /// <summary><c>defaultconfigs/</c> — what a pack copies into a new world's config. Confuses
-        /// people constantly, which is exactly why it is listed next to the real configs.</summary>
+        /// <summary><c>defaultconfigs/</c>: what a pack copies into a new world's config. Often confused
+        /// with the real configs, so it's listed next to them.</summary>
         DefaultConfigs,
-        /// <summary><c>logs/kubejs/</c> — where a KubeJS script error lands.</summary>
+        /// <summary><c>logs/kubejs/</c>: where KubeJS script errors land.</summary>
         KubeJsLog
     }
 
@@ -63,11 +65,33 @@ public static class ConfigHubService
         }
     }
 
-    /// <summary>The result of one instance's walk, plus the stamp it was valid for.</summary>
-    private sealed record PackScan(List<Entry> Files, string Stamp, DateTime ScannedUtc);
+    /// <summary>One file as remembered between launches. <c>FullPath</c> and <c>PackName</c> are
+    /// re-derived on load rather than stored, which keeps the file much smaller.</summary>
+    public sealed record CachedEntry(string Rel, long Size, long MTicks, byte Kind);
 
-    private static readonly Dictionary<Guid, PackScan> Cache = new();
-    private static readonly object CacheLock = new();
+    /// <summary>One shared path's compare verdict, remembered so the SHA-256 pass is not repaid on
+    /// every page open.</summary>
+    public sealed record CachedGroupState(string Rel, byte State);
+
+    /// <summary>One KubeJS error line and the script it names.</summary>
+    public sealed record CachedKubeError(string Script, string Line);
+
+    private static readonly ScanCache<CachedEntry> FileCache =
+        ScanCaches.For<CachedEntry>(ScanKinds.ConfigHub);
+
+    /// <summary>The cross-instance compare. Entries span every instance, so any instance's mutation
+    /// clears the lot. That's needed: after our own same-size write the fingerprint doesn't move, so
+    /// the key would otherwise still hit.</summary>
+    private static readonly ScanCache<CachedGroupState> GroupCache =
+        ScanCaches.For<CachedGroupState>(ScanKinds.ConfigGroups, maxScopes: 8, crossInstance: true);
+
+    private static readonly ScanCache<CachedKubeError> KubeCache =
+        ScanCaches.For<CachedKubeError>(ScanKinds.KubeJsErrors);
+
+    /// <summary>Reads the three cache files off the UI thread. Await it once before the page's
+    /// first-frame <see cref="Cached"/> call so no cache read touches the dispatcher.</summary>
+    public static Task WarmAsync() => Task.WhenAll(
+        FileCache.EnsureLoadedAsync(), GroupCache.EnsureLoadedAsync(), KubeCache.EnsureLoadedAsync());
 
     /// <summary>The folders the page covers, and the kind each produces. Order matters only in that
     /// it is the order files appear in before sorting.</summary>
@@ -80,29 +104,153 @@ public static class ConfigHubService
     ];
 
     /// <summary>
-    /// Folder names never walked into. These hold generated dumps rather than anything hand-edited —
-    /// KubeJS's <c>probe_dumps</c> alone can be tens of thousands of files, which would dominate both
-    /// the scan time and the list.
+    /// Folder names never walked into. They hold generated dumps, not hand-edited files; KubeJS's
+    /// <c>probe_dumps</c> alone can be tens of thousands of files.
     /// </summary>
     private static readonly HashSet<string> SkipFolders = new(StringComparer.OrdinalIgnoreCase)
     {
         "node_modules", ".git", ".svn", "probe_dumps", "exported", ".cache", "cache"
     };
 
-    /// <summary>Files larger than this are listed but never hashed or grepped — at that size a config
-    /// is a generated dump, and reading a dozen of them would stall the scan for no benefit.</summary>
+    /// <summary>Files larger than this are listed but never hashed or grepped. At that size a config
+    /// is a generated dump, and reading a dozen of them would stall the scan.</summary>
     public const long MaxInspectBytes = 4L * 1024 * 1024;
+
+    /// <summary>How deep the walk goes. Config trees are shallow in practice; the limit stops a
+    /// symlink loop or a stray world folder from turning the scan into a hang. The fingerprint uses
+    /// the same number, so it describes the tree that was actually walked.</summary>
+    private const int MaxWalkDepth = 12;
 
     // ── scanning ─────────────────────────────────────────────────────────────
 
+    /// <summary>Everything the Config page needs for one paint: the files, the cross-instance compare
+    /// and the KubeJS errors, plus when the oldest part of the answer was read.</summary>
+    /// <param name="ScannedUtc">Null only when nothing in the answer came from a remembered scan.</param>
+    public sealed record ScanResult(
+        List<Entry> Files,
+        Dictionary<string, GroupState> Groups,
+        Dictionary<Guid, Dictionary<string, List<string>>> KubeErrors,
+        DateTimeOffset? ScannedUtc);
+
     /// <summary>
-    /// Walks every given instance's config, KubeJS and defaultconfigs folders. Call from a background
-    /// thread. Instances with none of those folders contribute nothing and are not an error — a fresh
-    /// instance that has never been launched is exactly that case.
+    /// What was found last time, with no disk walk, so it's safe on the UI thread for the page's first
+    /// frame. Null when anything is missing; the page then shows the scan's progress instead.
     /// </summary>
-    /// <param name="force">Ignore the cache and re-walk every instance.</param>
+    /// <remarks>
+    /// <para>All-or-nothing on files and compare: files without the compare would paint every shared
+    /// path with the "?" badge, which claims the file was too large or locked. Both are invalidated by
+    /// the same fingerprint changes, so they hit and miss together in practice.</para>
+    /// <para>KubeJS errors may be absent: that just shows no warning triangle until the background
+    /// rescan fills them in.</para>
+    /// </remarks>
+    public static ScanResult? Cached(IReadOnlyList<PackSummary> packs, PackFolderService folders)
+    {
+        if (packs.Count == 0) return null;
+
+        var files = new List<Entry>();
+        var fingerprints = new List<(Guid Id, string Fingerprint)>();
+        DateTimeOffset? oldest = null;
+
+        foreach (var pack in packs)
+        {
+            string gameDir;
+            try { gameDir = folders.GameDir(pack.Id); }
+            catch { return null; }
+
+            var hit = FileCache.Get(ScanCache<CachedEntry>.ScopeKey(pack.Id, "files"));
+            if (hit.State != ScanState.Cached || hit.Fingerprint is not { Length: > 0 } fingerprint)
+                return null;
+
+            // Cheap check, and only when there's something to lose: don't paint remembered files for an
+            // instance whose folder has since gone. An instance that never had a game folder is a
+            // remembered empty list and needs no check.
+            if (hit.Rows.Count > 0 && !RootFingerprint.Shallow(gameDir).Exists) return null;
+
+            fingerprints.Add((pack.Id, fingerprint));
+            foreach (var row in hit.Rows) files.Add(Rehydrate(row, pack, gameDir));
+            if (hit.ScannedUtc is { } when && (oldest is null || when < oldest)) oldest = when;
+        }
+
+        var groupHit = GroupCache.Get(GroupScopeKey(fingerprints));
+        if (groupHit.State != ScanState.Cached) return null;
+        if (groupHit.ScannedUtc is { } gWhen && (oldest is null || gWhen < oldest)) oldest = gWhen;
+
+        var groups = new Dictionary<string, GroupState>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in groupHit.Rows) groups[row.Rel] = (GroupState)row.State;
+
+        return new ScanResult(files, groups, CachedKubeErrors(packs), oldest);
+    }
+
+    /// <summary>
+    /// Re-reads whatever has changed and returns the whole answer. Call from a background thread.
+    /// </summary>
+    /// <param name="force">Ignore every remembered scan and re-read every file. This is the only way
+    /// to catch an in-place edit that did not change a file's size, which is why the Refresh button
+    /// says so.</param>
+    /// <param name="progress">Reports the instance name as each one starts, for the status line.</param>
+    public static ScanResult Rescan(
+        IReadOnlyList<PackSummary> packs,
+        PackFolderService folders,
+        AppSettings settings,
+        bool force,
+        IProgress<string>? progress,
+        CancellationToken ct)
+    {
+        var (files, fingerprints) = ScanFiles(packs, folders, settings, force, progress, ct);
+
+        // The compare stays valid while no participating instance has changed, which is also the only
+        // time its verdicts can change, so the concatenated fingerprints are the key.
+        var groupKey = GroupScopeKey(fingerprints);
+        var groupHit = force ? CachedScan<CachedGroupState>.Cold : GroupCache.Get(groupKey);
+
+        Dictionary<string, GroupState> groups;
+        if (groupHit.State == ScanState.Cached)
+        {
+            groups = new Dictionary<string, GroupState>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in groupHit.Rows) groups[row.Rel] = (GroupState)row.State;
+        }
+        else
+        {
+            // Only paths in more than one instance need comparing, and only same-length copies need
+            // reading (see CompareGroups).
+            var shared = files.GroupBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase)
+                              .Where(g => g.Count() > 1);
+            groups = CompareGroups(shared, ct);
+            GroupCache.Put(groupKey,
+                groups.Select(kv => new CachedGroupState(kv.Key, (byte)kv.Value)).ToList(),
+                groupKey);
+        }
+
+        var kube = new Dictionary<Guid, Dictionary<string, List<string>>>();
+        foreach (var pack in packs)
+        {
+            ct.ThrowIfCancellationRequested();
+            string gameDir;
+            try { gameDir = folders.GameDir(pack.Id); }
+            catch { continue; }
+            kube[pack.Id] = KubeErrorsFor(pack.Id, gameDir, force, ct);
+        }
+
+        return new ScanResult(files, groups, kube, DateTimeOffset.UtcNow);
+    }
+
+    /// <summary>
+    /// Walks every given instance's config, KubeJS and defaultconfigs folders, re-reading only those
+    /// whose fingerprint has moved. Call from a background thread. Instances without those folders (a
+    /// fresh, never-launched one, say) just contribute nothing.
+    /// </summary>
+    /// <param name="force">Ignore the remembered scans and re-walk every instance.</param>
     /// <param name="progress">Reports the instance name as each one starts, for the status line.</param>
     public static List<Entry> Scan(
+        IReadOnlyList<PackSummary> packs,
+        PackFolderService folders,
+        AppSettings settings,
+        bool force,
+        IProgress<string>? progress,
+        CancellationToken ct) =>
+        ScanFiles(packs, folders, settings, force, progress, ct).Files;
+
+    private static (List<Entry> Files, List<(Guid Id, string Fingerprint)> Fingerprints) ScanFiles(
         IReadOnlyList<PackSummary> packs,
         PackFolderService folders,
         AppSettings settings,
@@ -111,72 +259,142 @@ public static class ConfigHubService
         CancellationToken ct)
     {
         var all = new List<Entry>();
+        var fingerprints = new List<(Guid, string)>();
+
         foreach (var pack in packs)
         {
             ct.ThrowIfCancellationRequested();
             progress?.Report(pack.Name);
 
             string gameDir;
-            // The name-less overload never creates the folder, which matters: scanning must not
-            // conjure an empty game/ directory for an instance that was never downloaded.
+            // The name-less overload never creates the folder, so scanning doesn't create an empty game/
+            // for an instance that was never downloaded.
             try { gameDir = folders.GameDir(pack.Id); }
             catch { continue; }
 
-            var stamp = Stamp(gameDir);
-            lock (CacheLock)
+            var key = ScanCache<CachedEntry>.ScopeKey(pack.Id, "files");
+            var remembered = force ? CachedScan<CachedEntry>.Cold : FileCache.Get(key);
+            var now = FingerprintOf(gameDir, ct);
+            fingerprints.Add((pack.Id, now));
+
+            // A null remembered fingerprint means "walk it all"; that's how an entry past its maximum age
+            // forces a full re-read without a second flag.
+            if (remembered.State == ScanState.Cached && remembered.Fingerprint == now)
             {
-                if (!force && Cache.TryGetValue(pack.Id, out var cached) && cached.Stamp == stamp)
-                {
-                    all.AddRange(cached.Files);
-                    continue;
-                }
+                foreach (var row in remembered.Rows) all.Add(Rehydrate(row, pack, gameDir));
+                continue;
             }
 
             var files = WalkPack(pack, gameDir, settings, ct);
-            lock (CacheLock) Cache[pack.Id] = new PackScan(files, stamp, DateTime.UtcNow);
+            FileCache.Put(key, files.Select(ToCached).ToList(), now);
             all.AddRange(files);
         }
-        return all;
+        return (all, fingerprints);
     }
 
-    /// <summary>Drops one instance's cached walk, so the next scan re-reads it. Called after this page
-    /// writes into an instance, which is the one case the folder stamp is guaranteed to miss (writing
-    /// a file does not change its folder's timestamp when the file already existed).</summary>
-    public static void Invalidate(Guid packId)
-    {
-        lock (CacheLock) Cache.Remove(packId);
-    }
+    /// <summary>Drops one instance's remembered scans, so the next one re-reads it. Called after this
+    /// page writes into an instance, which is the one case the fingerprint is guaranteed to miss
+    /// (overwriting a file of the same length changes no folder's timestamp and no byte total).</summary>
+    public static void Invalidate(Guid packId) =>
+        ScanCaches.InvalidatePack(packId, ScanScope.Config);
 
-    /// <summary>Drops every cached walk.</summary>
+    /// <summary>Drops every remembered config scan, compare and KubeJS log parse.</summary>
     public static void InvalidateAll()
     {
-        lock (CacheLock) Cache.Clear();
+        FileCache.Clear();
+        GroupCache.Clear();
+        KubeCache.Clear();
     }
 
     /// <summary>
-    /// A cheap fingerprint of an instance's config folders: the write time of each root and of its
-    /// immediate children. Creating, deleting or renaming a file bumps its folder's timestamp, so this
-    /// catches the changes made outside the launcher that matter most. It deliberately does not walk
-    /// deeper — that would cost as much as the scan it is trying to avoid — which is why the page has
-    /// a Refresh button and why <see cref="Invalidate"/> exists for our own writes.
+    /// What an instance's four config roots look like, cheaply: exists, own write time, and the
+    /// recursive file count, folder count and byte total of each. It walks the tree, so it is paid
+    /// only by the background rescan and never before serving a remembered list.
     /// </summary>
-    private static string Stamp(string gameDir)
+    /// <remarks>The skip list and depth are the scan's own, so the fingerprint describes the same
+    /// tree that was walked rather than a larger one.</remarks>
+    private static string FingerprintOf(string gameDir, CancellationToken ct)
     {
-        var parts = new List<string>();
+        var fingerprint = new Fingerprint();
         foreach (var (relative, _) in Roots)
         {
             var root = Path.Combine(gameDir, relative.Replace('/', Path.DirectorySeparatorChar));
-            try
-            {
-                if (!Directory.Exists(root)) { parts.Add(relative + ":-"); continue; }
-                parts.Add($"{relative}:{Directory.GetLastWriteTimeUtc(root).Ticks}");
-                foreach (var child in Directory.EnumerateDirectories(root))
-                    parts.Add($"{Path.GetFileName(child)}:{Directory.GetLastWriteTimeUtc(child).Ticks}");
-            }
-            catch (IOException) { parts.Add(relative + ":?"); }
-            catch (UnauthorizedAccessException) { parts.Add(relative + ":?"); }
+            fingerprint.Add(relative, RootFingerprint.Compute(root, SkipFolders, MaxWalkDepth, ct));
         }
-        return string.Join("|", parts);
+        return fingerprint.ToString();
+    }
+
+    /// <summary>
+    /// The scope one cross-instance compare is remembered under: every participating instance's id
+    /// and fingerprint, in a fixed order, hashed down to something short enough for a key.
+    /// </summary>
+    private static string GroupScopeKey(IReadOnlyList<(Guid Id, string Fingerprint)> packs)
+    {
+        var material = string.Join('\n', packs.OrderBy(p => p.Id)
+                                              .Select(p => $"{p.Id:N}={p.Fingerprint}"));
+        return "__groups:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material)))[..32];
+    }
+
+    private static CachedEntry ToCached(Entry entry) =>
+        new(entry.RelativePath, entry.Size, entry.ModifiedUtc.Ticks, (byte)entry.Kind);
+
+    private static Entry Rehydrate(CachedEntry row, PackSummary pack, string gameDir) =>
+        new(pack.Id, pack.Name, row.Rel,
+            Path.Combine(gameDir, row.Rel.Replace('/', Path.DirectorySeparatorChar)),
+            row.Size, new DateTime(row.MTicks, DateTimeKind.Utc), (FileKind)row.Kind);
+
+    /// <summary>One instance's KubeJS errors, re-parsed only when the log folder has changed.</summary>
+    /// <remarks>Fingerprinted on <c>logs/kubejs</c> alone: nothing else it reads can change its
+    /// answer, and that folder is small and flat, so the check costs one directory read.</remarks>
+    private static Dictionary<string, List<string>> KubeErrorsFor(
+        Guid packId, string gameDir, bool force, CancellationToken ct)
+    {
+        var key = ScanCache<CachedKubeError>.ScopeKey(packId, "kubejs");
+        var dir = Path.Combine(gameDir, "logs", "kubejs");
+        var now = new Fingerprint().Add("logs/kubejs", RootFingerprint.Compute(dir, null, 2, ct)).ToString();
+
+        if (!force)
+        {
+            var hit = KubeCache.Get(key);
+            if (hit.State == ScanState.Cached && hit.Fingerprint == now) return Regroup(hit.Rows);
+        }
+
+        Dictionary<string, List<string>> parsed;
+        try { parsed = ReadKubeJsErrors(gameDir, ct); }
+        catch (OperationCanceledException) { throw; }
+        // An unreadable log folder is normal, not an error. It isn't cached either, so "unknown" doesn't
+        // harden into "no errors".
+        catch { return new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase); }
+
+        KubeCache.Put(key,
+            parsed.SelectMany(kv => kv.Value.Select(line => new CachedKubeError(kv.Key, line))).ToList(),
+            now);
+        return parsed;
+    }
+
+    private static Dictionary<Guid, Dictionary<string, List<string>>> CachedKubeErrors(
+        IReadOnlyList<PackSummary> packs)
+    {
+        var byPack = new Dictionary<Guid, Dictionary<string, List<string>>>();
+        foreach (var pack in packs)
+        {
+            var hit = KubeCache.Get(ScanCache<CachedKubeError>.ScopeKey(pack.Id, "kubejs"));
+            if (hit.State != ScanState.Cached) continue;
+            byPack[pack.Id] = Regroup(hit.Rows);
+        }
+        return byPack;
+    }
+
+    private static Dictionary<string, List<string>> Regroup(IReadOnlyList<CachedKubeError> rows)
+    {
+        var byScript = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            if (!byScript.TryGetValue(row.Script, out var list))
+                byScript[row.Script] = list = new List<string>();
+            list.Add(row.Line);
+        }
+        return byScript;
     }
 
     private static List<Entry> WalkPack(PackSummary pack, string gameDir, AppSettings settings, CancellationToken ct)
@@ -198,9 +416,7 @@ public static class ConfigHubService
         AppSettings settings, List<Entry> into, int depth, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        // Config trees are shallow in practice; a limit stops a symlink loop or a stray world folder
-        // from turning the scan into a hang.
-        if (depth > 12) return;
+        if (depth > MaxWalkDepth) return;
 
         IEnumerable<string> entries;
         try { entries = Directory.EnumerateFileSystemEntries(dir); }
@@ -228,8 +444,8 @@ public static class ConfigHubService
             if (IsBackup(name)) continue;
 
             var rel = Path.GetRelativePath(gameDir, path).Replace('\\', '/');
-            // The privacy policy is the sync boundary, but it is also a "do not look at this" list:
-            // the Arleana bundle lives under config/ and has no business being browsable here either.
+            // The privacy policy is the sync boundary, but also a "don't show this" list: private bundles
+            // under config/ shouldn't be browsable here either.
             if (PrivateAssetPolicy.IsPrivate(rel, settings)) continue;
 
             FileInfo info;
@@ -240,9 +456,10 @@ public static class ConfigHubService
         }
     }
 
-    /// <summary>True for the backups this page writes before overwriting (<c>foo.toml.bak-20260921-013000</c>).
-    /// They are hidden from the list — after a few cross-instance copies they would outnumber the real
-    /// files — and reached instead through the row's "Restore a backup" action.</summary>
+    /// <summary>True for the backups this page writes before overwriting
+    /// (<c>foo.toml.bak-20260921-013000</c>). They are hidden from the list, since after a few copies
+    /// they'd outnumber the real files, and are reached through the row's "Restore a backup" action
+    /// instead.</summary>
     public static bool IsBackup(string fileName)
     {
         var dot = fileName.LastIndexOf(".bak-", StringComparison.OrdinalIgnoreCase);
@@ -250,24 +467,22 @@ public static class ConfigHubService
     }
 
     /// <summary>
-    /// When a backup was actually taken, read out of the <c>.bak-yyyyMMdd-HHmmss</c> suffix this page
-    /// wrote, falling back to the file's last-write time for a name that is not one of ours.
+    /// When a backup was taken, read from the <c>.bak-yyyyMMdd-HHmmss</c> suffix this page writes,
+    /// falling back to the last-write time for names that aren't ours.
     /// </summary>
     /// <remarks>
-    /// The last-write time is the wrong answer here and it looks like the right one:
-    /// <see cref="File.Copy(string,string,bool)"/> gives the copy the <i>source</i> file's last-write
-    /// time, so a backup carries the age of the content inside it, never the moment it was taken. Two
-    /// edits in a row therefore sort backwards, and "restore the newest backup" would hand back the
-    /// older one. The stamp in the name is written once and never touched again, so it is the
-    /// authority — do not swap this back to mtime.
+    /// Not mtime: <see cref="File.Copy(string,string,bool)"/> keeps the source's last-write time, so a
+    /// backup's mtime is the age of its content, and "restore the newest backup" would pick the wrong
+    /// one after two edits in a row.
     /// </remarks>
+    /// <seealso cref="TimeFormat.Stamp"/>
     public static DateTime BackupTakenUtc(FileInfo backup)
     {
         var name = backup.Name;
         var dot = name.LastIndexOf(".bak-", StringComparison.OrdinalIgnoreCase);
         if (dot >= 0 && DateTime.TryParseExact(
                 name[(dot + 5)..], "yyyyMMdd-HHmmss", CultureInfo.InvariantCulture,
-                // The stamp is written from DateTime.Now, so it is local time.
+                // TimeFormat.StampNow writes the local wall clock, so that is what this reads.
                 DateTimeStyles.AssumeLocal, out var taken))
             return taken.ToUniversalTime();
         return backup.LastWriteTimeUtc;
@@ -309,9 +524,9 @@ public static class ConfigHubService
     /// Call from a background thread.
     /// </summary>
     /// <remarks>
-    /// Files whose lengths differ cannot be identical, so the common case — a config the user has
-    /// actually edited in one instance — is answered without reading a byte. Only same-length copies
-    /// are hashed, which in a real pack lineage is most of them but they are small.
+    /// Files of different lengths can't be identical, so the common case (a config edited in one
+    /// instance) is answered without reading a byte. Only same-length copies are hashed; in a real pack
+    /// that's most of them, but they're small.
     /// </remarks>
     public static Dictionary<string, GroupState> CompareGroups(
         IEnumerable<IGrouping<string, Entry>> groups, CancellationToken ct)
@@ -348,8 +563,8 @@ public static class ConfigHubService
         return result;
     }
 
-    /// <summary>SHA-256 of a file's bytes, or null when it cannot be read (locked by the running
-    /// game, most likely). Never throws — an unreadable file becomes "unknown", not a crash.</summary>
+    /// <summary>SHA-256 of a file's bytes, or null when it can't be read (most likely locked by the
+    /// running game). Never throws: an unreadable file becomes "unknown".</summary>
     public static string? HashOrNull(string path)
     {
         try
@@ -377,16 +592,16 @@ public static class ConfigHubService
     public sealed record DiffLine(DiffKind Kind, int? LeftNumber, int? RightNumber, string Text);
 
     /// <summary>What a diff came out as, so the caller can say "identical" plainly.</summary>
-    /// <param name="OnlyLineEndings">True when the two files have the same lines but different bytes —
-    /// i.e. they differ only in line endings or in a byte-order mark. Saying "identical" there would be
-    /// a lie and showing every line as changed would be useless, so it gets its own answer.</param>
+    /// <param name="OnlyLineEndings">True when the two files have the same lines but different bytes
+    /// (line endings or a byte-order mark). Neither "identical" nor "every line changed" would be
+    /// right, so it gets its own answer.</param>
     public sealed record DiffResult(
         IReadOnlyList<DiffLine> Lines, int Added, int Removed, bool Truncated, bool OnlyLineEndings);
 
     /// <summary>
-    /// Above this many lines (after the common prefix and suffix are trimmed) the diff falls back to a
-    /// straight positional comparison. The LCS table is O(n·m), so an unbounded diff of two 50,000-line
-    /// recipe dumps would allocate gigabytes; a config anyone edits by hand is nowhere near the cap.
+    /// Above this many lines (after trimming the common prefix and suffix) the diff falls back to a
+    /// positional comparison. The LCS table is O(n*m), so two 50,000-line recipe dumps would allocate
+    /// gigabytes; hand-edited configs are nowhere near the cap.
     /// </summary>
     private const int LcsLineCap = 2000;
 
@@ -505,8 +720,8 @@ public static class ConfigHubService
     /// <param name="LineNumber">1-based.</param>
     public sealed record SearchHit(Entry File, int LineNumber, string Line);
 
-    /// <param name="Skipped">Files that were too large or could not be read. Reported rather than
-    /// swallowed, because a search that silently missed a file is worse than no search.</param>
+    /// <param name="Skipped">Files that were too large or unreadable. Reported so a search never
+    /// silently misses a file.</param>
     public sealed record SearchResult(List<SearchHit> Hits, int FilesRead, int Skipped);
 
     /// <summary>
@@ -551,15 +766,12 @@ public static class ConfigHubService
 
     /// <summary>
     /// Reads an instance's <c>logs/kubejs/*.txt</c> and maps each script file name to the error lines
-    /// that mention it, so a broken script can carry its error on the row instead of the user having to
-    /// know that KubeJS logs somewhere else entirely.
+    /// that mention it, so a broken script shows its error on its own row.
     /// </summary>
     /// <remarks>
-    /// Deliberately crude: KubeJS error lines name the script as <c>server_scripts/foo.js:12</c> or
-    /// just <c>foo.js</c> depending on the version and the kind of failure, so this matches on the file
-    /// name and accepts the odd false positive. The alternative — parsing each KubeJS release's log
-    /// format — would break on the next release, and a wrongly attributed warning costs the user a
-    /// glance while a missed one costs them an evening.
+    /// Matches on the file name only: depending on the KubeJS version and the failure, lines name the
+    /// script as <c>server_scripts/foo.js:12</c> or just <c>foo.js</c>. The odd false positive is cheaper
+    /// than parsing each release's log format.
     /// </remarks>
     public static Dictionary<string, List<string>> ReadKubeJsErrors(string gameDir, CancellationToken ct)
     {
@@ -603,7 +815,7 @@ public static class ConfigHubService
         foreach (var token in line.Split(separators, StringSplitOptions.RemoveEmptyEntries))
         {
             var candidate = token;
-            // "server_scripts/foo.js:12" → "foo.js"
+            // "server_scripts/foo.js:12" -> "foo.js"
             var colon = candidate.IndexOf(".js:", StringComparison.OrdinalIgnoreCase);
             if (colon >= 0) candidate = candidate[..(colon + 3)];
             if (!candidate.EndsWith(".js", StringComparison.OrdinalIgnoreCase)) continue;
@@ -624,9 +836,9 @@ public static class ConfigHubService
     public sealed record CopyPreview(List<CopyPreviewItem> Items, int FileCount, int WouldOverwrite, List<string> SharedPacks);
 
     /// <summary>
-    /// Works out exactly what a copy would do before anything is written: how many files, which of them
-    /// already exist, and which destination instances would push the change to other people. Call from a
-    /// background thread — it reads each destination's <c>.rules.json</c>.
+    /// Works out what a copy would do before anything is written: how many files, which already exist,
+    /// and which destination instances would sync the change to other people. Call from a background
+    /// thread; it reads each destination's <c>.rules.json</c>.
     /// </summary>
     public static CopyPreview PreviewCopy(
         IReadOnlyList<string> sourceRelativePaths,
@@ -676,9 +888,8 @@ public static class ConfigHubService
     /// every target instance, backing up anything it overwrites. Call from a background thread.
     /// </summary>
     /// <remarks>
-    /// The backup is not optional and is not a setting. A mod config is the one file in a pack that,
-    /// when wrong, stops the game starting with no clue as to why; a copy that silently replaced the
-    /// working one would be unrecoverable for anyone who did not think to make their own copy first.
+    /// Always backs up: a broken mod config can stop the game starting with no clue why, and an
+    /// overwritten working copy would be unrecoverable.
     /// </remarks>
     public static CopyResult Copy(
         string sourceGameDir,
@@ -688,7 +899,10 @@ public static class ConfigHubService
         IProgress<string>? progress,
         CancellationToken ct)
     {
-        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+        // Invariant culture, because BackupTakenUtc parses the stamp back with InvariantCulture. In the
+        // current culture a Thai or Saudi locale writes year 2569 or 1448, parsing fails, and backups
+        // fall back to mtime (the source file's time).
+        var stamp = TimeFormat.StampNow();
         var copied = 0;
         var backedUp = 0;
         var failures = new List<string>();
@@ -745,17 +959,10 @@ public static class ConfigHubService
         _ => $"{bytes / 1024.0 / 1024.0:0.##} MB"
     };
 
-    /// <summary>"3 minutes ago" style, matching how the rest of the launcher reports file times.</summary>
-    public static string FormatAge(DateTime utc)
-    {
-        var span = DateTime.UtcNow - utc;
-        if (span < TimeSpan.Zero) return "just now";
-        if (span.TotalMinutes < 1) return "just now";
-        if (span.TotalMinutes < 60) return $"{(int)span.TotalMinutes} min ago";
-        if (span.TotalHours < 24) return $"{(int)span.TotalHours} h ago";
-        if (span.TotalDays < 30) return $"{(int)span.TotalDays} d ago";
-        return utc.ToLocalTime().ToString("d MMM yyyy");
-    }
+    /// <summary>"3 minutes ago" style, for a timestamp the caller knows is UTC.</summary>
+    /// <remarks>Kept as a wrapper because callers hold a UTC <see cref="DateTime"/>, and
+    /// <see cref="TimeFormat"/> won't guess a <see cref="DateTime.Kind"/>.</remarks>
+    public static string FormatAge(DateTime utc) => TimeFormat.Ago(TimeFormat.FromUtc(utc)) ?? "";
 
     public static string KindLabel(FileKind kind) => kind switch
     {

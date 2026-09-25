@@ -1,6 +1,7 @@
 ﻿<Page x:Class="CloudLauncher.Views.ServersView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       xmlns:v="clr-namespace:CloudLauncher.Views"
       Title="Servers"
@@ -10,47 +11,64 @@
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <!-- Header -->
-        <DockPanel Grid.Row="0" Margin="28,24,28,12">
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button Content="Add server" Style="{StaticResource AccentButton}" Click="OnAddServer"
-                        Padding="12,5" Margin="0,0,8,0"
-                        ToolTip="Add a server to one instance's multiplayer list"/>
-                <!-- One refresh, not two. A separate "ping only" button sat beside this one as a
-                     near-identical circular glyph, which is precisely the duplicate-refresh confusion
-                     the user called out elsewhere tonight. Refresh re-reads every instance's list AND
-                     re-pings, which is what anyone pressing it wants. -->
-                <Button x:Name="RefreshButton" Style="{StaticResource IconButton}" Content="&#xE72C;"
-                        FontFamily="{StaticResource IconFont}" FontSize="13" Click="OnRefresh"
-                        ToolTip="Re-read every instance's server list and ping every server again (F5)"/>
-            </StackPanel>
+                <!-- Row 0 - title and the count slot. The actions live in the bar below, as on Instances. -->
+        <DockPanel Grid.Row="0" Style="{StaticResource PageHeaderPanel}">
             <StackPanel>
                 <TextBlock Style="{StaticResource H1}" Text="Servers"/>
-                <TextBlock x:Name="SubLabel" Style="{StaticResource Muted}"
-                           Text="Every server your instances can join, in one place."/>
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           Text="Every instance's multiplayer list, who is online, and the consoles you can reach."/>
             </StackPanel>
         </DockPanel>
 
-        <!-- Filters -->
-        <Grid Grid.Row="1" Margin="28,6,28,10">
+        <!-- Row 1 - actions left, search and the icon-only utilities right. -->
+        <Grid Grid.Row="1" Style="{StaticResource PageFilterBar}">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
-            <ComboBox x:Name="PackFilterBox" Grid.Column="0" Width="240"
-                      DisplayMemberPath="Label" SelectionChanged="OnPackFilterChanged"
-                      ToolTip="Which instance's server list to show"/>
+            <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,-3,0,-3">
+                <Button x:Name="AddServerButton" Style="{StaticResource AccentButton}"
+                        Click="OnAddServer" Margin="0,3,8,3"
+                        ToolTip="Add a server to one instance's multiplayer list">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE710;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Add server" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </WrapPanel>
 
-            <StackPanel Grid.Column="2" Orientation="Horizontal">
-                <Button x:Name="SortButton" Style="{StaticResource IconButton}" Click="OnSortButtonClick"
-                        Content="&#xE8CB;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                        Margin="0,0,8,0" Padding="8,5" ToolTip="Sort servers">
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <v:CompactSearchBox x:Name="SearchBox" Margin="0,0,8,0" Placeholder="Filter servers"
+                                    SearchToolTip="Filter by name, address, MOTD or instance (Ctrl+F)"/>
+                <Button x:Name="OpenFolderButton" Style="{StaticResource HeaderIconButton}"
+                        Content="&#xE8DA;" Click="OnOpenFolder"
+                        ToolTip="Open the selected instance's folder in Explorer - servers.dat lives in it"/>
+                <Button x:Name="RefreshButton" Style="{StaticResource HeaderIconButton}" Content="&#xE72C;"
+                        Click="OnRefresh"
+                        ToolTip="Re-read every instance's server list and ping every server again (F5)"/>
+            </StackPanel>
+        </Grid>
+
+        <Border Grid.Row="2" Style="{StaticResource PageDivider}"/>
+
+        <!-- Row 3 - sort, the on/off filter, then which instance's list to show, as on Instances. -->
+        <Grid Grid.Row="3" Margin="28,4,28,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="SortButton" Style="{StaticResource ToolbarIconButton}" Click="OnSortButtonClick"
+                        Content="&#xE8CB;" ToolTip="Sort servers">
                     <Button.ContextMenu>
                         <ContextMenu Opened="OnSortMenuOpened">
                             <MenuItem x:Name="SortListMenuItem" Header="Order in the game's list" Tag="List"
@@ -59,60 +77,30 @@
                                       IsCheckable="True" Click="OnSortMenuItemClick"/>
                             <MenuItem x:Name="SortAddressMenuItem" Header="Address" Tag="Address"
                                       IsCheckable="True" Click="OnSortMenuItemClick"/>
-                            <MenuItem x:Name="SortStatusMenuItem" Header="Status — online first" Tag="Status"
+                            <MenuItem x:Name="SortStatusMenuItem" Header="Status - online first" Tag="Status"
                                       IsCheckable="True" Click="OnSortMenuItemClick"/>
                             <MenuItem x:Name="SortPlayersMenuItem" Header="Players online" Tag="Players"
                                       IsCheckable="True" Click="OnSortMenuItemClick"/>
                         </ContextMenu>
                     </Button.ContextMenu>
                 </Button>
-
-                <Button x:Name="HiddenToggle" Style="{StaticResource IconButton}" Click="OnToggleHidden"
-                        Content="&#xED1A;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                        Margin="0,0,8,0" Padding="8,5"
-                        ToolTip="Show the hidden direct-connect entries Minecraft keeps but never draws"/>
-
-                <Border x:Name="CompactSearchHost"
-                        Background="{DynamicResource Surface1Brush}"
-                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                        CornerRadius="6" MinHeight="36" Width="36" Margin="0,0,0,0">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="*"/>
-                        </Grid.ColumnDefinitions>
-                        <Button x:Name="SearchToggleButton" Grid.Column="0"
-                                Style="{StaticResource IconButton}" Click="OnSearchToggle"
-                                Content="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                                ToolTip="Search servers (Ctrl+F)"/>
-                        <TextBox x:Name="SearchBox" Grid.Column="1" Background="Transparent" BorderThickness="0"
-                                 VerticalAlignment="Center" Margin="0,0,10,0" Visibility="Collapsed"
-                                 TextChanged="OnSearchTextChanged"
-                                 PreviewKeyDown="OnSearchPreviewKeyDown"
-                                 LostKeyboardFocus="OnSearchLostKeyboardFocus"
-                                 ToolTip="Filter by name, address, MOTD or instance">
-                            <TextBox.Template>
-                                <ControlTemplate TargetType="TextBox">
-                                    <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
-                                </ControlTemplate>
-                            </TextBox.Template>
-                        </TextBox>
-                    </Grid>
-                </Border>
+                <ToggleButton x:Name="HiddenToggle" Style="{StaticResource ToolbarToggleButton}"
+                              Content="&#xED1A;" Click="OnToggleHidden"
+                              ToolTip="Show the hidden direct-connect entries Minecraft keeps but never draws"/>
+                <ComboBox x:Name="PackFilterBox" Width="240" Margin="8,0,0,0" VerticalAlignment="Center"
+                          DisplayMemberPath="Label" SelectionChanged="OnPackFilterChanged"
+                          ToolTip="Which instance's server list to show"/>
             </StackPanel>
         </Grid>
 
-        <Border Grid.Row="2" Height="1" Margin="28,4,28,10"
-                Background="{DynamicResource BorderSubtleBrush}"/>
-
         <!-- Servers + console -->
-        <Grid Grid.Row="3" Margin="28,0,28,8">
+        <Grid Grid.Row="4" Margin="28,0,28,16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition x:Name="ConsoleColumn" Width="0"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Style="{StaticResource Card}" Padding="0">
+            <slate:SlateBorder Grid.Column="0" Style="{StaticResource Card}" Padding="0">
                 <Grid>
                     <ListBox x:Name="ServerList" Background="Transparent" BorderThickness="0"
                              SelectionMode="Extended"
@@ -122,68 +110,68 @@
                              MouseDoubleClick="OnServerDoubleClick">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="14,10" Margin="4,3" CornerRadius="8"
+                                <slate:SlateBorder Padding="14,10" Margin="4,3" CornerRadius="8"
                                         Background="{DynamicResource Surface2Brush}"
                                         BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
                                         ToolTip="{Binding Tooltip}">
-                                    <Border.ContextMenu>
+                                    <slate:SlateBorder.ContextMenu>
                                         <ContextMenu>
                                             <MenuItem Header="Join" Click="OnCtxJoin">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE768;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE768;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Header="Ping now" Click="OnCtxPing">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE895;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE895;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <Separator/>
                                             <MenuItem Header="Open console" Click="OnCtxConsole">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE756;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE756;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Click="OnCtxConsoleSetup"
                                                       Header="{Binding PlacementTarget.DataContext.ConsoleSetupLabel, RelativeSource={RelativeSource AncestorType=ContextMenu}}">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE713;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE713;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <Separator/>
                                             <MenuItem Header="Copy address" Click="OnCtxCopyAddress">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
-                                            <MenuItem Header="Copy to instance…" Click="OnCtxCopyTo">
+                                            <MenuItem Header="Copy to instance..." Click="OnCtxCopyTo">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Header="Move up" Click="OnCtxMoveUp">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE74A;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE74A;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Header="Move down" Click="OnCtxMoveDown">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE74B;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE74B;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <Separator/>
-                                            <MenuItem Header="Edit…" Click="OnCtxEdit">
+                                            <MenuItem Header="Edit..." Click="OnCtxEdit">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE70F;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE70F;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
-                                            <MenuItem Header="Remove…" Click="OnCtxRemove">
+                                            <MenuItem Header="Remove..." Click="OnCtxRemove">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                         </ContextMenu>
-                                    </Border.ContextMenu>
+                                    </slate:SlateBorder.ContextMenu>
 
                                     <DockPanel>
                                         <!-- Row actions live at the right edge. -->
@@ -193,19 +181,19 @@
                                                     Padding="12,4" Margin="0,0,6,0"
                                                     ToolTip="{Binding JoinTooltip}"/>
                                             <Button Style="{StaticResource IconButton}" Content="&#xE756;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    FontFamily="{DynamicResource IconFont}" FontSize="12"
                                                     Click="OnConsole" Tag="{Binding}"
                                                     ToolTip="{Binding ConsoleTooltip}"/>
                                             <Button Style="{StaticResource IconButton}" Content="&#xE8C8;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    FontFamily="{DynamicResource IconFont}" FontSize="12"
                                                     Click="OnCopyTo" Tag="{Binding}"
                                                     ToolTip="Copy this server into another instance"/>
                                             <Button Style="{StaticResource IconButton}" Content="&#xE70F;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    FontFamily="{DynamicResource IconFont}" FontSize="12"
                                                     Click="OnEdit" Tag="{Binding}"
                                                     ToolTip="Rename or re-address this entry"/>
                                             <Button Style="{StaticResource IconButton}" Content="&#xE74D;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                    FontFamily="{DynamicResource IconFont}" FontSize="12"
                                                     Click="OnRemove" Tag="{Binding}"
                                                     Foreground="{DynamicResource DangerBrush}"
                                                     ToolTip="{Binding RemoveTooltip}"/>
@@ -214,17 +202,17 @@
                                         <!-- Favicon, or the first letter of the name. -->
                                         <Grid DockPanel.Dock="Left" Width="40" Height="40" Margin="0,0,12,0"
                                               VerticalAlignment="Center">
-                                            <Border CornerRadius="8" Background="{DynamicResource AccentSoftBrush}"
+                                            <slate:SlateBorder CornerRadius="8" Background="{DynamicResource AccentSoftBrush}"
                                                     Visibility="{Binding LetterVisibility}">
                                                 <TextBlock Text="{Binding Letter}" FontSize="16" FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource AccentBrush}"
+                                                           Foreground="{DynamicResource AccentTextBrush}"
                                                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                            </Border>
-                                            <Border CornerRadius="8" ClipToBounds="True"
+                                            </slate:SlateBorder>
+                                            <slate:SlateBorder CornerRadius="8" ClipToBounds="True"
                                                     Visibility="{Binding IconVisibility}">
                                                 <Image Source="{Binding Icon}" Stretch="UniformToFill"
                                                        RenderOptions.BitmapScalingMode="NearestNeighbor"/>
-                                            </Border>
+                                            </slate:SlateBorder>
                                         </Grid>
 
                                         <StackPanel VerticalAlignment="Center">
@@ -256,19 +244,19 @@
                                                                Foreground="White"/>
                                                 </Border>
 
-                                                <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"
                                                         Background="{DynamicResource AccentSoftBrush}"
                                                         Visibility="{Binding ConsoleBadgeVisibility}"
                                                         ToolTip="This server has RCON console details saved">
                                                     <TextBlock Text="CONSOLE" Style="{StaticResource PillText}"
-                                                               Foreground="{DynamicResource AccentBrush}"/>
-                                                </Border>
+                                                               Foreground="{DynamicResource AccentTextBrush}"/>
+                                                </slate:SlateBorder>
 
-                                                <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"
                                                         Visibility="{Binding HiddenBadgeVisibility}"
-                                                        ToolTip="A direct-connect entry — Minecraft keeps it but does not show it">
+                                                        ToolTip="A direct-connect entry - Minecraft keeps it but does not show it">
                                                     <TextBlock Text="HIDDEN" Style="{StaticResource PillText}"/>
-                                                </Border>
+                                                </slate:SlateBorder>
                                             </StackPanel>
 
                                             <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
@@ -280,38 +268,30 @@
                                                        Visibility="{Binding MotdVisibility}"/>
                                         </StackPanel>
                                     </DockPanel>
-                                </Border>
+                                </slate:SlateBorder>
                             </DataTemplate>
                         </ListBox.ItemTemplate>
                     </ListBox>
 
-                    <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                MaxWidth="460" Visibility="Collapsed">
-                        <TextBlock Text="&#xE968;" FontFamily="{StaticResource IconFont}" FontSize="30"
-                                   HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                        <TextBlock x:Name="EmptyTitle" Style="{StaticResource H3}" Text="No servers yet"
-                                   HorizontalAlignment="Center" Margin="0,12,0,6"/>
-                        <TextBlock x:Name="EmptyBody" Style="{StaticResource Muted}" TextWrapping="Wrap"
-                                   TextAlignment="Center"
-                                   Text="Servers come from each instance's own multiplayer list. Use “Add server” to put one in, or add it in-game and refresh."/>
-                    </StackPanel>
+                    <!-- Last in the cell so it draws over the list. -->
+                    <v:PageStateView x:Name="PageStateHost"/>
                 </Grid>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Console -->
-            <Border x:Name="ConsolePanel" Grid.Column="1" Style="{StaticResource Card}" Padding="14"
+            <slate:SlateBorder x:Name="ConsolePanel" Grid.Column="1" Style="{StaticResource Card}" Padding="14"
                     Margin="14,0,0,0" Visibility="Collapsed">
                 <DockPanel>
                     <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
                             <Button Style="{StaticResource IconButton}" Content="&#xE713;"
-                                    FontFamily="{StaticResource IconFont}" FontSize="12"
-                                    Click="OnConsoleSettings" ToolTip="Console settings — host, port, password"/>
+                                    FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                    Click="OnConsoleSettings" ToolTip="Console settings - host, port, password"/>
                             <Button Style="{StaticResource IconButton}" Content="&#xE8C8;"
-                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                    FontFamily="{DynamicResource IconFont}" FontSize="12"
                                     Click="OnConsoleCopy" ToolTip="Copy the whole scrollback"/>
                             <Button Style="{StaticResource IconButton}" Content="&#xE711;"
-                                    FontFamily="{StaticResource IconFont}" FontSize="12"
+                                    FontFamily="{DynamicResource IconFont}" FontSize="12"
                                     Click="OnConsoleClose" ToolTip="Close the console"/>
                         </StackPanel>
                         <StackPanel>
@@ -331,7 +311,7 @@
                         <Button Content="save-all" Click="OnQuickCommand" Tag="save-all" Padding="9,4" Margin="0,0,5,0"
                                 ToolTip="Flush the world to disk"/>
                         <Button Content="tps" Click="OnQuickCommand" Tag="tps" Padding="9,4" Margin="0,0,5,0"
-                                ToolTip="Server tick rate — only on Paper/Spigot and some modded servers"/>
+                                ToolTip="Server tick rate - only on Paper/Spigot and some modded servers"/>
                         <Button Content="whitelist" Click="OnQuickCommand" Tag="whitelist list" Padding="9,4"
                                 ToolTip="Who is on the whitelist"/>
                     </StackPanel>
@@ -339,7 +319,7 @@
                     <DockPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
                         <Button DockPanel.Dock="Right" Content="Send" Click="OnConsoleSend" Padding="12,4"
                                 Margin="8,0,0,0" ToolTip="Run this command (Enter)"/>
-                        <TextBox x:Name="CommandBox" Padding="8,6" FontFamily="{StaticResource MonoFont}"
+                        <TextBox x:Name="CommandBox" Padding="8,6" FontFamily="{DynamicResource MonoFont}"
                                  PreviewKeyDown="OnCommandKeyDown"
                                  ToolTip="Type a server command. Up and down walk back through what you have run here."/>
                     </DockPanel>
@@ -348,16 +328,31 @@
                                TextWrapping="Wrap" Margin="0,8,0,0"
                                Foreground="{DynamicResource TextSecondaryBrush}"/>
 
-                    <Border Background="{DynamicResource LogBackgroundBrush}"
+                    <slate:SlateBorder Background="{DynamicResource LogBackgroundBrush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6">
                         <v:LogTextView x:Name="ConsoleLog"/>
-                    </Border>
+                    </slate:SlateBorder>
                 </DockPanel>
-            </Border>
+            </slate:SlateBorder>
         </Grid>
 
-        <TextBlock x:Name="StatusLabel" Grid.Row="4" Style="{StaticResource Caption}"
-                   Margin="28,4,28,14" TextWrapping="Wrap"
-                   Foreground="{DynamicResource TextSecondaryBrush}"/>
+        <!-- The bordered status bar every master page has. -->
+        <Border Grid.Row="5" Style="{StaticResource PageStatusBar}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <!-- No Foreground here: PageState colours this line, e.g. red for an error. -->
+                <TextBlock x:Name="StatusLabel" Grid.Column="0" Style="{StaticResource Caption}"
+                           TextWrapping="Wrap" VerticalAlignment="Center"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="CountLabel" Style="{StaticResource Caption}"
+                               VerticalAlignment="Center"/>
+                    <ProgressBar x:Name="BusyBar" Width="140" Height="4" IsIndeterminate="True"
+                                 Visibility="Collapsed" Margin="12,0,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
     </Grid>
 </Page>

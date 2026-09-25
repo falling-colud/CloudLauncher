@@ -11,44 +11,31 @@ using CloudLauncher.Services;
 namespace CloudLauncher.Views;
 
 /// <summary>How much of a log the view is showing: everything, or only the lines that matter.</summary>
-/// <remarks>Deliberately not <see cref="ThemeService.LogLevel"/> with a "minimum": that enum is
-/// ordered <c>Normal, Muted, Warning, Error</c> — Muted is quieter than Normal, not louder — so
-/// "&gt;= level" would mean nothing. These three are the questions people actually ask of a log.</remarks>
+/// <remarks>Not a minimum <see cref="ThemeService.LogLevel"/>: that enum is ordered <c>Normal,
+/// Muted, Warning, Error</c>, so "&gt;= level" would not mean anything useful.</remarks>
 public enum LogFilterMode
 {
     /// <summary>Every line.</summary>
     All,
 
-    /// <summary>Warnings and errors only — the two levels that mean something went wrong.</summary>
+    /// <summary>Warnings and errors only.</summary>
     Problems,
 
     /// <summary>Errors, stack traces and "Caused by:" only.</summary>
     Errors
 }
 
-/// <summary>
-/// A read-only log view that colours each line by what it is — error, warning, debug noise, ordinary
-/// output — using the user's log colours, and can narrow itself to the lines being looked for.
-/// </summary>
-/// <remarks>
-/// <para>This replaces a plain <see cref="TextBox"/>. A TextBox can only be one colour, and in a
-/// modded Minecraft log the one line that matters is a stack trace buried in twenty thousand lines of
-/// mod chatter; colour is what makes it findable. It also could not be themed, which is half of what
-/// was asked for.</para>
-/// <para>It is a virtualising <see cref="ListBox"/>, so only the visible lines exist as elements —
-/// a 200,000-line log costs the same as a screenful. Lines keep a reference to the theme's brush
-/// objects rather than copies of their colours, so changing the log colours in Settings repaints an
-/// open log immediately.</para>
-/// <para>Searching is done by <em>filtering</em> rather than by hopping the caret between matches:
-/// the question being asked of a crash log is almost always "show me every line that mentions this
-/// mod", and a list of the nine matching lines answers it in one look where nine presses of F3 does
-/// not. <see cref="FilterText"/> and <see cref="FilterMode"/> combine, so "errors only" plus a mod id
-/// is one gesture.</para>
-/// </remarks>
+/// <summary>A read-only log view that colours each line by what it is (error, warning, debug noise,
+/// ordinary output) using the user's log colours, and can filter down to the lines being looked
+/// for.</summary>
+/// <remarks>A virtualising <see cref="ListBox"/>, so only the visible lines exist as elements and a
+/// huge log costs about the same as a screenful. Search filters instead of jumping between matches,
+/// and <see cref="FilterText"/> combines with <see cref="FilterMode"/>, so "errors only" plus a mod
+/// id works.</remarks>
 public sealed class LogTextView : ListBox
 {
-    /// <summary>Lines retained. Minecraft streams its whole session through here; past this the
-    /// oldest go, which is also what <see cref="AppLog"/> does with its own buffer.</summary>
+    /// <summary>Lines kept. Minecraft streams its whole session through here; past this the oldest
+    /// go, as in <see cref="AppLog"/>'s own buffer.</summary>
     private const int MaxLines = 20_000;
 
     private readonly ObservableCollection<LogLine> _lines = new();
@@ -78,10 +65,11 @@ public sealed class LogTextView : ListBox
 
     /// <summary>Raised whenever the counts behind <see cref="VisibleLineCount"/>,
     /// <see cref="TotalLineCount"/> or <see cref="TrimmedLineCount"/> change, so a host can keep a
-    /// "12 of 8,431 lines" caption honest without polling.</summary>
+    /// "12 of 8,431 lines" caption current without polling.</summary>
     public event Action? StatsChanged;
 
-    /// <summary>Substring every shown line must contain (case-insensitive). Empty shows everything.</summary>
+    /// <summary>Substring every shown line must contain (case-insensitive). Empty shows
+    /// everything.</summary>
     public string FilterText
     {
         get => _filterText;
@@ -115,13 +103,13 @@ public sealed class LogTextView : ListBox
     /// <summary>Lines held in memory, filtered or not.</summary>
     public int TotalLineCount => _lines.Count;
 
-    /// <summary>How many lines have been dropped off the start of the buffer to stay under the cap.
-    /// Worth surfacing: on a very long session the beginning of the log — where the mod list and the
-    /// first failure usually are — is exactly what silently went missing.</summary>
+    /// <summary>How many lines have been dropped from the start of the buffer to stay under the
+    /// cap. Worth showing: on a long session the start of the log, where the mod list and first
+    /// failure usually are, is what goes missing.</summary>
     public int TrimmedLineCount { get; private set; }
 
-    /// <summary>The whole log as text — for copying, and for callers that still think in strings.
-    /// Always the complete buffer, never just what the filter is showing.</summary>
+    /// <summary>The whole log as text, for copying and for callers that want a string. Always the
+    /// full buffer, whatever the filter shows.</summary>
     public string Text
     {
         get
@@ -133,8 +121,8 @@ public sealed class LogTextView : ListBox
         set => SetText(value);
     }
 
-    /// <summary>The lines the filter is letting through, as text. What "Copy" means when a filter
-    /// is on — copying the whole file would throw away the narrowing the user just did.</summary>
+    /// <summary>The lines the filter lets through, as text. This is what Copy means while a filter
+    /// is on.</summary>
     public string VisibleText
     {
         get
@@ -238,8 +226,7 @@ public sealed class LogTextView : ListBox
         ClipboardHelper.TrySetText(text);
     }
 
-    /// <summary>Right-click menu. A log is read and quoted far more often than it is navigated, and
-    /// until now the only way to get a line out of here was to select it and know that Ctrl+C worked.</summary>
+    /// <summary>Right-click menu with the copy options and Select all.</summary>
     private ContextMenu BuildContextMenu()
     {
         var menu = new ContextMenu();
@@ -271,13 +258,10 @@ public sealed class LogTextView : ListBox
         return menu;
     }
 
-    /// <summary>
-    /// One TextBlock per line, coloured by the line's level through <c>DynamicResource</c> so that
-    /// changing the log colours in Settings repaints an open log immediately.
-    /// </summary>
-    /// <remarks>The colour lives in a <see cref="Style"/> rather than on the element: a value set
-    /// directly on a templated element outranks a DataTemplate trigger, so setting the default
-    /// foreground on the TextBlock itself would silently make every line the same colour.</remarks>
+    /// <summary>One TextBlock per line, coloured by the line's level through <c>DynamicResource</c>
+    /// so changing the log colours in Settings repaints an open log.</summary>
+    /// <remarks>The colour lives in a <see cref="Style"/>: a value set directly on the templated
+    /// TextBlock would outrank the DataTemplate trigger and make every line the same colour.</remarks>
     private static DataTemplate BuildTemplate()
     {
         var style = new Style(typeof(TextBlock));

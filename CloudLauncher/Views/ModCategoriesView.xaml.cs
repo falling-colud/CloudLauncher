@@ -7,12 +7,9 @@ using CloudLauncher.Services;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The Categories sub-tab: a workbench for tagging mods in bulk.
-///
-/// The rest of the app only lets you toggle one mod's categories at a time from a context menu,
-/// which is fine for a stray mod and miserable for organising a 400-mod pack. This is a three-pane
-/// assignment view — categories, what's in the selected one, and everything else — so membership is
-/// edited by multi-selecting and moving, or by dragging mods straight onto a category.
+/// The Categories sub-tab: a three-pane workbench for tagging mods in bulk (categories, the
+/// selected category's members, everything else). Membership is edited by multi-selecting and
+/// moving, or by dragging mods onto a category.
 /// </summary>
 public partial class ModCategoriesView : UserControl
 {
@@ -25,8 +22,8 @@ public partial class ModCategoriesView : UserControl
     private Action? _onChanged;
     private string? _selectedCategory;
     private Point _dragOrigin;
-    /// <summary>Which list a drag started from — the members list means "move", the candidates list
-    /// means "add".</summary>
+    /// <summary>Which list a drag started from: the members list means "move", the candidates list
+    /// "add".</summary>
     private ListBox? _dragSource;
     private InsertionAdorner? _insertion;
 
@@ -41,8 +38,7 @@ public partial class ModCategoriesView : UserControl
             IsHitTestVisible = false;
         }
 
-        /// <summary>Built per draw, not cached: a pen cached in a static field keeps whatever the
-        /// accent was when the app started, and outlives a colour change.</summary>
+        /// <summary>Built per draw so it follows accent colour changes.</summary>
         private static Pen BuildPen()
         {
             var pen = new Pen((Brush)Application.Current.FindResource("AccentBrush"), 2);
@@ -74,13 +70,13 @@ public partial class ModCategoriesView : UserControl
         InitializeComponent();
     }
 
-    /// <param name="onOpenMod">Opens a mod's page in the launcher — the menu's top action.</param>
-    /// <param name="onReload">Re-scans the pack's mods, after something that changes the files on
-    /// disk (a delete, or installing a different version).</param>
-    /// <param name="onUpdate">Installs the newest version of the given mods — the List view's own
-    /// implementation, so "Update to newest" behaves identically here.</param>
-    /// <param name="onRecheckUpdates">Re-runs the update check for the given mods after something
-    /// changed what counts as an update for them (their channel, or the store they follow).</param>
+    /// <param name="onOpenMod">Opens a mod's page in the launcher (the menu's top action).</param>
+    /// <param name="onReload">Re-scans the pack's mods after a change on disk (a delete, or installing
+    /// a different version).</param>
+    /// <param name="onUpdate">Installs the newest version of the given mods, using the List view's
+    /// implementation so it behaves the same.</param>
+    /// <param name="onRecheckUpdates">Re-runs the update check for the given mods after their channel
+    /// or store changed.</param>
     public void Load(Guid packId, IReadOnlyList<PackMod> mods, MainWindow? owner, Action? onChanged,
         Action<PackMod>? onOpenMod = null, Action? onReload = null,
         Action<IReadOnlyList<PackMod>>? onUpdate = null, Action<IReadOnlyList<PackMod>>? onRecheckUpdates = null)
@@ -101,13 +97,35 @@ public partial class ModCategoriesView : UserControl
     private Action<IReadOnlyList<PackMod>>? _onUpdate;
     private Action<IReadOnlyList<PackMod>>? _onRecheckUpdates;
 
+    /// <summary>True when the host page has its own search box and the mods it passed are already
+    /// filtered by it, so this control's box is hidden.</summary>
+    /// <remarks>Set by the launcher-wide Mods page. The per-pack hub leaves it false, since this box is
+    /// its only search.</remarks>
+    public bool HostOwnsSearch { get; set; }
+
+    /// <summary>What the host's filters have narrowed the set to, shown in the summary line. Null when
+    /// the board shows everything the host has.</summary>
+    /// <remarks>Every count on this board counts what it was given, so the summary has to say which
+    /// mods it is counting.</remarks>
+    public string? ScopeNote { get; set; }
+
+    /// <summary>Every mod the host has, when the set it passed is narrower. Null when they are the
+    /// same.</summary>
+    /// <remarks>The panes show the filtered set, but operations on the whole document use this one:
+    /// deleting a category (which untags every member), importing categories from another instance, and
+    /// the dependency graph in the options menu.</remarks>
+    public IReadOnlyList<PackMod>? UnfilteredMods { get; set; }
+
+    /// <summary>The set a scope-wide operation counts and acts on: see <see cref="UnfilteredMods"/>.</summary>
+    private IReadOnlyList<PackMod> ScopeWide => UnfilteredMods ?? _mods;
+
     // ── refresh ─────────────────────────────────────────────────────────────────
 
     private void Refresh()
     {
         var meta = App.State.ModMetadata;
 
-        // Stored order, not alphabetical — the list position is the user's chosen order.
+        // Stored order, not alphabetical: the user sets the order.
         var rows = meta.Categories(_packId)
             .Select(c =>
             {
@@ -130,10 +148,14 @@ public partial class ModCategoriesView : UserControl
             string.Equals(r.Name, _selectedCategory, StringComparison.OrdinalIgnoreCase));
         if (CategoryList.SelectedItem is null) _selectedCategory = null;
 
+        // The host's filter note goes next to the mod count, the number it changed.
+        var scope = ScopeNote is { Length: > 0 } note ? $" ({note})" : "";
         var untagged = _mods.Count(m => m.Meta.Categories.Count == 0);
         Summary.Text = $"{rows.Count} categor{(rows.Count == 1 ? "y" : "ies")}" +
-                       $"   ·   {_mods.Count} mod{(_mods.Count == 1 ? "" : "s")}" +
+                       $"   ·   {_mods.Count} mod{(_mods.Count == 1 ? "" : "s")}{scope}" +
                        (untagged > 0 ? $"   ·   {untagged} untagged" : "   ·   all tagged");
+
+        SearchRow.Visibility = HostOwnsSearch ? Visibility.Collapsed : Visibility.Visible;
 
         RefreshLists();
     }
@@ -180,7 +202,7 @@ public partial class ModCategoriesView : UserControl
         }
 
         var members = MembersOf(_selectedCategory);
-        MembersHeader.Text = $"IN “{_selectedCategory.ToUpperInvariant()}”  ·  {members.Count}";
+        MembersHeader.Text = $"IN '{_selectedCategory.ToUpperInvariant()}'  ·  {members.Count}";
         MemberList.ItemsSource = members;
 
         var inCategory = new HashSet<PackMod>(members);
@@ -188,7 +210,8 @@ public partial class ModCategoriesView : UserControl
         if (OnlyUntagged.IsChecked == true)
             candidates = candidates.Where(m => m.Meta.Categories.Count == 0);
 
-        var query = SearchBox.Text?.Trim();
+        // Ignore the hidden box when the host owns the search; its query is already applied.
+        var query = HostOwnsSearch ? null : SearchBox.Text?.Trim();
         if (!string.IsNullOrEmpty(query))
             candidates = candidates.Where(m =>
                 m.DisplayName.Contains(query, StringComparison.OrdinalIgnoreCase)
@@ -204,8 +227,8 @@ public partial class ModCategoriesView : UserControl
 
     private void UpdateButtons()
     {
-        // Library membership is editable now (it drives the IsLibrary flag), so the only thing that
-        // disables the buttons is having no category selected.
+        // Library membership is editable too (it drives the IsLibrary flag), so the buttons only need a
+        // selected category.
         var canEdit = _selectedCategory is not null;
         var library = _selectedCategory is not null && IsBuiltin(_selectedCategory);
         var members = MemberList.SelectedItems.Count;
@@ -227,11 +250,10 @@ public partial class ModCategoriesView : UserControl
 
     // ── membership edits ────────────────────────────────────────────────────────
 
-    /// <summary>The one place membership changes: everything else routes through here so the lists,
-    /// the counts and the rest of the management page all refresh the same way.</summary>
-    /// <param name="advance">List to re-select in afterwards. The moved rows have left it, so the
-    /// row that slid into their place gets selected — tagging a run of mods becomes
-    /// Enter-Enter-Enter instead of click-click-click.</param>
+    /// <summary>The one place membership changes, so the lists, the counts and the rest of the
+    /// management page all refresh the same way.</summary>
+    /// <param name="advance">List to re-select in afterwards. The row that slid into the moved rows'
+    /// place gets selected, so a run of mods can be tagged with repeated Enter.</param>
     private void Assign(IReadOnlyList<PackMod> mods, string category, bool member, ListBox? advance = null)
     {
         if (mods.Count == 0) return;
@@ -239,14 +261,14 @@ public partial class ModCategoriesView : UserControl
         var resumeAt = advance?.SelectedIndex ?? -1;
 
         var changed = App.State.ModMetadata.SetMembership(_packId, mods, category, member);
-        // Editing Library membership is really toggling the IsLibrary flag — say so, since it has
-        // effects (the disable cascade) beyond a plain tag.
+        // Library membership is the IsLibrary flag, which does more than a tag (the disable cascade),
+        // so say so.
         var isLibrary = IsBuiltin(category);
         Status.Text = changed == 0
             ? "Nothing to change."
             : isLibrary
                 ? $"Marked {changed} mod{(changed == 1 ? "" : "s")} as {(member ? "library" : "not library")}."
-                : $"{(member ? "Added" : "Removed")} {changed} mod{(changed == 1 ? "" : "s")} {(member ? "to" : "from")} “{category}”.";
+                : $"{(member ? "Added" : "Removed")} {changed} mod{(changed == 1 ? "" : "s")} {(member ? "to" : "from")} '{category}'.";
 
         Refresh();
         _onChanged?.Invoke();
@@ -261,8 +283,8 @@ public partial class ModCategoriesView : UserControl
         list.SelectedIndex = Math.Min(index, list.Items.Count - 1);
         list.ScrollIntoView(list.SelectedItem);
 
-        // Containers are generated after the items source is swapped, so grab focus once WPF has
-        // caught up — otherwise the next Enter goes nowhere.
+        // Containers are generated after the items source changes, so focus once WPF has caught up or
+        // the next Enter goes nowhere.
         list.Dispatcher.BeginInvoke(new Action(() =>
         {
             if (list.ItemContainerGenerator.ContainerFromIndex(list.SelectedIndex) is ListBoxItem row)
@@ -438,9 +460,8 @@ public partial class ModCategoriesView : UserControl
 
         if (fromMembers && string.Equals(target.Name, source, StringComparison.OrdinalIgnoreCase)) return; // already there
 
-        // Out of the member list is a *move* — the mods leave the category they came from. Out of the
-        // candidates list is a plain add, since they were never in one to begin with. Library is a
-        // valid source or target either way now (it just toggles the IsLibrary flag).
+        // From the members list this is a move out of the source category; from the candidates list a
+        // plain add. Library works either way (it toggles the IsLibrary flag).
         if (fromMembers && source is not null)
             App.State.ModMetadata.SetMembership(_packId, dropped, source, false);
 
@@ -452,8 +473,8 @@ public partial class ModCategoriesView : UserControl
     private void OnCategorySelected(object sender, SelectionChangedEventArgs e)
     {
         if (CategoryList.SelectedItem is CategoryRow row) _selectedCategory = row.Name;
-        // A one-time nudge that Library isn't an ordinary tag — adding here flips the IsLibrary flag,
-        // which feeds the disable cascade.
+        // Library isn't an ordinary tag: adding here sets the IsLibrary flag, which feeds the disable
+        // cascade.
         Status.Text = _selectedCategory is not null && IsBuiltin(_selectedCategory)
             ? "Adding a mod here marks it as a library mod (used by the dependency disable cascade)."
             : "";
@@ -462,17 +483,9 @@ public partial class ModCategoriesView : UserControl
 
     // ── mod context menu ─────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Right-clicking a mod here opens the same options menu the List and Graph views use — enable,
-    /// update, priority, side, library, lock, categories, notes, delete, the lot.
-    /// </summary>
-    /// <remarks>
-    /// This screen is where a pack gets organised, so it is exactly where you notice that a mod needs
-    /// its priority set or its side marked. Having to go back to the List view to do it broke the one
-    /// thing this view is for. Right-clicking a mod inside the current selection keeps the selection
-    /// and acts on all of it (the menu drops single-mod-only actions); right-clicking outside it
-    /// selects that mod first, which is how every file list behaves.
-    /// </remarks>
+    /// <summary>Right-clicking a mod opens the same options menu the List and Graph views use.</summary>
+    /// <remarks>Right-clicking inside the current selection acts on all of it (the menu drops
+    /// single-mod actions); right-clicking outside it selects that mod first.</remarks>
     private void OnModRightClick(object sender, MouseButtonEventArgs e)
     {
         if (sender is not ListBox list) return;
@@ -494,14 +507,17 @@ public partial class ModCategoriesView : UserControl
         menu.IsOpen = true;
     }
 
+    /// <summary>The context this board's right-click menu edits through.</summary>
+    /// <remarks>Delete and "Update to version" are left off on the launcher-wide board. Both act on one
+    /// jar, which on a global row may be the library copy, and <c>ModUpdater</c> replaces the jar file,
+    /// which would leave the library index pointing at a missing file. Per pack both are fine.</remarks>
     private ModOptionsContext BuildModOptionsContext() => new()
     {
         PackId = _packId,
         Inventory = App.State.ModInventory,
         Owner = _owner,
-        AllMods = _mods,
-        // A category change made from the menu has to land in these lists straight away — this view
-        // IS the category view.
+        AllMods = ScopeWide,
+        // Category changes from the menu must show up in these lists at once.
         OnChanged = () => { Refresh(); _onChanged?.Invoke(); },
         OnOpenPage = OpenModPage,
         OnSetEnabled = (list, enabled) =>
@@ -510,29 +526,28 @@ public partial class ModCategoriesView : UserControl
             Refresh();
             _onChanged?.Invoke();
         },
-        // Handed up to the hub rather than re-implemented: "Update to newest" has to obey the same
-        // update-lock rules here as it does in the List view, and one implementation is how that
-        // stays true. Without these two the menu silently dropped both items on this tab.
-        OnUpdate = list =>
+        // Passed through from the hub so "Update to newest" follows the same update-lock rules as the
+        // List view. Null drops the item from the menu; the launcher-wide Mods page passes neither,
+        // since one update can't suit instances on different versions and loaders.
+        OnUpdate = _onUpdate is null ? null : (Action<IReadOnlyList<PackMod>>)(list =>
         {
-            if (_onUpdate is null) return;
-            Status.Text = list.Count == 1 ? $"Updating {list[0].DisplayName}…" : $"Updating {list.Count} mod(s)…";
-            _onUpdate(list);
-        },
-        OnRecheckUpdates = list =>
+            Status.Text = list.Count == 1 ? $"Updating {list[0].DisplayName}..." : $"Updating {list.Count} mod(s)...";
+            _onUpdate?.Invoke(list);
+        }),
+        OnRecheckUpdates = _onRecheckUpdates is null ? null : (Action<IReadOnlyList<PackMod>>)(list =>
         {
-            if (_onRecheckUpdates is null) return;
-            Status.Text = "Re-checking for updates…";
-            _onRecheckUpdates(list);
-        },
-        OnUpdateToVersion = UpdateModToVersionAsync,
-        OnDelete = DeleteModsAsync,
+            Status.Text = "Re-checking for updates...";
+            _onRecheckUpdates?.Invoke(list);
+        }),
+        OnUpdateToVersion = ModMetadataService.IsGlobalScope(_packId)
+            ? null : (Action<PackMod>)UpdateModToVersionAsync,
+        OnDelete = ModMetadataService.IsGlobalScope(_packId)
+            ? null : (Action<IReadOnlyList<PackMod>>)DeleteModsAsync,
         OnReveal = mod =>
         {
             var dir = System.IO.Path.GetDirectoryName(mod.FilePath);
             if (dir is null) return;
-            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true }); }
-            catch (Exception ex) { Status.Text = "Could not open the folder: " + ex.Message; }
+            if (!SafeLaunch.OpenFolder(dir)) Status.Text = "Could not open the folder.";
         }
     };
 
@@ -540,14 +555,25 @@ public partial class ModCategoriesView : UserControl
     {
         if (_onOpenMod is not null) { _onOpenMod(mod); return; }
         if (mod.PageUrl is null) return;
-        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(mod.PageUrl) { UseShellExecute = true }); }
-        catch (Exception ex) { Status.Text = "Could not open the page: " + ex.Message; }
+        if (!SafeLaunch.OpenUrl(mod.PageUrl)) Status.Text = "Could not open the page.";
+    }
+
+    /// <summary>Clicking a mod's name opens its store page, as it does in every other mod list.</summary>
+    /// <remarks>Always the store page, not <see cref="OpenModPage"/>, so the user keeps their place
+    /// mid-sort. Single clicks only, so double-click-to-move still works; a drag captures the mouse, so
+    /// one starting on the name never arrives here.</remarks>
+    private void OnModNameClick(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ClickCount != 1) return;
+        if ((sender as FrameworkElement)?.DataContext is not PackMod { PageUrl: { } url }) return;
+        ModOptionsMenu.OpenUrl(url);
+        e.Handled = true;
     }
 
     private async void UpdateModToVersionAsync(PackMod mod)
     {
         if (mod.PrimaryMod is null || _owner is not MainWindow host) return;
-        Status.Text = $"Loading versions for {mod.DisplayName}…";
+        Status.Text = $"Loading versions for {mod.DisplayName}...";
         var versions = await ModUpdater.FetchVersionsAsync(mod.PrimaryMod);
         if (versions.Count == 0) { Status.Text = "No versions found."; return; }
 
@@ -557,14 +583,13 @@ public partial class ModCategoriesView : UserControl
             mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber, mod.Meta.UpdateLocked);
         if (chosen is null) { Status.Text = ""; return; }
 
-        // The picker's own "Keep this version" box already says where the lock should land, so a
-        // ticked box is not asked to confirm moving the lock it is setting.
+        // With "Keep this version" ticked the picker is already setting the lock, so don't ask.
         if (mod.Meta.UpdateLocked && !chosen.KeepVersion && !await AppDialog.ConfirmAsync(host, "Mod is locked",
                 $"{mod.DisplayName} is locked to its current version.\n\nChange it anyway?",
                 "Change anyway", "Keep locked"))
         { Status.Text = ""; return; }
 
-        Status.Text = $"Installing {chosen.Version.VersionNumber}…";
+        Status.Text = $"Installing {chosen.Version.VersionNumber}...";
         try
         {
             if (await ModUpdater.InstallVersionAsync(mod, chosen.Version))
@@ -610,7 +635,7 @@ public partial class ModCategoriesView : UserControl
 
             if (!row.Builtin)
             {
-                menu.Items.Add(Item("Rename…", () =>
+                menu.Items.Add(Item("Rename...", () =>
                     _ = ModCategoryMenu.RenameAsync(_packId, _owner, row.Name, () =>
                     {
                         _selectedCategory = null;   // the old name is gone; fall back to the first
@@ -635,15 +660,15 @@ public partial class ModCategoriesView : UserControl
                 MemberList.SelectAll();
                 MemberList.Focus();
             }, row.Count > 0));
-            // Clearing works for Library too — it just unmarks every mod. Only rename/delete stay
-            // off-limits, since the flag mirror depends on the name and the category always existing.
+            // Clearing works for Library too (it unmarks every mod). Rename and delete don't, since the flag
+            // mirror depends on the name and on the category existing.
             menu.Items.Add(Item(row.Builtin ? $"Unmark all {row.Count}" : $"Clear all {row.Count} members",
                 () => Assign(MembersOf(row.Name), row.Name, false), row.Count > 0));
             if (!row.Builtin)
             {
                 menu.Items.Add(new Separator());
                 menu.Items.Add(Item("Delete category", () =>
-                    _ = ModCategoryMenu.DeleteAsync(_packId, _owner, _mods, row.Name, () =>
+                    _ = ModCategoryMenu.DeleteAsync(_packId, _owner, ScopeWide, row.Name, () =>
                     {
                         _selectedCategory = null;
                         Refresh();
@@ -653,7 +678,7 @@ public partial class ModCategoriesView : UserControl
             menu.Items.Add(new Separator());
         }
 
-        menu.Items.Add(Item("New category…", NewCategory));
+        menu.Items.Add(Item("New category...", NewCategory));
         menu.IsOpen = true;
         e.Handled = true;
     }
@@ -670,7 +695,7 @@ public partial class ModCategoriesView : UserControl
             {
                 Header = name,
                 InputGestureText = string.Equals(current, hex, StringComparison.OrdinalIgnoreCase) ? "✓" : "",
-                Icon = new Border
+                Icon = new CloudLauncher.Controls.SlateBorder
                 {
                     Width = 12, Height = 12, CornerRadius = new CornerRadius(3),
                     Background = AccentPalette.Brush(hex, (Brush)FindResource("BorderBrush"))
@@ -681,7 +706,7 @@ public partial class ModCategoriesView : UserControl
         }
 
         parent.Items.Add(new Separator());
-        parent.Items.Add(Item("Custom…", () => _ = PickColorAsync(row.Name, current)));
+        parent.Items.Add(Item("Custom...", () => _ = PickColorAsync(row.Name, current)));
         parent.Items.Add(Item("No colour", () => ApplyColor(row.Name, null)));
         return parent;
     }
@@ -698,7 +723,7 @@ public partial class ModCategoriesView : UserControl
             .Select(c => c!)
             .ToList();
 
-        var picked = await ColorPickerDialog.ShowAsync(_owner, $"Colour for “{category}”", current, inUse);
+        var picked = await ColorPickerDialog.ShowAsync(_owner, $"Colour for '{category}'", current, inUse);
         if (picked is { } choice) ApplyColor(category, choice.Hex);
     }
 
@@ -709,17 +734,10 @@ public partial class ModCategoriesView : UserControl
         _onChanged?.Invoke();
     }
 
-    /// <summary>
-    /// Copies another instance's categories into this one: the category list (names, colours, order)
-    /// and which mods belong to them.
-    /// </summary>
-    /// <remarks>
-    /// Organising four hundred mods is most of an evening, and people run the same mods across
-    /// several instances — a dev copy, a friend's pack, last season's version of the same modpack.
-    /// Mods are matched by their store id, so an identical mod at a different version still lines up.
-    /// The import only adds: nothing already tagged here is removed or re-coloured, so it is safe to
-    /// run twice.
-    /// </remarks>
+    /// <summary>Copies another instance's categories into this one: the category list (names, colours,
+    /// order) and which mods belong to them.</summary>
+    /// <remarks>Mods are matched by store id, so the same mod at a different version still lines up.
+    /// The import only adds, so it is safe to run twice.</remarks>
     private async void OnImportCategories(object sender, RoutedEventArgs e)
     {
         if (_owner is null) return;
@@ -734,16 +752,16 @@ public partial class ModCategoriesView : UserControl
                 return;
             }
 
-            var picker = new PackPickerDialog(packs, "Import categories from…",
+            var picker = new PackPickerDialog(packs, "Import categories from...",
                 "Pick the instance to copy categories from. Mods are matched across instances by their store id, so the same mod at a different version still lines up.",
                 "Preview") { Owner = _owner };
             if (picker.ShowDialog() != true || picker.SelectedPackId is not { } sourceId) return;
 
             var source = packs.First(p => p.Id == sourceId);
-            var plan = App.State.ModMetadata.PlanCategoryImport(sourceId, _packId, _mods);
+            var plan = App.State.ModMetadata.PlanCategoryImport(sourceId, _packId, ScopeWide);
             if (plan.IsEmpty)
             {
-                Status.Text = $"Nothing to import from {source.Name} — this pack already has its categories and tags.";
+                Status.Text = $"Nothing to import from {source.Name} - this pack already has its categories and tags.";
                 return;
             }
 
@@ -762,9 +780,8 @@ public partial class ModCategoriesView : UserControl
         catch (Exception ex) { Status.Text = "Import failed: " + ex.Message; }
     }
 
-    /// <summary>The confirm text for a category/settings import. Shared with the hub's Tools menu,
-    /// which offers the same import from outside this tab, so both spell out exactly the same
-    /// consequences.</summary>
+    /// <summary>The confirm text for a category/settings import. Also used by the hub's Tools menu,
+    /// which offers the same import.</summary>
     internal static string DescribePlan(ModMetadataService.CategoryImportPlan plan, string sourceName)
     {
         var lines = new List<string>();
@@ -772,7 +789,7 @@ public partial class ModCategoriesView : UserControl
             ? $"Add {plan.NewCategories.Count} categor{(plan.NewCategories.Count == 1 ? "y" : "ies")}: " +
               string.Join(", ", plan.NewCategories.Take(8).Select(c => c.Name)) +
               (plan.NewCategories.Count > 8 ? $" and {plan.NewCategories.Count - 8} more" : "")
-            : "No new categories — this pack already has all of them.");
+            : "No new categories - this pack already has all of them.");
 
         if (plan.SharedCategories.Count > 0)
             lines.Add($"{plan.SharedCategories.Count} categor{(plan.SharedCategories.Count == 1 ? "y is" : "ies are")} " +
@@ -780,7 +797,7 @@ public partial class ModCategoriesView : UserControl
 
         lines.Add(plan.TaggedMods > 0
             ? $"Tag {plan.TaggedMods} mod(s) in this pack the way {sourceName} has them."
-            : "No mods to tag — the ones this pack shares with it are already tagged.");
+            : "No mods to tag - the ones this pack shares with it are already tagged.");
 
         if (plan.FlaggedMods > 0)
             lines.Add($"Copy priority, content size, side, library, note and lock onto {plan.FlaggedMods} mod(s) " +
@@ -790,14 +807,13 @@ public partial class ModCategoriesView : UserControl
             lines.Add($"{plan.UnmatchedSourceMods} mod(s) {sourceName} categorises are not installed here and are skipped.");
 
         lines.Add("");
-        lines.Add("Nothing is removed or re-coloured — this only adds.");
+        lines.Add("Nothing is removed or re-coloured - this only adds.");
         return string.Join("\n", lines);
     }
 
     private void OnNewCategory(object sender, RoutedEventArgs e) => NewCategory();
 
-    /// <summary>New categories select themselves, so you land straight in the pane where you'd start
-    /// filling them.</summary>
+    /// <summary>New categories are selected right away, ready to fill.</summary>
     private void NewCategory() =>
         _ = ModCategoryMenu.NewAsync(_packId, _owner,
             onChanged: () => { Refresh(); _onChanged?.Invoke(); },

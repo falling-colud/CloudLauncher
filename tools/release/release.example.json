@@ -1,0 +1,8 @@
+{
+  "sshHost": "user@your-server.example",
+  "sshKey": "~/.ssh/your-server-key",
+  "remoteDir": "/path/to/cloudlauncher/data/launcher",
+  "publicUrl": "https://launcher.example.com",
+  "signKey": "k1",
+  "signPem": ""
+}

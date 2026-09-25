@@ -15,7 +15,8 @@ namespace CloudLauncher.Server.Controllers;
 public class ResourcePacksController(
     AppDbContext db,
     ResourcePackPermissionResolver resolver,
-    BlobStore blobs) : ControllerBase
+    BlobStore blobs,
+    UploadGuard guard) : ControllerBase
 {
     private const long MaxResourcePackBytes = 64L * 1024 * 1024; // 64 MB per zip
 
@@ -71,8 +72,8 @@ public class ResourcePacksController(
             .Skip(offset).Take(limit)
             .ToListAsync(ct);
 
-        // One grouped count for the whole page rather than a COUNT per row. Packs with no uploaded
-        // version are simply absent from the dictionary and fall through to 0 below.
+        // One grouped count for the page instead of a COUNT per row. Packs with no uploaded version
+        // are missing from the dictionary and count as 0 below.
         var pageIds = page.Select(p => p.Id).ToList();
         var versionCounts = await db.HostedResourcePackVersions
             .Where(v => pageIds.Contains(v.ResourcePackId))
@@ -106,13 +107,14 @@ public class ResourcePacksController(
         if (!perms.HasFlag(PackPermissions.View))
             return Forbid();
 
-        var canSeeMembers = pack.OwnerId == me || perms.HasFlag(PackPermissions.ManageCollaborators);
-        var collabs = canSeeMembers
-            ? pack.Collaborators.Select(c => new PackCollaboratorEntry(c.UserId, c.User.UserName ?? "", c.Permissions)).ToList()
-            : new List<PackCollaboratorEntry>();
-        var teams = canSeeMembers
-            ? pack.Teams.Select(t => new PackTeamEntry(t.TeamId, t.Team.Name, t.Permissions)).ToList()
-            : new List<PackTeamEntry>();
+        // Anyone who can see the pack can see who else can, as with instances, so a collaborator
+        // can find their own row to leave or see whom to ask for more access. Usernames only; these
+        // rows carry no e-mail.
+        var collabs = pack.Collaborators
+            .Select(c => new PackCollaboratorEntry(c.UserId, c.User.UserName ?? "", c.Permissions))
+            .ToList();
+        var teams = await PackSharing.TeamEntriesAsync(
+            db, pack.Teams.Select(t => (t.TeamId, t.Team.Name, t.Permissions)), ct);
 
         var versions = pack.Versions
             .OrderByDescending(v => v.PublishedAt)
@@ -164,17 +166,25 @@ public class ResourcePacksController(
         var me = this.UserId();
         var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
         if (pack is null) return NotFound();
+        // Owner only, as with bundles: upload access covers versions, but the name and visibility
+        // belong to the owner. It also guards against 1.8.2 clients, which send the local file's
+        // name, overview and visibility before every upload and would otherwise let a collaborator
+        // rename someone else's pack or change who can see it.
         if (pack.OwnerId != me) return Forbid();
 
         if (req.Name is not null) { if (req.Name.Length > 128) return BadRequest(); pack.Name = req.Name.Trim(); }
         if (req.Summary is not null) { if (req.Summary.Length > 512) return BadRequest(); pack.Summary = req.Summary; }
         if (req.Description is not null) { if (req.Description.Length > 4096) return BadRequest(); pack.Description = req.Description; }
+        var visibilityChangedTo = req.Visibility is { } wanted && wanted != pack.Visibility ? req.Visibility : null;
         if (req.Visibility is not null) pack.Visibility = req.Visibility.Value;
-        // Only a version upload could write this before, so a pack created against the wrong
-        // Minecraft version had no way back. Null still means "leave it alone".
+        // Null leaves the Minecraft versions alone; a value corrects them without a new upload.
         if (req.McVersionsCsv is not null) pack.McVersionsCsv = req.McVersionsCsv;
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        if (visibilityChangedTo is not null)
+            await PackSharing.LogAsync(db, me, ActivityKind.VisibilityChanged, ActivitySubjectType.ResourcePack,
+                pack.Id, pack.Name, detail: visibilityChangedTo.Value.ToString(), ct: ct);
         return NoContent();
     }
 
@@ -191,22 +201,29 @@ public class ResourcePacksController(
     }
 
     // ---- Collaborators ----
+    //
+    // Sharing can be changed by the owner and anyone the owner gave ManageCollaborators, the same
+    // rule as instances and bundles.
 
     [HttpPost("{id:guid}/collaborators")]
     public async Task<ActionResult<PackCollaboratorEntry>> AddCollaborator(
         Guid id, [FromBody] AddCollaboratorRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var (pack, perms) = await LoadAsync(id, ct);
         if (pack is null) return NotFound();
-        if (pack.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(pack.OwnerId, me, perms)) return Forbid();
 
-        var user = await db.Users.FirstOrDefaultAsync(u => u.UserName == req.Username, ct);
+        var grantError = ControllerHelpers.ValidateGrant(pack.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
+
+        var user = await ControllerHelpers.FindUserByNameAsync(db, req.Username, ct);
         if (user is null) return BadRequest(new { error = "User not found" });
         if (user.Id == pack.OwnerId) return BadRequest(new { error = "Owner is implicit" });
 
         var existing = await db.HostedResourcePackCollaborators
             .FirstOrDefaultAsync(c => c.ResourcePackId == id && c.UserId == user.Id, ct);
+        var isNew = existing is null;
         if (existing is not null)
             existing.Permissions = req.Permissions;
         else
@@ -214,6 +231,11 @@ public class ResourcePacksController(
 
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me,
+            isNew ? ActivityKind.Shared : ActivityKind.PermissionsChanged,
+            ActivitySubjectType.ResourcePack, pack.Id, pack.Name,
+            targetUserId: user.Id, detail: req.Permissions.ToString(), ct: ct);
         return Ok(new PackCollaboratorEntry(user.Id, user.UserName ?? "", req.Permissions));
     }
 
@@ -222,15 +244,21 @@ public class ResourcePacksController(
         Guid id, Guid userId, [FromBody] UpdateCollaboratorRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var (pack, perms) = await LoadAsync(id, ct);
         if (pack is null) return NotFound();
-        if (pack.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(pack.OwnerId, me, perms)) return Forbid();
+
+        var grantError = ControllerHelpers.ValidateGrant(pack.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
 
         var row = await db.HostedResourcePackCollaborators.FirstOrDefaultAsync(c => c.ResourcePackId == id && c.UserId == userId, ct);
-        if (row is null) return NotFound();
+        if (row is null) return NotFound(new { error = "They are not a collaborator on this resource pack." });
         row.Permissions = req.Permissions;
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.PermissionsChanged, ActivitySubjectType.ResourcePack,
+            pack.Id, pack.Name, targetUserId: userId, detail: req.Permissions.ToString(), ct: ct);
         return NoContent();
     }
 
@@ -238,15 +266,26 @@ public class ResourcePacksController(
     public async Task<IActionResult> RemoveCollaborator(Guid id, Guid userId, CancellationToken ct)
     {
         var me = this.UserId();
-        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var (pack, perms) = await LoadAsync(id, ct);
         if (pack is null) return NotFound();
-        if (pack.OwnerId != me) return Forbid();
+        // Managers may withdraw any grant, and anyone may withdraw their own: leaving needs no
+        // permission, as on instances.
+        if (!ControllerHelpers.CanManageSharing(pack.OwnerId, me, perms) && me != userId) return Forbid();
 
         var row = await db.HostedResourcePackCollaborators.FirstOrDefaultAsync(c => c.ResourcePackId == id && c.UserId == userId, ct);
-        if (row is null) return NotFound();
+        if (row is null)
+            return NotFound(new
+            {
+                error = userId == me
+                    ? "You are not a collaborator on this resource pack, so there is nothing to leave."
+                    : "They are not a collaborator on this resource pack."
+            });
         db.HostedResourcePackCollaborators.Remove(row);
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.Unshared, ActivitySubjectType.ResourcePack,
+            pack.Id, pack.Name, targetUserId: userId, ct: ct);
         return NoContent();
     }
 
@@ -257,14 +296,25 @@ public class ResourcePacksController(
         Guid id, [FromBody] AddPackTeamRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var (pack, perms) = await LoadAsync(id, ct);
         if (pack is null) return NotFound();
-        if (pack.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(pack.OwnerId, me, perms)) return Forbid();
+
+        var grantError = ControllerHelpers.ValidateGrant(pack.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
 
         var team = await db.Teams.FirstOrDefaultAsync(t => t.Id == req.TeamId, ct);
         if (team is null) return BadRequest(new { error = "Team not found" });
 
+        // A manager who is not the owner may only share the pack with a team they are in. Otherwise
+        // ManageCollaborators would let a collaborator publish someone else's private pack to any
+        // team whose id they can guess. Same rule as bundles.
+        if (pack.OwnerId != me
+            && !await db.TeamMembers.AnyAsync(tm => tm.TeamId == req.TeamId && tm.UserId == me, ct))
+            return BadRequest(new { error = "You can only share this with a team you belong to." });
+
         var existing = await db.HostedResourcePackTeams.FirstOrDefaultAsync(pt => pt.ResourcePackId == id && pt.TeamId == req.TeamId, ct);
+        var isNew = existing is null;
         if (existing is not null)
             existing.Permissions = req.Permissions;
         else
@@ -272,7 +322,14 @@ public class ResourcePacksController(
 
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
-        return Ok(new PackTeamEntry(team.Id, team.Name, req.Permissions));
+
+        await PackSharing.LogAsync(db, me,
+            isNew ? ActivityKind.Shared : ActivityKind.PermissionsChanged,
+            ActivitySubjectType.ResourcePack, pack.Id, pack.Name,
+            targetTeamId: team.Id, detail: req.Permissions.ToString(), ct: ct);
+
+        var entries = await PackSharing.TeamEntriesAsync(db, [(team.Id, team.Name, req.Permissions)], ct);
+        return Ok(entries[0]);
     }
 
     [HttpPatch("{id:guid}/teams/{teamId:guid}")]
@@ -280,14 +337,21 @@ public class ResourcePacksController(
         Guid id, Guid teamId, [FromBody] UpdatePackTeamRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var (pack, perms) = await LoadAsync(id, ct);
         if (pack is null) return NotFound();
-        if (pack.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(pack.OwnerId, me, perms)) return Forbid();
+
+        var grantError = ControllerHelpers.ValidateGrant(pack.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
+
         var row = await db.HostedResourcePackTeams.FirstOrDefaultAsync(pt => pt.ResourcePackId == id && pt.TeamId == teamId, ct);
-        if (row is null) return NotFound();
+        if (row is null) return NotFound(new { error = "That team is not on this resource pack." });
         row.Permissions = req.Permissions;
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.PermissionsChanged, ActivitySubjectType.ResourcePack,
+            pack.Id, pack.Name, targetTeamId: teamId, detail: req.Permissions.ToString(), ct: ct);
         return NoContent();
     }
 
@@ -295,14 +359,18 @@ public class ResourcePacksController(
     public async Task<IActionResult> RemoveTeam(Guid id, Guid teamId, CancellationToken ct)
     {
         var me = this.UserId();
-        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var (pack, perms) = await LoadAsync(id, ct);
         if (pack is null) return NotFound();
-        if (pack.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(pack.OwnerId, me, perms)) return Forbid();
+
         var row = await db.HostedResourcePackTeams.FirstOrDefaultAsync(pt => pt.ResourcePackId == id && pt.TeamId == teamId, ct);
-        if (row is null) return NotFound();
+        if (row is null) return NotFound(new { error = "That team is not on this resource pack." });
         db.HostedResourcePackTeams.Remove(row);
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.Unshared, ActivitySubjectType.ResourcePack,
+            pack.Id, pack.Name, targetTeamId: teamId, ct: ct);
         return NoContent();
     }
 
@@ -315,9 +383,10 @@ public class ResourcePacksController(
         CancellationToken ct)
     {
         var me = this.UserId();
-        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        var (pack, perms) = await LoadAsync(id, ct);
         if (pack is null) return NotFound();
-        if (pack.OwnerId != me) return Forbid();
+        // UploadShared is enough (the dialog calls it "can upload changes"), as with bundles.
+        if (!perms.HasFlag(PackPermissions.UploadShared)) return Forbid();
         if (file is null || file.Length == 0) return BadRequest(new { error = "File required" });
         if (file.Length > MaxResourcePackBytes)
             return BadRequest(new { error = $"File too large (max {MaxResourcePackBytes / (1024 * 1024)} MB)" });
@@ -328,9 +397,15 @@ public class ResourcePacksController(
         if (req is null || string.IsNullOrWhiteSpace(req.VersionString))
             return BadRequest(new { error = "VersionString required" });
 
-        string hash;
+        // The disk floor and the pack owner's quota, checked before the zip reaches the blob store.
+        // A collaborator's upload counts against the owner's quota, as a pack sync does.
+        if (await guard.RefuseAsync(pack.OwnerId, me, file, ct) is { } refusal) return refusal;
+
+        StoredBlob stored;
         await using (var s = file.OpenReadStream())
-            hash = await blobs.StoreAsync(s, ct);
+            stored = await blobs.PutAsync(s, ct);
+        if (await guard.ChargeAsync(pack.OwnerId, me, stored, ct) is { } overQuota) return overQuota;
+        var hash = stored.Hash;
 
         var version = new HostedResourcePackVersion
         {
@@ -348,6 +423,10 @@ public class ResourcePacksController(
         if (!string.IsNullOrWhiteSpace(req.McVersionsCsv)) pack.McVersionsCsv = req.McVersionsCsv;
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+        guard.Settle(pack.OwnerId, hash);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.VersionPublished, ActivitySubjectType.ResourcePack,
+            pack.Id, pack.Name, detail: version.VersionString, ct: ct);
 
         return Ok(new HostedResourcePackVersionInfo(
             version.Id, version.VersionString, version.Changelog, version.ReleaseChannel,
@@ -356,11 +435,10 @@ public class ResourcePacksController(
     }
 
     /// <summary>Removes one uploaded version of a resource pack.</summary>
-    /// <remarks>
-    /// Deleting the last version is allowed and leaves the pack itself in place — a pack page with no
-    /// file behind it is a valid state (it is exactly what <see cref="Create"/> produces), and making
-    /// the final delete a special case would mean the owner could never clear a bad upload.
-    /// </remarks>
+    /// <remarks>Deleting the last version is allowed and leaves the pack in place: a pack with no
+    /// file is a valid state (it is what <see cref="Create"/> produces), and the owner has to be
+    /// able to clear a bad upload. Owner only, as with bundles: adding a version is collaboration,
+    /// removing one deletes someone else's release history.</remarks>
     [HttpDelete("{id:guid}/versions/{versionId:guid}")]
     public async Task<IActionResult> DeleteVersion(Guid id, Guid versionId, CancellationToken ct)
     {
@@ -385,11 +463,7 @@ public class ResourcePacksController(
     // ---- Icon ----
 
     /// <summary>Sets the resource pack's icon.</summary>
-    /// <remarks>
-    /// <c>HostedResourcePack.IconBlobHash</c> and <see cref="HostedResourcePackSummary"/> have always
-    /// carried an icon; until now nothing could write one. Same shape as the mod route on purpose —
-    /// one client-side upload helper drives all three hosted kinds.
-    /// </remarks>
+    /// <remarks>Same shape as the mod route, so the client can use one upload helper.</remarks>
     [HttpPost("{id:guid}/icon")]
     [RequestSizeLimit(ControllerHelpers.MaxIconBytes + (1 << 16))]
     public async Task<IActionResult> UploadIcon(Guid id, [FromForm] IFormFile file, CancellationToken ct)
@@ -399,13 +473,14 @@ public class ResourcePacksController(
         if (pack is null) return NotFound();
         if (pack.OwnerId != me) return Forbid();
 
-        var (hash, error) = await ControllerHelpers.TryStoreIconAsync(blobs, file, ct);
-        if (hash is null) return BadRequest(new { error });
+        var (hash, failure) = await ControllerHelpers.TryStoreIconAsync(blobs, guard, pack.OwnerId, me, file, ct);
+        if (hash is null) return failure!;
 
         var previous = pack.IconBlobHash;
         pack.IconBlobHash = hash;
         pack.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+        guard.Settle(pack.OwnerId, hash);
 
         if (previous is not null && previous != hash)
             await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
@@ -469,6 +544,14 @@ public class ResourcePacksController(
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
+    /// <summary>Loads a hosted resource pack together with what the caller may do to it.</summary>
+    private async Task<(HostedResourcePack? Pack, PackPermissions Perms)> LoadAsync(Guid id, CancellationToken ct)
+    {
+        var pack = await db.HostedResourcePacks.FirstOrDefaultAsync(p => p.Id == id, ct);
+        if (pack is null) return (null, PackPermissions.None);
+        return (pack, await resolver.GetAsync(pack, this.UserId(), ct));
+    }
+
     private async Task<string> GenerateUniqueSlugAsync(string name, CancellationToken ct)
     {
         var basic = new string(name.ToLowerInvariant().Select(c => char.IsLetterOrDigit(c) ? c : '-').ToArray());
@@ -486,6 +569,6 @@ public class ResourcePacksController(
     private static HostedResourcePackSummary ToSummary(HostedResourcePack p, PackPermissions perms, int versionCount) => new(
         p.Id, p.Slug, p.Name, p.Summary, p.OwnerId, p.Owner.UserName ?? "",
         p.Visibility, p.IconBlobHash, p.McVersionsCsv,
-        0, // DownloadCount placeholder — wire to a real counter later
+        0, // DownloadCount placeholder until there is a real counter
         p.CreatedAt, p.UpdatedAt, perms, versionCount);
 }

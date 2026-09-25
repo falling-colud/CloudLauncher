@@ -12,9 +12,9 @@ namespace CloudLauncher.Server.Controllers;
 [ApiController]
 [Authorize]
 [Route("mods")]
-public class ModsController(AppDbContext db, ModPermissionResolver resolver, BlobStore blobs) : ControllerBase
+public class ModsController(AppDbContext db, ModPermissionResolver resolver, BlobStore blobs, UploadGuard guard) : ControllerBase
 {
-    private const long MaxModBytes = 64L * 1024 * 1024; // 64 MB per jar — generous; bump if needed
+    private const long MaxModBytes = 64L * 1024 * 1024; // 64 MB per jar; bump if needed
 
     [HttpGet("browse")]
     public async Task<ActionResult<ModBrowsePage>> Browse(
@@ -70,8 +70,8 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
             .Skip(offset).Take(limit)
             .ToListAsync(ct);
 
-        // One grouped count for the whole page rather than a COUNT per row. Mods with no uploaded
-        // version are simply absent from the dictionary and fall through to 0 below.
+        // One grouped count for the whole page rather than a COUNT per row; mods with no uploaded
+        // version are absent and fall through to 0.
         var pageIds = page.Select(m => m.Id).ToList();
         var versionCounts = await db.ModVersions
             .Where(v => pageIds.Contains(v.ModId))
@@ -104,13 +104,13 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         if (!perms.HasFlag(PackPermissions.View))
             return Forbid();
 
-        var canSeeMembers = mod.OwnerId == me || perms.HasFlag(PackPermissions.ManageCollaborators);
-        var collabs = canSeeMembers
-            ? mod.Collaborators.Select(c => new PackCollaboratorEntry(c.UserId, c.User.UserName ?? "", c.Permissions)).ToList()
-            : new List<PackCollaboratorEntry>();
-        var teams = canSeeMembers
-            ? mod.Teams.Select(t => new PackTeamEntry(t.TeamId, t.Team.Name, t.Permissions)).ToList()
-            : new List<PackTeamEntry>();
+        // Anyone who can see the mod can see who else can, as on instances, so collaborators can find
+        // their own row. Usernames only; no e-mail addresses.
+        var collabs = mod.Collaborators
+            .Select(c => new PackCollaboratorEntry(c.UserId, c.User.UserName ?? "", c.Permissions))
+            .ToList();
+        var teams = await PackSharing.TeamEntriesAsync(
+            db, mod.Teams.Select(t => (t.TeamId, t.Team.Name, t.Permissions)), ct);
 
         var versions = mod.Versions
             .OrderByDescending(v => v.PublishedAt)
@@ -163,18 +163,24 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         var me = this.UserId();
         var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
         if (mod is null) return NotFound();
+        // Owner only, as on bundles: name, description and visibility are the owner's. This also guards
+        // against 1.8.2 clients, which send name and visibility before every upload.
         if (mod.OwnerId != me) return Forbid();
 
         if (req.Name is not null) { if (req.Name.Length > 128) return BadRequest(); mod.Name = req.Name.Trim(); }
         if (req.Summary is not null) { if (req.Summary.Length > 512) return BadRequest(); mod.Summary = req.Summary; }
         if (req.Description is not null) { if (req.Description.Length > 4096) return BadRequest(); mod.Description = req.Description; }
+        var visibilityChangedTo = req.Visibility is { } wanted && wanted != mod.Visibility ? req.Visibility : null;
         if (req.Visibility is not null) mod.Visibility = req.Visibility.Value;
-        // Compatibility is normalised the same way Create does it, so a loader typed as "NeoForge"
-        // here still matches the lower-cased values the browse filter compares against.
+        // Normalised like Create, so "NeoForge" still matches the lower-cased values browse filters on.
         if (req.McVersionsCsv is not null) mod.McVersionsCsv = req.McVersionsCsv;
         if (req.LoadersCsv is not null) mod.LoadersCsv = req.LoadersCsv.ToLowerInvariant();
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        if (visibilityChangedTo is not null)
+            await PackSharing.LogAsync(db, me, ActivityKind.VisibilityChanged, ActivitySubjectType.Mod,
+                mod.Id, mod.Name, detail: visibilityChangedTo.Value.ToString(), ct: ct);
         return NoContent();
     }
 
@@ -191,22 +197,29 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     }
 
     // ---- Collaborators ----
+    //
+    // Sharing can be changed by the owner and anyone granted ManageCollaborators, as on instances
+    // and bundles.
 
     [HttpPost("{id:guid}/collaborators")]
     public async Task<ActionResult<PackCollaboratorEntry>> AddCollaborator(
         Guid id, [FromBody] AddCollaboratorRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(mod.OwnerId, me, perms)) return Forbid();
 
-        var user = await db.Users.FirstOrDefaultAsync(u => u.UserName == req.Username, ct);
+        var grantError = ControllerHelpers.ValidateGrant(mod.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
+
+        var user = await ControllerHelpers.FindUserByNameAsync(db, req.Username, ct);
         if (user is null) return BadRequest(new { error = "User not found" });
         if (user.Id == mod.OwnerId) return BadRequest(new { error = "Owner is implicit" });
 
         var existing = await db.ModCollaborators
             .FirstOrDefaultAsync(c => c.ModId == id && c.UserId == user.Id, ct);
+        var isNew = existing is null;
         if (existing is not null)
             existing.Permissions = req.Permissions;
         else
@@ -214,6 +227,11 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
 
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me,
+            isNew ? ActivityKind.Shared : ActivityKind.PermissionsChanged,
+            ActivitySubjectType.Mod, mod.Id, mod.Name,
+            targetUserId: user.Id, detail: req.Permissions.ToString(), ct: ct);
         return Ok(new PackCollaboratorEntry(user.Id, user.UserName ?? "", req.Permissions));
     }
 
@@ -222,15 +240,21 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         Guid id, Guid userId, [FromBody] UpdateCollaboratorRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(mod.OwnerId, me, perms)) return Forbid();
+
+        var grantError = ControllerHelpers.ValidateGrant(mod.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
 
         var row = await db.ModCollaborators.FirstOrDefaultAsync(c => c.ModId == id && c.UserId == userId, ct);
-        if (row is null) return NotFound();
+        if (row is null) return NotFound(new { error = "They are not a collaborator on this mod." });
         row.Permissions = req.Permissions;
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.PermissionsChanged, ActivitySubjectType.Mod,
+            mod.Id, mod.Name, targetUserId: userId, detail: req.Permissions.ToString(), ct: ct);
         return NoContent();
     }
 
@@ -238,15 +262,26 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     public async Task<IActionResult> RemoveCollaborator(Guid id, Guid userId, CancellationToken ct)
     {
         var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        // Managers may remove anyone, and anyone may remove themselves (leaving needs no permission, as
+        // on instances).
+        if (!ControllerHelpers.CanManageSharing(mod.OwnerId, me, perms) && me != userId) return Forbid();
 
         var row = await db.ModCollaborators.FirstOrDefaultAsync(c => c.ModId == id && c.UserId == userId, ct);
-        if (row is null) return NotFound();
+        if (row is null)
+            return NotFound(new
+            {
+                error = userId == me
+                    ? "You are not a collaborator on this mod, so there is nothing to leave."
+                    : "They are not a collaborator on this mod."
+            });
         db.ModCollaborators.Remove(row);
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.Unshared, ActivitySubjectType.Mod,
+            mod.Id, mod.Name, targetUserId: userId, ct: ct);
         return NoContent();
     }
 
@@ -257,14 +292,24 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         Guid id, [FromBody] AddPackTeamRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(mod.OwnerId, me, perms)) return Forbid();
+
+        var grantError = ControllerHelpers.ValidateGrant(mod.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
 
         var team = await db.Teams.FirstOrDefaultAsync(t => t.Id == req.TeamId, ct);
         if (team is null) return BadRequest(new { error = "Team not found" });
 
+        // A non-owner manager may only add teams they are in; otherwise they could share someone else's
+        // private mod with any team whose id they can guess.
+        if (mod.OwnerId != me
+            && !await db.TeamMembers.AnyAsync(tm => tm.TeamId == req.TeamId && tm.UserId == me, ct))
+            return BadRequest(new { error = "You can only share this with a team you belong to." });
+
         var existing = await db.ModTeams.FirstOrDefaultAsync(mt => mt.ModId == id && mt.TeamId == req.TeamId, ct);
+        var isNew = existing is null;
         if (existing is not null)
             existing.Permissions = req.Permissions;
         else
@@ -272,7 +317,14 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
 
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
-        return Ok(new PackTeamEntry(team.Id, team.Name, req.Permissions));
+
+        await PackSharing.LogAsync(db, me,
+            isNew ? ActivityKind.Shared : ActivityKind.PermissionsChanged,
+            ActivitySubjectType.Mod, mod.Id, mod.Name,
+            targetTeamId: team.Id, detail: req.Permissions.ToString(), ct: ct);
+
+        var entries = await PackSharing.TeamEntriesAsync(db, [(team.Id, team.Name, req.Permissions)], ct);
+        return Ok(entries[0]);
     }
 
     [HttpPatch("{id:guid}/teams/{teamId:guid}")]
@@ -280,14 +332,21 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         Guid id, Guid teamId, [FromBody] UpdatePackTeamRequest req, CancellationToken ct)
     {
         var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(mod.OwnerId, me, perms)) return Forbid();
+
+        var grantError = ControllerHelpers.ValidateGrant(mod.OwnerId, me, perms, req.Permissions);
+        if (grantError is not null) return BadRequest(new { error = grantError });
+
         var row = await db.ModTeams.FirstOrDefaultAsync(mt => mt.ModId == id && mt.TeamId == teamId, ct);
-        if (row is null) return NotFound();
+        if (row is null) return NotFound(new { error = "That team is not on this mod." });
         row.Permissions = req.Permissions;
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.PermissionsChanged, ActivitySubjectType.Mod,
+            mod.Id, mod.Name, targetTeamId: teamId, detail: req.Permissions.ToString(), ct: ct);
         return NoContent();
     }
 
@@ -295,14 +354,18 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     public async Task<IActionResult> RemoveTeam(Guid id, Guid teamId, CancellationToken ct)
     {
         var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        if (!ControllerHelpers.CanManageSharing(mod.OwnerId, me, perms)) return Forbid();
+
         var row = await db.ModTeams.FirstOrDefaultAsync(mt => mt.ModId == id && mt.TeamId == teamId, ct);
-        if (row is null) return NotFound();
+        if (row is null) return NotFound(new { error = "That team is not on this mod." });
         db.ModTeams.Remove(row);
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.Unshared, ActivitySubjectType.Mod,
+            mod.Id, mod.Name, targetTeamId: teamId, ct: ct);
         return NoContent();
     }
 
@@ -315,9 +378,10 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         CancellationToken ct)
     {
         var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        // UploadShared is enough, as on bundles (the dialog offers it as "can upload changes").
+        if (!perms.HasFlag(PackPermissions.UploadShared)) return Forbid();
         if (file is null || file.Length == 0) return BadRequest(new { error = "File required" });
         if (file.Length > MaxModBytes) return BadRequest(new { error = $"File too large (max {MaxModBytes / (1024 * 1024)} MB)" });
 
@@ -327,9 +391,15 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         if (req is null || string.IsNullOrWhiteSpace(req.VersionString))
             return BadRequest(new { error = "VersionString required" });
 
-        string hash;
+        // Check free disk space and the owner's quota before storing. A collaborator's upload counts
+        // against the owner's quota, as a pack sync does.
+        if (await guard.RefuseAsync(mod.OwnerId, me, file, ct) is { } refusal) return refusal;
+
+        StoredBlob stored;
         await using (var s = file.OpenReadStream())
-            hash = await blobs.StoreAsync(s, ct);
+            stored = await blobs.PutAsync(s, ct);
+        if (await guard.ChargeAsync(mod.OwnerId, me, stored, ct) is { } overQuota) return overQuota;
+        var hash = stored.Hash;
 
         var version = new ModVersion
         {
@@ -350,6 +420,10 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         if (!string.IsNullOrWhiteSpace(req.LoadersCsv))    mod.LoadersCsv    = req.LoadersCsv.ToLowerInvariant();
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+        guard.Settle(mod.OwnerId, hash);
+
+        await PackSharing.LogAsync(db, me, ActivityKind.VersionPublished, ActivitySubjectType.Mod,
+            mod.Id, mod.Name, detail: version.VersionString, ct: ct);
 
         return Ok(new HostedModVersionInfo(
             version.Id, version.VersionString, version.Changelog, version.ReleaseChannel,
@@ -359,23 +433,19 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
 
     /// <summary>Corrects the details of an already-uploaded version, leaving its file alone.</summary>
     /// <remarks>
-    /// <para>A null field keeps whatever is stored, so a caller that only wants to fix the changelog
-    /// sends only the changelog and cannot accidentally blank the rest.</para>
-    /// <para>The parent mod's denormalised CSVs describe the most recent word on compatibility, so
-    /// they are re-written only when the version being edited is the newest one — the same rule
-    /// <see cref="UploadVersion"/> relies on, where the row it just added always is. Editing the
-    /// newest version's Minecraft list and leaving the mod advertising the old one would make the mod
-    /// un-findable under the version it now supports; rewriting them from an <em>older</em> version
-    /// would be worse, republishing the whole mod under a compatibility list it outgrew.</para>
+    /// <para>A null field keeps the stored value, so a caller can send only what it wants to fix.</para>
+    /// <para>The mod's denormalised compatibility CSVs are only rewritten when this is the newest
+    /// version, as in <see cref="UploadVersion"/>; copying them from an older version would republish
+    /// the mod under an outdated compatibility list.</para>
     /// </remarks>
     [HttpPatch("{id:guid}/versions/{versionId:guid}")]
     public async Task<ActionResult<HostedModVersionInfo>> UpdateVersion(
         Guid id, Guid versionId, [FromBody] UpdateModVersionRequest req, CancellationToken ct)
     {
-        var me = this.UserId();
-        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        var (mod, perms) = await LoadAsync(id, ct);
         if (mod is null) return NotFound();
-        if (mod.OwnerId != me) return Forbid();
+        // Whoever may publish a version may correct one, as on bundles.
+        if (!perms.HasFlag(PackPermissions.UploadShared)) return Forbid();
 
         var version = await db.ModVersions.FirstOrDefaultAsync(v => v.Id == versionId && v.ModId == id, ct);
         if (version is null) return NotFound();
@@ -391,8 +461,7 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         {
             if (req.Changelog.Length > 4096)
                 return BadRequest(new { error = "Changelog must be 4096 characters or fewer" });
-            // An empty string is a deliberate "clear it", which is the only way to take back a
-            // changelog that was wrong; null above is "leave it".
+            // An empty string clears the changelog; null (above) leaves it as is.
             version.Changelog = req.Changelog.Length == 0 ? null : req.Changelog;
         }
         if (req.ReleaseChannel is not null)
@@ -407,12 +476,9 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         if (req.LoadersCsv is not null)
             version.LoadersCsv = req.LoadersCsv.Length == 0 ? null : req.LoadersCsv.ToLowerInvariant();
 
-        // Only the newest version may speak for the mod. UploadVersion can denormalise
-        // unconditionally because the row it has just added is by definition the newest one; here the
-        // caller may be correcting an old build, and copying its CSVs up would silently republish the
-        // whole mod as (say) 1.16-only, with nothing that ever recomputes it. Do not remove this
-        // check: the endpoint is reached from the per-version "Edit details…" action, so editing an
-        // old version is the normal case, not an edge case.
+        // Only the newest version updates the mod's CSVs. Editing an old version is common (the
+        // per-version "Edit details..." action), and copying its CSVs up would republish the mod as,
+        // say, 1.16-only with nothing to recompute it.
         var isNewest = !await db.ModVersions
             .AnyAsync(v => v.ModId == id && v.Id != versionId && v.PublishedAt > version.PublishedAt, ct);
         if (isNewest)
@@ -432,12 +498,8 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     // ---- Icon ----
 
     /// <summary>Sets the mod's icon.</summary>
-    /// <remarks>
-    /// <c>Mod.IconBlobHash</c> has existed since the table did and <see cref="HostedModSummary"/> has
-    /// always carried it, but nothing could ever write one — so every hosted mod rendered as a grey
-    /// letter tile. Replacing an icon drops the previous blob if nothing else points at it, so
-    /// re-uploading an icon a few times does not leave a trail of dead files in the store.
-    /// </remarks>
+    /// <remarks>Replacing an icon drops the previous blob if nothing else references it, so repeated
+    /// uploads don't leave dead files in the store.</remarks>
     [HttpPost("{id:guid}/icon")]
     [RequestSizeLimit(ControllerHelpers.MaxIconBytes + (1 << 16))]
     public async Task<IActionResult> UploadIcon(Guid id, [FromForm] IFormFile file, CancellationToken ct)
@@ -445,17 +507,17 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
         var me = this.UserId();
         var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
         if (mod is null) return NotFound();
-        // The same gate uploading a version uses: owner only. The icon is part of how the mod
-        // presents itself, so it belongs with the other things only the owner can rewrite.
+        // Owner only, like a bundle's icon: it belongs with the name and description.
         if (mod.OwnerId != me) return Forbid();
 
-        var (hash, error) = await ControllerHelpers.TryStoreIconAsync(blobs, file, ct);
-        if (hash is null) return BadRequest(new { error });
+        var (hash, failure) = await ControllerHelpers.TryStoreIconAsync(blobs, guard, mod.OwnerId, me, file, ct);
+        if (hash is null) return failure!;
 
         var previous = mod.IconBlobHash;
         mod.IconBlobHash = hash;
         mod.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
+        guard.Settle(mod.OwnerId, hash);
 
         if (previous is not null && previous != hash)
             await ControllerHelpers.DeleteBlobIfUnreferencedAsync(db, blobs, previous, ct);
@@ -463,13 +525,9 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     }
 
     /// <summary>Serves the mod's icon, or 404 when it has none.</summary>
-    /// <remarks>
-    /// Anonymous, and gated by the same visibility rule as the rest of the mod: a public mod's icon
-    /// is public, anything else needs a caller who can view the mod. It has to work without an
-    /// Authorization header because an icon's whole job is to be the source of an &lt;Image&gt;, and
-    /// a WPF image binding sends no headers — so a signed-in launcher gets private icons by fetching
-    /// the bytes through its API client instead.
-    /// </remarks>
+    /// <remarks>Anonymous but gated by the mod's visibility: a public mod's icon is public, anything
+    /// else needs a caller who can view the mod. WPF image bindings send no headers, so the launcher
+    /// fetches private icons through its API client instead.</remarks>
     [AllowAnonymous]
     [HttpGet("{id:guid}/icon")]
     public async Task<IActionResult> GetIcon(Guid id, CancellationToken ct)
@@ -505,11 +563,9 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     }
 
     /// <summary>Removes one uploaded version of a mod.</summary>
-    /// <remarks>
-    /// Deleting the last version is allowed and leaves the mod itself in place — a mod page with no
-    /// file behind it is a valid state (it is exactly what <see cref="Create"/> produces), and making
-    /// the final delete a special case would mean the owner could never clear a bad upload.
-    /// </remarks>
+    /// <remarks>Deleting the last version is allowed; a mod with no file is valid (it's what
+    /// <see cref="Create"/> produces). Owner only, as on bundles: contributors may add versions but
+    /// not delete release history.</remarks>
     [HttpDelete("{id:guid}/versions/{versionId:guid}")]
     public async Task<IActionResult> DeleteVersion(Guid id, Guid versionId, CancellationToken ct)
     {
@@ -550,17 +606,18 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
 
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
+    /// <summary>Loads a mod together with what the caller may do to it.</summary>
+    private async Task<(Mod? Mod, PackPermissions Perms)> LoadAsync(Guid id, CancellationToken ct)
+    {
+        var mod = await db.Mods.FirstOrDefaultAsync(m => m.Id == id, ct);
+        if (mod is null) return (null, PackPermissions.None);
+        return (mod, await resolver.GetAsync(mod, this.UserId(), ct));
+    }
+
     /// <summary>Applies the browse ordering named by <paramref name="sort"/>.</summary>
-    /// <remarks>
-    /// <para>Anything unrecognised — including null, which is every older client — orders by most
-    /// recently updated, the ordering this route has always had. A browse that erupts in a 400
-    /// because a launcher sent a mode this build has not heard of would be a worse answer than a
-    /// list in the wrong order.</para>
-    /// <para><c>downloads</c> is accepted and deliberately resolves to the default: nothing counts
-    /// downloads yet (<c>HostedModSummary.DownloadCount</c> is a hard-coded zero), so sorting by it
-    /// would shuffle the list arbitrarily and call it popularity. The name is honoured now so the
-    /// route does not need changing on the day a counter exists.</para>
-    /// </remarks>
+    /// <remarks>Unknown values, including null from older clients, order by most recently updated
+    /// rather than returning a 400. <c>downloads</c> also maps to the default for now, since download
+    /// counts aren't tracked yet (<c>HostedModSummary.DownloadCount</c> is always zero).</remarks>
     private static IQueryable<Mod> ApplySort(IQueryable<Mod> query, string? sort) => sort?.Trim().ToLowerInvariant() switch
     {
         ModBrowseSort.Created => query.OrderByDescending(m => m.CreatedAt),
@@ -585,6 +642,6 @@ public class ModsController(AppDbContext db, ModPermissionResolver resolver, Blo
     private static HostedModSummary ToSummary(Mod m, PackPermissions perms, int versionCount) => new(
         m.Id, m.Slug, m.Name, m.Summary, m.OwnerId, m.Owner.UserName ?? "",
         m.Visibility, m.IconBlobHash, m.McVersionsCsv, m.LoadersCsv,
-        0, // DownloadCount placeholder — wire to a real counter later
+        0, // DownloadCount placeholder; wire to a real counter later
         m.CreatedAt, m.UpdatedAt, perms, versionCount);
 }

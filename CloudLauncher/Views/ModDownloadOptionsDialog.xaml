@@ -1,18 +1,18 @@
 ﻿<UserControl x:Class="CloudLauncher.Views.ModDownloadOptionsDialog"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls">
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="24" MinWidth="340" MaxWidth="420">
-        <Border.Effect>
+        <slate:SlateBorder.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
-        </Border.Effect>
+        </slate:SlateBorder.Effect>
         <StackPanel>
             <TextBlock x:Name="TitleText" Style="{StaticResource H2}" TextTrimming="CharacterEllipsis"/>
             <TextBlock Style="{StaticResource Muted}" Margin="0,2,0,16"
                        Text="Set the options to apply to this mod, then download."/>
 
-            <!-- Capped and scrollable: the card grew past the height of a small window once category,
-                 content size and the note joined the flags. -->
+            <!-- Capped and scrollable, so the card fits a small window. -->
             <ScrollViewer MaxHeight="430" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
             <StackPanel>
             <TextBlock Style="{StaticResource Caption}" Text="Priority"/>
@@ -25,12 +25,11 @@
                 <ComboBoxItem Content="P5"/>
             </ComboBox>
 
-            <!-- Content size and category are here for the same reason the flags are: a mod downloaded
-                 into an organised pack otherwise has to be hunted down in the List tab afterwards to
-                 be filed. -->
+            <!-- Content size and category are set here, like the flags, so a new mod doesn't have
+            to be found in the List tab afterwards to be filed. -->
             <TextBlock Style="{StaticResource Caption}" Text="Content size"/>
             <ComboBox x:Name="ContentSizeBox" Margin="0,4,0,14"
-                      ToolTip="How much this mod adds to the pack — independent of priority, which is how much you care about it."/>
+                      ToolTip="How much this mod adds to the pack - independent of priority, which is how much you care about it."/>
 
             <StackPanel x:Name="CategoryPanel">
                 <TextBlock Style="{StaticResource Caption}" Text="Category"/>
@@ -40,7 +39,7 @@
 
             <TextBlock Style="{StaticResource Caption}" Text="Note"/>
             <TextBox x:Name="NoteBox" Margin="0,4,0,14" MaxLength="200"
-                     ToolTip="Why you are adding it, what to test — shown on the mod's card."/>
+                     ToolTip="Why you are adding it, what to test - shown on the mod's card."/>
 
             <TextBlock Style="{StaticResource Caption}" Text="Side"/>
             <StackPanel Margin="0,6,0,14">
@@ -63,5 +62,5 @@
                 <Button Content="Download" Style="{StaticResource AccentButton}" Click="OnDownload"/>
             </StackPanel>
         </StackPanel>
-    </Border>
+    </slate:SlateBorder>
 </UserControl>

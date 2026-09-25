@@ -21,7 +21,15 @@ public sealed class LaunchService(
     PackFolderService packs,
     MinecraftInstanceService instances)
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
+    private static readonly HttpClient Http = ApiClient.WithUserAgent(new() { Timeout = TimeSpan.FromMinutes(10) });
+
+    // Set via a setter to break a construction cycle: the defaults engine depends on services that
+    // AppState builds after this one. Optional; when null, launches skip shared defaults (as in tests).
+    private ContentDefaultsService? _contentDefaults;
+
+    /// <summary>Gives the launch path the shared-content defaults engine. See
+    /// <see cref="ContentDefaultsService.ReconcileForLaunchAsync"/> for why it is called twice.</summary>
+    public void SetContentDefaults(ContentDefaultsService defaults) => _contentDefaults = defaults;
 
     /// <param name="joinServerAddress">Optional <c>host</c> or <c>host:port</c> to connect to as soon
     /// as the game reaches the main menu. See <see cref="LaunchAsync"/>.</param>
@@ -41,14 +49,12 @@ public sealed class LaunchService(
     }
 
     /// <param name="joinServerAddress">
-    /// Optional <c>host</c> or <c>host:port</c> the game should connect to instead of stopping at the
-    /// main menu — what the Servers page's "Join" does.
+    /// Optional <c>host</c> or <c>host:port</c> to connect to instead of stopping at the main menu
+    /// (the Servers page's "Join").
     /// </param>
     /// <remarks>
-    /// The address is passed to CmlLib as <see cref="MLaunchOption.ServerIp"/>/
-    /// <c>ServerPort</c>, which emits <c>--quickPlayMultiplayer</c> on versions that support it and
-    /// the older <c>--server</c>/<c>--port</c> pair on the ones that do not. Passing null is exactly
-    /// the behaviour every existing caller already had.
+    /// Passed to CmlLib as <see cref="MLaunchOption.ServerIp"/>/<c>ServerPort</c>, which emits
+    /// <c>--quickPlayMultiplayer</c> where supported and <c>--server</c>/<c>--port</c> otherwise.
     /// </remarks>
     public async Task<Process> LaunchAsync(
         PackDetail pack,
@@ -68,24 +74,63 @@ public sealed class LaunchService(
         void Report(string m) { log?.Report(m); AppLog.Log("launch", m); }
 
         if (pack.IsEmpty)
-            throw new InvalidOperationException("This pack is marked as empty — it can't launch Minecraft.");
+            throw new InvalidOperationException("This pack is marked as empty - it can't launch Minecraft.");
         if (string.IsNullOrEmpty(pack.MinecraftVersion))
             throw new InvalidOperationException("Pack has no Minecraft version set.");
+        EnsurePlainVersions(pack);
 
         Report($"Launching pack '{pack.Name}' ({pack.MinecraftVersion}, {pack.Loader})");
-        ProgressHub.Indeterminate(pack.Id, "Preparing…");
+        ProgressHub.Indeterminate(pack.Id, "Preparing...");
 
-        // Libraries, assets and version JARs go into the SHARED runtime directory,
-        // so they are downloaded once and reused across all packs.
+        // Libraries, assets and version JARs go into the shared runtime directory, so they are
+        // downloaded once and reused across all packs.
         var runtimeDir = AppSettings.RuntimeRoot;
         Directory.CreateDirectory(runtimeDir);
         var gameDir = packs.GameDir(pack.Id);
         Directory.CreateDirectory(gameDir);
-        // Overlay local/ files into game/ (local/ holds per-user additions not synced to the server).
-        // Shared files are already in game/ — synced there directly, so no shared/ overlay needed.
+        // Shared defaults, step one of three. This places files into local/, so it must run before
+        // the overlay copies local/ into game/. The overlay never overwrites, so an instance's own
+        // files still win over defaults.
+        if (_contentDefaults is { } defaults)
+        {
+            try
+            {
+                var reconciled = await defaults.ReconcileForLaunchAsync(pack, log, ct);
+                if (reconciled.DidAnything || reconciled.Refused)
+                    Report("Shared defaults: " + reconciled.Summary());
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // A default that cannot be placed never blocks the launch; the instance is
+                // complete without it.
+                AppLog.LogError("content-defaults", ex);
+                Report("Shared defaults could not be applied: " + ex.Message);
+            }
+        }
+        // Overlay local/ files into game/ (local/ holds per-user additions not synced to the
+        // server). Shared files are synced straight into game/, so they need no overlay.
         if (Directory.Exists(packs.LocalDir(pack.Id)))
-            Report("Overlaying local/ into game/ for launch…");
+            Report("Overlaying local/ into game/ for launch...");
         packs.PrepareLaunchOverlay(pack.Id);
+        // Step three: activate the defaults. It writes game/options.txt and the shader config, so
+        // it runs after the overlay (the files it names must exist in game/) and before
+        // LowModeService.Apply, whose options.txt write must come last.
+        if (_contentDefaults is { } activator)
+        {
+            try
+            {
+                var switched = await activator.ActivateForLaunchAsync(pack, log, ct);
+                if (switched.DidAnything || switched.Refused)
+                    Report("Shared defaults: " + switched.Summary());
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                AppLog.LogError("content-defaults", ex);
+                Report("Shared defaults could not be switched on: " + ex.Message);
+            }
+        }
         // Forcing windowed + no-pause-on-lost-focus only exists so the game can be
         // embedded in the custom host window. When that's disabled, leave the pack's
         // options.txt alone so fullscreen and pause behave as Minecraft normally would.
@@ -94,15 +139,12 @@ public sealed class LaunchService(
             OptionsTxtService.EnsureWindowed(gameDir);
             OptionsTxtService.EnsureNoPauseOnLostFocus(gameDir);
         }
-        // Low mode, applied here so it also covers files the sync just pulled down: turning the heavy visual
-        // settings down before the game reads them, or putting the player's own values back when it is off.
-        // This turns heavy visual settings down AND disables a curated set of purely decorative client-side
-        // mods. Every mod it can disable is verified absent from the dedicated server and free of network
-        // payloads, and the upload path reports them under their enabled names, so a low-mode player and a
-        // full-settings player can still join the same server and still share the same pack.
-        // Only CUS2 is offered low mode (LowModeService.AppliesTo). Any other pack is applied with
-        // `false`, which is not a no-op: it is what puts back a pack an older build — which offered the
-        // switch everywhere and defaulted it ON — had quietly lowered and left with no UI to undo it.
+        // Low mode lowers heavy visual settings and disables some decorative client-only mods (or
+        // restores them when off). Applied here so it covers files the sync just pulled down.
+        // Those mods are not on the server and send no payloads, so low-mode players can still
+        // join and share packs.
+        // Only the packs LowModeService.AppliesTo lists offer low mode; other packs get `false`, which
+        // restores packs that older builds lowered by default.
         Report(LowModeService.Apply(gameDir,
             LowModeService.AppliesTo(pack, settings) && LowModeService.IsEnabled(settings, pack.Id)));
         // MCEF's ~270 MB of natives are downloaded per player and never synced, so an interrupted
@@ -116,7 +158,7 @@ public sealed class LaunchService(
 
         var launcher = new MinecraftLauncher(path);
         var overallFraction = -1.0;
-        var overallLabel = "Installing files…";
+        var overallLabel = "Installing files...";
         var currentResourceLabel = "";
         var lastReportedTask = -1;
         var lastLoggedTask = -1;
@@ -152,7 +194,7 @@ public sealed class LaunchService(
             lastByteReportTicks = now;
 
             var frac = (double)e.ProgressedBytes / e.TotalBytes;
-            var label = overallFraction >= 0 ? overallLabel : $"Downloading… {(int)(frac * 100)}%";
+            var label = overallFraction >= 0 ? overallLabel : $"Downloading... {(int)(frac * 100)}%";
             ProgressHub.Report(pack.Id,
                 overallFraction,
                 label,
@@ -160,12 +202,12 @@ public sealed class LaunchService(
                 string.IsNullOrWhiteSpace(currentResourceLabel) ? "Current resource" : currentResourceLabel);
         };
 
-        Report("Resolving Minecraft version…");
+        Report("Resolving Minecraft version...");
         var versionId = await ResolveVersionAsync(launcher, pack, log, ct);
         Report($"Version: {versionId}");
 
-        Report("Resolving Minecraft account…");
-        ProgressHub.Indeterminate(pack.Id, "Signing in…");
+        Report("Resolving Minecraft account...");
+        ProgressHub.Indeterminate(pack.Id, "Signing in...");
         MSession session;
         try
         {
@@ -180,8 +222,8 @@ public sealed class LaunchService(
         }
         Report($"Account: {session.Username} ({(string.IsNullOrEmpty(session.AccessToken) ? "offline" : "online")})");
 
-        ProgressHub.Indeterminate(pack.Id, "Installing files…");
-        Report($"Installing/checking files for {versionId}…");
+        ProgressHub.Indeterminate(pack.Id, "Installing files...");
+        Report($"Installing/checking files for {versionId}...");
 
         JavaSelection java;
         try
@@ -198,9 +240,8 @@ public sealed class LaunchService(
         }
         Report($"Selected Java: {java.Path} ({java.Message})");
 
-        // Keep config/relauncher.json's javaPath valid and pointed at the JVM the pack's
-        // ReLauncher mod should relaunch into (its targetJavaVersion, e.g. J25) — NOT the
-        // Java we bootstrap with. Fixes empty/stale/wrong paths.
+        // Keep config/relauncher.json's javaPath valid and pointed at the JVM the pack's ReLauncher
+        // mod relaunches into (its targetJavaVersion, e.g. Java 25), not the Java we bootstrap with.
         await SyncRelauncherJavaAsync(gameDir, java, pack.Id, Report, ct);
 
         var maxRam = settings.GetMaxRamFor(pack.Id);
@@ -216,13 +257,14 @@ public sealed class LaunchService(
             GameLauncherName = "CloudLauncher",
             GameLauncherVersion = "1"
         };
-        // "Join this server on launch". Additive: with no address this is the launch every other
-        // caller already got. CmlLib turns these two into --quickPlayMultiplayer on versions that
-        // have it and --server/--port on the ones that do not, so this does not need to know which
-        // Minecraft version is being started.
+        // Join a server on launch. CmlLib turns these into --quickPlayMultiplayer or
+        // --server/--port depending on the Minecraft version.
         if (!string.IsNullOrWhiteSpace(joinServerAddress))
         {
             var (joinHost, joinPort) = MinecraftServerPing.ParseAddress(joinServerAddress);
+            // The address can come from a synced servers.dat and ends up on the command line, so it
+            // must be a plain host token the game cannot read as an option.
+            if (!IsPlainHost(joinHost)) joinHost = "";
             if (joinHost.Length > 0)
             {
                 args.ServerIp = joinHost;
@@ -231,7 +273,7 @@ public sealed class LaunchService(
             }
             else
             {
-                Report($"Could not read '{joinServerAddress}' as a server address — starting at the main menu.");
+                Report($"Could not read '{joinServerAddress}' as a server address - starting at the main menu.");
             }
         }
 
@@ -257,8 +299,8 @@ public sealed class LaunchService(
             throw;
         }
 
-        Report("Files ready. Starting Minecraft…");
-        ProgressHub.Report(pack.Id, 1.0, "Starting Minecraft…");
+        Report("Files ready. Starting Minecraft...");
+        ProgressHub.Report(pack.Id, 1.0, "Starting Minecraft...");
         var startedAt = DateTimeOffset.UtcNow;
         process.EnableRaisingEvents = true;
         process.Exited += (_, _) =>
@@ -274,8 +316,8 @@ public sealed class LaunchService(
         }
         catch (Exception ex)
         {
-            // The game never started, so the Exited handler that normally disposes the flush
-            // timer will not fire — dispose it here to avoid leaking the timer + log-sink chain.
+            // The game never started, so the Exited handler that normally disposes the flush timer
+            // will not fire. Dispose it here to avoid leaking the timer and log sink.
             flushTimer?.Stop();
             flushTimer?.Dispose();
             AppLog.LogError("process.Start", ex);
@@ -287,27 +329,120 @@ public sealed class LaunchService(
         return process;
     }
 
+    // ── dedicated server ──────────────────────────────────────────────────────
+
+    /// <summary>What a mirror pass did, or (in a preview) would do.</summary>
+    public sealed record ServerMirrorStats(int Linked, int Copied, int Removed, int Skipped, int ClientOnlyMods)
+    {
+        public static readonly ServerMirrorStats Empty = new(0, 0, 0, 0, 0);
+
+        /// <summary>True when the server directory is already in step with the pack: nothing to
+        /// link, copy or remove.</summary>
+        public bool NothingToDo => Linked == 0 && Copied == 0 && Removed == 0;
+    }
+
+    /// <summary>A dry run of the mirror: what it would do, and which mods it would
+    /// leave behind.</summary>
+    public sealed record ServerMirrorPreview(ServerMirrorStats Stats, IReadOnlyList<string> ClientOnlyJars);
+
+    /// <summary>Everything the install pass resolved (loader, mirror result, Java), so a hosting
+    /// page can show the state of a server it has not started.</summary>
+    public sealed record ServerInstallState(
+        Guid PackId,
+        string ServerRunDir,
+        LoaderKind Loader,
+        string? LoaderVersion,
+        string MinecraftVersion,
+        bool LoaderAlreadyInstalled,
+        ServerMirrorStats Mirror,
+        string JavaPath,
+        int? JavaMajor,
+        string JavaMessage,
+        string LaunchArguments,
+        bool EulaAccepted,
+        int Port);
+
+    /// <summary>An installed server plus the process to start, unstarted so the caller
+    /// (<see cref="ServerHostService"/>) can wire up stdout/stderr/stdin before it runs.</summary>
+    public sealed record ServerLaunchPlan(ServerInstallState Install, ProcessStartInfo StartInfo)
+    {
+        public int Port => Install.Port;
+        public string ServerRunDir => Install.ServerRunDir;
+    }
+
     /// <summary>
-    /// Starts a dedicated server for the pack in <c>server-run/</c> next to its game folder.
-    ///
-    /// <para>Everything slow — mirroring the pack, fetching the server jar, running a loader installer,
-    /// probing Java — runs off the UI thread and reports through <paramref name="log"/> and
-    /// <see cref="ProgressHub"/>. The launcher used to copy the whole game folder on the UI thread and
-    /// froze for as long as that took.</para>
-    ///
-    /// <para>The server directory is a <em>mirror</em>, not a copy: jars are hard-linked (instant, no
-    /// disk cost, the same bytes the client runs), configs and scripts are copied only when they
-    /// changed, client-only folders (saves, resource packs, screenshots, logs…) and private assets are
-    /// left out, and mods removed from the pack disappear from the server too. The pack's own
-    /// <c>server/</c> folder is laid over the top afterwards, so a server-specific config wins.</para>
-    ///
-    /// <para>The server matches the pack's loader — Fabric's server launcher, or the NeoForge/Forge
-    /// installer run in server mode once per loader version — so a modded pack actually loads its
-    /// mods instead of coming up as a vanilla server that ignores them.</para>
+    /// The pack's server has not been allowed to accept the Minecraft EULA.
     /// </summary>
-    public async Task<Process> StartLocalServerAsync(
+    /// <remarks>A separate type so the UI can offer the fix (a checkbox and a link to the
+    /// agreement) instead of a generic error.</remarks>
+    public sealed class ServerEulaNotAcceptedException(Guid packId)
+        : InvalidOperationException(
+            "You must accept the Minecraft EULA before this pack can run as a server. " +
+            "Read it at " + EulaUrl + " and tick \"I accept the Minecraft EULA\" in the server settings.")
+    {
+        public const string EulaUrl = "https://aka.ms/MinecraftEULA";
+        public Guid PackId { get; } = packId;
+    }
+
+    /// <summary>True when this pack's server may write <c>eula=true</c>: the user ticked the box, or an
+    /// <c>eula.txt</c> they accepted themselves is already in the folder.</summary>
+    public bool IsServerEulaAccepted(Guid packId) =>
+        settings.GetServerEulaAccepted(packId) || EulaAcceptedOnDisk(packs.ServerRunDir(packId));
+
+    /// <summary>Reads an existing <c>eula.txt</c>. An acceptance made outside the launcher still
+    /// counts; the launcher just never accepts on the user's behalf.</summary>
+    public static bool EulaAcceptedOnDisk(string serverRunDir)
+    {
+        try
+        {
+            var path = Path.Combine(serverRunDir, "eula.txt");
+            if (!File.Exists(path)) return false;
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#') continue;
+                var eq = line.IndexOf('=');
+                if (eq < 0) continue;
+                if (line[..eq].Trim().Equals("eula", StringComparison.OrdinalIgnoreCase))
+                    return line[(eq + 1)..].Trim().Equals("true", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        catch { /* unreadable: treat as not accepted */ }
+        return false;
+    }
+
+    /// <summary>
+    /// True when this pack's loader server is already installed in <c>server-run/</c>, so a UI can
+    /// offer "Install" or "Start" without touching the network.
+    /// </summary>
+    public bool IsServerInstalled(PackDetail pack)
+    {
+        if (string.IsNullOrEmpty(pack.MinecraftVersion)) return false;
+        if (!HasPlainVersions(pack)) return false;
+        var dir = packs.ServerRunDir(pack.Id);
+        if (!Directory.Exists(dir)) return false;
+        return pack.Loader switch
+        {
+            LoaderKind.Fabric => File.Exists(Path.Combine(dir, $"fabric-server-mc.{pack.MinecraftVersion}-loader.{pack.LoaderVersion}.jar")),
+            LoaderKind.NeoForge or LoaderKind.Forge => ForgeLikeServerInstalled(pack, dir).Installed,
+            _ => File.Exists(Path.Combine(dir, "server.jar")),
+        };
+    }
+
+    /// <summary>
+    /// Brings the pack's <c>server-run/</c> folder up to date and makes sure the right loader
+    /// server is in it, without starting anything.
+    /// </summary>
+    /// <remarks>
+    /// <para>Separate from starting because the first NeoForge install downloads hundreds of
+    /// megabytes. Slow work runs off the UI thread and reports through <paramref name="log"/> and
+    /// <see cref="ProgressHub"/>.</para>
+    /// <para>The server folder mirrors game/ (see <see cref="MirrorForServer"/>) with the pack's own
+    /// <c>server/</c> folder laid over it, and the server matches the pack's loader.</para>
+    /// </remarks>
+    public async Task<ServerInstallState> EnsureServerInstalledAsync(
         PackDetail pack,
-        IProgress<string>? log,
+        IProgress<string>? log = null,
         IReadOnlyCollection<string>? clientOnlyJarNames = null,
         CancellationToken ct = default)
     {
@@ -315,83 +450,208 @@ public sealed class LaunchService(
             throw new InvalidOperationException("Empty packs can't run as a server.");
         if (string.IsNullOrEmpty(pack.MinecraftVersion))
             throw new InvalidOperationException("Pack has no Minecraft version set.");
+        EnsurePlainVersions(pack);
 
         void Report(string m) { log?.Report(m); AppLog.Log("server", m); }
-        ProgressHub.Indeterminate(pack.Id, "Preparing server…");
+        ProgressHub.Indeterminate(pack.Id, "Preparing server...");
         try
         {
             return await Task.Run(async () =>
             {
-                var packRoot = packs.PackRoot(pack.Id);
                 var gameDir = packs.GameDir(pack.Id);
-                var serverOverrideDir = Path.Combine(packRoot, "server");
+                var serverOverrideDir = packs.ServerOverrideDir(pack.Id);
                 Directory.CreateDirectory(serverOverrideDir);
-                var serverRunDir = Path.Combine(packRoot, "server-run");
+                var serverRunDir = packs.ServerRunDir(pack.Id);
                 Directory.CreateDirectory(serverRunDir);
 
+                // No shared-defaults reconcile here. A dedicated server reads neither options.txt nor
+                // iris.properties, configs and KubeJS already arrive via the mirror from game/, and
+                // instantiating a world template would create a save in the client's saves/ folder.
                 if (Directory.Exists(packs.LocalDir(pack.Id)))
                 {
-                    Report("Overlaying local/ into game/ for server launch…");
+                    Report("Overlaying local/ into game/ for server launch...");
                     packs.PrepareLaunchOverlay(pack.Id);
                 }
 
-                Report("Mirroring the pack into server-run/ (mods, configs, scripts)…");
-                ProgressHub.Indeterminate(pack.Id, "Preparing server…", "Mirroring pack files");
+                Report("Mirroring the pack into server-run/ (mods, configs, scripts)...");
+                ProgressHub.Indeterminate(pack.Id, "Preparing server...", "Mirroring pack files");
                 var clientOnly = new HashSet<string>(clientOnlyJarNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
-                var mirror = MirrorForServer(gameDir, serverRunDir, serverOverrideDir, settings, clientOnly, ct);
+                var mirror = MirrorForServer(gameDir, serverRunDir, serverOverrideDir, settings, clientOnly, false, null, ct);
                 Report($"Server files ready: {mirror.Linked} jar(s) linked, {mirror.Copied} file(s) copied, " +
                        $"{mirror.Removed} stale file(s) removed, {mirror.Skipped} client-side or private file(s) left out.");
                 if (mirror.ClientOnlyMods > 0)
                     Report($"{mirror.ClientOnlyMods} mod(s) marked \"Client only\" in Modpack Management were left off the server.");
                 CopyDirectory(serverOverrideDir, serverRunDir, overwrite: true);
 
-                // Accept the EULA. Per Mojang's terms, this must reflect the user's actual acceptance —
-                // by clicking "Start server" the launcher's user is agreeing to it.
-                File.WriteAllText(Path.Combine(serverRunDir, "eula.txt"), "eula=true\n");
+                // Only write the EULA once the user has accepted it. Installed but not accepted is
+                // a valid state; the gate is on Start.
+                var eulaAccepted = settings.GetServerEulaAccepted(pack.Id) || EulaAcceptedOnDisk(serverRunDir);
+                if (eulaAccepted) File.WriteAllText(Path.Combine(serverRunDir, "eula.txt"), "eula=true\n");
 
-                ProgressHub.Indeterminate(pack.Id, "Preparing server…", "Checking Java");
+                ProgressHub.Indeterminate(pack.Id, "Preparing server...", "Checking Java");
                 var java = await EnsureJavaExecutableAsync(
                     pack.MinecraftVersion, pack.Id, settings.GetJavaPathFor(pack.Id), Report, ct);
                 Report($"Java: {java.Path} ({java.Message})");
                 await SyncRelauncherJavaAsync(serverRunDir, java, pack.Id, Report, ct);
 
-                var launchArgs = await PrepareServerLauncherAsync(pack, serverRunDir, java, Report, ct);
+                var loader = await PrepareServerLauncherAsync(pack, serverRunDir, java, Report, ct);
 
-                Report("Launching server (Ctrl-C in the console to stop)...");
-                var maxRam = settings.GetMaxRamFor(pack.Id);
-                var psi = new ProcessStartInfo
-                {
-                    FileName = java.Path,
-                    WorkingDirectory = serverRunDir,
-                    UseShellExecute = true, // open a new console so the user can see/interact
-                    CreateNoWindow = false,
-                    Arguments = $"-Xmx{maxRam}M -Xms{Math.Min(1024, maxRam)}M {launchArgs} nogui"
-                };
-                var p = new Process { StartInfo = psi };
-                p.Start();
-                return p;
+                // The server writes server.properties on its first run. Create a starter file now
+                // so the hosting page can show settings and a port before the first start.
+                var props = ServerPropertiesService.ReadOrCreate(serverRunDir, motd: pack.Name);
+
+                return new ServerInstallState(
+                    pack.Id, serverRunDir, pack.Loader, pack.LoaderVersion, pack.MinecraftVersion!,
+                    loader.AlreadyInstalled, mirror, java.Path, java.Major, java.Message,
+                    loader.LaunchArguments, eulaAccepted, props.Properties.ServerPort);
             }, ct);
         }
         finally { ProgressHub.Clear(pack.Id); }
     }
 
+    /// <summary>
+    /// Installs the server if needed and returns the process to start, ready to have its streams
+    /// wired up. Nothing is started here.
+    /// </summary>
+    /// <exception cref="ServerEulaNotAcceptedException">The user has not accepted the Minecraft
+    /// EULA for this pack. Checked before installing so it fails fast.</exception>
+    public async Task<ServerLaunchPlan> PrepareServerLaunchAsync(
+        PackDetail pack,
+        IProgress<string>? log = null,
+        IReadOnlyCollection<string>? clientOnlyJarNames = null,
+        CancellationToken ct = default)
+    {
+        if (!IsServerEulaAccepted(pack.Id)) throw new ServerEulaNotAcceptedException(pack.Id);
+
+        var install = await EnsureServerInstalledAsync(pack, log, clientOnlyJarNames, ct);
+
+        var maxRam = settings.GetServerMaxRamFor(pack.Id);
+        var jvm = BuildServerJvmArguments(maxRam, settings.GetServerJvmArgsFor(pack.Id));
+        var psi = new ProcessStartInfo
+        {
+            FileName = install.JavaPath,
+            WorkingDirectory = install.ServerRunDir,
+            Arguments = $"{jvm} {install.LaunchArguments} nogui",
+            // Redirected rather than a console window, so the launcher can read the output, stop
+            // the server cleanly and notice a crash.
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false),
+            StandardInputEncoding = new UTF8Encoding(false),
+        };
+
+        log?.Report($"Server command: java {RedactLaunchArguments(psi.Arguments)}");
+        log?.Report($"Players connect on port {install.Port}.");
+        return new ServerLaunchPlan(install, psi);
+    }
+
+    /// <summary>
+    /// Starts a dedicated server for the pack and returns the running process, with its output
+    /// forwarded to <paramref name="log"/>.
+    /// </summary>
+    /// <remarks>Untracked; anything that needs status, stop, console or commands should use
+    /// <see cref="ServerHostService"/>. The streams must be drained, or the server fills its pipe
+    /// buffer and hangs while loading mods.</remarks>
+    public async Task<Process> StartLocalServerAsync(
+        PackDetail pack,
+        IProgress<string>? log,
+        IReadOnlyCollection<string>? clientOnlyJarNames = null,
+        CancellationToken ct = default)
+    {
+        var plan = await PrepareServerLaunchAsync(pack, log, clientOnlyJarNames, ct);
+        var process = new Process { StartInfo = plan.StartInfo, EnableRaisingEvents = true };
+        void Pump(string? line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) return;
+            log?.Report("[server] " + line.TrimEnd());
+            AppLog.Log("server", line.TrimEnd());
+        }
+        process.OutputDataReceived += (_, e) => Pump(e.Data);
+        process.ErrorDataReceived += (_, e) => Pump(e.Data);
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        AppLog.Log("server", $"Server started (PID {process.Id}) on port {plan.Port}.");
+        return process;
+    }
+
+    /// <summary>
+    /// What the mirror would do to this pack's server folder, and which mods it would leave behind,
+    /// without writing anything. Used by the preview beside the Install button.
+    /// </summary>
+    public ServerMirrorPreview PreviewServerMirror(
+        PackDetail pack,
+        IReadOnlyCollection<string>? clientOnlyJarNames = null,
+        CancellationToken ct = default)
+        => PreviewServerMirror(
+            packs.GameDir(pack.Id), packs.ServerRunDir(pack.Id), packs.ServerOverrideDir(pack.Id),
+            settings, clientOnlyJarNames, ct);
+
+    /// <summary>Directory-level dry run, for callers that already hold the paths (and
+    /// for tests).</summary>
+    public static ServerMirrorPreview PreviewServerMirror(
+        string gameDir,
+        string serverRunDir,
+        string serverOverrideDir,
+        AppSettings settings,
+        IReadOnlyCollection<string>? clientOnlyJarNames = null,
+        CancellationToken ct = default)
+    {
+        if (!Directory.Exists(gameDir))
+            return new ServerMirrorPreview(ServerMirrorStats.Empty, Array.Empty<string>());
+        var clientOnly = new HashSet<string>(clientOnlyJarNames ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+        var found = new List<string>();
+        var stats = MirrorForServer(gameDir, serverRunDir, serverOverrideDir, settings, clientOnly, true, found, ct);
+        return new ServerMirrorPreview(stats, found);
+    }
+
+    /// <summary>
+    /// The JVM flags a server starts with: its heap, the stock GC tuning, then the pack's
+    /// own server arguments.
+    /// </summary>
+    /// <remarks>
+    /// As with <see cref="BuildExtraJvmArguments"/>, extra arguments add to the stock flags rather
+    /// than replace them. The stock GC block is dropped only when the user picks their own
+    /// collector, since two <c>-XX:+Use...GC</c> flags stop the JVM from starting.
+    /// </remarks>
+    public static string BuildServerJvmArguments(int maxRamMb, string? userArgs)
+    {
+        var user = (userArgs ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var picksOwnCollector = user.Any(a =>
+            a.StartsWith("-XX:+Use", StringComparison.OrdinalIgnoreCase) && a.EndsWith("GC", StringComparison.OrdinalIgnoreCase));
+
+        var parts = new List<string> { $"-Xmx{maxRamMb}M", $"-Xms{Math.Min(1024, maxRamMb)}M" };
+        if (!picksOwnCollector) parts.AddRange(StockJvmFlags);
+        // Java 17 still takes its encoding from the Windows code page, which garbles any non-ASCII
+        // text in the log (player names included).
+        parts.Add("-Dfile.encoding=UTF-8");
+        parts.AddRange(user);
+        return string.Join(' ', parts);
+    }
+
     // ── server directory mirror ───────────────────────────────────────────────
 
-    private sealed record MirrorStats(int Linked, int Copied, int Removed, int Skipped, int ClientOnlyMods);
-
-    /// <summary>Top-level game/ folders a dedicated server has no use for (or must not share with the
-    /// client): worlds, purely client-side assets, caches, and the launcher's own bookkeeping.</summary>
+    /// <summary>Top-level game/ folders a dedicated server has no use for (or must not share with
+    /// the client): worlds, purely client-side assets, caches, and the launcher's own
+    /// bookkeeping.</summary>
     private static readonly HashSet<string> ServerSkipDirs = new(StringComparer.OrdinalIgnoreCase)
     {
         "saves", "resourcepacks", "shaderpacks", "screenshots", "logs", "crash-reports", ".cloudlauncher",
         ".mixin.out", "downloads", "libraries", "versions", "assets", ".fabric", "local", "server-run",
         "xaero", "XaeroWorldMap", "XaeroWaypoints", "journeymap", "cachedImages", "replay_recordings",
         "schematics", "emotes", "skins", "CustomSkinLoader", "irisUpdateInfo", "modernfix", "flightpaths",
-        ".voxy", ".bobby", "cache", ".cache", "webcache", "backups", "simplebackups", "texturepacks", "fancymenu_data"
+        ".voxy", ".bobby", "cache", ".cache", "webcache", "backups", "simplebackups", "texturepacks", "fancymenu_data",
+        // The loader installers the launcher downloads live here; a synced copy must
+        // never stand in for one.
+        ".installers"
     };
 
-    /// <summary>Folders inside <c>mods/</c> that are per-player client caches, not mods (MCEF's ~270 MB of
-    /// Chromium natives, Connector's remapped-jar cache).</summary>
+    /// <summary>Folders inside <c>mods/</c> that are per-player client caches, not mods (MCEF's
+    /// ~270 MB of Chromium natives, Connector's remapped-jar cache).</summary>
     private static readonly HashSet<string> ServerSkipModSubdirs = new(StringComparer.OrdinalIgnoreCase)
     {
         "mcef-libraries", ".connector"
@@ -402,25 +662,27 @@ public sealed class LaunchService(
     {
         "options.txt", "optionsof.txt", "optionsshaders.txt", "servers.dat", "servers.dat_old",
         "usercache.json", "usernamecache.json", "realms_persistence.json", "hotbar.nbt",
-        "command_history.txt", ".lowmode-backup.json", "eula.txt"
+        "command_history.txt", ".lowmode-backup.json", "eula.txt",
+        // What the server is started with belongs to this machine: the loader stamp that says an
+        // install is done, and the files loader run scripts read JVM options from.
+        ".cloudlauncher-server-loader", "user_jvm_args.txt", "run.bat", "run.sh"
     };
 
-    [DllImport("Kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
-
-    /// <summary>Brings <paramref name="serverDir"/> in line with <paramref name="gameDir"/>: jars are
-    /// hard-linked, other files copied when they differ, client-only and private paths skipped, and
-    /// jars that left the pack (or were disabled) removed from the server's mods folder. Jars from the
-    /// pack's own <c>server/</c> overlay are kept.</summary>
-    private static MirrorStats MirrorForServer(
+    /// <summary>Brings <paramref name="serverDir"/> in line with <paramref name="gameDir"/>: jars
+    /// are hard-linked, other files copied when they differ, client-only and private paths skipped,
+    /// and jars that left the pack (or were disabled) removed from the server's mods folder. Jars
+    /// from the pack's own <c>server/</c> overlay are kept.</summary>
+    /// <param name="analyseOnly">Count what would happen without touching anything. Both modes make
+    /// the same decisions, so the preview is accurate.</param>
+    /// <param name="clientOnlyFound">Collects the relative path of each client-only mod left out.</param>
+    private static ServerMirrorStats MirrorForServer(
         string gameDir, string serverDir, string serverOverrideDir, AppSettings settings,
-        IReadOnlySet<string> clientOnlyJars, CancellationToken ct)
+        IReadOnlySet<string> clientOnlyJars, bool analyseOnly, List<string>? clientOnlyFound, CancellationToken ct)
     {
         int linked = 0, copied = 0, removed = 0, skipped = 0, clientOnlyMods = 0;
         var expectedJars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Walk only what the server can use: skipped top-level folders (worlds, caches, LOD data that
-        // can run to gigabytes) are never even enumerated.
+        // Skipped top-level folders (worlds, caches, LOD data) are never enumerated.
         IEnumerable<string> Sources()
         {
             foreach (var f in Directory.EnumerateFiles(gameDir, "*", SearchOption.TopDirectoryOnly))
@@ -454,7 +716,10 @@ public sealed class LaunchService(
             var top = parts[0];
             var name = Path.GetFileName(rel);
             var isRootFile = parts.Length == 1;
-            if ((isRootFile && ServerSkipFiles.Contains(name))
+            // A jar at the top of server-run/ is the server itself (server.jar, the Fabric launcher, a
+            // legacy Forge jar), which the launcher downloads; game/ never supplies one.
+            if ((isRootFile && name.EndsWith(".jar", StringComparison.OrdinalIgnoreCase))
+                || (isRootFile && ServerSkipFiles.Contains(name))
                 || name.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase)
                 || name.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
                 || PrivateAssetPolicy.IsPrivate(rel, settings))
@@ -462,12 +727,14 @@ public sealed class LaunchService(
                 skipped++;
                 continue;
             }
-            // A mod the pack marks "Client only" (shaders, minimaps, LOD renderers…) would crash or
-            // be refused by a dedicated server.
-            if (parts.Length == 2 && string.Equals(top, "mods", StringComparison.OrdinalIgnoreCase)
-                && clientOnlyJars.Contains(name))
+            // A mod marked "Client only" (shaders, minimaps, LOD renderers...) would crash or be
+            // refused by a dedicated server. Matched anywhere under mods/, including subfolders
+            // like mods/optional/.
+            if (string.Equals(top, "mods", StringComparison.OrdinalIgnoreCase)
+                && parts.Length >= 2 && clientOnlyJars.Contains(name))
             {
                 clientOnlyMods++;
+                clientOnlyFound?.Add(rel.Replace(Path.DirectorySeparatorChar, '/'));
                 continue;
             }
 
@@ -482,9 +749,18 @@ public sealed class LaunchService(
             if (dstInfo.Exists && dstInfo.Length == srcInfo.Length && dstInfo.LastWriteTimeUtc == srcInfo.LastWriteTimeUtc)
                 continue;
 
+            var wouldLink = isJar && OperatingSystem.IsWindows();
+            if (analyseOnly)
+            {
+                if (wouldLink) linked++; else copied++;
+                continue;
+            }
+
             Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
             if (dstInfo.Exists) File.Delete(dst);
-            if (isJar && OperatingSystem.IsWindows() && CreateHardLinkW(dst, src, IntPtr.Zero))
+            // Reuses PackFolderService's CreateHardLinkW wrapper; its Windows check is already
+            // implied by wouldLink.
+            if (wouldLink && PackFolderService.TryCreateHardLink(dst, src))
             {
                 linked++;
             }
@@ -495,14 +771,14 @@ public sealed class LaunchService(
             }
         }
 
-        // Jars the server-side overlay contributes are the user's deliberate server-only mods.
+        // Jars from the server-side overlay are the user's server-only mods, so keep them.
         var overlayMods = Path.Combine(serverOverrideDir, "mods");
         if (Directory.Exists(overlayMods))
             foreach (var f in Directory.EnumerateFiles(overlayMods, "*.jar", SearchOption.TopDirectoryOnly))
                 expectedJars.Add(Path.Combine(serverDir, "mods", Path.GetFileName(f)));
 
-        // Mods the pack no longer has (or has disabled, or marks client-only) must not linger on the
-        // server — including .jar.disabled leftovers from the old copy-everything approach.
+        // Remove mods the pack no longer has, has disabled or marks client-only, including
+        // .jar.disabled leftovers from older launcher versions.
         var serverMods = Path.Combine(serverDir, "mods");
         if (Directory.Exists(serverMods))
         {
@@ -511,18 +787,23 @@ public sealed class LaunchService(
                 var isModFile = f.EndsWith(".jar", StringComparison.OrdinalIgnoreCase)
                                 || f.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase);
                 if (!isModFile || expectedJars.Contains(f)) continue;
+                if (analyseOnly) { removed++; continue; }
                 try { File.Delete(f); removed++; } catch { /* locked by a running server */ }
             }
         }
-        return new MirrorStats(linked, copied, removed, skipped, clientOnlyMods);
+        return new ServerMirrorStats(linked, copied, removed, skipped, clientOnlyMods);
     }
 
     // ── loader-aware server launcher ──────────────────────────────────────────
 
+    /// <summary>The launch arguments for an installed loader server, and whether it was already
+    /// there (so a hosting page can tell "ready" from "just installed").</summary>
+    private sealed record ServerLoaderInstall(string LaunchArguments, bool AlreadyInstalled);
+
     /// <summary>Makes sure the right server for the pack's loader is present in <paramref name="dir"/>
     /// and returns the Java arguments that launch it (everything between the JVM flags and
     /// <c>nogui</c>).</summary>
-    private async Task<string> PrepareServerLauncherAsync(
+    private async Task<ServerLoaderInstall> PrepareServerLauncherAsync(
         PackDetail pack, string dir, JavaSelection java, Action<string> report, CancellationToken ct)
     {
         var mc = pack.MinecraftVersion!;
@@ -534,20 +815,21 @@ public sealed class LaunchService(
                     throw new InvalidOperationException("Fabric loader version not set.");
                 var jarName = $"fabric-server-mc.{mc}-loader.{pack.LoaderVersion}.jar";
                 var jar = Path.Combine(dir, jarName);
-                if (!File.Exists(jar))
+                var hadFabric = File.Exists(jar);
+                if (!hadFabric)
                 {
-                    report($"Fetching the Fabric {pack.LoaderVersion} server launcher…");
-                    ProgressHub.Indeterminate(pack.Id, "Preparing server…", "Fabric server launcher");
+                    report($"Fetching the Fabric {pack.LoaderVersion} server launcher...");
+                    ProgressHub.Indeterminate(pack.Id, "Preparing server...", "Fabric server launcher");
                     var installer = await GetFabricInstallerVersionAsync(ct);
                     var url = $"https://meta.fabricmc.net/v2/versions/loader/{mc}/{pack.LoaderVersion}/{installer}/server/jar";
                     await DownloadToAsync(url, jar, ct);
-                    // An older loader's launcher would only confuse whoever reads the folder.
+                    // Remove launchers left over from older loader versions.
                     foreach (var old in Directory.EnumerateFiles(dir, "fabric-server-mc.*.jar", SearchOption.TopDirectoryOnly).ToList())
                         if (!string.Equals(old, jar, StringComparison.OrdinalIgnoreCase))
                             try { File.Delete(old); } catch { }
                 }
-                await EnsureVanillaServerJarAsync(mc, dir, report, ct);
-                return $"-jar \"{jarName}\"";
+                var hadVanilla = await EnsureVanillaServerJarAsync(mc, dir, report, ct);
+                return new ServerLoaderInstall($"-jar \"{jarName}\"", hadFabric && hadVanilla);
             }
 
             case LoaderKind.NeoForge:
@@ -555,23 +837,53 @@ public sealed class LaunchService(
                 return await EnsureForgeLikeServerAsync(pack, dir, java, report, ct);
 
             default:
-                await EnsureVanillaServerJarAsync(mc, dir, report, ct);
-                return "-jar \"server.jar\"";
+            {
+                var had = await EnsureVanillaServerJarAsync(mc, dir, report, ct);
+                return new ServerLoaderInstall("-jar \"server.jar\"", had);
+            }
         }
     }
 
-    private async Task EnsureVanillaServerJarAsync(string mc, string dir, Action<string> report, CancellationToken ct)
+    /// <summary>Returns true when the jar was already there, i.e. nothing was downloaded.</summary>
+    private async Task<bool> EnsureVanillaServerJarAsync(string mc, string dir, Action<string> report, CancellationToken ct)
     {
         var serverJar = Path.Combine(dir, "server.jar");
-        if (File.Exists(serverJar)) return;
-        report($"Downloading the vanilla server jar for {mc}…");
+        if (File.Exists(serverJar)) return true;
+        report($"Downloading the vanilla server jar for {mc}...");
         await DownloadVanillaServerJarAsync(mc, serverJar, null, ct);
+        return false;
     }
 
-    /// <summary>Runs the NeoForge/Forge installer in server mode into <paramref name="dir"/> — once per
-    /// loader version, remembered by a stamp file — and returns the launch arguments: the installer's
-    /// generated <c>win_args.txt</c> (1.17+) or the legacy runnable forge jar (older Forge).</summary>
-    private async Task<string> EnsureForgeLikeServerAsync(
+    /// <summary>Where a Forge-like server's pieces live for this pack, and whether they are
+    /// all there.</summary>
+    /// <remarks>Shared by the installer and <see cref="IsServerInstalled"/> so both test the same
+    /// condition.</remarks>
+    private static (bool Installed, bool StampMatched, string ArgsRelative, string ArgsPath, string? LegacyJar, string StampPath, string Stamp)
+        ForgeLikeServerInstalled(PackDetail pack, string dir)
+    {
+        var isNeo = pack.Loader == LoaderKind.NeoForge;
+        var mc = pack.MinecraftVersion!;
+        var v = pack.LoaderVersion ?? "";
+        var argsFile = OperatingSystem.IsWindows() ? "win_args.txt" : "unix_args.txt";
+        var argsRel = isNeo
+            ? $"libraries/net/neoforged/neoforge/{v}/{argsFile}"
+            : $"libraries/net/minecraftforge/forge/{mc}-{v}/{argsFile}";
+        var argsPath = Path.Combine(dir, argsRel.Replace('/', Path.DirectorySeparatorChar));
+        var legacyJar = isNeo ? null : Path.Combine(dir, $"forge-{mc}-{v}.jar");
+        var stampPath = Path.Combine(dir, ".cloudlauncher-server-loader");
+        var stamp = $"{pack.Loader}|{mc}|{v}";
+        var stampMatched = File.Exists(stampPath)
+                           && string.Equals(SafeReadAllText(stampPath).Trim(), stamp, StringComparison.Ordinal);
+        var installed = File.Exists(argsPath) || (legacyJar is not null && File.Exists(legacyJar));
+        return (installed, stampMatched, argsRel, argsPath, legacyJar, stampPath, stamp);
+    }
+
+    private static string SafeReadAllText(string path)
+    {
+        try { return File.ReadAllText(path); } catch { return ""; }
+    }
+
+    private async Task<ServerLoaderInstall> EnsureForgeLikeServerAsync(
         PackDetail pack, string dir, JavaSelection java, Action<string> report, CancellationToken ct)
     {
         var isNeo = pack.Loader == LoaderKind.NeoForge;
@@ -580,19 +892,11 @@ public sealed class LaunchService(
         if (string.IsNullOrEmpty(v))
             throw new InvalidOperationException($"{pack.Loader} loader version not set.");
 
-        var argsFile = OperatingSystem.IsWindows() ? "win_args.txt" : "unix_args.txt";
-        var argsRel = isNeo
-            ? $"libraries/net/neoforged/neoforge/{v}/{argsFile}"
-            : $"libraries/net/minecraftforge/forge/{mc}-{v}/{argsFile}";
-        var argsPath = Path.Combine(dir, argsRel.Replace('/', Path.DirectorySeparatorChar));
-        var legacyJar = isNeo ? null : Path.Combine(dir, $"forge-{mc}-{v}.jar");
+        var (installedNow, stampOk, argsRel, argsPath, legacyJar, stampPath, stamp) = ForgeLikeServerInstalled(pack, dir);
         bool Installed() => File.Exists(argsPath) || (legacyJar is not null && File.Exists(legacyJar));
+        var alreadyInstalled = stampOk && installedNow;
 
-        var stampPath = Path.Combine(dir, ".cloudlauncher-server-loader");
-        var stamp = $"{pack.Loader}|{mc}|{v}";
-        var stampOk = File.Exists(stampPath) && string.Equals(File.ReadAllText(stampPath).Trim(), stamp, StringComparison.Ordinal);
-
-        if (!stampOk || !Installed())
+        if (!alreadyInstalled)
         {
             var installerUrl = isNeo
                 ? $"https://maven.neoforged.net/releases/net/neoforged/neoforge/{v}/neoforge-{v}-installer.jar"
@@ -602,16 +906,16 @@ public sealed class LaunchService(
             var installerJar = Path.Combine(installersDir, Path.GetFileName(new Uri(installerUrl).LocalPath));
             if (!File.Exists(installerJar))
             {
-                report($"Downloading the {pack.Loader} {v} server installer…");
-                ProgressHub.Indeterminate(pack.Id, "Preparing server…", $"{pack.Loader} installer");
+                report($"Downloading the {pack.Loader} {v} server installer...");
+                ProgressHub.Indeterminate(pack.Id, "Preparing server...", $"{pack.Loader} installer");
                 await DownloadToAsync(installerUrl, installerJar, ct);
             }
 
-            report($"Installing the {pack.Loader} {v} server into server-run/ — it downloads its libraries, so the first time takes a few minutes…");
-            ProgressHub.Indeterminate(pack.Id, "Preparing server…", $"Installing {pack.Loader} {v}");
-            // Forge's installer spells the switch --installServer; NeoForge's documents --install-server
-            // (and its LegacyInstaller lineage accepts the Forge spelling as well). Try the documented
-            // one first and fall back if the installer rejects the option.
+            report($"Installing the {pack.Loader} {v} server into server-run/ - it downloads its libraries, so the first time takes a few minutes...");
+            ProgressHub.Indeterminate(pack.Id, "Preparing server...", $"Installing {pack.Loader} {v}");
+            // Forge's installer spells the switch --installServer; NeoForge's documents
+            // --install-server (and its LegacyInstaller lineage accepts the Forge spelling as well).
+            // Try the documented one first and fall back if the installer rejects the option.
             var switches = isNeo ? new[] { "--install-server", "--installServer" } : new[] { "--installServer", "--install-server" };
             var ok = false;
             foreach (var sw in switches)
@@ -626,13 +930,13 @@ public sealed class LaunchService(
             }
             if (!ok)
                 throw new InvalidOperationException(
-                    $"The {pack.Loader} {v} server installer did not complete. Check the log above — it usually names the library it could not download.");
+                    $"The {pack.Loader} {v} server installer did not complete. Check the log above - it usually names the library it could not download.");
             File.WriteAllText(stampPath, stamp);
             report($"{pack.Loader} {v} server installed.");
         }
 
-        if (File.Exists(argsPath)) return $"@{argsRel}";
-        return $"-jar \"{Path.GetFileName(legacyJar!)}\"";
+        var launchArgs = File.Exists(argsPath) ? $"@{argsRel}" : $"-jar \"{Path.GetFileName(legacyJar!)}\"";
+        return new ServerLoaderInstall(launchArgs, alreadyInstalled);
     }
 
     /// <summary>Runs a console tool (an installer) with its output streamed into the log, and returns
@@ -752,29 +1056,59 @@ public sealed class LaunchService(
     // ---------- helpers ----------
 
     /// <summary>
+    /// Refuses a pack whose Minecraft or loader version is not a plain version name.
+    /// </summary>
+    /// <remarks>Both come from the pack (another user's data, for a shared pack) and end up in file
+    /// paths, the server's argument-file path and download URLs.</remarks>
+    private static void EnsurePlainVersions(PackDetail pack)
+    {
+        if (!HasPlainVersions(pack))
+            throw new InvalidOperationException(
+                "This instance's Minecraft or loader version is not a valid version name, so it cannot be installed or launched.");
+    }
+
+    private static bool HasPlainVersions(PackDetail pack) =>
+        IsPlainVersion(pack.MinecraftVersion)
+        && (pack.Loader == LoaderKind.None || string.IsNullOrEmpty(pack.LoaderVersion) || IsPlainVersion(pack.LoaderVersion));
+
+    private static bool IsPlainVersion(string? version) =>
+        version is { Length: > 0 and <= 64 }
+        && !version.Contains("..", StringComparison.Ordinal)
+        && version.All(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_' or '+' or ' ')
+        && PathSafety.IsSafeFileName(version);
+
+    /// <summary>One host name or IP literal: nothing the game's argument parser could take as
+    /// an option.</summary>
+    private static bool IsPlainHost(string host) =>
+        host.Length is > 0 and <= 255
+        && host[0] != '-'
+        && host.All(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' or ':' or '%');
+
+    /// <summary>
     /// Turns the pack's extra-JVM-args string into the list CmlLib should use, or null for "none set".
-    /// Setting <see cref="MLaunchOption.ExtraJvmArguments"/> REPLACES CmlLib's stock GC flags rather than
-    /// appending to them, so the stock set is re-included first — otherwise adding one -D property would
-    /// silently strip the G1 tuning every pack has always launched with.
+    /// Setting <see cref="MLaunchOption.ExtraJvmArguments"/> replaces CmlLib's stock GC flags, so
+    /// the stock set is included first; otherwise one -D property would drop the G1 tuning.
     /// </summary>
     private static MArgument[]? BuildExtraJvmArguments(string userArgs)
     {
         if (string.IsNullOrWhiteSpace(userArgs)) return null;
 
-        // CmlLib.Core 4.0.6 MinecraftProcessBuilder defaults, verbatim.
-        string[] stock =
-        [
-            "-XX:+UnlockExperimentalVMOptions",
-            "-XX:+UseG1GC",
-            "-XX:G1NewSizePercent=20",
-            "-XX:G1ReservePercent=20",
-            "-XX:MaxGCPauseMillis=50",
-            "-XX:G1HeapRegionSize=16M",
-            "-Xss1M",
-        ];
         var user = userArgs.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        return stock.Concat(user).Select(a => new MArgument(a)).ToArray();
+        return StockJvmFlags.Concat(user).Select(a => new MArgument(a)).ToArray();
     }
+
+    /// <summary>CmlLib.Core 4.0.6 MinecraftProcessBuilder defaults, verbatim. The server does not
+    /// go through CmlLib, so <see cref="BuildServerJvmArguments"/> uses these to match.</summary>
+    private static readonly string[] StockJvmFlags =
+    [
+        "-XX:+UnlockExperimentalVMOptions",
+        "-XX:+UseG1GC",
+        "-XX:G1NewSizePercent=20",
+        "-XX:G1ReservePercent=20",
+        "-XX:MaxGCPauseMillis=50",
+        "-XX:G1HeapRegionSize=16M",
+        "-Xss1M",
+    ];
 
     private static void CopyDirectory(string src, string dst, bool overwrite)
     {
@@ -873,7 +1207,8 @@ public sealed class LaunchService(
         finally { DetectJavaLock.Release(); }
     }
 
-    /// <summary>The Java major a Minecraft version normally runs on (8 / 17 / 21), for the pickers' labels.</summary>
+    /// <summary>The Java major a Minecraft version normally runs on (8 / 17 / 21), for the
+    /// pickers' labels.</summary>
     public static int RequiredJavaMajorFor(string? mcVersion) => RequiredJavaMajor(mcVersion);
 
     /// <summary>A bare "java.exe" candidate means "whatever is on the PATH"; resolve it so it can be
@@ -897,8 +1232,7 @@ public sealed class LaunchService(
 
     /// <summary>The Java to launch with: the user's choice for the pack (or the launcher default)
     /// when it exists and answers, else the automatic pick for the Minecraft version. A chosen Java
-    /// of the "wrong" major is used as asked — with a note in the log — because that is the whole
-    /// point of choosing one.</summary>
+    /// of an unexpected major is still used, with a note in the log.</summary>
     private static async Task<JavaSelection> EnsureJavaExecutableAsync(
         string? mcVersion,
         Guid packId,
@@ -935,11 +1269,9 @@ public sealed class LaunchService(
     }
 
     /// <summary>
-    /// Keeps a pack's <c>config/relauncher.json</c> javaPath valid. The game is
-    /// bootstrapped with <paramref name="launchJava"/> (the Minecraft-compatible JVM);
-    /// when the ReLauncher mod is enabled and targets a different Java major, we
-    /// provision that JVM and point javaPath at it so the mod's relaunch succeeds.
-    /// Otherwise we just repair the path to the bootstrap Java.
+    /// Keeps a pack's <c>config/relauncher.json</c> javaPath valid. When the ReLauncher mod is
+    /// enabled and targets a different Java major than <paramref name="launchJava"/>, that JVM is
+    /// provisioned and javaPath points at it; otherwise the path is repaired to the bootstrap Java.
     /// </summary>
     private static async Task SyncRelauncherJavaAsync(
         string gameDir,
@@ -965,9 +1297,8 @@ public sealed class LaunchService(
             catch (Exception ex)
             {
                 AppLog.LogError("relauncher", ex);
-                // Don't bail out: a stale/empty javaPath makes the ReLauncher mod fail with
-                // "missing the java machine" at startup. Fall back to the bootstrap Java so the
-                // path is at least valid — better a working JVM than a broken relaunch.
+                // Don't bail out: a bad javaPath makes ReLauncher fail with "missing the java machine".
+                // Fall back to the bootstrap Java so the path is at least valid.
                 report($"Could not provision Java {target} for relauncher.json; falling back to {launchJava.Path}.");
                 relauncherJavaPath = launchJava.Path;
             }
@@ -1009,13 +1340,12 @@ public sealed class LaunchService(
             .Where(j => j.Major is not null)
             .ToList();
 
-        // Match the required major EXACTLY. A newer JDK is not a safe substitute:
-        //   • Forge 1.20.1 ships ASM that can't read Java 25 classes
-        //     ("Unsupported class file major version 69").
-        //   • Forge 1.12.2 needs Java 8's URLClassLoader.
-        // So we never reuse a higher Java just because one happens to be installed
-        // (e.g. a Java 25 we provisioned for a pack's ReLauncher mod) — we resolve, and
-        // if necessary download, the exact major the version needs.
+        // Require the same major; a newer JDK is not a safe substitute:
+        //   - Forge 1.20.1 ships ASM that can't read Java 25 classes ("Unsupported class
+        //     file major version 69").
+        //   - Forge 1.12.2 needs Java 8's URLClassLoader.
+        // So a higher Java is never reused just because it is installed (e.g. one provisioned for
+        // ReLauncher); resolve, and if needed download, the major the version needs.
         var found = detected.FirstOrDefault(j => j.Major == required);
 
         if (found is not null)
@@ -1130,7 +1460,15 @@ public sealed class LaunchService(
 
             report($"Extracting Java {major}...");
             ProgressHub.Report(packId, 0.95, $"Extracting Java {major}...", -1, $"Extracting Java {major}");
-            ZipFile.ExtractToDirectory(tempZip, installDir, overwriteFiles: true);
+            // Extract like any other download: every entry must stay inside the install folder and
+            // within its declared size. The -version check below catches an incomplete runtime.
+            using (var archive = ZipFile.OpenRead(tempZip))
+            {
+                var unpacked = SafeZip.ExtractToDirectory(archive, installDir, overwrite: true, ct: ct);
+                if (unpacked.Skipped.Count > 0)
+                    AppLog.Log("java", $"Left {unpacked.Skipped.Count} entr(ies) of the Java {major} archive out: "
+                                       + string.Join(", ", unpacked.Skipped.Take(5)));
+            }
 
             var ext = OperatingSystem.IsWindows() ? ".exe" : "";
             var javaPath = Directory.EnumerateFiles(installDir, "java" + ext, SearchOption.AllDirectories)
@@ -1215,9 +1553,9 @@ public sealed class LaunchService(
         return path;
     }
 
-    /// <summary>Wires stdout/stderr batching for the process and returns the flush timer so the
-    /// caller can dispose it if the process never starts (otherwise the 150 ms timer — and the
-    /// buffer/report/view chain it pins — leaks forever, since only the Exited handler stops it).</summary>
+    /// <summary>Wires stdout/stderr batching for the process and returns the flush timer, so the
+    /// caller can dispose it if the process never starts. Otherwise only the Exited handler stops
+    /// it, and it would leak along with everything it references.</summary>
     private static System.Timers.Timer ConfigureProcessLogging(Process process, string gameDir, Action<string> report)
     {
         var psi = process.StartInfo;
@@ -1233,13 +1571,9 @@ public sealed class LaunchService(
 
         process.EnableRaisingEvents = true;
 
-        // Modded Minecraft emits hundreds of stdout/stderr lines per second during
-        // startup. Forwarding each line individually produces ~1000 Normal-priority
-        // dispatcher operations per second, which starves WM_HOTKEY and mouse-input
-        // messages (processed at Input priority) — making keybindings and window
-        // interactions unresponsive while the modpack loads.
-        // Instead, buffer lines and flush them as a single report() call every 150 ms
-        // so the dispatcher queue stays clear for input.
+        // Modded Minecraft prints hundreds of lines per second during startup. Forwarding each one
+        // floods the dispatcher and starves input (hotkeys, mouse), so buffer lines and flush them
+        // in one report() call every 150 ms.
         var lineBuffer = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var flushTimer = new System.Timers.Timer(150) { AutoReset = true };
         flushTimer.Elapsed += (_, _) => FlushLogBuffer(lineBuffer, report);
@@ -1276,7 +1610,7 @@ public sealed class LaunchService(
     }
 
     /// <summary>
-    /// Checks that a compatible Java is available. Older Minecraft/Forge needs Java 8 exactly.
+    /// Checks that a compatible Java is available. Older Minecraft/Forge needs Java 8 specifically.
     /// </summary>
     public static (bool ok, string message) CheckJava(string? mcVersion, string? overridePath = null)
     {

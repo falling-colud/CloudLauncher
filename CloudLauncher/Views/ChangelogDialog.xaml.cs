@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using CloudLauncher.Animations;
@@ -11,11 +11,6 @@ namespace CloudLauncher.Views;
 /// The launcher's changelog: every release the server has published, newest first, with the one
 /// you are running marked.
 /// </summary>
-/// <remarks>
-/// The release notes were already written for every version — the updater showed them once, when an
-/// update was offered, and then they were gone. "What changed in the version I just got?" and "what
-/// am I missing by not updating?" are the same question, and neither had an answer inside the app.
-/// </remarks>
 public partial class ChangelogDialog : UserControl
 {
     private readonly TaskCompletionSource<bool> _tcs = new();
@@ -34,7 +29,8 @@ public partial class ChangelogDialog : UserControl
     {
         var card = new ChangelogDialog();
         _ = card.LoadAsync();
-        await host.ShowCardAsync(card, card.Result, card.Cancel);
+        await host.ShowCardAsync(card, card.Result, card.Cancel,
+            new ResizableCardSpec("changelog", 720, 620, MinWidth: 480, MinHeight: 340));
     }
 
     private async Task LoadAsync()
@@ -45,7 +41,7 @@ public partial class ChangelogDialog : UserControl
             var installed = AppVersion.Current;
 
             var rows = releases
-                .OrderByDescending(r => ParseVersion(r.Version))
+                .OrderByDescending(r => AppVersion.Rank(ParseVersion(r.Version)))
                 .ThenByDescending(r => r.ReleasedAt)
                 .Select(r => new ReleaseRow(r, installed))
                 .ToList();
@@ -62,7 +58,7 @@ public partial class ChangelogDialog : UserControl
             var newer = rows.Count(r => r.IsNewer);
             FooterNote.Text = newer == 0
                 ? "You are on the latest version."
-                : $"{newer} newer release(s) — use Check for updates to install.";
+                : $"{newer} newer release(s) - use Check for updates to install.";
         }
         catch (Exception ex)
         {
@@ -71,8 +67,8 @@ public partial class ChangelogDialog : UserControl
         }
     }
 
-    /// <summary>A version that does not parse sorts last rather than throwing — the notes are still
-    /// worth showing.</summary>
+    /// <summary>A version that doesn't parse sorts last rather than throwing; its notes are still
+    /// shown.</summary>
     private static Version ParseVersion(string? value) =>
         Version.TryParse(value, out var parsed) ? parsed : new Version(0, 0);
 
@@ -84,15 +80,17 @@ public partial class ChangelogDialog : UserControl
         private readonly Version _version;
         private readonly Version _installed;
 
+        // Both in release order (AppVersion.Rank): numbering restarted at 0.8.4, so 1.8.3 is older
+        // than it. Ranking also drops the revision, so 1.8.3 matches the assembly's 1.8.3.0.
         public ReleaseRow(LauncherReleaseInfo info, Version installed)
         {
             _info = info;
-            _installed = installed;
-            _version = ParseVersion(info.Version);
+            _installed = AppVersion.Rank(installed);
+            _version = AppVersion.Rank(ParseVersion(info.Version));
         }
 
         public string VersionLabel => $"Version {_info.Version}";
-        public string DateLabel => _info.ReleasedAt.ToLocalTime().ToString("d MMM yyyy");
+        public string DateLabel => TimeFormat.Date(_info.ReleasedAt);
         public string Notes => string.IsNullOrWhiteSpace(_info.Notes) ? "(no notes for this release)" : _info.Notes!.Trim();
 
         public bool IsInstalled => _version == _installed;

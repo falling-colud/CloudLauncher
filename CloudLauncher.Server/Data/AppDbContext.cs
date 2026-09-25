@@ -29,10 +29,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
     public DbSet<HostedResourcePackVersion> HostedResourcePackVersions => Set<HostedResourcePackVersion>();
     public DbSet<HostedResourcePackCollaborator> HostedResourcePackCollaborators => Set<HostedResourcePackCollaborator>();
     public DbSet<HostedResourcePackTeam> HostedResourcePackTeams => Set<HostedResourcePackTeam>();
+    public DbSet<ContentBundle> ContentBundles => Set<ContentBundle>();
+    public DbSet<ContentBundleVersion> ContentBundleVersions => Set<ContentBundleVersion>();
+    public DbSet<ContentBundleCollaborator> ContentBundleCollaborators => Set<ContentBundleCollaborator>();
+    public DbSet<ContentBundleTeam> ContentBundleTeams => Set<ContentBundleTeam>();
+    public DbSet<PackInvitation> PackInvitations => Set<PackInvitation>();
+    public DbSet<TeamInvitation> TeamInvitations => Set<TeamInvitation>();
+    public DbSet<ContentBundleInvitation> ContentBundleInvitations => Set<ContentBundleInvitation>();
+    public DbSet<ActivityEntry> ActivityEntries => Set<ActivityEntry>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
         base.OnModelCreating(b);
+
+        b.Entity<AppUser>(e => e.Property(x => x.TermsVersion).HasMaxLength(32));
 
         b.Entity<RefreshToken>(e =>
         {
@@ -47,6 +57,12 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
             e.Property(x => x.Name).HasMaxLength(128).IsRequired();
             e.Property(x => x.Summary).HasMaxLength(PackText.SummaryMaxLength);
             e.Property(x => x.Description).HasMaxLength(PackText.DescriptionMaxLength);
+            e.Property(x => x.ShareToken).HasMaxLength(32);
+            // Postgres treats NULLs as distinct, so packs without a link don't collide on this index.
+            e.HasIndex(x => x.ShareToken).IsUnique();
+            // SetNull: deleting the last uploader must not delete the pack.
+            e.HasOne(x => x.LastUploadedBy).WithMany().HasForeignKey(x => x.LastUploadedById)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         b.Entity<PackCollaborator>(e =>
@@ -65,8 +81,12 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
 
         b.Entity<Team>(e =>
         {
-            e.HasIndex(x => x.Name).IsUnique();
-            e.HasOne(x => x.Owner).WithMany().HasForeignKey(x => x.OwnerId).OnDelete(DeleteBehavior.Restrict);
+            // Unique per owner. A global unique name would refuse a second team called "Friends" and
+            // reveal that someone else already has one.
+            e.HasIndex(x => new { x.OwnerId, x.Name }).IsUnique();
+            // Cascade like every other owner relationship; Restrict would block deleting a user who owns
+            // a team.
+            e.HasOne(x => x.Owner).WithMany().HasForeignKey(x => x.OwnerId).OnDelete(DeleteBehavior.Cascade);
             e.Property(x => x.Name).HasMaxLength(64).IsRequired();
         });
 
@@ -214,6 +234,102 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
             e.HasKey(x => new { x.ResourcePackId, x.TeamId });
             e.HasOne(x => x.ResourcePack).WithMany(m => m.Teams).HasForeignKey(x => x.ResourcePackId).OnDelete(DeleteBehavior.Cascade);
             e.HasOne(x => x.Team).WithMany().HasForeignKey(x => x.TeamId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<ContentBundle>(e =>
+        {
+            e.HasIndex(x => x.OwnerId);
+            // Unique per kind: one table holds every kind, and "vanilla" is a fair slug for both a shader
+            // pack and a config bundle. The kind is part of the route, so URLs don't collide either.
+            e.HasIndex(x => new { x.Kind, x.Slug }).IsUnique();
+            e.HasIndex(x => x.ShareToken).IsUnique();
+            e.HasOne(x => x.Owner).WithMany().HasForeignKey(x => x.OwnerId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Name).HasMaxLength(128).IsRequired();
+            e.Property(x => x.Slug).HasMaxLength(96).IsRequired();
+            e.Property(x => x.Summary).HasMaxLength(512);
+            e.Property(x => x.Description).HasMaxLength(4096);
+            e.Property(x => x.TargetPathRoot).HasMaxLength(128).IsRequired();
+            e.Property(x => x.McVersionsCsv).HasMaxLength(512);
+            e.Property(x => x.LoadersCsv).HasMaxLength(128);
+            e.Property(x => x.IconBlobHash).HasMaxLength(64);
+            e.Property(x => x.ShareToken).HasMaxLength(32);
+        });
+
+        b.Entity<ContentBundleVersion>(e =>
+        {
+            e.HasIndex(x => x.BundleId);
+            e.HasOne(x => x.Bundle).WithMany(m => m.Versions).HasForeignKey(x => x.BundleId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.VersionString).HasMaxLength(64).IsRequired();
+            e.Property(x => x.ReleaseChannel).HasMaxLength(16).IsRequired();
+            e.Property(x => x.BlobHash).HasMaxLength(64).IsRequired();
+            e.Property(x => x.FileName).HasMaxLength(255).IsRequired();
+            e.Property(x => x.McVersionsCsv).HasMaxLength(512);
+            e.Property(x => x.LoadersCsv).HasMaxLength(128);
+            e.Property(x => x.Changelog).HasMaxLength(8192);
+        });
+
+        b.Entity<ContentBundleCollaborator>(e =>
+        {
+            e.HasKey(x => new { x.BundleId, x.UserId });
+            e.HasOne(x => x.Bundle).WithMany(m => m.Collaborators).HasForeignKey(x => x.BundleId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<ContentBundleTeam>(e =>
+        {
+            e.HasKey(x => new { x.BundleId, x.TeamId });
+            e.HasOne(x => x.Bundle).WithMany(m => m.Teams).HasForeignKey(x => x.BundleId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.Team).WithMany().HasForeignKey(x => x.TeamId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        b.Entity<PackInvitation>(e =>
+        {
+            e.HasIndex(x => x.Token).IsUnique();
+            // The notification badge looks up pending invites (AcceptedAt null) on every launch.
+            e.HasIndex(x => new { x.InvitedUserId, x.AcceptedAt });
+            e.HasOne(x => x.Pack).WithMany().HasForeignKey(x => x.PackId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.InvitedUser).WithMany().HasForeignKey(x => x.InvitedUserId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.InvitedBy).WithMany().HasForeignKey(x => x.InvitedByUserId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Token).HasMaxLength(32).IsRequired();
+            e.Property(x => x.InvitedUsername).HasMaxLength(256);
+            e.Property(x => x.Message).HasMaxLength(512);
+        });
+
+        b.Entity<TeamInvitation>(e =>
+        {
+            e.HasIndex(x => x.Token).IsUnique();
+            e.HasIndex(x => new { x.InvitedUserId, x.AcceptedAt });
+            e.HasOne(x => x.Team).WithMany().HasForeignKey(x => x.TeamId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.InvitedUser).WithMany().HasForeignKey(x => x.InvitedUserId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.InvitedBy).WithMany().HasForeignKey(x => x.InvitedByUserId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Token).HasMaxLength(32).IsRequired();
+            e.Property(x => x.InvitedUsername).HasMaxLength(256);
+            e.Property(x => x.Message).HasMaxLength(512);
+        });
+
+        b.Entity<ContentBundleInvitation>(e =>
+        {
+            e.HasIndex(x => x.Token).IsUnique();
+            e.HasIndex(x => new { x.InvitedUserId, x.AcceptedAt });
+            e.HasOne(x => x.Bundle).WithMany().HasForeignKey(x => x.BundleId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.InvitedUser).WithMany().HasForeignKey(x => x.InvitedUserId).OnDelete(DeleteBehavior.Cascade);
+            e.HasOne(x => x.InvitedBy).WithMany().HasForeignKey(x => x.InvitedByUserId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Token).HasMaxLength(32).IsRequired();
+            e.Property(x => x.InvitedUsername).HasMaxLength(256);
+            e.Property(x => x.Message).HasMaxLength(512);
+        });
+
+        b.Entity<ActivityEntry>(e =>
+        {
+            // The feed is read per subject or per actor, always newest first.
+            e.HasIndex(x => new { x.SubjectType, x.SubjectId, x.CreatedAt }).IsDescending(false, false, true);
+            e.HasIndex(x => new { x.ActorUserId, x.CreatedAt }).IsDescending(false, true);
+            e.HasOne(x => x.Actor).WithMany().HasForeignKey(x => x.ActorUserId).OnDelete(DeleteBehavior.Cascade);
+            // SetNull for the targets: a line about somebody who has since left should still read.
+            e.HasOne(x => x.TargetUser).WithMany().HasForeignKey(x => x.TargetUserId).OnDelete(DeleteBehavior.SetNull);
+            e.HasOne(x => x.TargetTeam).WithMany().HasForeignKey(x => x.TargetTeamId).OnDelete(DeleteBehavior.SetNull);
+            e.Property(x => x.SubjectName).HasMaxLength(128).IsRequired();
+            e.Property(x => x.Detail).HasMaxLength(256);
         });
     }
 }

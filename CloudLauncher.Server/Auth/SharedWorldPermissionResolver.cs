@@ -31,6 +31,12 @@ public class SharedWorldPermissionResolver(AppDbContext db)
             .ToListAsync(ct);
         foreach (var p in teamPerms) perms |= p;
 
+        // Team visibility, same rule as instances and bundles: anyone on a team the world is shared
+        // with may see and download it, whatever that team's own grant says. Only ReadOnly, so a
+        // View-only team grant gets nothing beyond downloading.
+        if (world.Visibility == PackVisibility.Team && teamPerms.Count > 0)
+            perms |= PackPermissions.ReadOnly;
+
         return perms;
     }
 }

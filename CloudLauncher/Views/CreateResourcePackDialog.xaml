@@ -15,7 +15,7 @@
         <StackPanel Grid.Row="0" Margin="0,0,0,16">
             <TextBlock Style="{StaticResource H2}" Text="Create a resource pack"/>
             <TextBlock Style="{StaticResource Muted}"
-                       Text="Set up the project shell — you can upload zip versions after it is created."/>
+                       Text="Set up the project shell - you can upload zip versions after it is created."/>
         </StackPanel>
 
         <StackPanel Grid.Row="1">

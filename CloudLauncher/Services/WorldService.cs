@@ -7,13 +7,12 @@ namespace CloudLauncher.Services;
 
 /// <summary>
 /// Scans pack <c>game/saves/</c> folders for Minecraft worlds and tracks which packs
-/// may run each world. Storage is local — worlds don't sync to the server.
+/// may run each world. Storage is local; worlds don't sync to the server.
 /// </summary>
 /// <remarks>
-/// Everything here that touches the disk in bulk (scanning, copying, zipping, restoring) is written
-/// to be called from a background thread with a <see cref="CancellationToken"/>: a modded save is
-/// routinely several gigabytes across tens of thousands of region and chunk files, and the Worlds
-/// page used to do all of it on the dispatcher.
+/// Bulk disk work (scanning, copying, zipping, restoring) is meant to run on a background thread
+/// with a <see cref="CancellationToken"/>: a modded save can be several gigabytes across tens of
+/// thousands of files.
 /// </remarks>
 public sealed class WorldService(AppSettings settings, PackFolderService packs)
 {
@@ -23,10 +22,8 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// Folder sizes already measured, keyed by save folder path.
     /// </summary>
     /// <remarks>
-    /// Walking every file of a big save costs seconds, and the page re-scans on every visit, every
-    /// F5 and after every action. The stamp is the save's own last-write time, so the entry is
-    /// thrown away the moment the world is played, imported into or restored — the only times its
-    /// size can have changed — and a second visit to an untouched world is free.
+    /// Walking a big save takes seconds. Entries are stamped with the save's last-write time, so
+    /// playing, importing into or restoring a world invalidates its entry.
     /// </remarks>
     private static readonly ConcurrentDictionary<string, (DateTime Stamp, long Size)> SizeCache = new();
 
@@ -42,7 +39,7 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
             ct.ThrowIfCancellationRequested();
             try { result.AddRange(ScanPack(p, ct)); }
             catch (OperationCanceledException) { throw; }
-            catch { /* missing folder etc — skip */ }
+            catch { /* missing folder etc; skip */ }
         }
         return result.OrderByDescending(w => w.LastModified).ToList();
     }
@@ -180,16 +177,14 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         Path.Combine(string.IsNullOrEmpty(packName) ? packs.GameDir(packId) : packs.GameDir(packId, packName),
                      "saves");
 
-    // ── copying, importing, exporting ────────────────────────────────────────
+    // ── copying, importing, exporting ──
 
     /// <summary>
-    /// Copies a save folder. Progress is a 0–1 fraction of files copied.
+    /// Copies a save folder. Progress is the fraction (0 to 1) of files copied.
     /// </summary>
     /// <remarks>
-    /// The file list is enumerated up front so the fraction is real rather than a spinner, which is
-    /// the whole point on a save whose copy takes a minute. <c>session.lock</c> is opened share-all
-    /// and skipped if the running game still owns it — it is a zero-byte marker the game rewrites on
-    /// load, so losing it costs nothing and failing the whole copy for it costs everything.
+    /// Files are listed up front so the progress is real. <c>session.lock</c> is opened share-all and
+    /// skipped if the running game holds it; it is a marker the game rewrites on load.
     /// </remarks>
     public static async Task CopyWorldAsync(string src, string dst, IProgress<double>? progress = null,
                                             CancellationToken ct = default)
@@ -218,18 +213,16 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// Copies a save over an existing one at <paramref name="dst"/>, all-or-nothing.
     /// </summary>
     /// <remarks>
-    /// Never delete the destination first. The callers hand this the same token their Cancel button
-    /// holds, so a delete-then-copy left a half-written folder where the user's world had been the
-    /// moment anyone cancelled mid-copy — the copy throws between two files and there is nothing to
-    /// put back. The new copy is built in a temporary sibling instead and only swapped in once it is
-    /// complete, and the old save is moved aside rather than deleted so that even a failed swap
-    /// leaves one intact copy on disk. On cancellation or failure the temporary folder goes and the
-    /// existing save is untouched.
+    /// The copy is built in a temporary sibling and only swapped in once complete, and the old save is
+    /// moved aside rather than deleted, so a cancel (callers pass their Cancel button's token) or a
+    /// failed swap always leaves an intact copy.
     /// </remarks>
     public static async Task ReplaceWorldAsync(string src, string dst, IProgress<double>? progress = null,
                                                CancellationToken ct = default)
     {
-        var stamp = DateTime.Now.ToString("HHmmssfff");
+        // Invariant and dated, so a suffix left behind by a crash is readable and can't collide with a
+        // later run. Seconds are enough: the UI disables the button while a replace runs.
+        var stamp = TimeFormat.StampNow();
         var staging = dst + ".incoming-" + stamp;
         try
         {
@@ -256,7 +249,7 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         {
             if (hadExisting && !Directory.Exists(dst) && Directory.Exists(parked))
             {
-                try { Directory.Move(parked, dst); } catch { /* left as .replaced-… on disk */ }
+                try { Directory.Move(parked, dst); } catch { /* left as .replaced-... on disk */ }
             }
             await TryDeleteDirectoryAsync(staging);
             throw;
@@ -269,15 +262,14 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// <summary>
     /// Removes a directory if it is there, swallowing failures.
     /// </summary>
-    /// <remarks>Used for the temporary folders of a swap, where the swap has already decided which
-    /// copy is the real one: failing to tidy up is never a reason to fail the operation, and never a
-    /// reason to touch the copy that is now live.</remarks>
+    /// <remarks>For a swap's temporary folders, where failing to tidy up must never fail the operation
+    /// or touch the live copy.</remarks>
     private static async Task TryDeleteDirectoryAsync(string dir)
     {
         try
         {
             if (Directory.Exists(dir))
-                await Task.Run(() => Directory.Delete(dir, recursive: true), CancellationToken.None);
+                await Task.Run(() => DeleteFolderInside(Path.GetDirectoryName(dir)!, dir), CancellationToken.None);
         }
         catch { /* best effort */ }
     }
@@ -319,10 +311,8 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// Extracts a downloaded world .zip into an instance's saves folder. Returns the new folder name.
     /// </summary>
     /// <remarks>
-    /// Worlds on the internet are zips, and about half of them wrap the save in one top-level folder,
-    /// so the extract is followed by <see cref="FlattenIfSingleSubdir"/>. If no <c>level.dat</c> turns
-    /// up after that the extracted folder is removed again and the caller is told — leaving a folder
-    /// of stray files in saves/ is worse than refusing.
+    /// Many zips wrap the save in one top-level folder, hence <see cref="FlattenIfSingleSubdir"/>. If no
+    /// <c>level.dat</c> turns up, the extracted folder is removed again and the caller is told.
     /// </remarks>
     public async Task<string> ImportZipAsync(string zipPath, Guid packId, string packName, string? preferredName = null,
                                              IProgress<double>? progress = null, CancellationToken ct = default)
@@ -331,7 +321,8 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         Directory.CreateDirectory(savesDir);
         var baseName = SafeFolderName(preferredName ?? Path.GetFileNameWithoutExtension(zipPath));
         var folderName = UniqueFolderName(savesDir, baseName);
-        var targetDir = Path.Combine(savesDir, folderName);
+        var targetDir = PathSafety.ResolveFileName(savesDir, folderName)
+            ?? throw new IOException($"'{folderName}' cannot be used as a save folder name.");
 
         try
         {
@@ -343,7 +334,7 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         }
         catch
         {
-            try { if (Directory.Exists(targetDir)) Directory.Delete(targetDir, recursive: true); } catch { /* best effort */ }
+            try { if (Directory.Exists(targetDir)) DeleteFolderInside(savesDir, targetDir); } catch { /* best effort */ }
             throw;
         }
     }
@@ -362,17 +353,15 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         return path;
     }
 
-    // ── backups ──────────────────────────────────────────────────────────────
+    // ── backups ──
 
     /// <summary>
     /// Where a world's backups live: <c>&lt;pack root&gt;/backups/</c>, beside <c>game/</c> rather than
     /// inside it.
     /// </summary>
     /// <remarks>
-    /// Inside the game folder the zips would be swept up by anything that walks the instance —
-    /// manifests, syncs, an export of the pack — and would grow the instance by the size of the save
-    /// every time someone took a snapshot. Beside it, they are still per-instance and still removed
-    /// with the instance.
+    /// Inside game/ the zips would be picked up by manifests, syncs and pack exports. Beside it they are
+    /// still per-instance and removed with the instance.
     /// </remarks>
     public string BackupsDir(Guid packId) => Path.Combine(packs.PackRoot(packId), "backups");
 
@@ -382,7 +371,9 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     {
         var dir = BackupsDir(world.SourcePackId);
         Directory.CreateDirectory(dir);
-        var zipPath = Path.Combine(dir, $"{SafeFolderName(world.FolderName)}-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+        // Invariant: IsBackupOf below parses this tail, and a non-Gregorian year here would hide the
+        // backup.
+        var zipPath = Path.Combine(dir, $"{SafeFolderName(world.FolderName)}-{TimeFormat.StampNow()}.zip");
         await ZipDirectoryAsync(world.FolderPath, zipPath, progress, ct);
         return zipPath;
     }
@@ -391,10 +382,8 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// Backups taken of this world, newest first.
     /// </summary>
     /// <remarks>
-    /// The match is the whole name, not just the prefix: every backup is
-    /// <c>&lt;folder&gt;-&lt;timestamp&gt;.zip</c>, and a bare prefix test also swept up
-    /// <c>MyWorld-copy-…</c> and <c>MyWorld-2-…</c> under <c>MyWorld</c>. Those are different saves,
-    /// and restoring one of them here overwrote a world with a duplicate's contents.
+    /// Matches the whole <c>&lt;folder&gt;-&lt;timestamp&gt;.zip</c> name, since a prefix test would also
+    /// pick up backups of <c>MyWorld-copy</c> or <c>MyWorld-2</c> for <c>MyWorld</c>.
     /// </remarks>
     public List<WorldBackup> ListBackups(WorldInfo world)
     {
@@ -418,9 +407,6 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     }
 
     /// <summary>True for the <c>yyyyMMdd-HHmmss</c> tail <see cref="BackupAsync"/> appends.</summary>
-    /// <remarks>This is what makes the backup match exact: whatever follows the folder name must be
-    /// the timestamp and nothing else, so a longer folder name that merely starts the same way
-    /// cannot claim this zip.</remarks>
     private static bool IsBackupStamp(ReadOnlySpan<char> tail)
     {
         if (tail.Length != 15 || tail[8] != '-') return false;
@@ -433,24 +419,16 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// Replaces the live save with the contents of a backup zip.
     /// </summary>
     /// <remarks>
-    /// A safety backup of the current state is taken first, and the old folder is moved aside rather
-    /// than deleted until the extract has succeeded — restoring the wrong snapshot is a mistake
-    /// people make, and it must not also be the moment their current world disappears.
-    /// <para>
-    /// The extract succeeding is the commit point, and nothing after it may roll back. Removing the
-    /// parked copy used to sit inside the same <c>try</c>, so a game still holding one of its files
-    /// sent a perfectly good restore down the rollback path, which deletes the world that was just
-    /// restored. Tidying up is now allowed to fail: the parked folder's path is returned instead so
-    /// the caller can mention it, and the restored world is never touched again.
-    /// </para>
+    /// A safety backup of the current state is taken first, and the old folder is moved aside until the
+    /// extract succeeds. That is the commit point: nothing after it rolls back, and a failed cleanup
+    /// only returns the parked folder's path.
     /// </remarks>
-    /// <returns>The path of the parked copy of the old save if it could not be removed, else null.</returns>
     public async Task<string?> RestoreAsync(WorldInfo world, string zipPath, IProgress<double>? progress = null,
                                             CancellationToken ct = default)
     {
         await BackupAsync(world, null, ct);
 
-        var parked = world.FolderPath + ".restoring-" + DateTime.Now.ToString("HHmmss");
+        var parked = world.FolderPath + ".restoring-" + TimeFormat.StampNow();
         Directory.Move(world.FolderPath, parked);
         try
         {
@@ -461,10 +439,11 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         }
         catch
         {
-            // Put the world back exactly as it was before doing anything else.
+            // Put the world back as it was before doing anything else.
             try
             {
-                if (Directory.Exists(world.FolderPath)) Directory.Delete(world.FolderPath, recursive: true);
+                if (Directory.Exists(world.FolderPath))
+                    DeleteFolderInside(Path.GetDirectoryName(world.FolderPath)!, world.FolderPath);
                 Directory.Move(parked, world.FolderPath);
             }
             catch { /* the parked copy is still on disk under its .restoring name */ }
@@ -475,7 +454,7 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         Invalidate(world.FolderPath);
         try
         {
-            await Task.Run(() => Directory.Delete(parked, recursive: true), CancellationToken.None);
+            await Task.Run(() => DeleteFolderInside(Path.GetDirectoryName(parked)!, parked), CancellationToken.None);
             return null;
         }
         catch
@@ -489,24 +468,22 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         try { File.Delete(zipPath); } catch (IOException) { throw; }
     }
 
-    // ── renaming ─────────────────────────────────────────────────────────────
+    // ── renaming ──
 
     /// <summary>
-    /// Writes a new <c>LevelName</c> into the save's level.dat — the name Minecraft itself shows in
-    /// the world list.
+    /// Writes a new <c>LevelName</c> into the save's level.dat, the name Minecraft shows in its world
+    /// list.
     /// </summary>
     /// <remarks>
-    /// Without this, "rename" in the launcher only ever set a launcher-side label, so the world kept
-    /// its old name everywhere that mattered. The file's original compression is preserved and the
-    /// previous copy is kept as <c>level.dat_old</c>, exactly as the game does. Throws
-    /// <see cref="IOException"/> if Minecraft still has the file open, which the caller should report
-    /// as "close the game first" rather than as a failure the user can do nothing about.
+    /// Keeps the file's compression and the previous copy as <c>level.dat_old</c>, as the game does.
+    /// Throws <see cref="IOException"/> if Minecraft still has the file open, which the caller should
+    /// report as "close the game first".
     /// </remarks>
     public static void SetLevelName(WorldInfo world, string newName)
     {
         var path = Path.Combine(world.FolderPath, "level.dat");
         var root = Nbt.ReadFile(path, out var compression)
-            ?? throw new IOException("level.dat could not be read — the world may be open in Minecraft.");
+            ?? throw new IOException("level.dat could not be read - the world may be open in Minecraft.");
 
         var data = root["Data"] ?? root;
         if (data["LevelName"] is { } existing) existing.StringValue = newName;
@@ -529,7 +506,8 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         var savesDir = Path.GetDirectoryName(world.FolderPath)!;
         var clean = SafeFolderName(newFolderName);
         if (string.Equals(clean, world.FolderName, StringComparison.OrdinalIgnoreCase)) return world.Key;
-        var target = Path.Combine(savesDir, clean);
+        var target = PathSafety.ResolveFileName(savesDir, clean)
+            ?? throw new IOException($"'{clean}' cannot be used as a save folder name.");
         if (Directory.Exists(target))
             throw new IOException($"A save folder named '{clean}' already exists in this instance.");
 
@@ -547,19 +525,19 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         return newKey;
     }
 
-    // ── deleting ─────────────────────────────────────────────────────────────
+    // ── deleting ──
 
     /// <summary>Deletes the save folder from disk and forgets the world's launcher-side settings.</summary>
     public async Task DeleteAsync(WorldInfo world, CancellationToken ct = default)
     {
-        await Task.Run(() => Directory.Delete(world.FolderPath, recursive: true), ct);
+        await Task.Run(() => DeleteFolderInside(Path.GetDirectoryName(world.FolderPath)!, world.FolderPath), ct);
         Invalidate(world.FolderPath);
         Forget(world.Key);
     }
 
-    // ── shared helpers ───────────────────────────────────────────────────────
+    // ── shared helpers ──
 
-    /// <summary>True if this folder is a Minecraft save — i.e. it has a level.dat directly inside.</summary>
+    /// <summary>True if this folder is a Minecraft save, i.e. it has a level.dat directly inside.</summary>
     public static bool IsWorldFolder(string dir) => File.Exists(Path.Combine(dir, "level.dat"));
 
     /// <summary>True if the archive holds a level.dat, at the root or one folder down.</summary>
@@ -586,13 +564,18 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         return candidate;
     }
 
+    /// <summary>A plain folder name for a save. Names from other people's worlds, level.dat and zip
+    /// file names all come through here, so the result is always one name inside saves/.</summary>
     public static string SafeFolderName(string? name)
     {
         var invalid = Path.GetInvalidFileNameChars();
         var clean = new string((name ?? "world").Select(c => invalid.Contains(c) ? '-' : c).ToArray()).Trim();
-        if (string.IsNullOrEmpty(clean)) clean = "world";
         if (clean.Length > 80) clean = clean[..80];
-        return clean;
+        // Windows drops trailing dots and spaces, so "." and ".." end up empty here.
+        clean = clean.TrimEnd('.', ' ');
+        if (string.IsNullOrEmpty(clean)) return "world";
+        // A device name such as CON or NUL is kept readable but made into a plain name.
+        return PathSafety.IsSafeFileName(clean) ? clean : "world-" + clean.Replace('.', '-');
     }
 
     /// <summary>
@@ -608,11 +591,29 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         if (subs.Length != 1 || files.Length != 0) return;
 
         var sub = subs[0];
+        // A junction here points somewhere else on the disk; its contents are not the save's to move.
+        if ((File.GetAttributes(sub) & FileAttributes.ReparsePoint) != 0) return;
         foreach (var f in Directory.GetFiles(sub))
             File.Move(f, Path.Combine(dir, Path.GetFileName(f)));
         foreach (var d in Directory.GetDirectories(sub))
             Directory.Move(d, Path.Combine(dir, Path.GetFileName(d)));
-        Directory.Delete(sub, recursive: true);
+        DeleteFolderInside(dir, sub);
+    }
+
+    /// <summary>
+    /// Deletes <paramref name="dir"/> and everything in it, but only when it lies below
+    /// <paramref name="root"/> and no folder on the way down is a junction or link.
+    /// </summary>
+    /// <exception cref="IOException">The folder is not inside <paramref name="root"/>; nothing was
+    /// deleted.</exception>
+    private static void DeleteFolderInside(string root, string dir)
+    {
+        if (!PathSafety.IsInside(root, dir) || PathSafety.IsInside(dir, root) || PathSafety.CrossesLink(root, dir))
+        {
+            AppLog.Log(nameof(WorldService), $"Left {dir} in place: it is not a folder inside {root}.");
+            throw new IOException($"Refused to delete {dir}: it is not a folder inside {root}.");
+        }
+        Directory.Delete(dir, recursive: true);
     }
 
     /// <summary>Drops the cached size and metadata for a save whose contents just changed.</summary>
@@ -626,11 +627,9 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
     /// Zips a directory with per-file progress.
     /// </summary>
     /// <remarks>
-    /// <see cref="ZipFile.CreateFromDirectory(string,string)"/> would be one line, but it reports
-    /// nothing and opens every file exclusively — so a world that Minecraft still has open fails the
-    /// whole archive on <c>session.lock</c>. Writing the entries by hand costs twenty lines and buys
-    /// a real progress fraction, a cancel that takes effect within one file, and a backup that can be
-    /// taken while the game is running.
+    /// <see cref="ZipFile.CreateFromDirectory(string,string)"/> reports no progress and opens files
+    /// exclusively, so a world the game has open fails on <c>session.lock</c>. Writing entries by hand
+    /// gives real progress, a prompt cancel, and backups while the game is running.
     /// </remarks>
     private static Task ZipDirectoryAsync(string sourceDir, string destZip, IProgress<double>? progress,
                                           CancellationToken ct) =>
@@ -657,7 +656,7 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
                         using var dst = entry.Open();
                         src.CopyTo(dst);
                     }
-                    catch (IOException) { /* a file the game is rewriting right now — skip it */ }
+                    catch (IOException) { /* a file the game is rewriting right now; skip it */ }
                     progress?.Report((i + 1) / (double)files.Length);
                 }
             }
@@ -668,40 +667,55 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
             }
         }, ct);
 
-    /// <summary>Extracts an archive with per-entry progress, refusing entries that escape the target.</summary>
-    /// <remarks>The path check is not paranoia: these archives come from CurseForge, from a friend's
-    /// Discord, or from whatever the user dragged onto the page, and <c>..\..\</c> in an entry name is
-    /// the oldest trick there is.</remarks>
+    /// <summary>Extracts an archive with per-entry progress, skipping entries that escape the target.</summary>
+    /// <remarks>Archives can come from anywhere (stores, chat, drag and drop), so entries with
+    /// <c>..\..\</c> paths are expected and skipped. The archive's size is checked before anything is
+    /// written and each entry is held to its declared size, so a crafted zip can't fill the disk.</remarks>
     private static Task ExtractZipAsync(string zipPath, string targetDir, IProgress<double>? progress,
                                         CancellationToken ct) =>
         Task.Run(() =>
         {
-            Directory.CreateDirectory(targetDir);
-            // The trailing separator matters: without it "saves/world" would also accept a path that
-            // resolved to "saves/world-elsewhere".
-            var root = Path.GetFullPath(targetDir);
-            if (!root.EndsWith(Path.DirectorySeparatorChar)) root += Path.DirectorySeparatorChar;
             using var archive = ZipFile.OpenRead(zipPath);
+            if (SafeZip.CheckLimits(archive.Entries) is { } why)
+                throw new InvalidDataException($"Refused to unpack {Path.GetFileName(zipPath)}: {why}.");
+
+            Directory.CreateDirectory(targetDir);
+            var skipped = new List<string>();
             var total = archive.Entries.Count;
             for (var i = 0; i < total; i++)
             {
                 ct.ThrowIfCancellationRequested();
                 var entry = archive.Entries[i];
-                var destination = Path.GetFullPath(Path.Combine(root, entry.FullName));
-                if (!destination.StartsWith(root, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException($"Archive entry '{entry.FullName}' points outside the world folder.");
+                var rel = entry.FullName.Replace('\\', '/');
+                // Some zip tools write a leading "./", which names the same place.
+                while (rel.StartsWith("./", StringComparison.Ordinal)) rel = rel[2..];
+                var isFolder = rel.EndsWith('/');
+                var destination = PathSafety.ResolveInside(targetDir, isFolder ? rel.TrimEnd('/') : rel);
 
-                if (string.IsNullOrEmpty(entry.Name))
+                if (destination is null)
+                {
+                    if (rel.Trim('/').Length > 0) skipped.Add($"{entry.FullName} (unsafe path)");
+                }
+                else if (isFolder)
                 {
                     Directory.CreateDirectory(destination);
+                }
+                else if (SafeZip.CheckEntry(entry) is { } bad)
+                {
+                    skipped.Add($"{entry.FullName} ({bad})");
                 }
                 else
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                    entry.ExtractToFile(destination, overwrite: true);
+                    SafeZip.ExtractToFile(entry, destination, overwrite: true);
                 }
                 progress?.Report((i + 1) / (double)total);
             }
+
+            if (skipped.Count > 0)
+                AppLog.Log(nameof(WorldService),
+                    $"Left {skipped.Count} entr(ies) out of {Path.GetFileName(zipPath)}: " +
+                    string.Join(", ", skipped.Take(10)) + (skipped.Count > 10 ? ", ..." : ""));
         }, ct);
 
     private static bool IsLockFile(string relativePath) =>
@@ -760,16 +774,16 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
             var data = root["Data"] ?? root;
             meta = new WorldMeta(
                 LevelName: data.Find("LevelName")?.AsString(),
-                // Since 1.16 the seed moved into WorldGenSettings and lost its capital. Older saves
-                // still carry RandomSeed at the top of Data, and a search by name finds neither on a
-                // modern file — so both paths are spelled out here.
+                // Since 1.16 the seed is WorldGenSettings.seed; older saves keep RandomSeed at the top of Data.
                 Seed: data["WorldGenSettings"]?["seed"]?.AsLong() ?? data.Find("RandomSeed")?.AsLong(),
                 GameType: data.Find("GameType")?.AsInt(),
                 Difficulty: data.Find("Difficulty")?.AsInt(),
                 Hardcore: data.Find("hardcore")?.AsBool() ?? false,
                 AllowCommands: data.Find("allowCommands")?.AsBool() ?? false,
                 VersionName: data.Find("Version")?["Name"]?.AsString(),
-                LastPlayed: data.Find("LastPlayed")?.AsLong() is { } ms and > 0
+                // Past year 9999 the conversion throws, and one crafted level.dat would then hide every
+                // other save, so such a value counts as not recorded.
+                LastPlayed: data.Find("LastPlayed")?.AsLong() is { } ms and > 0 and <= MaxUnixMilliseconds
                     ? DateTimeOffset.FromUnixTimeMilliseconds(ms)
                     : null);
         }
@@ -777,6 +791,10 @@ public sealed class WorldService(AppSettings settings, PackFolderService packs)
         MetaCache[worldDir] = (stamp, meta);
         return meta;
     }
+
+    /// <summary>The last instant <see cref="DateTimeOffset.FromUnixTimeMilliseconds"/> accepts,
+    /// 9999-12-31 23:59:59.999 UTC.</summary>
+    private const long MaxUnixMilliseconds = 253_402_300_799_999;
 }
 
 /// <summary>What the launcher knows about a save without opening the game.</summary>

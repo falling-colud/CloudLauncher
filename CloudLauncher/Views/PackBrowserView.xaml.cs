@@ -1,5 +1,4 @@
-using System.Collections.ObjectModel;
-using System.Diagnostics;
+﻿using System.Collections.ObjectModel;
 using System.IO;
 using System.Net;
 using System.Text.RegularExpressions;
@@ -23,6 +22,11 @@ public partial class PackBrowserView : Page
     private ModSummary? _currentExternal;
     private PackSummary? _currentInternal;
     private readonly HashSet<Guid> _addedPackIds = new();
+
+    /// <summary>The hosted packs already in the list, so no page can add one a second time.</summary>
+    /// <remarks>Duplicates come from your own public packs (pinned at the top, then returned again
+    /// further down) and from packs updated while you scroll, which shift the page boundaries.</remarks>
+    private readonly HashSet<Guid> _listedPackIds = new();
     private List<ModVersion> _allVersions = new();
     private string? _currentProjectUrl;
     private string? _cachedDescription;
@@ -33,11 +37,17 @@ public partial class PackBrowserView : Page
     private string? _filterLoader;
 
     private CancellationTokenSource _cts = new();
+    /// <summary>Owns the in-flight page task, the throttle and the re-entrancy guard, so a reset
+    /// waits for the load it just cancelled rather than racing it.</summary>
+    private readonly InfiniteScroll.Pager _pager;
+    /// <summary>Searching / no results / failed / offline. Nothing else writes the count slot.</summary>
+    private readonly PageState _state;
     private bool _isLoading;
     private bool _hasMore;
     private int _offset;
-    private const int PageSize = 25;
-    private const int MaxResults = 200;
+    private const int PageSize = 50;   // both stores cap a page at 50
+    /// <summary>A safety stop so a runaway pager can't fill memory, not a browsing limit.</summary>
+    private const int MaxResults = 2000;
 
     public PackBrowserView(MainWindow shell)
     {
@@ -47,15 +57,32 @@ public partial class PackBrowserView : Page
         ResultsList.ItemsSource = _rows;
         PackTabs.SelectionChanged += OnPackTabChanged;
         App.State.ModpackDownload.PackAdded += OnPackAdded;
+
+        _pager = new InfiniteScroll.Pager(
+            () => !_isLoading && _hasMore && _activeChip is not null && _rows.Count < MaxResults,
+            () => _rows.Count,
+            LoadMoreAsync);
+
+        _state = new PageState(ResultsList, PageStateHost, nameof(PackBrowserView))
+            .Copy(PageCopy.Results)
+            .Slots(CountLabel, StatusLabel);
+        _state.RetryRequested += () => _ = RefreshEverythingAsync();
+
+        // This searches the store, so act on the debounced event; Enter searches immediately.
+        SearchBox.TextChangedDebounced += OnSearchSettled;
+        SearchBox.SearchSubmitted += OnSearchSubmitted;
+
         Loaded += async (_, _) =>
         {
-            // The chip and badge colours are painted in code (their active/inactive state is per
-            // row, so a DynamicResource cannot express it). ThemeService hands out brand-new brush
-            // objects on every Apply, so the paint has to be re-run when the theme changes or this
-            // page keeps the old accent until it is navigated away from and back.
+            // Chip and badge colours are painted in code (their state is per row), and ThemeService
+            // creates new brushes on every Apply, so repaint when the theme changes.
             ThemeService.Changed += OnThemeChanged;
             if (Window.GetWindow(this) is { } w) w.PreviewKeyDown += OnShellKeyDown;
-            await InitAsync();
+            // Search is the main job here, so the box starts open. It still collapses on blur when empty.
+            SearchBox.Expand();
+            try { await InitAsync(); }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { _state.Error("This page could not be set up.", ex); }
         };
         Unloaded += (_, _) =>
         {
@@ -82,8 +109,7 @@ public partial class PackBrowserView : Page
         if (!IsVisible) return;
         if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
         {
-            SearchBox.Focus();
-            SearchBox.SelectAll();
+            SearchBox.Focus();   // the control expands, focuses and selects
             e.Handled = true;
         }
         else if (e.Key == Key.F5)
@@ -96,9 +122,8 @@ public partial class PackBrowserView : Page
     private async void OnRefresh(object sender, RoutedEventArgs e) => await RefreshEverythingAsync();
 
     /// <summary>
-    /// Re-runs the current chip's query. Also re-reads the list of packs you already have, because
-    /// the Add/Open state of every CloudLauncher row depends on it and it goes stale as soon as you
-    /// add or delete an instance on another screen.
+    /// Re-runs the current chip's query, and re-reads which packs you already have, since every
+    /// CloudLauncher row's Add/Open button depends on it.
     /// </summary>
     private async Task RefreshEverythingAsync()
     {
@@ -111,7 +136,7 @@ public partial class PackBrowserView : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            SetStatus("Refresh failed: " + ex.Message, error: true);
+            _state.Error("Nothing answered.", ex, title: "Could not refresh");
         }
         finally
         {
@@ -129,7 +154,14 @@ public partial class PackBrowserView : Page
 
     private async Task InitAsync()
     {
-        await RefreshAddedPacksAsync();
+        // Show the loading state before the first request, so a dead server doesn't leave a blank pane.
+        _state.Begin(refreshing: false);
+
+        // This only decides Add vs Open, so a failure here must not stop the catalogs loading.
+        try { await RefreshAddedPacksAsync(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { AppLog.LogError(nameof(PackBrowserView), ex); }
+
         await BuildChipsAsync();
         if (_activeChip is null && _chips.Count > 0)
             await SelectChipAsync(_chips[0]);
@@ -175,20 +207,19 @@ public partial class PackBrowserView : Page
     }
 
     /// <summary>
-    /// Builds the source strip. Grouped the way the Mods and Resource-pack browsers group theirs:
-    /// the third-party catalogs first, then a divider, then everything that lives on this
-    /// CloudLauncher server — starting with your own packs, since this is the only screen in the
-    /// launcher that lists what you have published.
+    /// Builds the source strip like the Mods and Resource pack browsers: third-party catalogs, a
+    /// divider, then this server's sources, starting with your own packs.
     /// </summary>
     private async Task BuildChipsAsync()
     {
         _chips.Clear();
         _chips.Add(NewChip("", "CurseForge", SourceKind.CurseForge));
         _chips.Add(NewChip("", "Modrinth", SourceKind.Modrinth));
-        _chips.Add(NewChip("", "CloudLauncher Public", SourceKind.CloudLauncherPublic));
+        _chips.Add(NewChip("", "CloudLauncher Public", SourceKind.CloudLauncherPublic,
+            toolTip: "Packs anyone on this server can find, yours included"));
         _chips.Add(NewDividerChip());
         _chips.Add(NewChip("", "My packs", SourceKind.CloudLauncherPersonal,
-            toolTip: "Instances you own, listed the way everyone else sees them"));
+            toolTip: "Every instance you own, private ones included"));
         _chips.Add(NewChip("", "Shared with me", SourceKind.CloudLauncherShared));
         _chips.Add(NewChip("", "All teams", SourceKind.CloudLauncherTeam,
             toolTip: "Packs shared with every team you are in"));
@@ -199,7 +230,7 @@ public partial class PackBrowserView : Page
             foreach (var t in teams)
                 _chips.Add(NewChip("", t.Name, SourceKind.CloudLauncherTeam, t.Id));
         }
-        catch { /* teams unavailable — proceed without */ }
+        catch { /* teams unavailable: proceed without */ }
 
         ApplyChipStyles();
     }
@@ -250,7 +281,7 @@ public partial class PackBrowserView : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            SetStatus($"Couldn't load {row.Label}: {ex.Message}", error: true);
+            _state.Error($"{row.Label} could not be read.", ex);
         }
     }
 
@@ -261,52 +292,25 @@ public partial class PackBrowserView : Page
         await ResetAndLoadAsync();
     }
 
-    // Search as you type (see ModExplorerPage): reload a moment after typing stops; Enter is immediate.
-    private System.Windows.Threading.DispatcherTimer? _searchTimer;
-    private string _lastSearched = "";
-
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    /// <summary>Typing has settled. The box debounces at 450ms and only raises this when the query
+    /// changed.</summary>
+    private async void OnSearchSettled(object? sender, string text)
     {
-        _searchText = SearchBox.Text;
-        if (_searchTimer is null)
-        {
-            _searchTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
-            _searchTimer.Tick += async (_, _) =>
-            {
-                _searchTimer.Stop();
-                if (_activeChip is null || string.Equals(_searchText.Trim(), _lastSearched, StringComparison.Ordinal)) return;
-                _lastSearched = _searchText.Trim();
-                try { await ResetAndLoadAsync(); }
-                catch (OperationCanceledException) { }
-                catch (Exception ex) { SetStatus("Search failed: " + ex.Message, error: true); }
-            };
-        }
-        _searchTimer.Stop();
-        _searchTimer.Start();
+        _searchText = text;
+        if (_activeChip is null) return;
+        try { await ResetAndLoadAsync(); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { _state.Error("That search could not be run.", ex); }
     }
 
-    private async void OnSearchKeyDown(object sender, KeyEventArgs e)
+    /// <summary>Enter: search now, without waiting out the debounce.</summary>
+    private async void OnSearchSubmitted(object? sender, EventArgs e)
     {
-        try
-        {
-            if (e.Key == Key.Enter)
-            {
-                e.Handled = true;
-                _searchTimer?.Stop();
-                _lastSearched = _searchText.Trim();
-                await ResetAndLoadAsync();
-            }
-            else if (e.Key == Key.Escape)
-            {
-                SearchBox.Text = "";
-                _searchText = "";
-                _searchTimer?.Stop();
-                _lastSearched = "";
-                await ResetAndLoadAsync();
-            }
-        }
+        _searchText = SearchBox.Text.Trim();
+        if (_activeChip is null) return;
+        try { await ResetAndLoadAsync(); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Search failed: " + ex.Message, error: true); }
+        catch (Exception ex) { _state.Error("That search could not be run.", ex); }
     }
 
     private void OnFiltersClick(object sender, RoutedEventArgs e) => FiltersPopup.IsOpen = !FiltersPopup.IsOpen;
@@ -320,34 +324,36 @@ public partial class PackBrowserView : Page
         FiltersPopup.IsOpen = false;
         try { await ResetAndLoadAsync(); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Error: " + ex.Message, error: true); }
+        catch (Exception ex) { _state.Error("Those filters could not be applied.", ex); }
     }
 
     private async Task ResetAndLoadAsync()
     {
         _cts.Cancel(); _cts = new CancellationTokenSource();
+        // Wait for the cancelled load to unwind before clearing: otherwise the new load stops at the
+        // in-progress guard and leaves the list empty, or a late page appends into the cleared list.
+        await _pager.DrainAsync();
         _offset = 0;
         _rows.Clear();
+        _listedPackIds.Clear();
+        _pager.Reset();          // the old throttle timestamp belongs to the previous result set
         _hasMore = true;
-        StatusLabel.Text = "";
-        EmptyState.Visibility = Visibility.Collapsed;
-        CountLabel.Text = "";
+        // A new query: old results aren't worth keeping, so this is Loading, not Refreshing.
+        _state.Begin(refreshing: false);
+        _state.Note(null);       // whatever the last query said about itself is no longer true
         ClearDetail();
-        await LoadMoreAsync(_cts.Token);
+        await _pager.LoadPageAsync(_cts.Token);
     }
 
     private async void OnResultsScroll(object sender, ScrollChangedEventArgs e)
     {
-        if (_isLoading || !_hasMore || _activeChip is null) return;
-        if (e.OriginalSource is ScrollViewer sv &&
-            sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 200)
+        if (e.OriginalSource is not ScrollViewer sv) return;
+        try
         {
-            // LoadMoreAsync reports its own failures; this catch only exists so a throw from the
-            // scroll handler cannot escape as an unhandled exception and take the launcher down.
-            try { await LoadMoreAsync(_cts.Token); }
-            catch (OperationCanceledException) { }
-            catch (Exception ex) { SetStatus("Error: " + ex.Message, error: true); }
+            await _pager.FillAheadAsync(sv, _cts.Token);
         }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { _state.Error("The next page could not be loaded.", ex); }
     }
 
     private async Task LoadMoreAsync(CancellationToken ct)
@@ -356,7 +362,9 @@ public partial class PackBrowserView : Page
         if (_rows.Count >= MaxResults) { _hasMore = false; return; }
 
         _isLoading = true;
-        LoadingBar.Visibility = Visibility.Visible;
+        // Topping up visible results shows the Refreshing hairline; the first page of a new query
+        // already entered Loading in ResetAndLoadAsync.
+        if (_rows.Count > 0) _state.Begin(refreshing: true);
 
         try
         {
@@ -387,44 +395,35 @@ public partial class PackBrowserView : Page
 
             _offset += added;
             if (added == 0) _hasMore = false;
-            CountLabel.Text = _rows.Count == 0
-                ? ""
-                : $"{_rows.Count} result{(_rows.Count == 1 ? "" : "s")}{(HasFilters ? " (filtered)" : "")}";
-            EmptyState.Visibility = (_rows.Count == 0 && !_hasMore) ? Visibility.Visible : Visibility.Collapsed;
-            if (_rows.Count == 0 && !_hasMore)
+
+            // Stay in Loading while more pages are coming, or "No results" would flash mid-search.
+            if (_rows.Count > 0 || !_hasMore)
             {
-                // "You have none" and "none matched what you asked for" are different problems and
-                // need different advice, so the empty state distinguishes them.
-                var searching = !string.IsNullOrWhiteSpace(_searchText) || HasFilters;
-                EmptyTitle.Text = _activeChip.Kind == SourceKind.CloudLauncherPersonal && !searching
-                    ? "No packs published"
-                    : "No results";
-                EmptyDetail.Text = _activeChip.Kind switch
-                {
-                    SourceKind.CloudLauncherPersonal when searching =>
-                        "None of your packs match your search and filters.",
-                    SourceKind.CloudLauncherPersonal =>
-                        "You haven't created a pack yet — create an instance, then set its visibility "
-                        + "to Team or Public in its Options to publish it here.",
-                    SourceKind.CloudLauncherPublic => "No public packs match your search.",
-                    SourceKind.CloudLauncherShared => "Nobody has shared a pack with you yet.",
-                    SourceKind.CloudLauncherTeam when _activeChip.TeamId is null =>
-                        "None of your teams has a pack shared with it yet.",
-                    SourceKind.CloudLauncherTeam   => "This team has no packs yet.",
-                    _ => "Try a different search or filter."
-                };
+                // The empty message depends on the source and filters. EmptyNext only applies to this
+                // Content call.
+                var (emptyTitle, emptyBody) = EmptyAnswer(_activeChip);
+                _state.EmptyNext(emptyTitle, emptyBody);
+
+                _state.Content(_rows.Count,
+                    countText: $"{_rows.Count:N0} result{(_rows.Count == 1 ? "" : "s")}"
+                             + (HasFilters ? " (filtered)" : ""));
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            // Usually a newer query cancelled us, but the token is shared with the detail pane, so a row
+            // click can cancel too. Nothing else would clear the bar then, so show the rows we have.
+            if (_state.HasData) _state.Cancelled();
+        }
         catch (Exception ex)
         {
-            SetStatus("Error: " + ex.Message, error: true);
+            // Name the catalog that failed.
+            _state.Error($"{_activeChip.Label} did not answer.", ex);
             _hasMore = false;
         }
         finally
         {
             _isLoading = false;
-            LoadingBar.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -448,15 +447,13 @@ public partial class PackBrowserView : Page
     }
 
     /// <summary>
-    /// Loads one screenful from this server's catalog, honouring the Minecraft-version and loader
+    /// Loads one screenful from this server's catalog, applying the Minecraft version and loader
     /// filters.
     /// </summary>
     /// <remarks>
-    /// The browse endpoint takes no version or loader parameter, so the filter is applied here on
-    /// the page that came back. That means a page can be filtered down to nothing, which would look
-    /// like "no results" while the server still has matches further down — so keep pulling pages
-    /// until something matches or the server runs out. The cap keeps a filter that matches nothing
-    /// from walking the whole catalog in one go; scrolling continues it.
+    /// The browse endpoint can't filter by version or loader, so filtering happens here and a page
+    /// can end up empty. Keep pulling pages until something matches or the server runs out, up to a
+    /// cap; scrolling continues from there.
     /// </remarks>
     private async Task<int> LoadCloudLauncherAsync(PackBrowseSource source, Guid? teamId, CancellationToken ct)
     {
@@ -464,14 +461,27 @@ public partial class PackBrowserView : Page
         var scanned = 0;
         var matched = 0;
 
+        // Your own public packs lead the first Public page, since older servers leave them out of
+        // Public. Fetched alongside the first page to avoid a second round trip.
+        var ownPublic = source == PackBrowseSource.Public && _offset == 0
+            ? OwnPublicPacks.FetchAsync(App.State.Api, _searchText, ct)
+            : null;
+
         for (var page = 0; page < maxPagesPerCall; page++)
         {
             var result = await App.State.Api.BrowsePacksAsync(
                 source, teamId, _searchText, _offset + scanned, PageSize, ct);
             scanned += result.Items.Count;
 
+            if (ownPublic is not null)
+            {
+                PinOwnPublicPacks(await ownPublic);
+                ownPublic = null;
+            }
+
             foreach (var p in result.Items.Where(MatchesPackFilters))
             {
+                if (!_listedPackIds.Add(p.Id)) continue;   // pinned above, or a shifted page boundary
                 _rows.Add(RowFromInternal(p));
                 matched++;
             }
@@ -480,9 +490,57 @@ public partial class PackBrowserView : Page
             if (matched > 0 || !_hasMore || result.Items.Count == 0) break;
         }
 
-        // The caller advances the paging cursor by what we return, and the cursor counts rows the
-        // server handed over — not the subset that survived the filter.
+        // The paging cursor counts rows the server returned, not the filtered or pinned ones.
         return scanned;
+    }
+
+    /// <summary>Puts your own public packs at the top of the Public list, marked as yours.</summary>
+    /// <remarks>Pinned instead of sorted in by date, which would need every later page to know where
+    /// they fall. Later copies from the server are dropped by <see cref="_listedPackIds"/>.</remarks>
+    private void PinOwnPublicPacks(IReadOnlyList<PackSummary> own)
+    {
+        var at = 0;
+        foreach (var p in own.Where(MatchesPackFilters))
+        {
+            if (!_listedPackIds.Add(p.Id)) continue;
+            _rows.Insert(at++, RowFromInternal(p));
+        }
+    }
+
+    /// <summary>What an empty list means for this source, worded for whatever is narrowing it.</summary>
+    private (string Title, string Body) EmptyAnswer(SourceChipRow chip)
+    {
+        var narrowing = (!string.IsNullOrWhiteSpace(_searchText), HasFilters) switch
+        {
+            (true, true) => "your search and filters",
+            (true, false) => "your search",
+            (false, true) => "your filters",
+            _ => null
+        };
+
+        if (narrowing is not null)
+            return ("No results", chip.Kind switch
+            {
+                SourceKind.CloudLauncherPublic => $"No public packs match {narrowing}.",
+                SourceKind.CloudLauncherPersonal => $"None of your packs match {narrowing}.",
+                SourceKind.CloudLauncherShared => $"No pack shared with you matches {narrowing}.",
+                SourceKind.CloudLauncherTeam => $"No team pack matches {narrowing}.",
+                _ => "Try a different search or filter."
+            });
+
+        return chip.Kind switch
+        {
+            SourceKind.CloudLauncherPublic => ("No public packs yet",
+                "Packs set to 'Everyone on this CloudLauncher server' show up here, yours included. "
+                + "To list one of yours, choose that on its Share & sync tab."),
+            SourceKind.CloudLauncherPersonal => ("No packs yet",
+                "You don't own any instances yet. Every one you create shows up here, private ones too."),
+            SourceKind.CloudLauncherShared => ("No results", "Nobody has shared a pack with you yet."),
+            SourceKind.CloudLauncherTeam when chip.TeamId is null =>
+                ("No results", "None of your teams has a pack shared with it yet."),
+            SourceKind.CloudLauncherTeam => ("No results", "This team has no packs yet."),
+            _ => ("No results", "Try a different search or filter.")
+        };
     }
 
     /// <summary>True when the Filters popup is narrowing the results.</summary>
@@ -521,15 +579,18 @@ public partial class PackBrowserView : Page
             Internal = p,
             Title = p.Name,
             Subtitle = p.Summary ?? p.Description ?? "",
-            MetaLabel = $"by {p.OwnerUsername} · {FormatLoader(p.Loader, p.LoaderVersion)} · {p.MinecraftVersion ?? "—"}",
+            MetaLabel = $"by {p.OwnerUsername} · {FormatLoader(p.Loader, p.LoaderVersion)} · {p.MinecraftVersion ?? "-"}",
             Initial = InitialFor(p.Name),
             SourceBadge = "CloudLauncher",
             SourceBadgeBackground = (Brush)FindResource("AccentSoftBrush"),
             SourceBadgeForeground = (Brush)FindResource("AccentBrush"),
             ActionLabel = "Add",
-            // Hosted packs carry no icon of their own, but once a pack is yours its artwork is in
-            // the instance's synced assets folder, so at least your own rows are not grey letters.
-            IconImage = TryLoadLocalIcon(p.Id)
+            // Hosted packs have no icon URL, but packs you have carry artwork in their synced assets.
+            IconImage = TryLoadLocalIcon(p.Id),
+            // Every row under My packs is yours, so the marker would only be noise there.
+            YoursVisibility = IsMine(p) && _activeChip?.Kind != SourceKind.CloudLauncherPersonal
+                ? Visibility.Visible
+                : Visibility.Collapsed
         };
         ApplyInternalActionState(row);
         return row;
@@ -539,7 +600,7 @@ public partial class PackBrowserView : Page
     private static System.Windows.Media.ImageSource? TryLoadLocalIcon(Guid packId)
     {
         try { return App.State.PackAssets.TryLoadIconImage(packId); }
-        catch { return null; } // missing/locked instance folder — fall back to the letter tile
+        catch { return null; } // missing or locked instance folder: fall back to the letter tile
     }
 
     // ── detail panel ─────────────────────────────────────────────────────────
@@ -549,7 +610,7 @@ public partial class PackBrowserView : Page
         if (ResultsList.SelectedItem is not PackBrowseRow row) return;
         try { await LoadRowDetailAsync(row); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Couldn't load that pack: " + ex.Message, error: true); }
+        catch (Exception ex) { Fail("That pack's details could not be loaded.", ex); }
     }
 
     private async void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
@@ -557,7 +618,7 @@ public partial class PackBrowserView : Page
         if (ResultsList.SelectedItem is not PackBrowseRow row) return;
         try { await DownloadRowAsync(row, null); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
+        catch (Exception ex) { Fail("That pack could not be added.", ex); }
     }
 
     private async Task LoadRowDetailAsync(PackBrowseRow row)
@@ -587,8 +648,8 @@ public partial class PackBrowserView : Page
         AddedHint.Text = row.StateHint;
         PackTabs.SelectedIndex = 0;
         OverviewBrowser.Visibility = Visibility.Visible;
-        OverviewBrowser.Show("Loading…");
-        ScreenshotsEmptyText.Text = "Loading screenshots…";
+        OverviewBrowser.Show("Loading...");
+        ScreenshotsEmptyText.Text = "Loading screenshots...";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
         ScreenshotList.Visibility = Visibility.Collapsed;
@@ -605,7 +666,8 @@ public partial class PackBrowserView : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            OverviewBrowser.Show("Error: " + ex.Message);
+            AppLog.LogError(nameof(PackBrowserView), ex);
+            OverviewBrowser.Show("This pack's page could not be loaded. The full error is in the launcher log.");
         }
     }
 
@@ -621,8 +683,7 @@ public partial class PackBrowserView : Page
             : await App.State.Modrinth.GetProjectDetailAsync(mod.Id, ct);
 
         _cachedDescription = detail.Description ?? mod.Description;
-        // Trust the source's declared format instead of sniffing: a Modrinth body that embeds one
-        // HTML tag used to be misread as HTML, which rendered the whole Markdown page as raw text.
+        // Trust the declared format instead of sniffing: Modrinth Markdown can embed HTML tags.
         _descriptionIsMarkdown = detail.IsMarkdown;
         ShowOverviewDescription(_cachedDescription, _descriptionIsMarkdown);
         ShowScreenshots(detail.Screenshots);
@@ -659,8 +720,8 @@ public partial class PackBrowserView : Page
         catch (OperationCanceledException) { throw; }
         catch (ApiException api) when (api.Status == HttpStatusCode.Forbidden)
         {
-            // The owner set the pack back to Private (or dropped you as a collaborator) after the
-            // list was fetched. Without this arm the user sees the raw "403 Forbidden: {...}" body.
+            // The owner made the pack Private or removed you after the list loaded. Show that instead of
+            // the raw 403 body.
             ShowOverviewDescription(
                 $"You no longer have access to '{summary.Name}'.\n\n"
                 + "Its owner stopped sharing it, so it can't be downloaded or played. "
@@ -671,50 +732,50 @@ public partial class PackBrowserView : Page
         }
         catch (ApiException api) when (api.Status == HttpStatusCode.NotFound)
         {
-            ShowOverviewDescription($"'{summary.Name}' no longer exists — its owner deleted it.", false);
+            ShowOverviewDescription($"'{summary.Name}' no longer exists - its owner deleted it.", false);
             InternalDetailsList.ItemsSource = null;
         }
         catch (Exception ex)
         {
+            AppLog.LogError(nameof(PackBrowserView), ex);
             ShowOverviewDescription(
                 (summary.Summary ?? summary.Description ?? "") +
                 Environment.NewLine + Environment.NewLine +
-                "Error loading detail: " + ex.Message,
+                "The rest of this pack's details could not be read. The full error is in the launcher log.",
                 false);
         }
     }
 
     /// <summary>
-    /// Fills the Details tab for a CloudLauncher pack with facts that are actually true of it.
+    /// Fills the Details tab for a CloudLauncher pack.
     /// </summary>
-    /// <remarks>
-    /// This tab used to be "Versions" holding one fabricated row whose Version column was the
-    /// Minecraft version and whose Channel column read "Public" or "Private" — it looked like a
-    /// release channel and told the user nothing. Hosted packs have no release history: the server
-    /// keeps one live copy of the instance.
-    /// </remarks>
+    /// <remarks>Hosted packs have no release history; the server keeps one live copy of the
+    /// instance.</remarks>
     private void ShowInternalDetails(PackDetail detail)
     {
         var facts = new List<PackFactRow>
         {
-            new("Minecraft version", detail.MinecraftVersion ?? "—"),
+            new("Minecraft version", detail.MinecraftVersion ?? "-"),
             new("Loader", FormatLoader(detail.Loader, detail.LoaderVersion)),
             new("Visibility", detail.Visibility switch
             {
-                PackVisibility.Public => "Public — anyone on this server can find it",
-                PackVisibility.Team   => "Team — visible to the teams it is shared with",
-                _                     => "Private — only you and its collaborators"
+                PackVisibility.Public => "Public - anyone on this server can find it",
+                PackVisibility.Team   => "Team - visible to the teams it is shared with",
+                _                     => "Private - only you and its collaborators"
             }),
             new("Hosted on the server",
-                detail.IsShared ? "Yes — its files can be downloaded" : "No — there are no files to download",
+                detail.IsShared ? "Yes - its files can be downloaded" : "No - there are no files to download",
                 detail.IsShared
                     ? null
-                    : "Turn on 'Host this instance on the server' in the instance's Options so people who add it get its files."),
+                    : App.State.Settings.UserId is { } me && detail.OwnerId == me
+                        ? "Tick 'Publish this instance to CloudLauncher' on its Share & sync tab so "
+                          + "people who add it get its files."
+                        : "Its owner has not published its files yet, so adding it gives you an empty instance."),
             new("Owner", detail.OwnerUsername),
             new("Shared with",
                 $"{Plural(detail.Collaborators.Count, "collaborator")}, {Plural(detail.Teams.Count, "team")}"),
-            new("Created", detail.CreatedAt.LocalDateTime.ToString("d MMM yyyy")),
-            new("Last updated", detail.UpdatedAt.LocalDateTime.ToString("d MMM yyyy HH:mm"))
+            new("Created", TimeFormat.Date(detail.CreatedAt)),
+            new("Last updated", TimeFormat.DateTime(detail.UpdatedAt))
         };
 
         InternalDetailsList.ItemsSource = facts;
@@ -725,9 +786,8 @@ public partial class PackBrowserView : Page
         $"{count} {noun}{(count == 1 ? "" : "s")}";
 
     /// <summary>
-    /// Shows or hides the two tabs that only a CurseForge/Modrinth project can fill. A hosted pack
-    /// has neither screenshots nor project links, so leaving them in place meant every CloudLauncher
-    /// pack showed two tabs whose only content was a sentence explaining they were empty.
+    /// Shows or hides the two tabs only a CurseForge or Modrinth project can fill. Hosted packs have
+    /// no screenshots or project links.
     /// </summary>
     private void ShowExternalTabs(bool external)
     {
@@ -770,14 +830,14 @@ public partial class PackBrowserView : Page
         if (sender is not Button b || b.Tag is not PackBrowseRow row) return;
         try { await DownloadRowAsync(row, b); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
+        catch (Exception ex) { Fail("That pack could not be added.", ex); }
     }
 
     private async void OnDownloadSelectedPack(object sender, RoutedEventArgs e)
     {
         try { await DownloadCurrentAsync(sender as Button); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
+        catch (Exception ex) { Fail("That pack could not be added.", ex); }
     }
 
     private async void OnDownloadVersion(object sender, RoutedEventArgs e)
@@ -799,7 +859,7 @@ public partial class PackBrowserView : Page
             finally { if (button is not null) button.IsEnabled = true; }
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Download failed: " + ex.Message, error: true); }
+        catch (Exception ex) { Fail("That version could not be downloaded.", ex); }
     }
 
     private async Task DownloadCurrentAsync(Button? button)
@@ -838,11 +898,11 @@ public partial class PackBrowserView : Page
         }
         catch (ApiException api) when (api.Status == HttpStatusCode.NotFound)
         {
-            SetStatus("That pack no longer exists — its owner deleted it.", error: true);
+            SetStatus("That pack no longer exists - its owner deleted it.", error: true);
         }
         catch (Exception ex)
         {
-            SetStatus("Download failed: " + ex.Message, error: true);
+            Fail("That download could not be started.", ex);
         }
         finally
         {
@@ -851,13 +911,13 @@ public partial class PackBrowserView : Page
     }
 
     /// <summary>
-    /// Says, in words, what a 403 on a pack actually means: the owner stopped sharing it. Offers the
-    /// only cleanup that helps — dropping it from your list — when the pack is still sitting there.
+    /// Explains a 403 on a pack (the owner stopped sharing it) and offers to drop it from your list
+    /// if it is still there.
     /// </summary>
     private async Task ReportLostAccessAsync(PackBrowseRow row)
     {
         var name = row.Title;
-        SetStatus($"You no longer have access to '{name}' — its owner stopped sharing it.", error: true);
+        SetStatus($"You no longer have access to '{name}' - its owner stopped sharing it.", error: true);
 
         if (row.Internal is not { } pack || !IsInternalPackAdded(pack.Id)) return;
 
@@ -887,12 +947,10 @@ public partial class PackBrowserView : Page
     }
 
     /// <summary>
-    /// Writes to both status lines at once — the footer one and the one under the detail panel —
-    /// so a message is visible wherever the user is looking.
+    /// Writes to both status lines, the footer and the one under the detail panel.
     /// </summary>
-    /// <remarks>Colour is set by resource reference rather than by assigning a brush, because
-    /// ThemeService swaps the brush objects on every theme change and an assigned brush would be
-    /// frozen at the old colour.</remarks>
+    /// <remarks>Colour is set by resource reference: ThemeService replaces brushes on every theme
+    /// change, so an assigned brush would keep the old colour.</remarks>
     private void SetStatus(string message, bool error)
     {
         var key = error ? "DangerBrush" : "AccentBrush";
@@ -902,11 +960,20 @@ public partial class PackBrowserView : Page
         DownloadStatus.Text = message;
     }
 
+    /// <summary>An action failed: one sentence the user can act on, and the exception to the log.</summary>
+    /// <remarks>Same split as <see cref="PageState.Error"/>. Raw exception text is for the log, not
+    /// the user.</remarks>
+    private void Fail(string plain, Exception ex)
+    {
+        AppLog.LogError(nameof(PackBrowserView), ex);
+        SetStatus(plain + " The full error is in the launcher log.", error: true);
+    }
+
     private async Task DownloadExternalAsync(ModSummary mod, ModVersion? selectedVersion, Button? button)
     {
         StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
         DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
-        StatusLabel.Text = $"Starting download for '{mod.Name}'…";
+        StatusLabel.Text = $"Starting download for '{mod.Name}'...";
         DownloadStatus.Text = StatusLabel.Text;
 
         var metadata = new PackImportMetadata(
@@ -919,7 +986,7 @@ public partial class PackBrowserView : Page
 
         await App.State.ModpackDownload.StartExternalDownloadAsync(mod, selectedVersion, metadata);
 
-        SetStatus($"'{mod.Name}' is downloading — check your instances.", error: false);
+        SetStatus($"'{mod.Name}' is downloading - check your instances.", error: false);
     }
 
     private async Task<List<ModVersion>> LoadVersionsForModAsync(ModSummary mod, CancellationToken ct)
@@ -963,8 +1030,7 @@ public partial class PackBrowserView : Page
         DownloadStatus.Text = "";
         AddedHint.Text = "";
         OpenProjectButton.Visibility = Visibility.Collapsed;
-        // Put the tabs back, or a CurseForge pack selected after a CloudLauncher one would inherit
-        // the collapsed Screenshots/Links tabs and the Details fact sheet.
+        // Restore the tabs a CloudLauncher pack may have hidden.
         ShowExternalTabs(true);
     }
 
@@ -1064,7 +1130,7 @@ public partial class PackBrowserView : Page
         if (RowFromMenuSender(sender) is not { } row) return;
         try { await DownloadRowAsync(row, null); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { SetStatus("Failed: " + ex.Message, error: true); }
+        catch (Exception ex) { Fail("That pack could not be added.", ex); }
     }
 
     private void OnCtxOpenInstance(object sender, RoutedEventArgs e)
@@ -1084,7 +1150,7 @@ public partial class PackBrowserView : Page
         if (RowFromMenuSender(sender)?.Internal is not { } pack) return;
         SetStatus(ClipboardHelper.TrySetText(pack.Id.ToString())
             ? "Pack ID copied."
-            : "Couldn't copy — the clipboard is in use by another program.",
+            : "Couldn't copy - the clipboard is in use by another program.",
             error: false);
     }
 
@@ -1093,7 +1159,7 @@ public partial class PackBrowserView : Page
         if (RowFromMenuSender(sender)?.External is not { } mod) return;
         SetStatus(ClipboardHelper.TrySetText(BuildProjectUrl(mod))
             ? "Project URL copied."
-            : "Couldn't copy — the clipboard is in use by another program.",
+            : "Couldn't copy - the clipboard is in use by another program.",
             error: false);
     }
 
@@ -1105,7 +1171,7 @@ public partial class PackBrowserView : Page
             var mine = IsMine(pack);
             var confirmed = await AppDialog.ConfirmAsync(_shell, "Remove from my list",
                 mine
-                    ? $"'{pack.Name}' is yours — removing it here only hides it from your instance "
+                    ? $"'{pack.Name}' is yours - removing it here only hides it from your instance "
                       + "list. It stays on the server and anyone you shared it with keeps it.\n\nHide it?"
                     : $"Stop listing '{pack.Name}' as one of your instances?\n\n"
                       + "You can add it again from this browser while it is still shared with you. "
@@ -1118,23 +1184,24 @@ public partial class PackBrowserView : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            SetStatus("Couldn't remove it: " + ex.Message, error: true);
+            Fail("That pack could not be removed from your list.", ex);
         }
     }
 
     private void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { DownloadStatus.Text = ex.Message; }
+        if (!SafeLaunch.OpenUrl(url))
+            SetStatus("That link could not be opened. The full error is in the launcher log.", error: true);
     }
 
+    /// <summary>The detail header's 42px tile, through the same cache the rows use.</summary>
+    /// <remarks>A fresh BitmapImage per selection would decode full-size icons on the UI thread on
+    /// every arrow-key press.</remarks>
     private void SetSelectedIcon(string? iconUrl)
     {
-        SelectedIconImage.Source = null;
-        if (string.IsNullOrWhiteSpace(iconUrl)) return;
-        try { SelectedIconImage.Source = new BitmapImage(new Uri(iconUrl, UriKind.Absolute)); }
-        catch { SelectedIconImage.Source = null; }
+        IconLoader.SetDecodeWidth(SelectedIconImage, 42);
+        IconLoader.SetUrl(SelectedIconImage, string.IsNullOrWhiteSpace(iconUrl) ? null : iconUrl);
     }
 
     private static string BuildProjectUrl(ModSummary mod)
@@ -1167,35 +1234,34 @@ public partial class PackBrowserView : Page
     private bool IsInternalPackAdded(Guid packId) => _addedPackIds.Contains(packId);
 
     /// <summary>
-    /// What the button on a CloudLauncher pack says. A pack that is already in your instances used to
-    /// get no button at all, which reads as "this one cannot be downloaded" — it is the opposite: it
-    /// is already yours, and its files are fetched from its instance page. So it says Open and goes
-    /// there.
+    /// Sets the button on a CloudLauncher pack. A pack already in your instances gets Open, which goes
+    /// to its instance page where its files are downloaded.
     /// </summary>
-    /// <remarks>A pack shared with you is in your instance list the moment the owner adds you, before
-    /// you have downloaded a single file — which is exactly when someone goes looking for a download
-    /// button in the browser.</remarks>
-    /// <remarks>
-    /// A pack you own is never "Add"-able: the server answers <c>subscribe</c> with 400 "You own
-    /// this pack", so the My-packs chip would otherwise be a list of buttons that always fail.
-    /// </remarks>
+    /// <remarks>Shared packs are in your list as soon as the owner adds you. Packs you own never get
+    /// Add: the server refuses <c>subscribe</c> for them with 400 "You own this pack".</remarks>
     private void ApplyInternalActionState(PackBrowseRow row)
     {
         if (row.Internal is not { } pack) return;
-        var added = IsInternalPackAdded(pack.Id) || IsMine(pack);
+        var mine = IsMine(pack);
+        var added = IsInternalPackAdded(pack.Id) || mine;
         row.ActionVisibility = Visibility.Visible;
         row.ActionLabel = added ? "Open" : "Add";
-        row.StateHint = IsMine(pack)
-            ? "You own this pack — open it to edit or publish it"
-            : added ? "Already in your instances — open it to download its files" : "";
 
-        // Visibility and hosting are set on two unrelated cards, so a pack can be published while
-        // its files were never uploaded. Anyone who adds that gets an empty instance, so say so
-        // before they click rather than after.
+        // Listing and hosting are separate switches, so a listed pack may have no files on the server.
+        // Warn before anyone adds it, and tell the owner where the switch is.
         var notHosted = !pack.IsShared;
         row.NotHostedVisibility = notHosted ? Visibility.Visible : Visibility.Collapsed;
-        if (notHosted && !added)
-            row.StateHint = "Not hosted on the server — this pack has no files to download yet";
+        row.NotHostedHint = mine
+            ? "Its files are not on the server yet, so anyone who adds it gets an empty instance. "
+              + "Publish it from its Share & sync tab."
+            : "This pack has no files on the server yet - adding it gives you an empty instance.";
+        row.StateHint = mine
+            ? notHosted
+                ? "Yours, but its files are not on the server yet - open it to publish them"
+                : "Yours - open it to change it or who can find it"
+            : added ? "Already in your instances - open it to download its files"
+            : notHosted ? "Not hosted on the server - this pack has no files to download yet"
+            : "";
 
         row.AddedMenuVisibility = IsInternalPackAdded(pack.Id) ? Visibility.Visible : Visibility.Collapsed;
     }
@@ -1211,7 +1277,7 @@ public partial class PackBrowserView : Page
         Modrinth,
         CloudLauncherPublic,
 
-        /// <summary>Packs you own, as they appear to everyone else.</summary>
+        /// <summary>Every pack you own, whatever its visibility.</summary>
         CloudLauncherPersonal,
         CloudLauncherShared,
         CloudLauncherTeam
@@ -1260,8 +1326,14 @@ public partial class PackBrowserView : Page
         /// <summary>Why the button says what it says, for the detail panel.</summary>
         public string StateHint { get; set; } = "";
 
-        /// <summary>Shown on a published pack whose files were never uploaded to the server.</summary>
+        /// <summary>Shown on a listed pack whose files were never uploaded to the server.</summary>
         public Visibility NotHostedVisibility { get; set; } = Visibility.Collapsed;
+
+        /// <summary>Why "Not hosted" matters, worded for whoever is looking at it.</summary>
+        public string NotHostedHint { get; set; } = "";
+
+        /// <summary>The "Yours" marker: your own pack, in any list but My packs.</summary>
+        public Visibility YoursVisibility { get; set; } = Visibility.Collapsed;
 
         public Visibility InternalMenuVisibility =>
             Kind == PackBrowseRowKind.Internal ? Visibility.Visible : Visibility.Collapsed;
@@ -1298,10 +1370,10 @@ public partial class PackBrowserView : Page
         {
             Source = version,
             VersionNumber = version.VersionNumber,
-            McVersions = string.Join(", ", version.GameVersions.Take(3)) + (version.GameVersions.Length > 3 ? "…" : ""),
+            McVersions = string.Join(", ", version.GameVersions.Take(3)) + (version.GameVersions.Length > 3 ? "..." : ""),
             LoaderList = string.Join(", ", version.Loaders),
             ReleaseChannel = version.ReleaseChannel,
-            DateLabel = version.DatePublished.LocalDateTime.ToString("yyyy-MM-dd"),
+            DateLabel = TimeFormat.Date(version.DatePublished),
             SizeLabel = version.Files.FirstOrDefault()?.Size is long s
                 ? s > 1024 * 1024 ? $"{s / (1024.0 * 1024):F1} MB" : $"{s / 1024.0:F0} KB"
                 : ""

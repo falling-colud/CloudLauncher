@@ -1,6 +1,7 @@
 ﻿<Window x:Class="CloudLauncher.Views.ConfirmDeleteDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:slate="clr-namespace:CloudLauncher.Controls"
         Title="Delete instance" Height="320" Width="480"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Background="{DynamicResource Surface1Brush}"
@@ -14,13 +15,13 @@
 
         <!-- Header with warning icon -->
         <DockPanel Grid.Row="0" Margin="0,0,0,16">
-            <Border DockPanel.Dock="Left" Width="48" Height="48" CornerRadius="12"
+            <slate:SlateBorder DockPanel.Dock="Left" Width="48" Height="48" CornerRadius="12"
                     Background="{DynamicResource AccentSoftBrush}"
                     VerticalAlignment="Top" Margin="0,0,16,0">
-                <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource IconFont}" FontSize="22"
-                           Foreground="{DynamicResource AccentBrush}"
+                <TextBlock Text="&#xE7BA;" FontFamily="{DynamicResource IconFont}" FontSize="22"
+                           Foreground="{DynamicResource AccentTextBrush}"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
-            </Border>
+            </slate:SlateBorder>
             <StackPanel VerticalAlignment="Center">
                 <TextBlock x:Name="HeaderLabel" Style="{StaticResource H2}" Text="Delete this instance?"/>
                 <TextBlock x:Name="PackNameLabel" Style="{StaticResource Muted}" Margin="0,4,0,0"
@@ -34,11 +35,11 @@
                        Foreground="{DynamicResource TextSecondaryBrush}">
                 This will remove the instance from the server. Anyone you shared it with will lose access.
             </TextBlock>
-            <Border Background="{DynamicResource Surface0Brush}" CornerRadius="6"
+            <slate:SlateBorder Background="{DynamicResource Surface0Brush}" CornerRadius="6"
                     Padding="12,10" Margin="0,12,0,0"
                     BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1">
                 <DockPanel>
-                    <TextBlock DockPanel.Dock="Left" Text="&#xE946;" FontFamily="{StaticResource IconFont}"
+                    <TextBlock DockPanel.Dock="Left" Text="&#xE946;" FontFamily="{DynamicResource IconFont}"
                                FontSize="14" Foreground="{DynamicResource InfoBlueBrush}"
                                VerticalAlignment="Top" Margin="0,2,10,0"/>
                     <TextBlock TextWrapping="Wrap" Style="{StaticResource Caption}"
@@ -47,16 +48,16 @@
                         Delete them yourself if you no longer need them.
                     </TextBlock>
                 </DockPanel>
-            </Border>
+            </slate:SlateBorder>
         </StackPanel>
 
         <!-- Buttons -->
-        <DockPanel Grid.Row="2" Margin="0,8,0,0">
+        <DockPanel Grid.Row="2" Margin="0,8,0,0" LastChildFill="False">
             <Button x:Name="DeleteButton" DockPanel.Dock="Right" Style="{StaticResource DangerButton}"
                     Content="Delete instance" Click="OnDelete" IsDefault="False"
                     FontWeight="SemiBold" MinWidth="120"/>
             <Button DockPanel.Dock="Right" Content="Cancel" IsCancel="True" Click="OnCancel"
-                    MinWidth="100"/>
+                    MinWidth="100" Margin="0,0,8,0"/>
         </DockPanel>
     </Grid>
 </Window>

@@ -10,7 +10,7 @@ public sealed record MinecraftReleaseInfo(string Id, string Type, DateTimeOffset
 
 public sealed class VersionService
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
+    private static readonly HttpClient Http = ApiClient.WithUserAgent(new() { Timeout = TimeSpan.FromSeconds(30) });
 
     // These manifests change at most daily, but the create dialogs call them on every open.
     // Cache per-endpoint with a short TTL so routine UI actions don't re-download hundreds of
@@ -76,8 +76,8 @@ public sealed class VersionService
     public Task<List<string>> ListNeoForgeVersionsAsync(CancellationToken ct = default) =>
         CachedAsync("neoforge", async () =>
         {
-            // NeoForge maven exposes a JSON list. Version strings are like "21.1.86" — the major
-            // tracks the Minecraft version (21.1.x → MC 1.21.1, 20.4.x → MC 1.20.4, etc.).
+            // NeoForge maven exposes a JSON list. Versions look like "21.1.86", where the first two
+            // parts track the Minecraft version (21.1.x -> MC 1.21.1, 20.4.x -> MC 1.20.4).
             var resp = await Http.GetFromJsonAsync<MavenVersionList>(
                 "https://maven.neoforged.net/api/maven/versions/releases/net%2Fneoforged%2Fneoforge", ct);
             var versions = resp?.Versions ?? new();
@@ -87,11 +87,11 @@ public sealed class VersionService
 
     public static string? NeoForgeVersionForMinecraft(string neoforgeVersion)
     {
-        // 21.1.86 → 1.21.1, 20.4.237 → 1.20.4, 21.0.143 → 1.21
+        // 21.1.86 -> 1.21.1, 20.4.237 -> 1.20.4, 21.0.143 -> 1.21
         var parts = neoforgeVersion.Split('.');
         if (parts.Length < 2) return null;
         if (!int.TryParse(parts[0], out var major) || !int.TryParse(parts[1], out var minor)) return null;
-        // major.minor → 1.major[.minor unless minor == 0]
+        // major.minor -> 1.major[.minor unless minor == 0]
         return minor == 0 ? $"1.{major}" : $"1.{major}.{minor}";
     }
 

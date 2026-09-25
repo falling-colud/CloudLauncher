@@ -1,12 +1,15 @@
 ﻿using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using CloudLauncher.Services;
+using CloudLauncher.Shared;
 
 namespace CloudLauncher.Views;
 
@@ -26,6 +29,8 @@ public partial class SettingsPanel : Page
         };
         Unloaded += (_, _) =>
         {
+            // Events raised while the page is torn down are not user changes.
+            _suppress = true;
             if (Window.GetWindow(this) is { } w) w.PreviewKeyDown -= OnShellKeyDown;
         };
     }
@@ -49,15 +54,10 @@ public partial class SettingsPanel : Page
         e.Handled = true;
     }
 
-    /// <summary>
-    /// Hides the setting cards that do not mention what was typed.
-    /// </summary>
-    /// <remarks>
-    /// Matching walks each card's own visual text — headings, descriptions, check box labels and
-    /// button captions — rather than a hand-kept keyword list, so a setting added later is findable
-    /// without anyone remembering to index it. A card's own layout is untouched; only its visibility
-    /// changes, so clearing the box restores the page exactly.
-    /// </remarks>
+    /// <summary>Hides the setting cards that do not mention what was typed.</summary>
+    /// <remarks>Matches against each card's visible text (headings, descriptions, labels, button
+    /// captions), so new settings are searchable without a keyword list. Only visibility changes, so
+    /// clearing the box restores the page.</remarks>
     private void OnSettingsSearchChanged(object sender, TextChangedEventArgs e)
     {
         var query = SettingsSearchBox.Text?.Trim();
@@ -94,9 +94,8 @@ public partial class SettingsPanel : Page
                     break;
             }
 
-            // The visual tree, so text inside a control's template (a check box's label, a combo
-            // item) counts too. Tooltips are deliberately left out: they explain a setting rather
-            // than name it, and matching on them would keep half the page visible for common words.
+            // The visual tree, so text inside templates (check box labels, combo items) counts too.
+            // Tooltips are left out; matching them would keep half the page visible for common words.
             var count = VisualTreeHelper.GetChildrenCount(d);
             for (var i = 0; i < count; i++) Walk(VisualTreeHelper.GetChild(d, i), into);
         }
@@ -136,15 +135,21 @@ public partial class SettingsPanel : Page
             ConcurrencySlider.Value = s.EffectiveModDownloadConcurrency;
             ConcurrencyLabel.Text = ConcurrencyText((int)ConcurrencySlider.Value);
             CurseForgeKeyBox.Password = s.CurseForgeApiKey ?? "";
+            CurseForgeKeyTextBox.Text = s.CurseForgeApiKey ?? "";
+            CurseForgeDirectBox.IsChecked = s.CurseForgeDirect;
             RefreshCurseForgeKeyHint();
+            UpdateRateSlider.Value = s.EffectiveModUpdateChecksPerSecond;
+            UpdateRateLabel.Text = UpdateRateText(s.EffectiveModUpdateChecksPerSecond);
             RefreshThemeControls();
+            RefreshLookControls();
             PacksFolderLabel.Text = s.PacksRoot;
             PacksFolderHint.Text = Directory.Exists(s.PacksRoot)
                 ? "New instances are created here. Existing ones stay where they are unless you move them."
-                : "This folder does not exist yet — it is created the first time an instance needs it.";
+                : "This folder does not exist yet - it is created the first time an instance needs it.";
             RuntimeFolderLabel.Text = AppSettings.RuntimeRoot;
             RefreshPrivatePaths();
             VersionLabel.Text = $"Installed version {AppVersion.CurrentString}.";
+            RefreshAbout();
         }
         finally { _suppress = false; }
         _ = LoadDefaultJavaChoicesAsync();
@@ -196,44 +201,169 @@ public partial class SettingsPanel : Page
 
     // ── mod stores ───────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Stores the user's own CurseForge key. It is kept in this machine's settings.json and sent with
-    /// each proxied request; the server uses it for that request and does not keep it.
-    /// </summary>
+    /// <summary>Stores the user's own CurseForge key on every keystroke. It stays on this PC in its own
+    /// encrypted file (see <see cref="AppSettings.SetCurseForgeApiKey"/>) and is sent with each proxied
+    /// request; the server uses it for that request only.</summary>
+    /// <remarks>WPF clears every PasswordBox on a page when its Frame navigates away
+    /// (<c>NavigationService.FireNavigating</c> sets <c>Password = ""</c>), which raises PasswordChanged
+    /// like a keystroke. So an empty box only counts as "clear the key" while the box has keyboard
+    /// focus.</remarks>
     private void OnCurseForgeKeyChanged(object sender, RoutedEventArgs e)
     {
         if (_suppress) return;
-        var key = CurseForgeKeyBox.Password.Trim();
-        App.State.Settings.CurseForgeApiKey = key.Length == 0 ? null : key;
-        App.State.Settings.Save();
+        var typed = CurseForgeKeyBox.Password;
+        if (typed.Length == 0 && !CurseForgeKeyBox.IsKeyboardFocusWithin) return;
+        StoreCurseForgeKey(typed);
+    }
+
+    /// <summary>The revealed twin of the password box: same key, visible, saved the same way.</summary>
+    private void OnCurseForgeKeyTextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_suppress) return;
+        StoreCurseForgeKey(CurseForgeKeyTextBox.Text);
+    }
+
+    private bool _curseForgeKeyWriteFailed;
+
+    private void StoreCurseForgeKey(string? typed)
+    {
+        _curseForgeKeyWriteFailed = !App.State.Settings.SetCurseForgeApiKey(typed);
+        _curseForgeKeyTested = null;
         RefreshCurseForgeKeyHint();
+    }
+
+    /// <summary>Swaps the dots for the key itself and back, so the user can see what was saved.</summary>
+    private void OnRevealCurseForgeKey(object sender, RoutedEventArgs e)
+    {
+        var reveal = CurseForgeKeyTextBox.Visibility != Visibility.Visible;
+        _suppress = true;
+        try
+        {
+            var key = App.State.Settings.CurseForgeApiKey ?? "";
+            CurseForgeKeyTextBox.Text = key;
+            CurseForgeKeyBox.Password = key;
+        }
+        finally { _suppress = false; }
+
+        CurseForgeKeyTextBox.Visibility = reveal ? Visibility.Visible : Visibility.Collapsed;
+        CurseForgeKeyBox.Visibility = reveal ? Visibility.Collapsed : Visibility.Visible;
+        RevealCurseForgeKeyButton.ToolTip = reveal ? "Hide the key" : "Show the key";
+        RevealCurseForgeKeyButton.Content = reveal ? "" : "";
+    }
+
+    /// <summary>The last test's verdict for the key that is currently saved; cleared by any edit.</summary>
+    private string? _curseForgeKeyTested;
+    private bool _testingCurseForgeKey;
+
+    /// <summary>Asks CurseForge, through the launcher server, whether it accepts the saved key.</summary>
+    /// <remarks>The search text is random because the server answers repeated requests from its cache
+    /// without checking the key, so a fixed query could report a rejected key as working.</remarks>
+    private async void OnTestCurseForgeKey(object sender, RoutedEventArgs e)
+    {
+        var key = App.State.Settings.CurseForgeApiKey;
+        if (key is not { Length: > 0 })
+        {
+            _curseForgeKeyTested = "There is no key to test - paste yours into the box first.";
+            RefreshCurseForgeKeyHint();
+            return;
+        }
+        // When sent straight to CurseForge the key never reaches the launcher server, so plain http
+        // to the server doesn't matter.
+        if (!App.State.Api.IsCurseForgeDirect
+            && Uri.TryCreate(App.State.Settings.ServerUrl, UriKind.Absolute, out var server)
+            && server.Scheme != Uri.UriSchemeHttps && !server.IsLoopback)
+        {
+            _curseForgeKeyTested = "The launcher server is on plain http, so your key is not sent to it at all.";
+            RefreshCurseForgeKeyHint();
+            return;
+        }
+
+        _testingCurseForgeKey = true;
+        _curseForgeKeyTested = "Testing...";
+        RefreshCurseForgeKeyHint();
+        try
+        {
+            var probe = "cl-key-test-" + Guid.NewGuid().ToString("N")[..10];
+            using var resp = await App.State.Api.ProxyAsync("curseforge", System.Net.Http.HttpMethod.Get,
+                $"mods/search?gameId=432&classId=6&pageSize=1&searchFilter={probe}");
+            if (!ReferenceEquals(key, App.State.Settings.CurseForgeApiKey)) return; // edited meanwhile
+            var body = resp.IsSuccessStatusCode ? "" : await resp.Content.ReadAsStringAsync();
+            _curseForgeKeyTested = (int)resp.StatusCode switch
+            {
+                >= 200 and < 300 => "✓ CurseForge accepted this key.",
+                400 when body.Contains("own_key_rejected", StringComparison.Ordinal)
+                    => "✗ CurseForge rejected this key. Check it was copied whole, or create a new one.",
+                429 => "CurseForge is busy right now, so the key could not be tested. Try again in a minute.",
+                401 => "Sign in to the launcher first, then test the key.",
+                var code => $"The test did not get an answer ({code}). Try again in a minute."
+            };
+        }
+        catch (Exception ex)
+        {
+            _curseForgeKeyTested = "The test did not get an answer: " + ex.Message;
+        }
+        finally
+        {
+            _testingCurseForgeKey = false;
+            RefreshCurseForgeKeyHint();
+        }
     }
 
     private void RefreshCurseForgeKeyHint()
     {
         var key = App.State.Settings.CurseForgeApiKey;
-        CurseForgeKeyHint.Text = key is { Length: > 0 }
-            ? $"Using your own key ({key.Length} characters). Clear the box to go back to the shared one."
+        var text = key is { Length: > 0 }
+            ? $"Saved. Using your own key ({key.Length} characters), "
+              + (App.State.Api.IsCurseForgeDirect ? "sent straight to CurseForge" : "through the launcher server")
+              + ". Clear the box to go back to the shared one."
             : "Using the launcher's shared key. Set your own if CurseForge searches or updates keep being refused when several people are using the launcher at once.";
+        if (_curseForgeKeyWriteFailed || App.State.Settings.CurseForgeKeyInSettingsFile)
+            text = "Saved in settings.json instead of the encrypted store, which this PC refused"
+                   + (SecretStore.LastError is { } why ? $" ({why})" : "") + ".";
+        if (_curseForgeKeyTested is not null) text += "\n" + _curseForgeKeyTested;
+        CurseForgeKeyHint.Text = text;
+        TestCurseForgeKeyButton.IsEnabled = key is { Length: > 0 } && !_testingCurseForgeKey;
+        CurseForgeDirectBox.IsEnabled = key is { Length: > 0 };
     }
 
-    private void OnOpenCurseForgeConsole(object sender, RoutedEventArgs e)
+    /// <summary>Own key set: go straight to CurseForge or through the launcher server's queue.</summary>
+    private void OnCurseForgeDirectToggled(object sender, RoutedEventArgs e)
     {
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "https://console.curseforge.com/?#/api-keys",
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex) { StatusLabel.Text = "Could not open the browser: " + ex.Message; }
+        if (_suppress) return;
+        App.State.Settings.CurseForgeDirect = CurseForgeDirectBox.IsChecked == true;
+        App.State.Settings.Save();
+        _curseForgeKeyTested = null;
+        RefreshCurseForgeKeyHint();
+        StatusLabel.Text = App.State.Settings.CurseForgeDirect
+            ? "CurseForge requests now go straight to CurseForge with your key."
+            : "CurseForge requests go through the launcher server again.";
+    }
+
+    // ── update checks ────────────────────────────────────────────────────────
+
+    private static string UpdateRateText(int perSecond) => $"{perSecond} / s";
+
+    private void OnUpdateRateChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (UpdateRateLabel is not null) UpdateRateLabel.Text = UpdateRateText((int)UpdateRateSlider.Value);
+        if (_suppress) return;
+        App.State.Settings.ModUpdateChecksPerSecond = (int)UpdateRateSlider.Value;
+        App.State.Settings.Save();
+    }
+
+    private void OnOpenCurseForgeConsole(object sender, RoutedEventArgs e) =>
+        OpenInBrowser("https://console.curseforge.com/?#/api-keys");
+
+    /// <summary>Opens a web page, saying so on the status line when the browser could not be
+    /// started.</summary>
+    private void OpenInBrowser(string url)
+    {
+        if (!SafeLaunch.OpenUrl(url)) StatusLabel.Text = $"Could not open the browser. The address is {url}";
     }
 
     // ── changelog ────────────────────────────────────────────────────────────
 
-    /// <summary>Opens the release notes for every published version. Sits next to Check for updates
-    /// because "what changed?" and "is there an update?" are the same trip.</summary>
+    /// <summary>Opens the release notes for every published version.</summary>
     private async void OnOpenChangelog(object sender, RoutedEventArgs e)
     {
         try { await ChangelogDialog.ShowAsync(_shell); }
@@ -265,8 +395,8 @@ public partial class SettingsPanel : Page
             : "Custom colours. Reset puts everything back.";
     }
 
-    /// <summary>Shows a colour on a swatch button — the stored value, or, when it is unset, whatever
-    /// the theme currently derives (so an unset swatch still shows what you will get).</summary>
+    /// <summary>Shows a colour on a swatch button: the stored value, or when unset, the colour the
+    /// theme currently derives.</summary>
     private static void PaintSwatch(Button button, string? hex, string? fallbackResourceKey = null)
     {
         Brush brush;
@@ -287,10 +417,8 @@ public partial class SettingsPanel : Page
         theme.PresetName = preset.Name;
         theme.Accent = preset.Accent;
         theme.Surface = preset.Surface;
-        // A preset re-derives every colour it does not set rather than keeping the previous theme's
-        // overrides, which is what "pick a preset" means to anyone choosing one. The state colours
-        // are cleared with the log ones: a red left over from the last theme against a new accent is
-        // exactly the clash a preset is chosen to avoid.
+        // A preset re-derives every colour it doesn't set instead of keeping the previous theme's
+        // overrides, including state and log colours, so nothing clashes with the new accent.
         theme.Danger = theme.Success = theme.Warning = null;
         theme.LogBackground = theme.LogText = theme.LogMuted = theme.LogWarning = theme.LogError = null;
         theme.LogAccent = preset.LogAccent;
@@ -365,10 +493,202 @@ public partial class SettingsPanel : Page
     private void ApplyThemeChange()
     {
         App.State.Settings.Save();
-        ThemeService.Apply(App.State.Settings.Theme);
+        ThemeService.ApplyLook(App.State.Settings);
         _suppress = true;
         try { RefreshThemeControls(); }
         finally { _suppress = false; }
+    }
+
+    // ── appearance: Slate or Classic ─────────────────────────────────────────
+
+    /// <summary>One accent swatch. The fill is a fixed colour per preset, not a theme brush, so it is
+    /// safe to hold (theme brushes are replaced on every apply).</summary>
+    public sealed record AccentSwatchRow(string Name, string Hex, Brush Fill, bool IsSelected);
+
+    private void RefreshLookControls()
+    {
+        var look = App.State.Settings.Look ??= new LookSettings();
+        RefreshPixelFontOptions(look);
+        StyleSlateRadio.IsChecked = look.IsSlate;
+        StyleClassicRadio.IsChecked = !look.IsSlate;
+        SlateOptionsPanel.Visibility = look.IsSlate ? Visibility.Visible : Visibility.Collapsed;
+        ClassicColoursPanel.Visibility = look.IsSlate ? Visibility.Collapsed : Visibility.Visible;
+
+        SkinDarkRadio.IsChecked = !look.IsVanilla;
+        SkinVanillaRadio.IsChecked = look.IsVanilla;
+
+        var accent = ThemeService.Parse(look.Accent, LookSettings.DefaultAccent);
+        var swatches = ThemeService.SlateAccents
+            .Select(a =>
+            {
+                var brush = new SolidColorBrush(ThemeService.Parse(a.Hex, LookSettings.DefaultAccent));
+                brush.Freeze();
+                return new AccentSwatchRow(a.Name, a.Hex, brush, SameColour(a.Hex, look.Accent));
+            })
+            .ToList();
+        AccentSwatches.ItemsSource = swatches;
+        var named = swatches.FirstOrDefault(r => r.IsSelected);
+        AccentNameLabel.Text = named is not null ? named.Name : $"Custom {ThemeService.ToHex(accent)}";
+
+        // The Vanilla skin is always square, so the radius slider is off for it.
+        RadiusSlider.Value = Math.Clamp(look.Radius, 0, LookSettings.MaxRadius);
+        RadiusSlider.IsEnabled = !look.IsVanilla;
+        RadiusLabel.Text = look.IsVanilla ? "Square" : RadiusText(look.Radius);
+        MotionSlider.Value = Math.Clamp(look.Motion, 0, 2);
+        MotionLabel.Text = MotionText(look.Motion);
+
+        PixelHeadingsBox.IsChecked = look.PixelHeadings;
+        PixelTextBox.IsChecked = look.PixelText;
+        PixelIconsBox.IsChecked = look.PixelIcons;
+        ShadowsBox.IsChecked = look.Shadows;
+        TransitionsBox.IsChecked = look.Transitions;
+        UiSoundsBox.IsChecked = look.UiSounds;
+
+        LookHint.Text = look.IsSlate
+            ? "Classic keeps its own colours, so you can switch back and forth."
+            : "";
+    }
+
+    private static bool SameColour(string a, string? b) =>
+        ThemeService.TryParse(a) is { } x && ThemeService.TryParse(b) is { } y && x == y;
+
+    private static string RadiusText(int steps) => steps <= 0 ? "Square" : $"{steps} px";
+
+    private static string MotionText(double m) => m switch
+    {
+        <= 0 => "Off",
+        < 0.99 => $"Fast ({m:0.##}×)",
+        <= 1.01 => "Normal",
+        _ => $"Slow ({m:0.##}×)",
+    };
+
+    /// <summary>One segment per pixel font, labelled in that font; built on first use.</summary>
+    private void RefreshPixelFontOptions(LookSettings look)
+    {
+        if (PixelFontOptions.Children.Count == 0)
+        {
+            foreach (var spec in ThemeService.PixelFonts)
+            {
+                var option = new RadioButton
+                {
+                    Style = (Style)FindResource("SegmentRadio"),
+                    GroupName = "PixelFont",
+                    Tag = spec.Family,
+                    Margin = new Thickness(0, 0, 8, 8),
+                    ToolTip = spec.Family == LookSettings.PixeloidFont ? spec.Family + " (the default)" : spec.Family,
+                    Content = new TextBlock
+                    {
+                        Text = spec.Family,
+                        FontFamily = ThemeService.PixelFamily(spec, "Segoe UI"),
+                        FontSize = spec.Brand,
+                    },
+                };
+                option.Checked += OnPixelFontChecked;
+                PixelFontOptions.Children.Add(option);
+            }
+        }
+        var chosen = ThemeService.PixelFontFor(look.PixelFont).Family;
+        foreach (RadioButton option in PixelFontOptions.Children)
+            option.IsChecked = (string)option.Tag == chosen;
+    }
+
+    private void OnPixelFontChecked(object sender, RoutedEventArgs e)
+    {
+        if (_suppress || sender is not RadioButton { Tag: string family }) return;
+        App.State.Settings.Look.PixelFont = family;
+        ApplyLookChange();
+    }
+
+    private void ApplyLookChange()
+    {
+        App.State.Settings.Save();
+        ThemeService.ApplyLook(App.State.Settings);
+        _suppress = true;
+        try
+        {
+            RefreshLookControls();
+            RefreshThemeControls();
+        }
+        finally { _suppress = false; }
+    }
+
+    private void OnLookStyleChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppress) return;
+        App.State.Settings.Look.Style = StyleClassicRadio.IsChecked == true
+            ? LookSettings.ClassicStyle
+            : LookSettings.SlateStyle;
+        ApplyLookChange();
+        StatusLabel.Text = App.State.Settings.Look.IsSlate
+            ? "Slate style on."
+            : "Classic style on. Your Slate options are kept for when you switch back.";
+    }
+
+    private void OnLookSkinChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppress) return;
+        App.State.Settings.Look.Skin = SkinVanillaRadio.IsChecked == true
+            ? LookSettings.VanillaSkin
+            : LookSettings.DarkSkin;
+        ApplyLookChange();
+    }
+
+    private void OnPickSlateAccent(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: AccentSwatchRow row }) return;
+        App.State.Settings.Look.Accent = row.Hex;
+        ApplyLookChange();
+    }
+
+    private async void OnPickCustomSlateAccent(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var choice = await ColorPickerDialog.ShowAsync(_shell, "Accent colour",
+                App.State.Settings.Look.Accent, ThemeService.SlateAccents.Select(a => a.Hex));
+            if (choice is null) return;
+            App.State.Settings.Look.Accent = choice.Value.Hex ?? LookSettings.DefaultAccent;
+            ApplyLookChange();
+        }
+        catch (Exception ex) { StatusLabel.Text = "Could not open the colour picker: " + ex.Message; }
+    }
+
+    private void OnLookRadiusChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (RadiusLabel is not null) RadiusLabel.Text = RadiusText((int)RadiusSlider.Value);
+        if (_suppress) return;
+        App.State.Settings.Look.Radius = (int)RadiusSlider.Value;
+        ApplyLookChange();
+    }
+
+    private void OnLookMotionChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (MotionLabel is not null) MotionLabel.Text = MotionText(MotionSlider.Value);
+        if (_suppress) return;
+        App.State.Settings.Look.Motion = MotionSlider.Value;
+        // Motion only changes timings; nothing has to be repainted for it.
+        App.State.Settings.Save();
+        ThemeService.ApplyLook(App.State.Settings);
+    }
+
+    private void OnLookToggle(object sender, RoutedEventArgs e)
+    {
+        if (_suppress) return;
+        var look = App.State.Settings.Look;
+        look.PixelHeadings = PixelHeadingsBox.IsChecked == true;
+        look.PixelText = PixelTextBox.IsChecked == true;
+        look.PixelIcons = PixelIconsBox.IsChecked == true;
+        look.Shadows = ShadowsBox.IsChecked == true;
+        look.Transitions = TransitionsBox.IsChecked == true;
+        look.UiSounds = UiSoundsBox.IsChecked == true;
+        ApplyLookChange();
+    }
+
+    private void OnResetLook(object sender, RoutedEventArgs e)
+    {
+        App.State.Settings.Look = new LookSettings();
+        ApplyLookChange();
+        StatusLabel.Text = "Slate options reset to the defaults.";
     }
 
     // ── default Java ─────────────────────────────────────────────────────────
@@ -422,7 +742,7 @@ public partial class SettingsPanel : Page
     private async void OnCheckForUpdates(object sender, RoutedEventArgs e)
     {
         CheckUpdateButton.IsEnabled = false;
-        UpdateStatusLabel.Text = "Checking for updates…";
+        UpdateStatusLabel.Text = "Checking for updates...";
         try
         {
             var latest = await App.State.Update.GetLatestAsync();
@@ -432,7 +752,9 @@ public partial class SettingsPanel : Page
             }
             else if (AppVersion.IsNewer(latest.Version))
             {
-                UpdateStatusLabel.Text = $"Version {latest.Version} is available.";
+                UpdateStatusLabel.Text = UpdateVerifier.Verify(latest).IsValid
+                    ? $"Version {latest.Version} is available."
+                    : $"Version {latest.Version} is out, but it could not be verified.";
                 new UpdateDialog(latest) { Owner = _shell }.ShowDialog();
             }
             else
@@ -574,16 +896,106 @@ public partial class SettingsPanel : Page
 
     private void OnOpenMcDefaults(object sender, RoutedEventArgs e) => _shell.OpenMcDefaults();
 
-    private void OnOpenPacksFolder(object sender, RoutedEventArgs e)
+    private void OnOpenPacksFolder(object sender, RoutedEventArgs e) => OpenFolder(App.State.Settings.PacksRoot);
+
+    private void OnOpenRuntimeFolder(object sender, RoutedEventArgs e) => OpenFolder(AppSettings.RuntimeRoot);
+
+    /// <summary>Opens a folder in Explorer, creating it first so a fresh install has something to
+    /// show.</summary>
+    private void OpenFolder(string path)
     {
-        Directory.CreateDirectory(App.State.Settings.PacksRoot);
-        Process.Start(new ProcessStartInfo { FileName = App.State.Settings.PacksRoot, UseShellExecute = true });
+        try { Directory.CreateDirectory(path); }
+        catch (Exception ex)
+        {
+            StatusLabel.Text = $"Could not create {path}: {ex.Message}";
+            return;
+        }
+        if (!SafeLaunch.OpenFolder(path)) StatusLabel.Text = $"Could not open {path} in Explorer.";
     }
 
-    private void OnOpenRuntimeFolder(object sender, RoutedEventArgs e)
+    // ── about ────────────────────────────────────────────────────────────────
+
+    private const string WebsiteUrl = "https://cloudlauncher.co";
+
+    private void RefreshAbout()
     {
-        Directory.CreateDirectory(AppSettings.RuntimeRoot);
-        Process.Start(new ProcessStartInfo { FileName = AppSettings.RuntimeRoot, UseShellExecute = true });
+        AboutVersionLabel.Text = $"Version {AppVersion.CurrentString}";
+        AboutWebsiteButton.ToolTip = WebsiteUrl;
+        AboutPrivacyButton.ToolTip = App.State.Api.LegalPageUrl(Legal.PrivacyPath);
+        AboutTermsButton.ToolTip = App.State.Api.LegalPageUrl(Legal.TermsPath);
+
+        var icon = AppIcon.Value;
+        AboutIcon.Source = icon;
+        AboutIcon.Visibility = icon is null ? Visibility.Collapsed : Visibility.Visible;
+        AboutIconFallback.Visibility = icon is null ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>The icon embedded in the running exe, read once.</summary>
+    private static readonly Lazy<ImageSource?> AppIcon = new(LoadAppIcon);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHDefExtractIcon(string iconFile, int index, uint flags,
+        out IntPtr largeIcon, IntPtr smallIcon, uint iconSize);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyIcon(IntPtr icon);
+
+    private static ImageSource? LoadAppIcon()
+    {
+        try
+        {
+            var exe = Environment.ProcessPath;
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return null;
+            // 64 px, so it stays sharp at the 48 px it is shown at on a scaled display.
+            if (SHDefExtractIcon(exe, 0, 0, out var handle, IntPtr.Zero, 64) != 0 || handle == IntPtr.Zero)
+                return null;
+            try
+            {
+                var source = Imaging.CreateBitmapSourceFromHIcon(handle, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+                source.Freeze();
+                return source;
+            }
+            finally { DestroyIcon(handle); }
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("about-icon", ex);
+            return null;
+        }
+    }
+
+    private void OnOpenWebsite(object sender, RoutedEventArgs e) => OpenInBrowser(WebsiteUrl);
+
+    private void OnOpenPrivacy(object sender, RoutedEventArgs e) =>
+        OpenInBrowser(App.State.Api.LegalPageUrl(Legal.PrivacyPath));
+
+    private void OnOpenTerms(object sender, RoutedEventArgs e) =>
+        OpenInBrowser(App.State.Api.LegalPageUrl(Legal.TermsPath));
+
+    private void OnOpenThirdPartyNotices(object sender, RoutedEventArgs e)
+    {
+        if (!SafeLaunch.OpenFile(Path.Combine(AppContext.BaseDirectory, "THIRD-PARTY-NOTICES.txt")))
+            StatusLabel.Text = "The third-party notices file is missing from this installation.";
+    }
+
+    private void OnOpenLogsFolder(object sender, RoutedEventArgs e)
+    {
+        // Whatever is still queued goes to the file first, so the newest lines are there to read.
+        AppLog.Flush();
+        OpenFolder(AppLog.LogFolder);
+    }
+
+    /// <summary>Starts an email to the developer with the version details already filled in.</summary>
+    private void OnReportProblem(object sender, RoutedEventArgs e)
+    {
+        var version = AppVersion.CurrentString;
+        var body = $"CloudLauncher version: {version}\r\n"
+                   + $"Windows version: {RuntimeInformation.OSDescription}\r\n"
+                   + "\r\n"
+                   + "What happened?\r\n";
+        if (!SafeLaunch.OpenMail(Legal.ContactEmail, $"CloudLauncher {version} problem", body))
+            StatusLabel.Text = $"No email app opened. You can write to {Legal.ContactEmail} instead.";
     }
 
     // -- files that never leave this PC --------------------------------------
@@ -654,18 +1066,12 @@ public partial class SettingsPanel : Page
 
     // -- moving the instances folder -----------------------------------------
 
-    /// <summary>
-    /// Points the launcher at a different instances folder, optionally taking the existing instances
-    /// with it.
-    /// </summary>
-    /// <remarks>
-    /// The copy runs off the UI thread and reports per-folder progress, because an instances folder is
-    /// routinely tens of gigabytes. A folder that cannot be moved (usually because Minecraft still has
-    /// a file open in it) stops the move and leaves everything where it was rather than half-migrating:
-    /// see the rollback in the catch below, which exists because a half-done move orphans the instances
-    /// it already moved — <see cref="AppSettings.PacksRoot"/> would still point at the old folder and
-    /// nothing would look for them in the new one.
-    /// </remarks>
+    /// <summary>Points the launcher at a different instances folder, optionally moving the existing
+    /// instances.</summary>
+    /// <remarks>The copy runs off the UI thread with per-folder progress, since the folder can be tens
+    /// of gigabytes. If a folder can't be moved (usually Minecraft has a file open), the move is rolled
+    /// back: <see cref="AppSettings.PacksRoot"/> would still point at the old folder, orphaning
+    /// whatever had already moved.</remarks>
     private async void OnChangePacksFolder(object sender, RoutedEventArgs e)
     {
         try { await ChangePacksFolderAsync(); }
@@ -727,18 +1133,16 @@ public partial class SettingsPanel : Page
                         moved.Add(new MovedInstance(name, source, destination));
                         var done = moved.Count;
                         Dispatcher.Invoke(() =>
-                            StatusLabel.Text = $"Moving instances… {done} of {sources.Length}");
+                            StatusLabel.Text = $"Moving instances... {done} of {sources.Length}");
                     }
                 });
             }
             catch (Exception ex)
             {
-                // Whatever moved before the failure is now in the new folder while PacksRoot still
-                // names the old one, so those instances are orphaned — the launcher would not look
-                // for them anywhere. Put them back, and if even that fails, name each one and where
-                // it now sits instead of leaving the user to search two drives.
-                // Across volumes the undo is a copy back, so it is not instant — say what is going on.
-                StatusLabel.Text = "Putting the instances that had already moved back…";
+                // Anything already moved is orphaned while PacksRoot still names the old folder, so
+                // put it back. If that fails too, name each one and where it is now. Across volumes
+                // the undo is a copy, so tell the user what is happening.
+                StatusLabel.Text = "Putting the instances that had already moved back...";
                 var stranded = await Task.Run(() => RollBackMove(moved));
                 var count = moved.Count;
                 StatusLabel.Text = stranded.Count == 0
@@ -763,17 +1167,16 @@ public partial class SettingsPanel : Page
         App.State.Settings.Save();
         Refresh();
 
-        // Pack folder lookups are cached per session, and every entry in that cache is a path under
-        // the folder we just left. Dropping it is what makes this take effect without a restart:
-        // the next lookup re-scans the new root for each pack's .packid marker. The Instances screen
-        // is then rebuilt so the cards in front of the user are the ones in the new location rather
-        // than a page still drawn from the old paths.
+        // Pack folder lookups are cached with paths under the old root. Dropping the cache makes the
+        // next lookup re-scan the new root for each pack's .packid marker, so no restart is needed.
         App.State.Packs.InvalidateRootCache();
-        _shell.RefreshPacks();
+        // Every content page, not only Instances: they are cached between navigations and hold rows
+        // keyed by paths under the old root.
+        _shell.OnInstancesRootMoved();
 
         StatusLabel.Text = $"Instances now live in {chosen}." +
             (duplicated.Count > 0
-                ? $" {duplicated.Count} folder(s) could not be cleared out of the old location — a second " +
+                ? $" {duplicated.Count} folder(s) could not be cleared out of the old location - a second " +
                   "copy is still there and can be deleted once Minecraft is closed."
                 : "");
     }
@@ -781,17 +1184,13 @@ public partial class SettingsPanel : Page
     /// <summary>One instance folder that has already been moved, kept so the move can be undone.</summary>
     private readonly record struct MovedInstance(string Name, string Source, string Destination);
 
-    /// <summary>
-    /// Moves one instance folder. Returns false when the data arrived at <paramref name="destination"/>
-    /// but the original could not be deleted, so a duplicate is still sitting in the old folder.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="Directory.Move"/> is a rename, and a rename cannot cross a volume — Windows fails it
-    /// with ERROR_NOT_SAME_DEVICE. Moving instances onto a bigger drive is the main reason anyone uses
-    /// this button, so that path is not an edge case and the manual copy below is the one that usually
-    /// runs. A copy that fails partway takes its own half-written destination back out: a partial
-    /// instance folder is indistinguishable from a real one, and the source has not been touched yet.
-    /// </remarks>
+    /// <summary>Moves one instance folder. Returns false when the data arrived at
+    /// <paramref name="destination"/> but the original could not be deleted, leaving a duplicate
+    /// behind.</summary>
+    /// <remarks><see cref="Directory.Move"/> can't cross volumes (ERROR_NOT_SAME_DEVICE), and moving to
+    /// another drive is the common case, so the manual copy below usually runs. A copy that fails
+    /// partway deletes its half-written destination, since a partial folder looks like a real
+    /// instance.</remarks>
     private static bool MoveInstanceFolder(string source, string destination)
     {
         try
@@ -815,8 +1214,8 @@ public partial class SettingsPanel : Page
             throw;
         }
 
-        // The bytes are safely at the destination now, so a locked file in the old folder must not
-        // fail the move and trigger a rollback — it is reported as a leftover copy instead.
+        // The data is safely at the destination, so a locked file in the old folder is reported as a
+        // leftover copy rather than failing the move and triggering a rollback.
         try { Directory.Delete(source, recursive: true); }
         catch (IOException) { return false; }
         catch (UnauthorizedAccessException) { return false; }
@@ -836,9 +1235,8 @@ public partial class SettingsPanel : Page
     }
 
     /// <summary>Recursive copy used when a move has to cross volumes.</summary>
-    /// <remarks>Junctions and symlinks are skipped rather than followed: an instances folder that
-    /// contains a junction back to itself would otherwise recurse until it ran out of path, and the
-    /// data behind a junction does not live in this folder anyway.</remarks>
+    /// <remarks>Junctions and symlinks are skipped rather than followed: a junction back into the
+    /// folder would recurse forever, and the data behind a junction doesn't live here anyway.</remarks>
     private static void CopyDirectory(string source, string destination)
     {
         Directory.CreateDirectory(destination);
@@ -851,10 +1249,8 @@ public partial class SettingsPanel : Page
             File.Copy(file, Path.Combine(destination, Path.GetFileName(file)), overwrite: true);
     }
 
-    /// <summary>
-    /// Puts back everything a failed move had already moved. Returns "name → where it is now" for any
-    /// that could not be put back, so the message can name them instead of saying "nothing is lost".
-    /// </summary>
+    /// <summary>Puts back everything a failed move had already moved. Returns "name -> where it is
+    /// now" for anything that could not be put back, so the message can name them.</summary>
     private static List<string> RollBackMove(IReadOnlyList<MovedInstance> moved)
     {
         var stranded = new List<string>();
@@ -871,7 +1267,7 @@ public partial class SettingsPanel : Page
                 }
                 MoveInstanceFolder(item.Destination, item.Source);
             }
-            catch { stranded.Add($"{item.Name} → {item.Destination}"); }
+            catch { stranded.Add($"{item.Name} > {item.Destination}"); }
         }
         return stranded;
     }

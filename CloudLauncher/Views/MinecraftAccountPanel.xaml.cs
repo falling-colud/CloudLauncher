@@ -59,7 +59,7 @@ public partial class MinecraftAccountPanel : Page
 
     private async void OnAddMicrosoft(object sender, RoutedEventArgs e)
     {
-        Okay("Opening Microsoft sign-in…");
+        Okay("Opening Microsoft sign-in...");
         MicrosoftButton.IsEnabled = false;
         try
         {
@@ -74,7 +74,8 @@ public partial class MinecraftAccountPanel : Page
         finally { MicrosoftButton.IsEnabled = true; }
     }
 
-    /// <summary>Enter in the offline name box adds the account — the panel has no default button.</summary>
+    /// <summary>Enter in the offline name box adds the account, since the panel has no default
+    /// button.</summary>
     private void OnOfflineNameKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter) return;
@@ -123,12 +124,12 @@ public partial class MinecraftAccountPanel : Page
             : "The clipboard is in use by another program.");
     }
 
-    /// <summary>The UUID is stored for every signed-in Microsoft account and shown nowhere else —
-    /// it is what a server operator asks for when whitelisting or banning someone.</summary>
+    /// <summary>Copies the account's UUID, which server operators ask for when whitelisting or banning
+    /// someone. It isn't shown anywhere else.</summary>
     private void OnCtxCopyUuid(object sender, RoutedEventArgs e)
     {
         if (RowFromSender(sender) is not { } row) return;
-        if (!row.HasUuid) { Fail("This account has no UUID — offline accounts do not get one."); return; }
+        if (!row.HasUuid) { Fail("This account has no UUID - offline accounts do not get one."); return; }
         Okay(ClipboardHelper.TrySetText(row.Uuid)
             ? "UUID copied."
             : "The clipboard is in use by another program.");
@@ -136,9 +137,8 @@ public partial class MinecraftAccountPanel : Page
 
     /// <summary>Renames an offline account from the row's context menu.</summary>
     /// <remarks>
-    /// The prompt opens with the current name in it, because a rename is almost always a correction
-    /// to what is already there rather than a fresh name typed from nothing. Cancelling, or leaving
-    /// it unchanged, does nothing at all.
+    /// The prompt starts with the current name, since a rename is usually a small correction.
+    /// Cancelling or leaving it unchanged does nothing.
     /// </remarks>
     private async void OnCtxRename(object sender, RoutedEventArgs e)
     {
@@ -213,10 +213,8 @@ public partial class MinecraftAccountPanel : Page
 /// One saved Minecraft account, as the list shows it.
 /// </summary>
 /// <remarks>
-/// Only data here — no brushes. Snapshotting <c>(Brush)Application.Current.Resources[...]</c> in the
-/// constructor left these rows painted in the old palette after a theme change, because
-/// <see cref="ThemeService"/> replaces each resource with a new frozen brush on every apply. The
-/// template now picks its colours with DynamicResource from <see cref="IsCurrent"/> and
+/// Data only, no brushes: <see cref="ThemeService"/> replaces every brush on each theme apply, so
+/// the template picks its colours with DynamicResource based on <see cref="IsCurrent"/> and
 /// <see cref="IsMicrosoft"/>.
 /// </remarks>
 public sealed class AccountRow
@@ -231,12 +229,12 @@ public sealed class AccountRow
     public bool HasUuid => !string.IsNullOrEmpty(Uuid);
 
     /// <summary>Whether Rename applies to this account.</summary>
-    /// <remarks>Offline only. A Microsoft account's name is Mojang's and is written back from the
-    /// session on every launch, so a rename typed here would silently revert.</remarks>
+    /// <remarks>Offline only. A Microsoft account's name is written back from the session on every
+    /// launch, so a rename here would not stick.</remarks>
     public bool CanRename => !IsMicrosoft;
 
     public string RenameToolTip => IsMicrosoft
-        ? "Microsoft accounts are named by Mojang — the name comes from the sign-in."
+        ? "Microsoft accounts are named by Mojang - the name comes from the sign-in."
         : "Change the username this offline account plays as";
 
     public Visibility UseButtonVisibility => IsCurrent ? Visibility.Collapsed : Visibility.Visible;

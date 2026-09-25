@@ -7,9 +7,9 @@ using CloudLauncher.Services;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The orange "Custom" download options card (in-window overlay). The user sets priority, side and
-/// flags independently, then clicks Download; <see cref="ApplyTo"/> writes them onto the mod's
-/// metadata once it's downloaded.
+/// The orange "Custom" download options card (in-window overlay). The user picks priority, side and
+/// flags, then clicks Download; <see cref="ApplyTo"/> writes them onto the mod's metadata once it's
+/// downloaded.
 /// </summary>
 public partial class ModDownloadOptionsDialog : UserControl
 {
@@ -42,7 +42,6 @@ public partial class ModDownloadOptionsDialog : UserControl
             foreach (var name in _categories) CategoryBox.Items.Add(new ComboBoxItem { Content = name });
             CategoryBox.SelectedIndex = 0;
         }
-        // A pack with no categories has nothing to offer, so the row would only be a dead control.
         CategoryPanel.Visibility = _categories.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
         Loaded += (_, _) => { Animate.SlideFadeIn(this, 0, 14, 200); Focus(); };
@@ -60,8 +59,9 @@ public partial class ModDownloadOptionsDialog : UserControl
         base.OnPreviewKeyDown(e);
     }
 
-    /// <summary>Shows the card as an in-window overlay. Returns the dialog if Download was clicked, else null.</summary>
-    /// <param name="packId">The pack being downloaded into — supplies the Category box's options.</param>
+    /// <summary>Shows the card as an in-window overlay. Returns the dialog if Download was clicked,
+    /// else null.</summary>
+    /// <param name="packId">The pack being downloaded into; supplies the Category box's options.</param>
     public static async Task<ModDownloadOptionsDialog?> ShowAsync(MainWindow host, string modName, Guid? packId = null)
     {
         var card = new ModDownloadOptionsDialog(modName, packId);
@@ -70,9 +70,8 @@ public partial class ModDownloadOptionsDialog : UserControl
     }
 
     /// <summary>Applies every chosen option onto the mod's saved flags.</summary>
-    /// <remarks>The category is appended rather than assigned: a mod can be in several, and this
-    /// runs against metadata that a previous download of the same project id may already have
-    /// filed.</remarks>
+    /// <remarks>The category is appended, not assigned: a mod can be in several, and an earlier download
+    /// of the same project may already have filed it.</remarks>
     public void ApplyTo(ModMeta meta)
     {
         meta.Priority = PriorityBox.SelectedIndex < 0 ? 0 : PriorityBox.SelectedIndex; // 0=Normal, 1..5=P1..P5

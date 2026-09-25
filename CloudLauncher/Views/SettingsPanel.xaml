@@ -1,26 +1,62 @@
 ﻿<Page x:Class="CloudLauncher.Views.SettingsPanel"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:local="clr-namespace:CloudLauncher.Views"
       Title="Settings"
       Background="{DynamicResource Surface0Brush}">
+    <Page.Resources>
+        <!--  One accent swatch: the colour in a pixel-cornered tile, ringed when it is the one in use.  -->
+        <Style x:Key="AccentSwatchButton" TargetType="Button">
+            <Setter Property="Width" Value="30"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Margin" Value="0,0,8,8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <slate:SlateBorder x:Name="ring" CornerRadius="6" BorderThickness="2" BorderBrush="Transparent"
+                                           Background="Transparent" Padding="2">
+                            <slate:SlateBorder CornerRadius="4" Background="{TemplateBinding Background}"/>
+                        </slate:SlateBorder>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ring" Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}"/>
+                            </Trigger>
+                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                <Setter TargetName="ring" Property="BorderBrush" Value="{DynamicResource TextPrimaryBrush}"/>
+                            </DataTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Page.Resources>
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel x:Name="SettingsStack" Margin="22,18,22,28">
 
-            <DockPanel>
-                <TextBox x:Name="SettingsSearchBox" DockPanel.Dock="Right" Width="230"
+            <!--  Two star columns so the search box shrinks first when the panel is narrow. The 34px right
+            margin clears the shell's floating close/back buttons (see PageHeaderPanelSide).  -->
+            <Grid Margin="0,0,34,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" MinWidth="120"/>
+                    <ColumnDefinition Width="*" MaxWidth="230" MinWidth="110"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Style="{StaticResource H2}" Text="Settings" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <TextBox x:Name="SettingsSearchBox" Grid.Column="1"
                          VerticalAlignment="Center" TextChanged="OnSettingsSearchChanged"
                          PreviewKeyDown="OnSettingsSearchKeyDown"
                          ToolTip="Show only the sections mentioning what you type (Ctrl+F)"/>
-                <TextBlock Style="{StaticResource H2}" Text="Settings" VerticalAlignment="Center"/>
-            </DockPanel>
+            </Grid>
 
             <TextBlock x:Name="NoSettingsMatchLabel" Style="{StaticResource Muted}" Visibility="Collapsed"
                        Margin="0,24,0,0" HorizontalAlignment="Center"
                        Text="No settings matched that search."/>
 
             <!-- Default RAM -->
-            <Border Style="{StaticResource Card}" Margin="0,18,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,18,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Default memory" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
@@ -30,7 +66,7 @@
                         <TextBlock x:Name="RamValueLabel" DockPanel.Dock="Right"
                                    Text="4096 MB" MinWidth="96" TextAlignment="Right"
                                    VerticalAlignment="Center" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource AccentBrush}"/>
+                                   Foreground="{DynamicResource AccentTextBrush}"/>
                         <Slider x:Name="RamSlider" Minimum="1024" Maximum="32768"
                                 TickFrequency="512" IsSnapToTickEnabled="True"
                                 Value="4096" ValueChanged="OnRamChanged"
@@ -38,38 +74,38 @@
                     </DockPanel>
                     <TextBlock x:Name="RamHint" Style="{StaticResource Caption}"
                                Margin="0,16,0,0"
-                               Text="Recommended: 4–8 GB for modded play. Changes save automatically."/>
+                               Text="Recommended: 4-8 GB for modded play. Changes save automatically."/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Minecraft defaults link -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <DockPanel>
-                    <Border DockPanel.Dock="Left" Width="40" Height="40" CornerRadius="10"
+                    <slate:SlateBorder DockPanel.Dock="Left" Width="40" Height="40" CornerRadius="10"
                             Background="{DynamicResource AccentSoftBrush}" VerticalAlignment="Center"
                             Margin="0,0,16,0">
-                        <TextBlock Text="&#xE7C3;" FontFamily="{StaticResource IconFont}" FontSize="18"
-                                   Foreground="{DynamicResource AccentBrush}"
+                        <TextBlock Text="&#xE7C3;" FontFamily="{DynamicResource IconFont}" FontSize="18"
+                                   Foreground="{DynamicResource AccentTextBrush}"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                    </Border>
-                    <Button DockPanel.Dock="Right" Content="Edit defaults…"
+                    </slate:SlateBorder>
+                    <Button DockPanel.Dock="Right" Content="Edit defaults..."
                             Style="{StaticResource AccentButton}" Click="OnOpenMcDefaults"
                             VerticalAlignment="Center"/>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Style="{StaticResource H3}" Text="Minecraft defaults"/>
                         <TextBlock Style="{StaticResource Muted}"
-                                   Text="FOV, render distance, brightness, volumes, keybindings — applied to new instances."
+                                   Text="FOV, render distance, brightness, volumes, keybindings - applied to new instances."
                                    TextWrapping="Wrap" Margin="0,4,16,0"/>
                     </StackPanel>
                 </DockPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Java -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Java" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
-                               Text="The Java runtime used for every instance that has no choice of its own (instance Options tab → Java). Automatic picks the version each Minecraft release needs and downloads it when it is missing."
+                               Text="The Java runtime used for every instance that has no choice of its own (instance Options tab > Java). Automatic picks the version each Minecraft release needs and downloads it when it is missing."
                                TextWrapping="Wrap" Margin="0,0,0,14"/>
                     <DockPanel>
                         <TextBlock DockPanel.Dock="Left" Text="Default runtime" Width="120"
@@ -78,10 +114,10 @@
                     </DockPanel>
                     <TextBlock x:Name="DefaultJavaHint" Style="{StaticResource Caption}" Margin="0,10,0,0" TextWrapping="Wrap"/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Layout preferences -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Layout" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
@@ -93,10 +129,10 @@
                     <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="26,4,0,0"
                                Text="When off, pages cover the main content. Use the back arrow to return."/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Display scale -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Display scale" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
@@ -107,7 +143,7 @@
                         <TextBlock DockPanel.Dock="Left" Text="Launcher" Width="150"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <TextBlock x:Name="LauncherScaleLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
-                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}"/>
+                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
                         <Slider x:Name="LauncherScaleSlider" Minimum="0.7" Maximum="1.6"
                                 TickFrequency="0.05" IsSnapToTickEnabled="True"
                                 ValueChanged="OnLauncherScaleChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
@@ -117,7 +153,7 @@
                         <TextBlock DockPanel.Dock="Left" Text="Mods (list / browse)" Width="150"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <TextBlock x:Name="ModScaleLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
-                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}"/>
+                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
                         <Slider x:Name="ModScaleSlider" Minimum="0.7" Maximum="1.6"
                                 TickFrequency="0.05" IsSnapToTickEnabled="True"
                                 ValueChanged="OnModScaleChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
@@ -126,130 +162,241 @@
                     <TextBlock Style="{StaticResource Caption}" Margin="0,14,0,0" TextWrapping="Wrap"
                                Text="100% is the default. Changes save and apply automatically; the mod size stacks on top of the launcher scale."/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Appearance -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
-                    <TextBlock Style="{StaticResource H3}" Text="Colours" Margin="0,0,0,4"/>
-                    <TextBlock Style="{StaticResource Muted}"
-                               Text="Pick a preset, or set the two colours the rest of the launcher is built from. Changes apply immediately."
-                               TextWrapping="Wrap" Margin="0,0,0,16"/>
+                    <TextBlock Style="{StaticResource H3}" Text="Appearance" Margin="0,0,0,4"/>
+                    <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,16"
+                               Text="Slate is the look of the Slate Minecraft mods: warm near-black, pixel corners, pixel headings and pixel icons. Classic is the launcher's earlier look, with your own colours. Changes apply as you make them."/>
 
-                    <DockPanel Margin="0,0,0,12">
-                        <TextBlock DockPanel.Dock="Left" Text="Preset" Width="150"
+                    <DockPanel Margin="0,0,0,14">
+                        <TextBlock DockPanel.Dock="Left" Text="Style" Width="150"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
-                        <ComboBox x:Name="ThemePresetBox" Width="260" HorizontalAlignment="Left"
-                                  DisplayMemberPath="Name" SelectionChanged="OnThemePresetChanged"/>
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton x:Name="StyleSlateRadio" Style="{StaticResource SegmentRadio}" GroupName="LookStyle"
+                                         Content="Slate" Checked="OnLookStyleChanged"
+                                         ToolTip="The Slate mods' look (the default)"/>
+                            <RadioButton x:Name="StyleClassicRadio" Style="{StaticResource SegmentRadio}" GroupName="LookStyle"
+                                         Content="Classic" Checked="OnLookStyleChanged"
+                                         ToolTip="The launcher's look before Slate, with the colours you set for it"/>
+                        </StackPanel>
                     </DockPanel>
 
-                    <DockPanel Margin="0,0,0,10">
-                        <TextBlock DockPanel.Dock="Left" Text="Accent" Width="150"
-                                   Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
-                        <Button x:Name="AccentSwatch" Width="46" Height="26" Click="OnPickAccent"
-                                HorizontalAlignment="Left" Padding="0"
-                                ToolTip="Play, focus rings, links and the rail indicator"/>
-                    </DockPanel>
+                    <!--  Slate's own options: the same set the mod's Interface page offers.  -->
+                    <StackPanel x:Name="SlateOptionsPanel">
+                        <DockPanel Margin="0,0,0,14">
+                            <TextBlock DockPanel.Dock="Left" Text="Skin" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="SkinDarkRadio" Style="{StaticResource SegmentRadio}" GroupName="LookSkin"
+                                             Content="Dark" Checked="OnLookSkinChanged"
+                                             ToolTip="Warm near-black with one accent colour"/>
+                                <RadioButton x:Name="SkinVanillaRadio" Style="{StaticResource SegmentRadio}" GroupName="LookSkin"
+                                             Content="Vanilla" Checked="OnLookSkinChanged"
+                                             ToolTip="Minecraft's grey stone: bevelled buttons, square corners, black text fields"/>
+                            </StackPanel>
+                        </DockPanel>
 
-                    <DockPanel Margin="0,0,0,10">
-                        <TextBlock DockPanel.Dock="Left" Text="Background" Width="150"
-                                   Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
-                        <Button x:Name="SurfaceSwatch" Width="46" Height="26" Click="OnPickSurface"
-                                HorizontalAlignment="Left" Padding="0"
-                                ToolTip="The deepest surface. Every other panel, border and text tier is derived from it — pick a light colour for a light launcher."/>
-                    </DockPanel>
+                        <DockPanel Margin="0,0,0,12">
+                            <TextBlock DockPanel.Dock="Left" Text="Accent" Width="150" Margin="0,6,0,0"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Top"/>
+                            <StackPanel>
+                                <ItemsControl x:Name="AccentSwatches" Focusable="False">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Button Style="{StaticResource AccentSwatchButton}" Background="{Binding Fill}"
+                                                    ToolTip="{Binding Name}" Click="OnPickSlateAccent"/>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock x:Name="AccentNameLabel" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                    <Button Content="Custom colour..." Style="{StaticResource LinkButton}" Margin="10,0,0,0"
+                                            VerticalAlignment="Center" Click="OnPickCustomSlateAccent"
+                                            ToolTip="Any colour you like as the accent"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </DockPanel>
 
-                    <TextBlock Style="{StaticResource Caption}" Margin="0,2,0,10" TextWrapping="Wrap"
-                               Foreground="{DynamicResource TextTertiaryBrush}"
-                               Text="State colours. Leave one unset to derive it from the two above."/>
+                        <DockPanel Margin="0,0,0,8">
+                            <TextBlock DockPanel.Dock="Left" Text="Corners" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="RadiusLabel" DockPanel.Dock="Right" MinWidth="90" TextAlignment="Right"
+                                       VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
+                            <Slider x:Name="RadiusSlider" Minimum="0" Maximum="4" TickFrequency="1"
+                                    IsSnapToTickEnabled="True" TickPlacement="BottomRight"
+                                    ValueChanged="OnLookRadiusChanged" VerticalAlignment="Center" Margin="0,0,16,0"
+                                    ToolTip="How many pixel steps round each corner"/>
+                        </DockPanel>
 
-                    <WrapPanel Margin="0,0,0,4">
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Danger" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="DangerSwatch" Width="46" Height="26" Click="OnPickDanger" Padding="0"
-                                    ToolTip="Delete, Remove and every other destructive button"/>
-                        </StackPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Success" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="SuccessSwatch" Width="46" Height="26" Click="OnPickSuccess" Padding="0"
-                                    ToolTip="Up-to-date badges, finished downloads, confirmations"/>
-                        </StackPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Warning" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="WarningSwatch" Width="46" Height="26" Click="OnPickWarning" Padding="0"
-                                    ToolTip="Update-available badges and anything that needs attention but is not an error"/>
-                        </StackPanel>
-                    </WrapPanel>
+                        <DockPanel Margin="0,0,0,14">
+                            <TextBlock DockPanel.Dock="Left" Text="Motion" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="MotionLabel" DockPanel.Dock="Right" MinWidth="90" TextAlignment="Right"
+                                       VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
+                            <Slider x:Name="MotionSlider" Minimum="0" Maximum="2" TickFrequency="0.25"
+                                    IsSnapToTickEnabled="True"
+                                    ValueChanged="OnLookMotionChanged" VerticalAlignment="Center" Margin="0,0,16,0"
+                                    ToolTip="Animation speed: all the way left turns motion off"/>
+                        </DockPanel>
 
-                    <Border Height="1" Background="{DynamicResource BorderSubtleBrush}" Margin="0,8,0,14"/>
+                        <DockPanel Margin="0,0,0,14">
+                            <TextBlock DockPanel.Dock="Left" Text="Pixel font" Width="150" Margin="0,9,0,0"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Top"/>
+                            <!-- Filled from ThemeService.PixelFonts; each option is written in its own font. -->
+                            <WrapPanel x:Name="PixelFontOptions"/>
+                        </DockPanel>
 
-                    <TextBlock Style="{StaticResource H3}" Text="Logs" FontSize="13" Margin="0,0,0,4"/>
-                    <TextBlock Style="{StaticResource Muted}"
-                               Text="Colours for the log views (an instance&apos;s Logs tab and the launcher log). Leave a colour unset to derive it from the two above."
-                               TextWrapping="Wrap" Margin="0,0,0,12"/>
+                        <WrapPanel Margin="150,0,0,4">
+                            <CheckBox x:Name="PixelHeadingsBox" Content="Pixel headings" Click="OnLookToggle"
+                                      Margin="0,0,26,10" ToolTip="The pixel font for titles and headings, like the mod's screens"/>
+                            <CheckBox x:Name="PixelTextBox" Content="Pixel text everywhere" Click="OnLookToggle"
+                                      Margin="0,0,26,10" ToolTip="The pixel font for all text. Crispest at 100% launcher scale."/>
+                            <CheckBox x:Name="PixelIconsBox" Content="Pixel icons" Click="OnLookToggle"
+                                      Margin="0,0,26,10" ToolTip="The Slate pixel icon set instead of the Windows icons"/>
+                            <CheckBox x:Name="ShadowsBox" Content="Hard shadows" Click="OnLookToggle"
+                                      Margin="0,0,26,10" ToolTip="Two-pixel drop shadows under buttons, menus and raised cards"/>
+                            <CheckBox x:Name="TransitionsBox" Content="Page transitions" Click="OnLookToggle"
+                                      Margin="0,0,26,10" ToolTip="Pages and tabs slide in when they open"/>
+                            <CheckBox x:Name="UiSoundsBox" Content="Click sounds" Click="OnLookToggle"
+                                      Margin="0,0,26,10" ToolTip="A soft click when you press a button"/>
+                        </WrapPanel>
 
-                    <WrapPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Background" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="LogBgSwatch" Width="46" Height="26" Click="OnPickLogBackground" Padding="0"/>
-                        </StackPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Text" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="LogTextSwatch" Width="46" Height="26" Click="OnPickLogText" Padding="0"/>
-                        </StackPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Warnings" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="LogWarnSwatch" Width="46" Height="26" Click="OnPickLogWarning" Padding="0"/>
-                        </StackPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Errors" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="LogErrorSwatch" Width="46" Height="26" Click="OnPickLogError" Padding="0"/>
-                        </StackPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Muted" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="LogMutedSwatch" Width="46" Height="26" Click="OnPickLogMuted" Padding="0"
-                                    ToolTip="Timestamps and other low-priority log text"/>
-                        </StackPanel>
-                        <StackPanel Margin="0,0,20,10">
-                            <TextBlock Text="Highlights" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
-                            <Button x:Name="LogAccentSwatch" Width="46" Height="26" Click="OnPickLogAccent" Padding="0"
-                                    ToolTip="Matches from the log search box and other highlighted lines"/>
-                        </StackPanel>
-                    </WrapPanel>
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="Reset Slate options" Click="OnResetLook"
+                                    Style="{StaticResource SubtleButton}"/>
+                            <TextBlock x:Name="LookHint" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                       TextWrapping="Wrap" Margin="0,0,12,0"/>
+                        </DockPanel>
+                    </StackPanel>
 
-                    <DockPanel Margin="0,6,0,0">
-                        <Button DockPanel.Dock="Right" Content="Reset to default" Click="OnResetTheme"
-                                Style="{StaticResource SubtleButton}"/>
-                        <TextBlock x:Name="ThemeHint" Style="{StaticResource Caption}" VerticalAlignment="Center"
-                                   TextWrapping="Wrap" Margin="0,0,12,0"/>
-                    </DockPanel>
+                    <!--  Colour options for the Classic look.  -->
+                    <StackPanel x:Name="ClassicColoursPanel">
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="150,0,0,14"
+                                   Text="Pick a preset, or set the two colours the rest of the launcher is built from."/>
+
+                        <DockPanel Margin="0,0,0,12">
+                            <TextBlock DockPanel.Dock="Left" Text="Preset" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="ThemePresetBox" Width="260" HorizontalAlignment="Left"
+                                      DisplayMemberPath="Name" SelectionChanged="OnThemePresetChanged"/>
+                        </DockPanel>
+
+                        <DockPanel Margin="0,0,0,10">
+                            <TextBlock DockPanel.Dock="Left" Text="Accent" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <Button x:Name="AccentSwatch" Width="46" Height="26" Click="OnPickAccent"
+                                    HorizontalAlignment="Left" Padding="0"
+                                    ToolTip="Play, focus rings, links and the rail indicator"/>
+                        </DockPanel>
+
+                        <DockPanel Margin="0,0,0,10">
+                            <TextBlock DockPanel.Dock="Left" Text="Background" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <Button x:Name="SurfaceSwatch" Width="46" Height="26" Click="OnPickSurface"
+                                    HorizontalAlignment="Left" Padding="0"
+                                    ToolTip="The deepest surface. Every other panel, border and text tier is derived from it - pick a light colour for a light launcher."/>
+                        </DockPanel>
+
+                        <TextBlock Style="{StaticResource Caption}" Margin="0,2,0,10" TextWrapping="Wrap"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"
+                                   Text="State colours. Leave one unset to derive it from the two above."/>
+
+                        <WrapPanel Margin="0,0,0,4">
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Danger" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="DangerSwatch" Width="46" Height="26" Click="OnPickDanger" Padding="0"
+                                        ToolTip="Delete, Remove and every other destructive button"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Success" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="SuccessSwatch" Width="46" Height="26" Click="OnPickSuccess" Padding="0"
+                                        ToolTip="Up-to-date badges, finished downloads, confirmations"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Warning" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="WarningSwatch" Width="46" Height="26" Click="OnPickWarning" Padding="0"
+                                        ToolTip="Update-available badges and anything that needs attention but is not an error"/>
+                            </StackPanel>
+                        </WrapPanel>
+
+                        <Border Height="1" Background="{DynamicResource BorderSubtleBrush}" Margin="0,8,0,14"/>
+
+                        <TextBlock Style="{StaticResource H3}" Text="Logs" FontSize="13" Margin="0,0,0,4"/>
+                        <TextBlock Style="{StaticResource Muted}"
+                                   Text="Colours for the log views (an instance&apos;s Logs tab and the launcher log). Leave a colour unset to derive it from the two above."
+                                   TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+                        <WrapPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Background" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="LogBgSwatch" Width="46" Height="26" Click="OnPickLogBackground" Padding="0"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Text" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="LogTextSwatch" Width="46" Height="26" Click="OnPickLogText" Padding="0"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Warnings" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="LogWarnSwatch" Width="46" Height="26" Click="OnPickLogWarning" Padding="0"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Errors" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="LogErrorSwatch" Width="46" Height="26" Click="OnPickLogError" Padding="0"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Muted" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="LogMutedSwatch" Width="46" Height="26" Click="OnPickLogMuted" Padding="0"
+                                        ToolTip="Timestamps and other low-priority log text"/>
+                            </StackPanel>
+                            <StackPanel Margin="0,0,20,10">
+                                <TextBlock Text="Highlights" Style="{StaticResource Caption}" Margin="0,0,0,4"/>
+                                <Button x:Name="LogAccentSwatch" Width="46" Height="26" Click="OnPickLogAccent" Padding="0"
+                                        ToolTip="Matches from the log search box and other highlighted lines"/>
+                            </StackPanel>
+                        </WrapPanel>
+
+                        <DockPanel Margin="0,6,0,0">
+                            <Button DockPanel.Dock="Right" Content="Reset to default" Click="OnResetTheme"
+                                    Style="{StaticResource SubtleButton}"/>
+                            <TextBlock x:Name="ThemeHint" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                       TextWrapping="Wrap" Margin="0,0,12,0"/>
+                        </DockPanel>
+                    </StackPanel>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Downloads -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Downloads" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
-                               Text="How many mod files download at the same time — during Update all, when installing a mod with its dependencies, and while a modpack is being installed."
+                               Text="How many mod files download at the same time - during Update all, when installing a mod with its dependencies, and while a modpack is being installed."
                                TextWrapping="Wrap" Margin="0,0,0,16"/>
                     <DockPanel>
                         <TextBlock DockPanel.Dock="Left" Text="At once" Width="150"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <TextBlock x:Name="ConcurrencyLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
-                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}"/>
+                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
                         <Slider x:Name="ConcurrencySlider" Minimum="1" Maximum="9"
                                 TickFrequency="1" IsSnapToTickEnabled="True" TickPlacement="BottomRight"
                                 ValueChanged="OnConcurrencyChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
                     </DockPanel>
                     <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
                                Margin="150,8,0,0" TextWrapping="Wrap"
-                               Text="Three is a good default. Higher is faster on a quick connection, but the mod stores answer a burst of requests from one address with refusals — which everyone using this launcher shares."/>
+                               Text="Three is a good default. Higher is faster on a quick connection, but the mod stores answer a burst of requests from one address with refusals - which everyone using this launcher shares."/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Mod stores -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Mod stores" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
@@ -259,22 +406,38 @@
                         <TextBlock DockPanel.Dock="Left" Text="CurseForge key" Width="150"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <Button DockPanel.Dock="Right" Content="Get a key" Style="{StaticResource LinkButton}"
-                                Click="OnOpenCurseForgeConsole" Margin="8,0,0,0" VerticalAlignment="Center"
+                                Click="OnOpenCurseForgeConsole" Margin="10,0,0,0" VerticalAlignment="Center"
                                 ToolTip="Opens console.curseforge.com, where a free API key can be created"/>
-                        <PasswordBox x:Name="CurseForgeKeyBox" PasswordChanged="OnCurseForgeKeyChanged"
+                        <Button DockPanel.Dock="Right" x:Name="TestCurseForgeKeyButton" Content="Test key"
+                                Click="OnTestCurseForgeKey" Margin="8,0,0,0" VerticalAlignment="Center"
+                                ToolTip="Ask CurseForge whether it accepts this key"/>
+                        <Button DockPanel.Dock="Right" x:Name="RevealCurseForgeKeyButton" Style="{StaticResource IconButton}"
+                                Content="&#xE7B3;" FontSize="14" Margin="6,0,0,0" VerticalAlignment="Center"
+                                Click="OnRevealCurseForgeKey" ToolTip="Show the key"/>
+                        <Grid VerticalAlignment="Center">
+                            <PasswordBox x:Name="CurseForgeKeyBox" PasswordChanged="OnCurseForgeKeyChanged"
+                                         ToolTip="Leave empty to use the launcher&apos;s shared key"/>
+                            <TextBox x:Name="CurseForgeKeyTextBox" Visibility="Collapsed"
+                                     TextChanged="OnCurseForgeKeyTextChanged" FontFamily="{DynamicResource MonoFont}"
                                      ToolTip="Leave empty to use the launcher&apos;s shared key"/>
+                        </Grid>
                     </DockPanel>
                     <TextBlock x:Name="CurseForgeKeyHint" Style="{StaticResource Caption}"
                                Margin="150,0,0,0" TextWrapping="Wrap"/>
+                    <CheckBox x:Name="CurseForgeDirectBox" Margin="150,12,0,0" Click="OnCurseForgeDirectToggled"
+                              Content="Talk to CurseForge directly with this key"/>
+                    <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                               Margin="176,4,0,0" TextWrapping="Wrap"
+                               Text="Skips the launcher server, which queues everyone's CurseForge requests behind one address. Your key has its own quota, so only the queue is lost. Off sends them through the server as before."/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Mods -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Mods" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
-                               Text="How mods are downloaded, updated and listed. An instance can override the channel on its Mods Management → Advanced tab."
+                               Text="How mods are downloaded, updated and listed. An instance can override the channel on its Mods Management > Advanced tab."
                                TextWrapping="Wrap" Margin="0,0,0,16"/>
 
                     <DockPanel>
@@ -292,10 +455,23 @@
                                Text="Applies to downloading a mod, to Update all, and to required dependencies. A mod that only ever publishes betas still installs whatever this is set to."/>
 
                     <DockPanel Margin="0,16,0,0">
+                        <TextBlock DockPanel.Dock="Left" Text="Update checks" Width="150"
+                                   Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="UpdateRateLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
+                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
+                        <Slider x:Name="UpdateRateSlider" Minimum="1" Maximum="100"
+                                TickFrequency="1" IsSnapToTickEnabled="True"
+                                ValueChanged="OnUpdateRateChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
+                    </DockPanel>
+                    <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                               Margin="150,8,0,0" TextWrapping="Wrap"
+                               Text="How fast the launcher asks about mods one at a time during an update check. Most mods are checked together in a few requests and do not wait on this. If the stores ask the launcher to slow down, the check pauses and carries on."/>
+
+                    <DockPanel Margin="0,16,0,0">
                         <TextBlock DockPanel.Dock="Left" Text="Row text width" Width="150"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <TextBlock x:Name="ModRowWidthLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
-                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentBrush}"/>
+                                   VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
                         <Slider x:Name="ModRowWidthSlider" Minimum="360" Maximum="2000"
                                 TickFrequency="20" IsSnapToTickEnabled="True"
                                 ValueChanged="OnModRowWidthChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
@@ -310,10 +486,10 @@
                                Margin="150,6,0,0" TextWrapping="Wrap"
                                Text="On gives every row one straight column of controls down the right of the list. Off tucks them in right after the mod's name, a shorter mouse hop away on a wide monitor."/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Minecraft game window -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Minecraft game window" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
@@ -333,7 +509,7 @@
                                   Content="Start with launcher chrome hidden"
                                   Click="OnMinecraftWindowPackPageCollapsedToggled"/>
                         <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="26,4,0,10"
-                                   Text="Opens with the title bar, instance page, and play-time bar collapsed — same result as pressing the collapse shortcut once. Press it again to bring chrome back."/>
+                                   Text="Opens with the title bar, instance page, and play-time bar collapsed - same result as pressing the collapse shortcut once. Press it again to bring chrome back."/>
                         <CheckBox x:Name="MinecraftWindowBorderlessFullscreenBox"
                                   Content="Open borderless fullscreen by default"
                                   Click="OnMinecraftWindowBorderlessFullscreenToggled"/>
@@ -344,10 +520,10 @@
                                    Text="Keyboard shortcuts are saved when selected and registered while the game wrapper is open."/>
                     </StackPanel>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Storage paths -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Storage" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}"
@@ -364,7 +540,7 @@
                                 Click="OnChangePacksFolder" Margin="0,0,8,0"
                                 ToolTip="Put your instances on another drive. You choose whether the existing ones move with it."/>
                         <TextBlock x:Name="PacksFolderLabel" VerticalAlignment="Center"
-                                   TextTrimming="CharacterEllipsis" FontFamily="{StaticResource MonoFont}"
+                                   TextTrimming="CharacterEllipsis" FontFamily="{DynamicResource MonoFont}"
                                    FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"
                                    Margin="0,0,16,0"/>
                     </DockPanel>
@@ -377,28 +553,28 @@
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <Button DockPanel.Dock="Right" Content="Open" Click="OnOpenRuntimeFolder"/>
                         <TextBlock x:Name="RuntimeFolderLabel" VerticalAlignment="Center"
-                                   TextTrimming="CharacterEllipsis" FontFamily="{StaticResource MonoFont}"
+                                   TextTrimming="CharacterEllipsis" FontFamily="{DynamicResource MonoFont}"
                                    FontSize="11" Foreground="{DynamicResource TextPrimaryBrush}"
                                    Margin="0,0,16,0"/>
                     </DockPanel>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Never-upload paths -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <TextBlock Style="{StaticResource H3}" Text="Files that never leave this PC" Margin="0,0,0,4"/>
                     <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,10"
                                Text="Anything matching one of these paths is left out when a shared instance is uploaded, and a sync from the server is never allowed to overwrite or delete it. Use it for large local-only assets that everyone else does not need."/>
                     <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,12"
                                Foreground="{DynamicResource TextTertiaryBrush}">
-                        Paths are relative to an instance&apos;s <Run FontFamily="{StaticResource MonoFont}">game/</Run> folder.
-                        A trailing <Run FontFamily="{StaticResource MonoFont}">/</Run> means the whole folder
-                        (<Run FontFamily="{StaticResource MonoFont}">config/mymod/bundle/</Run>); otherwise it is an exact
-                        path or a glob (<Run FontFamily="{StaticResource MonoFont}">saves/**</Run>).
+                        Paths are relative to an instance&apos;s <Run FontFamily="{DynamicResource MonoFont}">game/</Run> folder.
+                        A trailing <Run FontFamily="{DynamicResource MonoFont}">/</Run> means the whole folder
+                        (<Run FontFamily="{DynamicResource MonoFont}">config/mymod/bundle/</Run>); otherwise it is an exact
+                        path or a glob (<Run FontFamily="{DynamicResource MonoFont}">saves/**</Run>).
                     </TextBlock>
 
-                    <Border Background="{DynamicResource Surface1Brush}"
+                    <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                             CornerRadius="8" Padding="6" MinHeight="60">
                         <ItemsControl x:Name="PrivatePathsList">
@@ -407,25 +583,25 @@
                                     <DockPanel Margin="4,3">
                                         <!-- Row actions at the right edge -->
                                         <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
-                                                Content="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                Content="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="12"
                                                 Foreground="{DynamicResource DangerBrush}"
                                                 Visibility="{Binding RemoveVisibility}"
                                                 Click="OnRemovePrivatePath"
                                                 ToolTip="Stop protecting this path"/>
-                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                        <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
                                                 VerticalAlignment="Center" Margin="8,0,0,0"
                                                 Visibility="{Binding BuiltInVisibility}"
                                                 ToolTip="Shipped with the launcher and always applied">
                                             <TextBlock Text="built-in" Style="{StaticResource PillText}"/>
-                                        </Border>
+                                        </slate:SlateBorder>
                                         <TextBlock Text="{Binding Pattern}" VerticalAlignment="Center"
-                                                   FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                                   FontFamily="{DynamicResource MonoFont}" FontSize="11"
                                                    TextTrimming="CharacterEllipsis"/>
                                     </DockPanel>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                    </Border>
+                    </slate:SlateBorder>
 
                     <DockPanel Margin="0,10,0,0">
                         <Button DockPanel.Dock="Right" Content="Add pattern..." Click="OnAddPrivatePath"
@@ -435,10 +611,10 @@
                                    Foreground="{DynamicResource TextTertiaryBrush}"/>
                     </DockPanel>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- Updates -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="22,18">
                 <StackPanel>
                     <DockPanel>
                         <Button DockPanel.Dock="Right" x:Name="CheckUpdateButton" Content="Check for updates"
@@ -457,16 +633,58 @@
                                TextWrapping="Wrap" Margin="0,12,0,0"
                                Foreground="{DynamicResource TextSecondaryBrush}"/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- About -->
-            <Border Style="{StaticResource Card}" Padding="22,18">
+            <slate:SlateBorder Style="{StaticResource Card}" Padding="22,18">
                 <StackPanel>
-                    <TextBlock Style="{StaticResource H3}" Text="About" Margin="0,0,0,6"/>
-                    <TextBlock Style="{StaticResource Muted}"
-                               Text="CloudLauncher - Minecraft launcher with shared instances, team sync, and built-in mod browsing."/>
+                    <TextBlock Style="{StaticResource H3}" Text="About" Margin="0,0,0,12"/>
+
+                    <DockPanel>
+                        <!--  The exe's own icon; the cloud tile stands in if it cannot be read.  -->
+                        <Grid DockPanel.Dock="Left" Width="48" Height="48" Margin="0,0,16,0" VerticalAlignment="Top">
+                            <slate:SlateBorder x:Name="AboutIconFallback" CornerRadius="10" Visibility="Collapsed"
+                                               Background="{DynamicResource AccentSoftBrush}">
+                                <TextBlock Text="&#xE753;" FontFamily="{DynamicResource IconFont}" FontSize="22"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           Foreground="{DynamicResource AccentTextBrush}"/>
+                            </slate:SlateBorder>
+                            <Image x:Name="AboutIcon" RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Grid>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="CloudLauncher" FontSize="16" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="AboutVersionLabel" Style="{StaticResource Muted}" Margin="0,2,0,0"/>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                       Text="© 2026 falling_colud"/>
+                            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                       Text="Source available. All rights reserved."/>
+                        </StackPanel>
+                    </DockPanel>
+
+                    <WrapPanel Margin="0,14,0,0">
+                        <Button x:Name="AboutWebsiteButton" Content="Website" Style="{StaticResource LinkButton}"
+                                Click="OnOpenWebsite" Margin="0,0,16,8"/>
+                        <Button x:Name="AboutPrivacyButton" Content="Privacy" Style="{StaticResource LinkButton}"
+                                Click="OnOpenPrivacy" Margin="0,0,16,8"/>
+                        <Button x:Name="AboutTermsButton" Content="Terms" Style="{StaticResource LinkButton}"
+                                Click="OnOpenTerms" Margin="0,0,16,8"/>
+                        <Button Content="Third-party notices" Style="{StaticResource LinkButton}"
+                                Click="OnOpenThirdPartyNotices" Margin="0,0,16,8"
+                                ToolTip="Licences of the libraries CloudLauncher is built with"/>
+                    </WrapPanel>
+
+                    <WrapPanel Margin="0,4,0,0">
+                        <Button Content="Open logs folder" Click="OnOpenLogsFolder" Margin="0,0,8,8"
+                                ToolTip="The launcher's own log files, useful when reporting a problem"/>
+                        <Button Content="Report a problem" Click="OnReportProblem" Margin="0,0,8,8"
+                                ToolTip="Starts an email to the developer with your version details filled in"/>
+                    </WrapPanel>
+
+                    <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                               TextWrapping="Wrap" Margin="0,6,0,0"
+                               Text="Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft."/>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,16,0,0"
                        Foreground="{DynamicResource TextSecondaryBrush}"/>

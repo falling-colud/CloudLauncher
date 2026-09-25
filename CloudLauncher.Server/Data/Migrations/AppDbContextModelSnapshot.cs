@@ -22,6 +22,57 @@ namespace CloudLauncher.Server.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("CloudLauncher.Server.Data.ActivityEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ActorUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Detail")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("SubjectId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SubjectName")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("SubjectType")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid?>("TargetTeamId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("TargetUserId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ActorUserId", "CreatedAt")
+                        .IsDescending(false, true);
+
+                    b.HasIndex("SubjectType", "SubjectId", "CreatedAt")
+                        .IsDescending(false, false, true);
+
+                    b.HasIndex("TargetTeamId");
+
+                    b.HasIndex("TargetUserId");
+
+                    b.ToTable("ActivityEntries");
+                });
+
             modelBuilder.Entity("CloudLauncher.Server.Data.AppUser", b =>
                 {
                     b.Property<Guid>("Id")
@@ -77,6 +128,13 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.Property<long?>("StorageQuotaBytes")
                         .HasColumnType("bigint");
 
+                    b.Property<DateTimeOffset?>("TermsAcceptedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("TermsVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
                     b.Property<bool>("TwoFactorEnabled")
                         .HasColumnType("boolean");
 
@@ -96,6 +154,232 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.ToTable("AspNetUsers", (string)null);
                 });
 
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundle", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(4096)
+                        .HasColumnType("character varying(4096)");
+
+                    b.Property<long>("DownloadCount")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("IconBlobHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("LoadersCsv")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("McVersionsCsv")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<Guid>("OwnerId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ShareToken")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset?>("ShareTokenCreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Slug")
+                        .IsRequired()
+                        .HasMaxLength(96)
+                        .HasColumnType("character varying(96)");
+
+                    b.Property<string>("Summary")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("TargetPathRoot")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Visibility")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OwnerId");
+
+                    b.HasIndex("ShareToken")
+                        .IsUnique();
+
+                    b.HasIndex("Kind", "Slug")
+                        .IsUnique();
+
+                    b.ToTable("ContentBundles");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleCollaborator", b =>
+                {
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Permissions")
+                        .HasColumnType("integer");
+
+                    b.HasKey("BundleId", "UserId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("ContentBundleCollaborators");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleInvitation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("AcceptedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("InvitedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("InvitedUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("InvitedUsername")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Message")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<int>("Permissions")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BundleId");
+
+                    b.HasIndex("InvitedByUserId");
+
+                    b.HasIndex("Token")
+                        .IsUnique();
+
+                    b.HasIndex("InvitedUserId", "AcceptedAt");
+
+                    b.ToTable("ContentBundleInvitations");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleTeam", b =>
+                {
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("TeamId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Permissions")
+                        .HasColumnType("integer");
+
+                    b.HasKey("BundleId", "TeamId");
+
+                    b.HasIndex("TeamId");
+
+                    b.ToTable("ContentBundleTeams");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleVersion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("BlobHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("BundleId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Changelog")
+                        .HasMaxLength(8192)
+                        .HasColumnType("character varying(8192)");
+
+                    b.Property<string>("FileName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<long>("FileSize")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("LoadersCsv")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("McVersionsCsv")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<DateTimeOffset>("PublishedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ReleaseChannel")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("VersionString")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BundleId");
+
+                    b.ToTable("ContentBundleVersions");
+                });
+
             modelBuilder.Entity("CloudLauncher.Server.Data.GlobalSetting", b =>
                 {
                     b.Property<int>("Id")
@@ -109,6 +393,9 @@ namespace CloudLauncher.Server.Data.Migrations
 
                     b.Property<string>("ModrinthToken")
                         .HasColumnType("text");
+
+                    b.Property<bool>("RegistrationClosed")
+                        .HasColumnType("boolean");
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -425,6 +712,12 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.Property<bool>("IsShared")
                         .HasColumnType("boolean");
 
+                    b.Property<DateTimeOffset?>("LastUploadedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("LastUploadedById")
+                        .HasColumnType("uuid");
+
                     b.Property<int>("Loader")
                         .HasColumnType("integer");
 
@@ -448,6 +741,13 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.Property<string>("RulesJson")
                         .HasColumnType("text");
 
+                    b.Property<string>("ShareToken")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset?>("ShareTokenCreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("Summary")
                         .HasMaxLength(2048)
                         .HasColumnType("character varying(2048)");
@@ -460,7 +760,12 @@ namespace CloudLauncher.Server.Data.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("LastUploadedById");
+
                     b.HasIndex("OwnerId");
+
+                    b.HasIndex("ShareToken")
+                        .IsUnique();
 
                     b.ToTable("Packs");
                 });
@@ -481,6 +786,63 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.HasIndex("UserId");
 
                     b.ToTable("PackCollaborators");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.PackInvitation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("AcceptedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("InvitedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("InvitedUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("InvitedUsername")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Message")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<Guid>("PackId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Permissions")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InvitedByUserId");
+
+                    b.HasIndex("PackId");
+
+                    b.HasIndex("Token")
+                        .IsUnique();
+
+                    b.HasIndex("InvitedUserId", "AcceptedAt");
+
+                    b.ToTable("PackInvitations");
                 });
 
             modelBuilder.Entity("CloudLauncher.Server.Data.PackListing", b =>
@@ -560,6 +922,9 @@ namespace CloudLauncher.Server.Data.Migrations
 
                     b.Property<DateTimeOffset>("ExpiresAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("ReplacedById")
+                        .HasColumnType("uuid");
 
                     b.Property<DateTimeOffset?>("RevokedAt")
                         .HasColumnType("timestamp with time zone");
@@ -735,12 +1100,67 @@ namespace CloudLauncher.Server.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("Name")
+                    b.HasIndex("OwnerId", "Name")
                         .IsUnique();
 
-                    b.HasIndex("OwnerId");
-
                     b.ToTable("Teams");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.TeamInvitation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("AcceptedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("InvitedByUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("InvitedUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("InvitedUsername")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Message")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("TeamId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Token")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("InvitedByUserId");
+
+                    b.HasIndex("TeamId");
+
+                    b.HasIndex("Token")
+                        .IsUnique();
+
+                    b.HasIndex("InvitedUserId", "AcceptedAt");
+
+                    b.ToTable("TeamInvitations");
                 });
 
             modelBuilder.Entity("CloudLauncher.Server.Data.TeamMember", b =>
@@ -753,6 +1173,9 @@ namespace CloudLauncher.Server.Data.Migrations
 
                     b.Property<DateTimeOffset>("JoinedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("integer");
 
                     b.HasKey("TeamId", "UserId");
 
@@ -891,6 +1314,117 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.ToTable("AspNetUserTokens", (string)null);
                 });
 
+            modelBuilder.Entity("CloudLauncher.Server.Data.ActivityEntry", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "Actor")
+                        .WithMany()
+                        .HasForeignKey("ActorUserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.Team", "TargetTeam")
+                        .WithMany()
+                        .HasForeignKey("TargetTeamId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "TargetUser")
+                        .WithMany()
+                        .HasForeignKey("TargetUserId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.Navigation("Actor");
+
+                    b.Navigation("TargetTeam");
+
+                    b.Navigation("TargetUser");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundle", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "Owner")
+                        .WithMany()
+                        .HasForeignKey("OwnerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Owner");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleCollaborator", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.ContentBundle", "Bundle")
+                        .WithMany("Collaborators")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleInvitation", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.ContentBundle", "Bundle")
+                        .WithMany()
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "InvitedBy")
+                        .WithMany()
+                        .HasForeignKey("InvitedByUserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "InvitedUser")
+                        .WithMany()
+                        .HasForeignKey("InvitedUserId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.Navigation("Bundle");
+
+                    b.Navigation("InvitedBy");
+
+                    b.Navigation("InvitedUser");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleTeam", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.ContentBundle", "Bundle")
+                        .WithMany("Teams")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.Team", "Team")
+                        .WithMany()
+                        .HasForeignKey("TeamId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
+
+                    b.Navigation("Team");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundleVersion", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.ContentBundle", "Bundle")
+                        .WithMany("Versions")
+                        .HasForeignKey("BundleId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Bundle");
+                });
+
             modelBuilder.Entity("CloudLauncher.Server.Data.HostedResourcePack", b =>
                 {
                     b.HasOne("CloudLauncher.Server.Data.AppUser", "Owner")
@@ -1013,11 +1547,18 @@ namespace CloudLauncher.Server.Data.Migrations
 
             modelBuilder.Entity("CloudLauncher.Server.Data.Pack", b =>
                 {
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "LastUploadedBy")
+                        .WithMany()
+                        .HasForeignKey("LastUploadedById")
+                        .OnDelete(DeleteBehavior.SetNull);
+
                     b.HasOne("CloudLauncher.Server.Data.AppUser", "Owner")
                         .WithMany()
                         .HasForeignKey("OwnerId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("LastUploadedBy");
 
                     b.Navigation("Owner");
                 });
@@ -1039,6 +1580,32 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.Navigation("Pack");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.PackInvitation", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "InvitedBy")
+                        .WithMany()
+                        .HasForeignKey("InvitedByUserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "InvitedUser")
+                        .WithMany()
+                        .HasForeignKey("InvitedUserId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("CloudLauncher.Server.Data.Pack", "Pack")
+                        .WithMany()
+                        .HasForeignKey("PackId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("InvitedBy");
+
+                    b.Navigation("InvitedUser");
+
+                    b.Navigation("Pack");
                 });
 
             modelBuilder.Entity("CloudLauncher.Server.Data.PackListing", b =>
@@ -1166,10 +1733,36 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.HasOne("CloudLauncher.Server.Data.AppUser", "Owner")
                         .WithMany()
                         .HasForeignKey("OwnerId")
-                        .OnDelete(DeleteBehavior.Restrict)
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
                     b.Navigation("Owner");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.TeamInvitation", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "InvitedBy")
+                        .WithMany()
+                        .HasForeignKey("InvitedByUserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("CloudLauncher.Server.Data.AppUser", "InvitedUser")
+                        .WithMany()
+                        .HasForeignKey("InvitedUserId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("CloudLauncher.Server.Data.Team", "Team")
+                        .WithMany()
+                        .HasForeignKey("TeamId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("InvitedBy");
+
+                    b.Navigation("InvitedUser");
+
+                    b.Navigation("Team");
                 });
 
             modelBuilder.Entity("CloudLauncher.Server.Data.TeamMember", b =>
@@ -1240,6 +1833,15 @@ namespace CloudLauncher.Server.Data.Migrations
                         .HasForeignKey("UserId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.ContentBundle", b =>
+                {
+                    b.Navigation("Collaborators");
+
+                    b.Navigation("Teams");
+
+                    b.Navigation("Versions");
                 });
 
             modelBuilder.Entity("CloudLauncher.Server.Data.HostedResourcePack", b =>

@@ -1,6 +1,7 @@
 ﻿<Page x:Class="CloudLauncher.Views.MinecraftAccountPanel"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Minecraft accounts"
       Background="{DynamicResource Surface0Brush}">
@@ -12,9 +13,9 @@
                        Text="Add as many Microsoft or offline accounts as you like, then switch between them from this page or the title-bar chip."/>
 
             <!-- ACCOUNT LIST -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,16" Padding="0">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,16" Padding="0">
                 <DockPanel>
-                    <Border DockPanel.Dock="Top" Background="{DynamicResource Surface3Brush}"
+                    <slate:SlateBorder DockPanel.Dock="Top" Background="{DynamicResource Surface3Brush}"
                             BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
                             Padding="16,12" CornerRadius="10,10,0,0">
                         <DockPanel>
@@ -22,16 +23,16 @@
                             <TextBlock x:Name="AccountsCount" DockPanel.Dock="Right"
                                        Style="{StaticResource Caption}"/>
                         </DockPanel>
-                    </Border>
+                    </slate:SlateBorder>
                     <ItemsControl x:Name="AccountsList" Padding="6" anim:Animate.EntranceStagger="True">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Border CornerRadius="8" Padding="14,10" Margin="0,3"
+                                <slate:SlateBorder CornerRadius="8" Padding="14,10" Margin="0,3"
                                         BorderThickness="1" ToolTip="{Binding RowTooltip}"
                                         anim:Animate.HoverLift="True">
                                     <!-- Colours come through DynamicResource so a theme change while
                                          this page is open repaints the rows with everything else. -->
-                                    <Border.Style>
+                                    <slate:SlateBorder.Style>
                                         <Style TargetType="Border">
                                             <Setter Property="Background" Value="{DynamicResource Surface2Brush}"/>
                                             <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
@@ -42,41 +43,40 @@
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
-                                    </Border.Style>
-                                    <Border.ContextMenu>
+                                    </slate:SlateBorder.Style>
+                                    <slate:SlateBorder.ContextMenu>
                                         <ContextMenu>
                                             <MenuItem Header="Use this account" Click="OnCtxUse"
                                                       Visibility="{Binding UseButtonVisibility}">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE73E;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Header="Copy username" Click="OnCtxCopyUsername">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Header="Copy UUID" Click="OnCtxCopyUuid"
                                                       IsEnabled="{Binding HasUuid}"
                                                       ToolTip="The Minecraft profile ID this account launches with"/>
                                             <Separator/>
-                                            <!-- Offline only: a Microsoft account's name comes back
-                                                 from the sign-in on every launch, so a rename here
-                                                 would quietly undo itself. -->
+                                            <!-- Offline only: a Microsoft account's name is refreshed on every sign-in, so a
+                                            rename here would be undone. -->
                                             <MenuItem Header="Rename..." Click="OnCtxRename"
                                                       IsEnabled="{Binding CanRename}"
                                                       ToolTip="{Binding RenameToolTip}">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE8AC;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Header="Remove..." Click="OnCtxRemove">
                                                 <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                    <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                         </ContextMenu>
-                                    </Border.ContextMenu>
+                                    </slate:SlateBorder.ContextMenu>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="Auto"/>
@@ -85,9 +85,9 @@
                                         </Grid.ColumnDefinitions>
 
                                         <!-- Kind icon -->
-                                        <Border Grid.Column="0" Width="36" Height="36" CornerRadius="8"
+                                        <slate:SlateBorder Grid.Column="0" Width="36" Height="36" CornerRadius="8"
                                                 Margin="0,0,12,0" VerticalAlignment="Center">
-                                            <Border.Style>
+                                            <slate:SlateBorder.Style>
                                                 <Style TargetType="Border">
                                                     <Setter Property="Background" Value="{DynamicResource Surface4Brush}"/>
                                                     <Style.Triggers>
@@ -96,8 +96,8 @@
                                                         </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
-                                            </Border.Style>
-                                            <TextBlock Text="{Binding IconGlyph}" FontFamily="{StaticResource IconFont}"
+                                            </slate:SlateBorder.Style>
+                                            <TextBlock Text="{Binding IconGlyph}" FontFamily="{DynamicResource IconFont}"
                                                        FontSize="14"
                                                        HorizontalAlignment="Center" VerticalAlignment="Center">
                                                 <TextBlock.Style>
@@ -105,13 +105,13 @@
                                                         <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
                                                         <Style.Triggers>
                                                             <DataTrigger Binding="{Binding IsMicrosoft}" Value="True">
-                                                                <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+                                                                <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}"/>
                                                             </DataTrigger>
                                                         </Style.Triggers>
                                                     </Style>
                                                 </TextBlock.Style>
                                             </TextBlock>
-                                        </Border>
+                                        </slate:SlateBorder>
 
                                         <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
                                             <TextBlock Text="{Binding Username}" FontWeight="SemiBold"
@@ -129,37 +129,37 @@
                                                     ToolTip="Launch Minecraft as this account from now on"
                                                     Margin="0,0,8,0"/>
                                             <TextBlock Text="In use" FontWeight="SemiBold"
-                                                       Foreground="{DynamicResource AccentBrush}"
+                                                       Foreground="{DynamicResource AccentTextBrush}"
                                                        VerticalAlignment="Center" Margin="0,0,12,0"
                                                        Visibility="{Binding ActiveLabelVisibility}"/>
                                             <Button Style="{StaticResource IconButton}"
-                                                    Content="&#xE74D;" FontFamily="{StaticResource IconFont}"
+                                                    Content="&#xE74D;" FontFamily="{DynamicResource IconFont}"
                                                     FontSize="13" ToolTip="Remove account"
                                                     Click="OnRemoveAccount" Tag="{Binding Id}"
                                                     Foreground="{DynamicResource DangerBrush}"/>
                                         </StackPanel>
                                     </Grid>
-                                </Border>
+                                </slate:SlateBorder>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
                     <TextBlock x:Name="EmptyLabel" Style="{StaticResource Caption}"
                                HorizontalAlignment="Center" Margin="0,12,0,16"
-                               Text="No accounts yet — add one below."
+                               Text="No accounts yet - add one below."
                                Visibility="Collapsed"/>
                 </DockPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- ADD MICROSOFT -->
-            <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+            <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,12">
                 <StackPanel>
                     <DockPanel>
-                        <Border DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
+                        <slate:SlateBorder DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
                                 Background="{DynamicResource AccentSoftBrush}" Margin="0,0,12,0">
-                            <TextBlock Text="&#xE748;" FontFamily="{StaticResource IconFont}" FontSize="16"
+                            <TextBlock Text="&#xE748;" FontFamily="{DynamicResource IconFont}" FontSize="16"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"
-                                       Foreground="{DynamicResource AccentBrush}"/>
-                        </Border>
+                                       Foreground="{DynamicResource AccentTextBrush}"/>
+                        </slate:SlateBorder>
                         <Button x:Name="MicrosoftButton" DockPanel.Dock="Right"
                                 Content="Add Microsoft account" Style="{StaticResource AccentButton}"
                                 Click="OnAddMicrosoft" VerticalAlignment="Center"/>
@@ -170,22 +170,23 @@
                         </StackPanel>
                     </DockPanel>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <!-- ADD OFFLINE -->
-            <Border Style="{StaticResource Card}">
+            <slate:SlateBorder Style="{StaticResource Card}">
                 <StackPanel>
                     <DockPanel>
-                        <Border DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
+                        <slate:SlateBorder DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
                                 Background="{DynamicResource Surface4Brush}" Margin="0,0,12,0">
-                            <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}" FontSize="16"
+                            <TextBlock Text="&#xE77B;" FontFamily="{DynamicResource IconFont}" FontSize="16"
                                        HorizontalAlignment="Center" VerticalAlignment="Center"
                                        Foreground="{DynamicResource TextSecondaryBrush}"/>
-                        </Border>
+                        </slate:SlateBorder>
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock Text="Offline" FontWeight="SemiBold"/>
                             <TextBlock Style="{StaticResource Caption}"
-                                       Text="Any username. Joins offline-mode servers only."/>
+                                       Text="Any username, for offline-mode servers. Needs a Microsoft account that owns Minecraft signed in here first."
+                                       TextWrapping="Wrap"/>
                         </StackPanel>
                     </DockPanel>
                     <DockPanel Margin="0,12,0,0">
@@ -195,7 +196,7 @@
                                  ToolTip="3 to 16 characters, the same rules Minecraft uses"/>
                     </DockPanel>
                 </StackPanel>
-            </Border>
+            </slate:SlateBorder>
 
             <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,16,0,0"
                        TextWrapping="Wrap"/>

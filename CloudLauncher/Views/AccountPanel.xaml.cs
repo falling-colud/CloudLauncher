@@ -1,19 +1,21 @@
+using System.Globalization;
+using System.IO;
+using System.Net;
 using System.Windows;
 using System.Windows.Controls;
 using CloudLauncher.Services;
 using CloudLauncher.Shared;
+using Microsoft.Win32;
 
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The CloudLauncher account page: who you are signed in as, how much server storage you are using,
-/// and the three things you can do to the account itself — change the password, sign out here, or
-/// sign out everywhere.
+/// The CloudLauncher account page: who you are signed in as, server storage used, and account
+/// actions (rename, change password, sign out here or everywhere, download your data, delete).
 /// </summary>
 /// <remarks>
-/// Everything the server tells us is optional. The page renders from the cached settings first and
-/// then fills in whatever the profile and usage calls return, so an offline launcher (or an older
-/// server without <c>auth/me/usage</c>) still shows a usable Account page instead of an error.
+/// Renders from cached settings first, then fills in whatever the profile and usage calls return, so
+/// it still works offline or against an older server without <c>auth/me/usage</c>.
 /// </remarks>
 public partial class AccountPanel : Page
 {
@@ -22,9 +24,9 @@ public partial class AccountPanel : Page
     /// <summary>Cancels an in-flight profile/usage load when the page goes away.</summary>
     private readonly CancellationTokenSource _cts = new();
 
-    /// <summary>The address <c>auth/me</c> reported, or null when it told us nothing.</summary>
-    /// <remarks>Held so the resend action can use it. A server too old to send an address leaves this
-    /// null and the resend falls back to asking, which is what it always did.</remarks>
+    /// <summary>The address <c>auth/me</c> reported, or null when it didn't send one.</summary>
+    /// <remarks>Used by the resend action. Older servers don't send it, and resend then asks for the
+    /// address.</remarks>
     private string? _email;
 
     public AccountPanel(MainWindow shell)
@@ -59,8 +61,7 @@ public partial class AccountPanel : Page
     private void RefreshLocal()
     {
         var s = App.State.Settings;
-        UsernameLabel.Text = s.Username ?? "Signed out";
-        ProfileInitial.Text = !string.IsNullOrEmpty(s.Username) ? char.ToUpper(s.Username[0]).ToString() : "?";
+        ApplyUsername(s.Username);
         ServerLabel.Text = App.State.Api.ServerUrl;
         UserIdLabel.Text = s.UserId?.ToString() ?? "";
         CopyIdButton.Visibility = s.UserId is null ? Visibility.Collapsed : Visibility.Visible;
@@ -76,21 +77,24 @@ public partial class AccountPanel : Page
         RefreshButton.IsEnabled = false;
         try
         {
-            // Two independent calls: a server too old for the usage route must not cost us the
+            // Two independent calls, so an older server without the usage route still gives us the
             // profile, and vice versa.
             try
             {
-                var me = await App.State.Api.MeAsync(_cts.Token);
-                UsernameLabel.Text = me.Username;
+                // Also refreshes the cached name and admin flag, so the sidebar follows a rename made
+                // on another device.
+                var me = await App.State.Api.RefreshAccountAsync(_cts.Token);
+                ApplyUsername(me.Username);
                 UserIdLabel.Text = me.Id.ToString();
                 CopyIdButton.Visibility = Visibility.Visible;
                 ApplyEmail(me.Email);
                 ApplyVerifiedState(me.EmailConfirmed);
+                _shell.UpdateChrome();
             }
             catch (OperationCanceledException) { return; }
             catch
             {
-                // Offline or refused — the cached identity from settings is already on screen.
+                // Offline or refused; the cached identity from settings is already on screen.
                 VerifiedPill.Visibility = Visibility.Collapsed;
                 ResendVerificationButton.Visibility = Visibility.Collapsed;
             }
@@ -102,12 +106,14 @@ public partial class AccountPanel : Page
         finally { if (!_cts.IsCancellationRequested) RefreshButton.IsEnabled = true; }
     }
 
-    /// <summary>Shows the registered address beside the verified pill.</summary>
-    /// <remarks>
-    /// The pill on its own said an address was unverified without saying which — unhelpful for anyone
-    /// with more than one mailbox, and the reason resending used to start by asking the user for
-    /// something the server already knew.
-    /// </remarks>
+    private void ApplyUsername(string? username)
+    {
+        UsernameLabel.Text = string.IsNullOrEmpty(username) ? "Signed out" : username;
+        ProfileInitial.Text = !string.IsNullOrEmpty(username) ? char.ToUpper(username[0]).ToString() : "?";
+    }
+
+    /// <summary>Shows the registered address beside the verified pill, so it's clear which address
+    /// needs verifying.</summary>
     private void ApplyEmail(string? email)
     {
         _email = string.IsNullOrWhiteSpace(email) ? null : email.Trim();
@@ -129,7 +135,7 @@ public partial class AccountPanel : Page
     }
 
     /// <summary>Paints the storage meter. An account with no quota gets the figure without a bar,
-    /// because a progress bar with no maximum is a bar that always looks empty.</summary>
+    /// since a bar with no maximum would always look empty.</summary>
     private void ApplyUsage(UserStorageUsage usage)
     {
         StorageSection.Visibility = Visibility.Visible;
@@ -148,7 +154,7 @@ public partial class AccountPanel : Page
 
         var remaining = Math.Max(0, quota - usage.UsedBytes);
         StorageHint.Text = remaining == 0
-            ? "You are out of space — uploads will be refused until you delete a version or a shared instance."
+            ? "You are out of space - uploads will be refused until you delete a version or a shared instance."
             : $"{FormatBytes(remaining)} left. Uploads are refused once this is full.";
         StorageHint.SetResourceReference(ForegroundProperty,
             fraction >= 0.9 ? "DangerBrush" : "TextTertiaryBrush");
@@ -192,9 +198,8 @@ public partial class AccountPanel : Page
     {
         try
         {
-            // The profile carries the address now, so the common case is one click. The prompt is
-            // still the fallback for a server too old to send it — and it remains the way in when the
-            // sign-up address was itself the thing that was wrong.
+            // Usually the profile has the address, so this is one click. The prompt covers older
+            // servers that don't send it, and the case where the sign-up address itself was wrong.
             var email = _email;
             if (email is null)
             {
@@ -218,15 +223,90 @@ public partial class AccountPanel : Page
         {
             var card = new ChangePasswordCard();
             await _shell.ShowCardAsync(card, card.Result, card.Cancel);
-            if (await card.Result) Okay("Password changed. Other devices have been signed out.");
+            if (!await card.Result) return;
+            // The account certainly has a password now, which the Delete account card relies on.
+            if (App.State.Settings.UserId is { } id && App.State.Settings.PasswordAccountId != id)
+            {
+                App.State.Settings.PasswordAccountId = id;
+                App.State.Settings.Save();
+            }
+            Okay("Password changed. Other devices have been signed out.");
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    private async void OnChangeUsername(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var card = new AccountUsernameCard(App.State.Settings.Username ?? "");
+            await _shell.ShowCardAsync(card, card.Result, card.Cancel);
+            if (await card.Result is not { } me) return;
+            ApplyUsername(me.Username);
+            _shell.UpdateChrome();
+            Okay($"Your username is now {me.Username}. Use it the next time you sign in.");
+        }
+        catch (Exception ex) { Fail(ex.Message); }
+    }
+
+    /// <summary>Saves the server's export of the account to a file the user picks.</summary>
+    private async void OnDownloadData(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var name = App.State.Settings.Username is { Length: > 0 } u ? u : "account";
+            foreach (var bad in Path.GetInvalidFileNameChars()) name = name.Replace(bad, '_');
+            var date = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            var dialog = new SaveFileDialog
+            {
+                Title = "Save your CloudLauncher data",
+                FileName = $"cloudlauncher-data-{name}-{date}.json",
+                DefaultExt = ".json",
+                Filter = "JSON file (*.json)|*.json|All files (*.*)|*.*",
+                AddExtension = true,
+                OverwritePrompt = true
+            };
+            if (dialog.ShowDialog(_shell) != true) return;
+
+            DownloadDataButton.IsEnabled = false;
+            Okay("Downloading your data...");
+            await App.State.Api.ExportMyDataAsync(dialog.FileName, _cts.Token);
+            Okay($"Your data was saved to {dialog.FileName}.");
+        }
+        catch (OperationCanceledException) { /* the page closed */ }
+        catch (ApiException ex) when (ex.Status == HttpStatusCode.NotFound)
+        {
+            Fail("This server cannot export account data yet.");
+        }
+        catch (ApiException ex) { Fail("Could not download your data: " + (ApiClient.ServerSentence(ex) ?? ex.Message)); }
+        catch (Exception ex) { Fail("Could not download your data: " + ex.Message); }
+        finally { DownloadDataButton.IsEnabled = true; }
+    }
+
+    /// <summary>
+    /// Deletes the account on the server, then signs this PC out the way Sign out does and goes back
+    /// to the login screen. The card itself asks for the password and the typed confirmation.
+    /// </summary>
+    private async void OnDeleteAccount(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var card = new AccountDeleteCard(passwordRequired: App.State.Settings.AccountHasPassword);
+            await _shell.ShowCardAsync(card, card.Result, card.Cancel);
+            if (!await card.Result) return;
+
+            // The card's call has already forgotten the tokens and the account's cached data.
+            AppLog.Log("account", "Account deleted; signed out on this PC.");
+            _shell.NavigateToLogin();
+            await AppDialog.MessageAsync(_shell, "Account deleted",
+                "Your CloudLauncher account has been deleted. Instances on this PC are still here.");
         }
         catch (Exception ex) { Fail(ex.Message); }
     }
 
     /// <summary>
-    /// Ends this session properly: the server revokes the refresh token, so a machine you signed out
-    /// of can no longer refresh itself back in. Local tokens are cleared either way — the user asked
-    /// to be signed out of this PC and that part does not depend on the network.
+    /// Signs out properly: the server revokes the refresh token, so this machine can't refresh back in.
+    /// Local tokens are cleared either way, since that part doesn't depend on the network.
     /// </summary>
     private async void OnSignOut(object sender, RoutedEventArgs e)
     {
@@ -264,7 +344,7 @@ public partial class AccountPanel : Page
             try { await App.State.Api.LogoutAllAsync(); }
             catch (Exception ex)
             {
-                // The account may be left signed in elsewhere, so say so rather than pretending.
+                // Other devices may still be signed in, so tell the user.
                 AppLog.LogError("SignOutEverywhere", ex);
                 await AppDialog.MessageAsync(_shell, "Other devices may still be signed in",
                     "The server could not be reached: " + ex.Message

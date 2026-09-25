@@ -1,0 +1,44 @@
+﻿<UserControl x:Class="CloudLauncher.Views.AccountDeleteCard"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls">
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="24" MinWidth="400" MaxWidth="460">
+        <slate:SlateBorder.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </slate:SlateBorder.Effect>
+        <StackPanel>
+            <TextBlock Style="{StaticResource H2}" Text="Delete account" TextWrapping="Wrap"/>
+            <TextBlock Style="{StaticResource Body}" Foreground="{DynamicResource TextSecondaryBrush}"
+                       TextWrapping="Wrap" Margin="0,10,0,0"
+                       Text="This deletes your CloudLauncher account. Instances, hosted content and teams you own are deleted too, for everyone who uses them."/>
+            <TextBlock Style="{StaticResource Body}" Foreground="{DynamicResource DangerBrush}" FontWeight="SemiBold"
+                       TextWrapping="Wrap" Margin="0,8,0,0"
+                       Text="This cannot be undone."/>
+            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
+                       Text="Files on this PC are not touched."/>
+
+            <TextBlock x:Name="PasswordLabel" Style="{StaticResource Caption}" Text="Password"
+                       Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,16,0,4" TextWrapping="Wrap"/>
+            <PasswordBox x:Name="PasswordInput"/>
+
+            <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextSecondaryBrush}"
+                       Margin="0,12,0,4">
+                <Run Text="Type"/>
+                <Run Text="DELETE" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimaryBrush}"/>
+                <Run Text="to confirm"/>
+            </TextBlock>
+            <TextBox x:Name="ConfirmBox" TextChanged="OnConfirmChanged"/>
+
+            <TextBlock x:Name="ErrorLabel" Style="{StaticResource ErrorText}" TextWrapping="Wrap"
+                       Margin="0,12,0,0" Visibility="Collapsed"/>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource SubtleButton}"
+                        Margin="0,0,8,0" Click="OnCancel"/>
+                <Button x:Name="DeleteButton" Content="Delete account" Style="{StaticResource DangerButton}"
+                        IsEnabled="False" Click="OnSubmit"/>
+            </StackPanel>
+        </StackPanel>
+    </slate:SlateBorder>
+</UserControl>

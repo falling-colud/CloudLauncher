@@ -6,15 +6,16 @@ namespace CloudLauncher.Services;
 
 /// <summary>
 /// One installed mod, unified from its disk file, its resolved CurseForge/Modrinth identity,
-/// and its saved flags. This is the single item type the Mod view, List view, Graph view and
-/// Files tab all bind to — replacing the per-view re-scans so every surface agrees.
+/// and its saved flags. The Mod view, List view, Graph view and Files tab all bind to this type,
+/// so every view agrees.
 /// </summary>
 public sealed class PackMod : INotifyPropertyChanged
 {
     /// <summary>Absolute path on disk; may end <c>.jar</c> or <c>.jar.disabled</c>.</summary>
     public required string FilePath { get; set; }
 
-    /// <summary>File name normalised to always end <c>.jar</c> (the <c>.disabled</c> suffix stripped).</summary>
+    /// <summary>File name normalised to end in <c>.jar</c> (any <c>.disabled</c> suffix
+    /// stripped).</summary>
     public required string FileName { get; init; }
 
     /// <summary>Which pack folder the jar lives in: <c>game</c> or <c>local</c>.</summary>
@@ -26,9 +27,14 @@ public sealed class PackMod : INotifyPropertyChanged
     /// held steady across updates by <see cref="ModAddedCache"/>. Drives the "Add date" sort.</summary>
     public DateTime AddedAt { get; set; }
 
-    /// <summary>"Added 12 Sep 2026, 21:04" in local time, for the List view row and the tooltip.</summary>
+    /// <summary>"Added 12/09/2026 21:04" in the reader's own date order and clock, for the List view
+    /// row and the tooltip.</summary>
+    /// <remarks><see cref="AddedAt"/> is UTC (from <c>CreationTimeUtc</c>, stored by
+    /// <see cref="ModAddedCache"/> as an ISO <c>Z</c> stamp), so it is wrapped with
+    /// <see cref="TimeFormat.FromUtc"/> and localised by <see cref="TimeFormat"/>. Converting it here as
+    /// well would shift it twice.</remarks>
     public string AddedLabel =>
-        AddedAt <= DateTime.MinValue ? "" : "Added " + AddedAt.ToLocalTime().ToString("d MMM yyyy, HH:mm");
+        AddedAt <= DateTime.MinValue ? "" : "Added " + TimeFormat.DateTime(TimeFormat.FromUtc(AddedAt));
 
     private bool _enabled;
     public bool Enabled
@@ -43,9 +49,8 @@ public sealed class PackMod : INotifyPropertyChanged
     public ModVersion? CurseForgeVersion { get; set; }
 
     /// <summary>Fills in the resolved store identity after the fast initial scan and refreshes bindings.
-    /// A store that came back unresolved is left as it was rather than cleared: identity lookups fail
-    /// per store (an API outage, a CDN block), and blanking one we had already identified drops the
-    /// mod back to looking unrecognised until some later pass happens to succeed.</summary>
+    /// A store that came back unresolved is left as it was: lookups can fail per store (an API outage,
+    /// a CDN block), and clearing an identity we already had would make the mod look unrecognised.</summary>
     public void ApplyIdentity(ModSummary? modrinth, ModVersion? modrinthVer, ModSummary? curse, ModVersion? curseVer)
     {
         if (modrinth is not null) { Modrinth = modrinth; ModrinthVersion = modrinthVer; }
@@ -68,7 +73,8 @@ public sealed class PackMod : INotifyPropertyChanged
         set { if (_selected != value) { _selected = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected))); } }
     }
 
-    /// <summary>Latest compatible version found by the background update check, if newer than installed.</summary>
+    /// <summary>Latest compatible version found by the background update check, if newer than
+    /// installed.</summary>
     private ModVersion? _latest;
     public ModVersion? LatestVersion
     {
@@ -85,14 +91,16 @@ public sealed class PackMod : INotifyPropertyChanged
     public ModSource? DefaultSource { get; set; }
 
     /// <summary>The pack-wide update channel (<see cref="ModAdvancedSettings.UpdateChannel"/>), stamped
-    /// on by the inventory at load; <see cref="EffectiveUpdateChannel"/> applies the per-mod override.</summary>
+    /// on by the inventory at load. <see cref="EffectiveUpdateChannel"/> applies the per-mod
+    /// override.</summary>
     public string DefaultUpdateChannel { get; set; } = ModUpdateChannel.Release;
 
     /// <summary>The channel this mod's updates are drawn from: its own setting, else the pack's.</summary>
     public string EffectiveUpdateChannel =>
         ModUpdateChannel.Normalize(Meta.UpdateChannel) ?? ModUpdateChannel.Normalize(DefaultUpdateChannel) ?? ModUpdateChannel.Release;
 
-    /// <summary>The store this mod follows: its own choice, else the pack default, else Modrinth first.</summary>
+    /// <summary>The store this mod follows: its own choice, else the pack default, else Modrinth
+    /// first.</summary>
     public ModSource? EffectiveSourcePreference => Meta.PreferredSource ?? DefaultSource;
 
     // Honor the store the user installed from (Meta.PreferredSource) - or the pack-wide default a
@@ -112,7 +120,8 @@ public sealed class PackMod : INotifyPropertyChanged
     public ModSource? PrimarySource => PrimaryMod?.Source;
     public bool IsExternal => PrimaryMod is null;
 
-    /// <summary>True when the jar is known on both stores, so a store preference actually changes something.</summary>
+    /// <summary>True when the jar is known on both stores, so a store preference makes a
+    /// difference.</summary>
     public bool IsCrossListed => Modrinth is not null && CurseForge is not null;
 
     /// <summary>Numeric key so a grid sorts "1.10" after "1.9" instead of alphabetically.</summary>
@@ -137,9 +146,13 @@ public sealed class PackMod : INotifyPropertyChanged
     }
 
     public string DisplayName => PrimaryMod?.Name ?? Path.GetFileNameWithoutExtension(FileName);
-    public string VersionLabel => PrimaryVersion?.VersionNumber ?? "—";
+    public string VersionLabel => PrimaryVersion?.VersionNumber ?? "-";
     public string? IconUrl => PrimaryMod?.IconUrl;
     public string? PageUrl => BuildPageUrl();
+
+    /// <summary>Whether this mod has a store page at all; false for an external jar.</summary>
+    /// <remarks>A bool for XAML, since a <c>DataTrigger</c> can only compare against a value.</remarks>
+    public bool HasPage => PageUrl is not null;
 
     public string Key => ModMetadataService.KeyFor(Modrinth, CurseForge, FileName);
     public IReadOnlyList<string> CandidateKeys => ModMetadataService.CandidateKeys(Modrinth, CurseForge, FileName);
@@ -151,11 +164,74 @@ public sealed class PackMod : INotifyPropertyChanged
     public bool IsTesting => Meta.IsTesting;
     public bool IsExtra => Meta.IsExtra;
 
-    /// <summary>Held at its current version: bulk updates skip it. See <see cref="ModMeta.UpdateLocked"/>.</summary>
+    /// <summary>Held at its current version: bulk updates skip it. See
+    /// <see cref="ModMeta.UpdateLocked"/>.</summary>
     public bool IsUpdateLocked => Meta.UpdateLocked;
     public ModSide Side => Meta.Side;
     public bool IsSideRestricted => Meta.Side != ModSide.Both;
     public bool IsLocal => string.Equals(Folder, "local", StringComparison.OrdinalIgnoreCase);
+
+    // ── where this copy lives ───────────────────────────────────────
+    // The global Mods page lists the same mod from several instances, so each row has to say
+    // which instance it came from.
+
+    /// <summary>The instance whose folder this jar was read from. <see cref="Guid.Empty"/> for a row
+    /// that isn't an instance's at all: the library's own copy on the global Mods page.</summary>
+    public Guid OwnerPackId { get; set; }
+
+    /// <summary>That instance's display name, for "in (instance)" on a cross-instance list. Null when
+    /// <see cref="LoadAsync"/> was not told one; never inferred from the folder, which is a slug.</summary>
+    public string? OwnerPackName { get; set; }
+
+    /// <summary>"in (instance)", "in N instances", or "kept by the launcher" for the library's own copy.
+    /// Empty when the owner is not known, so a caller can leave the clause out.</summary>
+    public string WhereLabel =>
+        CopyCount > 1 ? $"in {CopyCount} instances"
+        : IsLibraryItself ? "kept by the launcher"
+        : OwnerPackName is { Length: > 0 } name ? "in " + name
+        : "";
+
+    /// <summary>How many instances hold this mod, when this row stands for all of them at once (the
+    /// global Mods page). Zero or one on an ordinary per-instance row, which is what makes
+    /// <see cref="WhereLabel"/> name the instance instead of counting them.</summary>
+    /// <remarks>Only a count: the page's own snapshot already holds the other instances' rows.</remarks>
+    public int CopyCount { get; set; }
+
+    /// <summary>True for the row that <em>is</em> the library's copy rather than an instance's.</summary>
+    /// <remarks>Not the same as <see cref="IsLibraryCopy"/>, which means a jar inside an instance that
+    /// is a hard link to the library file. Both can be true of one mod in two different rows; mixing
+    /// them up would let "remove from this instance" delete the library's only copy.</remarks>
+    public bool IsLibraryItself => OwnerPackId == Guid.Empty;
+
+    /// <summary>True when this instance's jar and the library's copy are the same file, so a library
+    /// update reaches this instance and deleting the jar here leaves the library alone.</summary>
+    /// <remarks>Set by <see cref="MarkLibraryCopies"/> because computing it per mod would scan the whole
+    /// library per mod.</remarks>
+    public bool IsLibraryCopy { get; set; }
+
+    /// <summary>
+    /// True when the library holds a mod of this file name and this instance's jar is not that file.
+    /// </summary>
+    /// <remarks>Covers two cases: the library's copy was placed here but the instance's own file is
+    /// kept in front of it at launch, or the library just keeps a copy for other instances. Both mean
+    /// "this instance uses its own copy" to the user, and telling them apart needs the library's
+    /// applied-to record, which doesn't belong in this type.</remarks>
+    public bool ShadowsLibrary { get; set; }
+
+    /// <summary>One clause for a library column: what this row's relationship to the library is.
+    /// Empty when there is nothing to say, which is the common case.</summary>
+    public string LibraryStateLabel =>
+        IsLibraryItself  ? "a default"
+        : IsLibraryCopy  ? "using the shared copy"
+        : ShadowsLibrary ? "this instance has its own copy"
+        : "";
+
+    /// <summary>True when these flags came from the global document rather than from this instance,
+    /// so a list can badge the row instead of implying the user set it here.</summary>
+    /// <remarks>Set from <see cref="ModMetadataService.EffectiveMeta"/>'s out parameter whenever the
+    /// inventory reads a mod's flags. Editing an inherited row writes a per-instance override through
+    /// <see cref="SaveMeta"/>.</remarks>
+    public bool MetaInherited { get; set; }
 
     public string? Note => string.IsNullOrWhiteSpace(Meta.Note) ? null : Meta.Note!.Trim();
     public bool HasNote => Note is not null;
@@ -166,17 +242,15 @@ public sealed class PackMod : INotifyPropertyChanged
 
     /// <summary>Display names of the other installed mods this one is recorded as incompatible with,
     /// filled in by <see cref="PackModInventory.ResolveConflicts"/>.</summary>
-    /// <remarks>Resolved for the whole list at once rather than computed per mod: the record is a
-    /// list of mod <em>keys</em>, so answering it for one mod means indexing every other mod's keys,
-    /// and a card-level property doing that would be O(n²) on every repaint.</remarks>
+    /// <remarks>Resolved for the whole list at once: the record is a list of mod <em>keys</em>, so a
+    /// per-card property would index every other mod's keys, O(n^2) on every repaint.</remarks>
     public IReadOnlyList<string> ConflictsWith => _conflicts;
 
     /// <summary>True when this mod carries a conflict worth showing: a recorded clash with another
     /// installed mod, or the standing "incompatible with mods not installed here" flag.</summary>
     public bool HasConflict => _conflicts.Count > 0 || Meta.IncompatibleWithUnknown;
 
-    /// <summary>What the CONFLICT pill's tooltip says — the mods by name, so the pill is actionable
-    /// rather than just alarming.</summary>
+    /// <summary>The CONFLICT pill's tooltip: the conflicting mods by name.</summary>
     public string ConflictLabel
     {
         get
@@ -192,8 +266,8 @@ public sealed class PackMod : INotifyPropertyChanged
         }
     }
 
-    /// <summary>Sets the resolved conflict names, raising change notification only when they moved —
-    /// the resolve runs over the whole pack after every metadata edit.</summary>
+    /// <summary>Sets the resolved conflict names, raising change notification only when they changed,
+    /// since the resolve runs over the whole pack after every metadata edit.</summary>
     internal void SetConflicts(IReadOnlyList<string> names)
     {
         if (_conflicts.Count == names.Count && _conflicts.SequenceEqual(names, StringComparer.Ordinal)) return;
@@ -208,7 +282,7 @@ public sealed class PackMod : INotifyPropertyChanged
         {
             if (Note is not { } n) return "";
             var line = n.Split('\n')[0].TrimEnd('\r', ' ');
-            return line.Length > 90 ? line[..90].TrimEnd() + "…" : line;
+            return line.Length > 90 ? line[..90].TrimEnd() + "..." : line;
         }
     }
 
@@ -234,9 +308,9 @@ public sealed class PackMod : INotifyPropertyChanged
 
     public string CategoriesLabel => Meta.Categories.Count == 0 ? "" : string.Join(", ", Meta.Categories);
 
-    /// <summary>The category this mod is filed under when the views group by category: its first
-    /// one, or "Uncategorized". A mod can be in several; the first is the one it was put in first,
-    /// and grouping needs exactly one bucket per mod — the same rule the graph uses.</summary>
+    /// <summary>The category used when views group by category: the mod's first one (the one it was
+    /// put in first), or "Uncategorized". Grouping needs one bucket per mod; the graph uses the same
+    /// rule.</summary>
     public string PrimaryCategory => Meta.Categories.FirstOrDefault() ?? UncategorizedName;
 
     public const string UncategorizedName = "Uncategorized";
@@ -245,9 +319,9 @@ public sealed class PackMod : INotifyPropertyChanged
     {
         get
         {
-            // Union dependencies from BOTH stores' matched versions, so a dependency edge resolves
-            // whether the dependent (or its target, e.g. Create) was recognised on Modrinth or
-            // CurseForge — they reference each other by store-specific project ids.
+            // Union dependencies from both stores' matched versions, so an edge resolves whichever store
+            // the dependent or its target (e.g. Create) was recognised on; stores reference each other's
+            // mods by their own project ids.
             if (ModrinthVersion is null) return CurseForgeVersion?.Dependencies ?? Array.Empty<ModDependency>();
             if (CurseForgeVersion is null) return ModrinthVersion.Dependencies;
             var list = new List<ModDependency>(ModrinthVersion.Dependencies);
@@ -284,14 +358,14 @@ public sealed class PackMod : INotifyPropertyChanged
                 ? "updates locked"
                 : $"kept at {VersionLabel}");
         if (flags.Count > 0) sb.AppendLine("Flags: " + string.Join(", ", flags));
-        // The incompatibility record is otherwise invisible — it is written from the options menu and
-        // then never mentioned again, which is exactly the trap it exists to prevent.
+        // Show the recorded incompatibility here; once set in the options menu it isn't shown anywhere
+        // else.
         if (ConflictLabel is { Length: > 0 } conflict) sb.AppendLine(conflict);
         if (Meta.Categories.Count > 0) sb.AppendLine("Categories: " + string.Join(", ", Meta.Categories));
         if (RequiredDependencies.Count > 0) sb.AppendLine($"Dependencies: {RequiredDependencies.Count}");
         if (HasUpdate)
-            sb.AppendLine($"Update available → {LatestVersion!.VersionNumber}" +
-                          (Meta.UpdateLocked ? "  (locked — “Update all” skips this)" : ""));
+            sb.AppendLine($"Update available > {LatestVersion!.VersionNumber}" +
+                          (Meta.UpdateLocked ? "  (locked - 'Update all' skips this)" : ""));
         if (Meta.UpdateChannel is not null)
             sb.AppendLine($"Update channel: {ModUpdateChannel.Label(Meta.UpdateChannel)}");
 
@@ -299,23 +373,32 @@ public sealed class PackMod : INotifyPropertyChanged
         {
             sb.AppendLine();
             sb.AppendLine("Note:");
-            sb.AppendLine(note.Length > 500 ? note[..500].TrimEnd() + "…" : note);
+            sb.AppendLine(note.Length > 500 ? note[..500].TrimEnd() + "..." : note);
         }
 
         if (PrimaryMod?.Description is { Length: > 0 } desc)
         {
             sb.AppendLine();
-            sb.Append(desc.Length > 400 ? desc[..400].TrimEnd() + "…" : desc);
+            sb.Append(desc.Length > 400 ? desc[..400].TrimEnd() + "..." : desc);
         }
         return sb.ToString().TrimEnd();
     }
 
     private string? BuildPageUrl() => PrimaryMod switch
     {
-        { Source: ModSource.Modrinth } m   => $"https://modrinth.com/mod/{m.Slug}",
-        { Source: ModSource.CurseForge } m => $"https://www.curseforge.com/minecraft/mc-mods/{m.Slug}",
+        { Source: ModSource.Modrinth } m   => $"https://modrinth.com/mod/{PagePathSegment(m)}",
+        { Source: ModSource.CurseForge } m => $"https://www.curseforge.com/minecraft/mc-mods/{PagePathSegment(m)}",
         _ => null
     };
+
+    /// <summary>The path segment a store page lives under: the mod's slug when it really is one,
+    /// otherwise its project id.</summary>
+    /// <remarks>CurseForge summaries are mapped as <c>Slug ?? Name</c> (see
+    /// <c>CurseForgeService.ToSummary</c>), so a missing slug arrives as a display name with spaces,
+    /// which would 404. Both stores accept a project id in the same place, so the id is the fallback,
+    /// as in <c>ModsView.BuildProjectUrl</c>. Hence the whitespace test.</remarks>
+    private static string PagePathSegment(ModSummary mod) =>
+        string.IsNullOrWhiteSpace(mod.Slug) || mod.Slug.Any(char.IsWhiteSpace) ? mod.Id : mod.Slug;
 
     /// <summary>Raise change notification for every binding (call after a flag or state change).</summary>
     public void Refresh() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
@@ -362,10 +445,11 @@ public sealed class PackModInventory
     /// <summary>The store a pack's mods evidently came from, when the pack has no explicit default:
     /// whichever store more of its jars exist on <em>exclusively</em>. A jar only CurseForge knows
     /// can't have come from Modrinth, so a pack of CurseForge-only mods with one Modrinth-only mod is
-    /// a CurseForge pack — and its cross-listed mods should link there too. Null when it's a tie.</summary>
+    /// a CurseForge pack, and its cross-listed mods should link there too. Null on a tie.</summary>
     public ModSource? InferredSource(Guid packId) => _inferred.TryGetValue(packId, out var s) ? s : null;
 
-    /// <summary>Exclusive-store counts behind <see cref="InferredSource"/>, for the Advanced tab's label.</summary>
+    /// <summary>Exclusive-store counts behind <see cref="InferredSource"/>, for the Advanced tab's
+    /// label.</summary>
     public (int CurseForgeOnly, int ModrinthOnly) ExclusiveCounts(IEnumerable<PackMod> mods)
     {
         int cf = 0, mr = 0;
@@ -387,12 +471,15 @@ public sealed class PackModInventory
     private ModSource? EffectiveDefault(Guid packId) =>
         _metadata.Advanced(packId).PreferredSource ?? InferredSource(packId);
 
-    /// <summary>Fast first pass: enumerate the jars, attach saved flags, and reuse each jar's
-    /// locally-cached store identity (name / icon / version) — all without hashing or network, so
-    /// the list and graph paint fully and instantly even for 400+ mod packs across relaunches.
-    /// <see cref="ResolveIdentitiesAsync"/> runs afterwards to refine identities and catch changed
-    /// jars; the update check follows that.</summary>
-    public async Task<List<PackMod>> LoadAsync(Guid packId, bool includeLocal, CancellationToken ct = default)
+    /// <summary>Fast first pass: enumerate the jars, attach saved flags and reuse each jar's locally
+    /// cached store identity (name / icon / version), with no hashing or network, so the list and graph
+    /// paint immediately even for 400+ mod packs. <see cref="ResolveIdentitiesAsync"/> runs afterwards to
+    /// refine identities and catch changed jars, then the update check.</summary>
+    /// <param name="packName">The instance's display name, stamped onto every row as
+    /// <see cref="PackMod.OwnerPackName"/>. Only needed where rows from several instances share one
+    /// list (the global Mods page).</param>
+    public async Task<List<PackMod>> LoadAsync(Guid packId, bool includeLocal,
+                                               CancellationToken ct = default, string? packName = null)
     {
         return await Task.Run(() =>
         {
@@ -426,22 +513,24 @@ public sealed class PackModInventory
                     Enabled = enabled,
                     Size = size,
                     AddedAt = addedAt,
+                    OwnerPackId = packId,
+                    OwnerPackName = packName,
                     DefaultSource = advanced.PreferredSource ?? InferredSource(packId),
                     DefaultUpdateChannel = channel,
-                    Meta = _metadata.GetMeta(packId, ModMetadataService.CandidateKeys(null, null, fileName))
                 };
+                ApplyMeta(packId, mod, ModMetadataService.CandidateKeys(null, null, fileName));
 
-                // Reuse the saved identities right away (no hashing, no network — validated by the jar's
-                // size + write time). Both stores' identities when known, so a cross-listed mod shows
+                // Reuse the saved identities right away (no hashing or network; validated by the jar's
+                // size and write time). Both stores' identities when known, so a cross-listed mod shows
                 // the store it follows from the first frame instead of flipping once resolution lands.
                 if (_cache.TryGetCachedMatches(path, out var cachedMr, out var cachedCf))
                 {
                     mod.ApplyIdentity(cachedMr?.Mod, cachedMr?.Version, cachedCf?.Mod, cachedCf?.Version);
-                    mod.Meta = _metadata.GetMeta(packId, mod.CandidateKeys); // re-key to the stable source id
+                    ApplyMeta(packId, mod, mod.CandidateKeys);   // re-key to the stable source id
                 }
 
-                // "Added" is the first time this mod was seen here, not this jar's creation time —
-                // an update replaces the jar, and the user still means "when did I add this mod".
+                // "Added" is when this mod was first seen here, not the jar's creation time, since an update
+                // replaces the jar.
                 mod.AddedAt = _added.Resolve(packId, mod.CandidateKeys, addedAt);
 
                 mods.Add(mod);
@@ -485,12 +574,12 @@ public sealed class PackModInventory
 
             m.ApplyIdentity(id.Modrinth?.Mod, id.Modrinth?.Version, id.CurseForge?.Mod, id.CurseForge?.Version);
             // Re-read flags now that a stable source key (modrinth:/curseforge:) is available.
-            m.Meta = _metadata.GetMeta(packId, m.CandidateKeys);
+            ApplyMeta(packId, m, m.CandidateKeys);
             m.AddedAt = _added.Resolve(packId, m.CandidateKeys, m.AddedAt);
         }
 
-        // Re-infer from the full picture — but only from a pass where both stores answered, since a
-        // store that failed would make every jar look exclusive to the other one.
+        // Re-infer from the full picture, but only when both stores answered: a failed store would
+        // make every jar look exclusive to the other one.
         if (index.Complete)
         {
             var (cfOnly, mrOnly) = ExclusiveCounts(mods);
@@ -506,6 +595,58 @@ public sealed class PackModInventory
             if (m.DefaultSource == effective) continue;
             m.DefaultSource = effective;
             m.Refresh();
+        }
+    }
+
+    /// <summary>Reads a mod's effective flags (this instance's, else the global default) and records
+    /// which of the two it got.</summary>
+    /// <remarks>Both writes happen together here so <see cref="PackMod.MetaInherited"/> always matches
+    /// where the flags came from.</remarks>
+    private void ApplyMeta(Guid packId, PackMod mod, IReadOnlyList<string> keys)
+    {
+        mod.Meta = _metadata.EffectiveMeta(packId, keys, out var inherited);
+        mod.MetaInherited = inherited;
+    }
+
+    /// <summary>
+    /// Marks which of these jars are the library's own file, and which are an instance's private copy
+    /// shadowing one.
+    /// </summary>
+    /// <remarks>
+    /// <para>One library scan for the whole list: <c>ContentLibraryService.IsLibraryLink</c> re-scans the
+    /// library on every call.</para>
+    /// <para>Library names are indexed with any <c>.disabled</c> suffix stripped and matched on
+    /// <see cref="PackMod.FileName"/>, which is normalised to <c>.jar</c>, so a default disabled by
+    /// <see cref="SetEnabled"/> (renamed in place) still shows as one.</para>
+    /// </remarks>
+    /// <param name="mods">Rows from <see cref="LoadAsync"/>, in any number of instances.</param>
+    /// <param name="libraryMods">The library's mod items, from
+    /// <c>ContentLibraryService.Scan(LibraryKind.Mod)</c>.</param>
+    public static void MarkLibraryCopies(IReadOnlyList<PackMod> mods, IReadOnlyList<(string FileName, string Path)> libraryMods)
+    {
+        var byName = new Dictionary<string, string>(libraryMods.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var (fileName, path) in libraryMods)
+            byName[StripDisabled(fileName)] = path;
+        if (byName.Count == 0)
+        {
+            foreach (var mod in mods) { mod.IsLibraryCopy = false; mod.ShadowsLibrary = false; }
+            return;
+        }
+
+        foreach (var mod in mods)
+        {
+            if (mod.IsLibraryItself) { mod.IsLibraryCopy = true; mod.ShadowsLibrary = false; continue; }
+            if (!byName.TryGetValue(mod.FileName, out var libraryPath))
+            {
+                mod.IsLibraryCopy = false;
+                mod.ShadowsLibrary = false;
+                continue;
+            }
+            // Compare file identity (volume serial and file index), not names: that is what tells a
+            // shared file from the instance's own copy.
+            var same = PackFolderService.EntriesReferToSameContent(libraryPath, mod.FilePath);
+            mod.IsLibraryCopy = same;
+            mod.ShadowsLibrary = !same;
         }
     }
 
@@ -545,9 +686,10 @@ public sealed class PackModInventory
             ? name[..^".disabled".Length]
             : name;
 
-    /// <summary>Flips a mod's effective enabled state by renaming <c>.jar</c> ⇄ <c>.jar.disabled</c>.
-    /// Updates the mod's <see cref="PackMod.FilePath"/> and <see cref="PackMod.Enabled"/> in place.
-    /// Returns false if the file could not be renamed (e.g. locked).</summary>
+    /// <summary>Flips a mod's effective enabled state by renaming between <c>.jar</c> and
+    /// <c>.jar.disabled</c>. Updates the mod's <see cref="PackMod.FilePath"/> and
+    /// <see cref="PackMod.Enabled"/> in place. Returns false if the file could not be renamed
+    /// (e.g. locked).</summary>
     public bool SetEnabled(PackMod mod, bool enabled)
     {
         try
@@ -590,11 +732,10 @@ public sealed class PackModInventory
     /// it clashes with, so the views can show them (see <see cref="PackMod.ConflictsWith"/>).
     /// </summary>
     /// <remarks>
-    /// A conflict is recorded on both mods by the options menu, but metadata written by an older
-    /// build — or edited by hand in <c>mods.json</c> — may only carry one direction, so a link found
-    /// either way is mirrored onto both here. Mods whose partner is not installed contribute nothing:
-    /// a clash with a mod this pack does not have is not a conflict the user can act on, and
-    /// <see cref="ModMeta.IncompatibleWithUnknown"/> is the flag for that case.
+    /// The options menu records a conflict on both mods, but metadata from older builds or edited by
+    /// hand in <c>mods.json</c> may only have one direction, so links are mirrored onto both here.
+    /// Conflicts with mods that aren't installed are ignored; <see cref="ModMeta.IncompatibleWithUnknown"/>
+    /// covers that case.
     /// </remarks>
     public static void ResolveConflicts(IReadOnlyList<PackMod> mods)
     {
@@ -603,8 +744,8 @@ public sealed class PackModInventory
             foreach (var key in m.CandidateKeys)
                 byKey[key] = m;
 
-        // PackMod does not override Equals, so the default comparer is reference identity — which is
-        // what "this mod object" means here, since two jars can share a display name.
+        // PackMod doesn't override Equals, so this keys by reference, which is what we want since two
+        // jars can share a display name.
         var names = new Dictionary<PackMod, SortedSet<string>>();
         foreach (var m in mods) names[m] = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
 

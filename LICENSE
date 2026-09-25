@@ -1,0 +1,47 @@
+CloudLauncher Source-Available License
+
+Copyright (c) 2026 falling_colud. All rights reserved.
+
+The source code of CloudLauncher is published so that people can read it, learn from
+it and check what the launcher does. Publishing it does not make it open source, and
+no license is granted except as written below.
+
+You may:
+
+  1. View and read the source code.
+  2. Build it and run the result on your own computers for your own personal,
+     non-commercial use.
+  3. Fork this repository on GitHub, as GitHub's Terms of Service allow, and change
+     your fork only to propose contributions back to this repository.
+
+You may not, without prior written permission from the copyright holder:
+
+  1. Distribute the source code, or programs built from it, in original or modified
+     form, including through app stores, mirrors or bundles.
+  2. Publish, host or run a modified version of CloudLauncher, or a service based on
+     it, for other people.
+  3. Use the source code, or substantial parts of it, in other software.
+  4. Sell CloudLauncher or charge for access to it.
+  5. Remove or change this notice.
+
+Contributions: by submitting a contribution (for example a pull request) you confirm
+that you have the right to submit it, and you agree that it may be used, changed and
+distributed as part of CloudLauncher under any license the copyright holder chooses.
+
+Official builds of CloudLauncher are free to download and use. They are distributed
+only by the copyright holder, at https://cloudlauncher.co.
+
+Components written by others are licensed under their own terms. See
+THIRD-PARTY-NOTICES.txt.
+
+CloudLauncher is not an official Minecraft product. It is not approved by or associated
+with Mojang or Microsoft.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Permission requests: leon.raineri@gmail.com

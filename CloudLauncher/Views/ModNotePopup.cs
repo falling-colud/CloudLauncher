@@ -8,25 +8,21 @@ using CloudLauncher.Services;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// The little "note" popup — a free-text scratchpad attached to one mod, saved to the modpack
-/// (<see cref="ModMeta.Note"/> → <c>game/.cloudlauncher/mods.json</c>) so it syncs with everything
-/// else. Opened from the options menu, the note chip on a list card, and the planning board, so a
-/// note is always one click away wherever a mod is shown.
-///
-/// It writes on close (click-away, Esc or ✕) rather than per keystroke, so a long note is one save.
-/// </summary>
+/// <summary>The small note popup: free text attached to one mod, saved to the modpack
+/// (<see cref="ModMeta.Note"/> in <c>game/.cloudlauncher/mods.json</c>) so it syncs with everything
+/// else. Opened from the options menu, a card's note chip and the planning board.</summary>
+/// <remarks>Saves on close (click-away, Esc or the close button) rather than on every keystroke.</remarks>
 public static class ModNotePopup
 {
     private static Popup? _open;
 
-    /// <summary>Opens the note editor for <paramref name="mod"/>. Anchors under
-    /// <paramref name="anchor"/> when given, otherwise at the mouse (context-menu invocations).
-    /// <paramref name="onSaved"/> fires only when the text actually changed.</summary>
+    /// <summary>Opens the note editor for <paramref name="mod"/>, under <paramref name="anchor"/>
+    /// when given, otherwise at the mouse (context menus). <paramref name="onSaved"/> fires only
+    /// when the text changed.</summary>
     public static void Show(FrameworkElement? anchor, PackMod mod, Guid packId,
         PackModInventory inventory, Action? onSaved = null)
     {
-        // Only one note open at a time — a second click elsewhere replaces (and saves) the first.
+        // Only one note is open at a time; opening another closes (and saves) the first.
         if (_open is not null) _open.IsOpen = false;
 
         var original = mod.Meta.Note ?? "";
@@ -94,7 +90,7 @@ public static class ModNotePopup
 
         box.PreviewKeyDown += (_, e) =>
         {
-            // Esc and Ctrl+Enter both commit — Enter alone stays a newline, this is a notepad.
+            // Esc and Ctrl+Enter both commit. Plain Enter inserts a newline.
             if (e.Key == Key.Escape || (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.Control))
             {
                 popup.IsOpen = false;
@@ -162,7 +158,7 @@ public static class ModNotePopup
         body.Children.Add(stack);
         body.Children.Add(close);
 
-        return new Border
+        return new CloudLauncher.Controls.SlateBorder
         {
             Width = 320,
             Background = Res("Surface2Brush"),

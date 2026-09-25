@@ -6,14 +6,9 @@ using System.Text.Json;
 
 namespace CloudLauncher.Services;
 
-/// <summary>
-/// What a server answered a status ping with, or why it did not answer.
-/// </summary>
-/// <remarks>
-/// A failure is an ordinary result here rather than an exception: half the servers in a player's list
-/// are someone's box that is off right now, and the Servers page draws "offline — connection refused"
-/// as a normal row state. Callers that treat this as an error path get dialogs nobody asked for.
-/// </remarks>
+/// <summary>What a server answered a status ping with, or why it did not answer.</summary>
+/// <remarks>A failure is a normal result, not an exception: servers in a player's list are often
+/// off, and the Servers page shows that as an ordinary row state.</remarks>
 public sealed record ServerPingResult
 {
     /// <summary>True when the server answered a well-formed status response.</summary>
@@ -22,7 +17,8 @@ public sealed record ServerPingResult
     /// <summary>Why the ping failed, in words a player can act on. Null when <see cref="Online"/>.</summary>
     public string? Error { get; init; }
 
-    /// <summary>The version string the server reports, e.g. "Paper 1.21.1" — free text, not a version number.</summary>
+    /// <summary>The version string the server reports, e.g. "Paper 1.21.1". Free text, not a
+    /// version number.</summary>
     public string? VersionName { get; init; }
 
     /// <summary>Protocol number, which is what actually decides whether a client can join.</summary>
@@ -38,7 +34,8 @@ public sealed record ServerPingResult
     /// <summary>The MOTD, flattened to plain text with the legacy colour codes removed.</summary>
     public string? Motd { get; init; }
 
-    /// <summary>The server icon as raw base64 PNG (the <c>data:</c> prefix already stripped), or null.</summary>
+    /// <summary>The server icon as raw base64 PNG (the <c>data:</c> prefix already stripped), or
+    /// null.</summary>
     public string? FaviconBase64 { get; init; }
 
     /// <summary>Round trip in milliseconds, from the ping packet when the server answers one and from
@@ -48,23 +45,12 @@ public sealed record ServerPingResult
     public static ServerPingResult Failed(string error) => new() { Online = false, Error = error };
 }
 
-/// <summary>
-/// The Minecraft Server List Ping — the same exchange the multiplayer screen makes to fill in a
-/// server's MOTD, player count, icon and latency.
-/// </summary>
-/// <remarks>
-/// <para>This is the modern (1.7+) JSON handshake, which is what every server a launcher user is
-/// likely to have in their list speaks. The pre-1.7 legacy ping (the 0xFE packet) is deliberately not
-/// implemented: a server old enough to need it cannot be joined by any instance this launcher can
-/// build, so it would show a status for something unplayable.</para>
-/// <para>SRV records are <em>not</em> resolved. Minecraft itself looks up <c>_minecraft._tcp.&lt;host&gt;</c>
-/// when no port was given, and a handful of hosting providers rely on it — for those, a ping here
-/// fails with a connection error even though the game connects fine. .NET has no SRV resolver in the
-/// base class libraries, and the alternative was a DNS dependency for a status dot. If this turns out
-/// to matter, the fix is a small DNS query here, not anywhere else.</para>
-/// <para>The protocol version sent in the handshake is -1, the "I am only asking" value. Sending a
-/// real protocol number makes some servers answer with a version-mismatch MOTD instead of their own.</para>
-/// </remarks>
+/// <summary>The Minecraft Server List Ping, as used by the multiplayer screen for a server's MOTD,
+/// player count, icon and latency.</summary>
+/// <remarks>Only the modern (1.7+) JSON handshake; no instance this launcher builds could join a
+/// pre-1.7 server. SRV records are not resolved (.NET has no built-in resolver), so hosts relying on
+/// them fail to ping even though the game connects. The handshake sends protocol -1, since a real
+/// number makes some servers answer with a version-mismatch MOTD.</remarks>
 public static class MinecraftServerPing
 {
     public const int DefaultPort = 25565;
@@ -73,15 +59,36 @@ public static class MinecraftServerPing
     /// busy server on a slow link, short enough that a dead address does not hold up the sweep.</summary>
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(5);
 
-    /// <summary>
-    /// Splits a <c>servers.dat</c> address into host and port, defaulting the port to 25565.
-    /// </summary>
-    /// <remarks>Handles the bracketed IPv6 form (<c>[::1]:25565</c>) as well as <c>host:port</c>, and
-    /// treats a bare address containing several colons as an unbracketed IPv6 literal rather than
-    /// chopping its last group off as a port.</remarks>
+    /// <summary>The longest favicon kept from a reply, in base64 characters. A 64x64 PNG is a few
+    /// kilobytes, and a servers.dat entry cannot store more anyway (NBT strings stop at 64 KB), so
+    /// anything longer is dropped.</summary>
+    public const int MaxFaviconLength = 64 * 1024;
+
+    /// <summary>The largest packet accepted, and so the largest status document. A status reply is a
+    /// few kilobytes, a modded one listing its mods a few hundred.</summary>
+    private const int MaxPacketBytes = 2 * 1024 * 1024;
+
+    /// <summary>How much of a reply's text is kept. Far beyond what real servers send, but it keeps a
+    /// reply the size of <see cref="MaxPacketBytes"/> out of a row's text and tooltip, which are laid
+    /// out again on every change.</summary>
+    private const int MaxMotdLength = 1024;
+    private const int MaxNameLength = 256;
+    private const int MaxSampleNames = 100;
+
+    /// <summary>Splits a <c>servers.dat</c> address into host and port, defaulting the port to
+    /// 25565.</summary>
+    /// <remarks>Handles <c>[::1]:25565</c> and <c>host:port</c>, and treats a bare address with several
+    /// colons as IPv6. A host containing whitespace, control characters, quotes or backslashes comes back
+    /// empty ("not an address"): the address can come from someone else's servers.dat and ends up on the
+    /// game's command line, where those characters could inject arguments.</remarks>
     public static (string Host, int Port) ParseAddress(string? address)
     {
-        var text = (address ?? "").Trim();
+        var (host, port) = SplitAddress((address ?? "").Trim());
+        return IsPlausibleHost(host) ? (host, port) : ("", DefaultPort);
+    }
+
+    private static (string Host, int Port) SplitAddress(string text)
+    {
         if (text.Length == 0) return ("", DefaultPort);
 
         if (text.StartsWith('['))
@@ -105,10 +112,18 @@ public static class MinecraftServerPing
         return (text, DefaultPort);
     }
 
+    /// <summary>False for a host containing anything no host name or IP literal can.</summary>
+    private static bool IsPlausibleHost(string host)
+    {
+        foreach (var c in host)
+            if (char.IsWhiteSpace(c) || char.IsControl(c) || c is '"' or '\\') return false;
+        return true;
+    }
+
     private static bool InPortRange(int port) => port is > 0 and <= 65535;
 
     /// <summary>Formats a host and port back into the form <c>servers.dat</c> stores, leaving the
-    /// default port off exactly as the game does.</summary>
+    /// default port off as the game does.</summary>
     public static string FormatAddress(string host, int port) =>
         port == DefaultPort ? host : host.Contains(':') ? $"[{host}]:{port}" : $"{host}:{port}";
 
@@ -120,13 +135,11 @@ public static class MinecraftServerPing
         return PingAsync(host, port, timeout, ct);
     }
 
-    /// <summary>
-    /// Connects, asks for the status JSON, times a ping packet, and returns what came back.
-    /// </summary>
-    /// <remarks>Never throws for anything the network does — a refused connection, a DNS failure, a
-    /// server that answers with something other than this protocol and a timeout all come back as an
-    /// offline result carrying the reason. Cancellation is the one exception, because a cancelled
-    /// sweep is not a server being down and must not be painted as one.</remarks>
+    /// <summary>Connects, asks for the status JSON, times a ping packet, and returns what came
+    /// back.</summary>
+    /// <remarks>Network failures (refused, DNS, wrong protocol, timeout) come back as an offline result
+    /// with the reason; only cancellation throws, since a cancelled sweep is not a server being down. One
+    /// deadline covers the whole exchange, so a stalling server costs at most the timeout.</remarks>
     public static async Task<ServerPingResult> PingAsync(string host, int port, TimeSpan? timeout = null,
                                                          CancellationToken ct = default)
     {
@@ -141,8 +154,8 @@ public static class MinecraftServerPing
         {
             await client.ConnectAsync(host, port, token);
             var stream = client.GetStream();
-            // Timed from here, not from before the connect: DNS and the TCP handshake are not what
-            // "latency" means to a player, and on a cold cache they dwarf the round trip.
+            // Timed from here, after the connect: DNS and the TCP handshake are not what players mean by
+            // latency, and on a cold cache they dwarf the round trip.
             var startedAt = Environment.TickCount64;
 
             await WritePacketAsync(stream, 0x00, body =>
@@ -191,8 +204,8 @@ public static class MinecraftServerPing
         }
     }
 
-    /// <summary>Times the optional 0x01 ping/pong. Returns null when the server does not answer one,
-    /// which several proxies and older plugins do not — the status round trip stands in.</summary>
+    /// <summary>Times the optional 0x01 ping/pong. Returns null when the server does not answer one
+    /// (several proxies and older plugins don't); the status round trip is used instead.</summary>
     private static async Task<int?> TimePingAsync(NetworkStream stream, CancellationToken ct)
     {
         try
@@ -214,7 +227,7 @@ public static class MinecraftServerPing
 
     private static string Describe(SocketException ex) => ex.SocketErrorCode switch
     {
-        SocketError.ConnectionRefused => "Connection refused — nothing is listening on that port",
+        SocketError.ConnectionRefused => "Connection refused - nothing is listening on that port",
         SocketError.HostNotFound or SocketError.NoData => "That address does not resolve",
         SocketError.TimedOut => "Timed out",
         SocketError.NetworkUnreachable or SocketError.HostUnreachable => "Host unreachable",
@@ -223,19 +236,23 @@ public static class MinecraftServerPing
 
     // ── the status JSON ──────────────────────────────────────────────────────
 
-    /// <summary>Pulls the fields the page shows out of the status document, tolerating every field
-    /// being absent — modded and proxied servers routinely omit half of them.</summary>
+    /// <summary>Pulls the fields the page shows out of the status document. Any field may be missing;
+    /// modded and proxied servers often omit half of them.</summary>
     private static ServerPingResult Parse(string json, int latencyMs)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
+        // Valid JSON is not necessarily a status document, and TryGetProperty throws, rather than
+        // returning false, on anything that is not an object.
+        if (root.ValueKind != JsonValueKind.Object)
+            return ServerPingResult.Failed("The server answered with something else");
 
         string? versionName = null;
         int? protocol = null;
         if (root.TryGetProperty("version", out var version) && version.ValueKind == JsonValueKind.Object)
         {
             if (version.TryGetProperty("name", out var vn) && vn.ValueKind == JsonValueKind.String)
-                versionName = StripFormatting(vn.GetString());
+                versionName = Clip(StripFormatting(vn.GetString()), MaxNameLength);
             if (version.TryGetProperty("protocol", out var pv) && TryReadInt32(pv, out var p)) protocol = p;
         }
 
@@ -250,9 +267,10 @@ public static class MinecraftServerPing
             {
                 foreach (var entry in list.EnumerateArray())
                 {
+                    if (sample.Count >= MaxSampleNames) break;
                     if (entry.ValueKind != JsonValueKind.Object) continue;
                     if (!entry.TryGetProperty("name", out var n) || n.ValueKind != JsonValueKind.String) continue;
-                    var name = StripFormatting(n.GetString());
+                    var name = Clip(StripFormatting(n.GetString()), MaxNameLength);
                     if (!string.IsNullOrWhiteSpace(name)) sample.Add(name);
                 }
             }
@@ -267,9 +285,9 @@ public static class MinecraftServerPing
         {
             var value = icon.GetString() ?? "";
             var comma = value.IndexOf(',');
-            // "data:image/png;base64,iVBOR…" — everything before the comma is the data-URI preamble.
+            // "data:image/png;base64,iVBOR...": everything before the comma is the data-URI preamble.
             favicon = comma >= 0 ? value[(comma + 1)..] : value;
-            if (favicon.Length == 0) favicon = null;
+            if (favicon.Length == 0 || favicon.Length > MaxFaviconLength) favicon = null;
         }
 
         return new ServerPingResult
@@ -280,21 +298,24 @@ public static class MinecraftServerPing
             PlayersOnline = online,
             PlayersMax = max,
             PlayerSample = sample,
-            Motd = string.IsNullOrWhiteSpace(motd) ? null : motd.Trim(),
+            Motd = string.IsNullOrWhiteSpace(motd) ? null : Clip(motd.Trim(), MaxMotdLength),
             FaviconBase64 = favicon,
             LatencyMs = latencyMs
         };
     }
 
-    /// <summary>
-    /// Reads a status field that is supposed to be a number.
-    /// </summary>
-    /// <remarks>The <see cref="JsonValueKind"/> check is not decoration and must not be folded away:
-    /// <see cref="JsonElement.TryGetInt32"/> <em>throws</em> <see cref="InvalidOperationException"/>
-    /// when the element is a string, a bool or null — it does not return false — and that exception is
-    /// not one <see cref="PingAsync(string, int, TimeSpan?, CancellationToken)"/> catches, so a plugin
-    /// that writes <c>"online": "12"</c> (they exist) would paint a perfectly live server as offline.
-    /// A numeric string is parsed rather than discarded, because it is plainly the number meant.</remarks>
+    /// <summary>Cuts <paramref name="value"/> to at most <paramref name="max"/> characters without
+    /// leaving half a surrogate pair at the end.</summary>
+    private static string Clip(string value, int max)
+    {
+        if (value.Length <= max) return value;
+        return value[..(char.IsHighSurrogate(value[max - 1]) ? max - 1 : max)];
+    }
+
+    /// <summary>Reads a status field that is supposed to be a number.</summary>
+    /// <remarks>Keep the <see cref="JsonValueKind"/> check: <see cref="JsonElement.TryGetInt32"/> throws
+    /// <see cref="InvalidOperationException"/> for a string, bool or null, and some plugins write
+    /// <c>"online": "12"</c>. A numeric string is parsed as the number it means.</remarks>
     private static bool TryReadInt32(JsonElement element, out int value)
     {
         switch (element.ValueKind)
@@ -310,14 +331,10 @@ public static class MinecraftServerPing
         }
     }
 
-    /// <summary>
-    /// Flattens a chat component into plain text.
-    /// </summary>
-    /// <remarks>The MOTD is allowed to be a bare string, a component object with <c>text</c> and a
-    /// nested <c>extra</c> array, or an array of components — all three appear in the wild, and some
-    /// servers nest four levels deep to colour individual words. Anything that is neither (a
-    /// <c>translate</c> key with no fallback, say) contributes nothing rather than leaking JSON into
-    /// the UI.</remarks>
+    /// <summary>Flattens a chat component into plain text.</summary>
+    /// <remarks>The MOTD may be a bare string, a component with <c>text</c> and nested <c>extra</c>, or an
+    /// array of components, nested to any depth. Anything else (a <c>translate</c> key with no fallback,
+    /// say) contributes nothing rather than leaking JSON into the UI.</remarks>
     private static string FlattenComponent(JsonElement element)
     {
         switch (element.ValueKind)
@@ -350,9 +367,8 @@ public static class MinecraftServerPing
     /// <summary>
     /// Removes the legacy section-sign formatting codes so a MOTD reads as text.
     /// </summary>
-    /// <remarks>Servers still write <c>§a</c>-style codes inside the JSON, and a MOTD is frequently
-    /// more code than word. The code is always the section sign plus exactly one character, so this is
-    /// a two-character skip and not a general escape parser.</remarks>
+    /// <remarks>Servers still put <c>§a</c>-style codes inside the JSON. A code is always the section
+    /// sign plus one character, so this is a two-character skip, not a general parser.</remarks>
     public static string StripFormatting(string? value)
     {
         if (string.IsNullOrEmpty(value)) return "";
@@ -397,10 +413,10 @@ public static class MinecraftServerPing
     private static async Task<(int Id, MemoryStream Body)> ReadPacketAsync(Stream stream, CancellationToken ct)
     {
         var length = await ReadVarIntAsync(stream, ct);
-        // A status response is a few kilobytes; a megabyte means we are not talking to a Minecraft
-        // server (or are being handed a length that would have us allocate on someone else's say-so).
-        if (length is <= 0 or > 2 * 1024 * 1024)
-            throw new InvalidDataException("The server sent a reply this is not a Minecraft server");
+        // Past MaxPacketBytes this is not a Minecraft server, and we won't allocate whatever size the peer
+        // sends. Negative covers a VarInt whose fifth byte set the sign bit.
+        if (length is <= 0 or > MaxPacketBytes)
+            throw new InvalidDataException("The server sent a reply that is not from a Minecraft server");
 
         var buffer = new byte[length];
         await ReadExactlyAsync(stream, buffer, ct);
@@ -445,7 +461,7 @@ public static class MinecraftServerPing
         throw new InvalidDataException("Malformed VarInt");
     }
 
-    /// <summary>The async twin of <see cref="ReadVarInt"/>, for the packet length prefix — the one
+    /// <summary>The async twin of <see cref="ReadVarInt"/>, for the packet length prefix: the one
     /// VarInt that has to come off the socket before its packet's size is known.</summary>
     private static async Task<int> ReadVarIntAsync(Stream from, CancellationToken ct)
     {
@@ -471,7 +487,9 @@ public static class MinecraftServerPing
     private static string ReadString(Stream from)
     {
         var length = ReadVarInt(from);
-        if (length < 0 || length > 4 * 1024 * 1024) throw new InvalidDataException("Malformed string");
+        // Checked against what the packet actually holds before anything is allocated for it.
+        if (length < 0 || length > MaxPacketBytes || (from.CanSeek && length > from.Length - from.Position))
+            throw new InvalidDataException("Malformed string");
         var bytes = new byte[length];
         var offset = 0;
         while (offset < length)

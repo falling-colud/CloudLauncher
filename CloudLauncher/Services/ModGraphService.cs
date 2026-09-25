@@ -79,7 +79,7 @@ public sealed class ModGraph
     }
 
     /// <summary>The transitive closure of <paramref name="roots"/> plus all their dependencies
-    /// (used to launch a test set with everything it needs).</summary>
+    /// (for launching a test set with everything it needs).</summary>
     public HashSet<PackMod> Closure(IEnumerable<PackMod> roots)
     {
         var seen = new HashSet<PackMod>();

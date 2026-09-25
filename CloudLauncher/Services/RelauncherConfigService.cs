@@ -7,19 +7,15 @@ using System.Text.RegularExpressions;
 namespace CloudLauncher.Services;
 
 /// <summary>
-/// Some modpacks ship the "ReLauncher" mod, which keeps its own copy of the Java
-/// path in <c>config/relauncher.json</c> and uses it to relaunch the game in a
-/// separate JVM. When that path is empty or points at a Java that no longer
-/// exists (e.g. it was baked in by another launcher / a different machine), the
-/// modpack fails to start. We force it to match the Java the launcher actually
-/// resolved for this pack so the two never disagree.
+/// Keeps the ReLauncher mod's Java path (<c>config/relauncher.json</c>) in line with the Java the
+/// launcher resolved. The mod relaunches the game in its own JVM, and an empty or stale path (e.g.
+/// written on another machine) stops the pack from starting.
 /// </summary>
 public static class RelauncherConfigService
 {
     /// <summary>
-    /// If <paramref name="gameDir"/> contains <c>config/relauncher.json</c>, rewrite its
-    /// <c>javaPath</c> to <paramref name="launcherJavaPath"/> when the stored value is
-    /// empty or doesn't match the resolved launcher Java. Other fields are preserved.
+    /// Sets <c>javaPath</c> in <c>config/relauncher.json</c> to <paramref name="launcherJavaPath"/>
+    /// when it is empty or different. Other fields are preserved.
     /// </summary>
     public static void FixJavaPath(string gameDir, string launcherJavaPath, Action<string>? report = null)
     {
@@ -32,8 +28,7 @@ public static class RelauncherConfigService
             if (!File.Exists(configPath))
                 return;
 
-            // ReLauncher launches the game windowless, so prefer javaw.exe over java.exe
-            // when both live in the same bin/ directory (matches what the mod expects).
+            // ReLauncher runs the game windowless, so prefer javaw.exe when it sits next to java.exe.
             var desired = PreferWindowlessJava(launcherJavaPath);
 
             JsonNode? root;
@@ -44,7 +39,7 @@ public static class RelauncherConfigService
             }
             catch
             {
-                // Corrupt/unparseable JSON — start fresh so the mod still launches.
+                // Unparseable JSON: start fresh so the mod still launches.
                 root = new JsonObject();
             }
 
@@ -57,17 +52,15 @@ public static class RelauncherConfigService
 
             obj["javaPath"] = desired;
 
-            // Use the relaxed encoder so characters like '+' in the args field aren't
-            // over-escaped to "\u002B" (the default HTML-safe encoder does that and
-            // mangles the file). Backslashes in paths are still escaped to "\\" — that
-            // is mandatory JSON and decodes back to a single backslash.
+            // Relaxed encoder so '+' in the args field isn't written as "\u002B" (the default HTML-safe
+            // encoder does that). Backslashes are still escaped, as JSON requires.
             var options = new JsonSerializerOptions
             {
                 WriteIndented = true,
                 Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
             };
             File.WriteAllText(configPath, obj.ToJsonString(options));
-            report?.Invoke($"Corrected relauncher.json javaPath → {desired}");
+            report?.Invoke($"Corrected relauncher.json javaPath > {desired}");
             AppLog.Log("relauncher", $"Set {configPath} javaPath to {desired} (was '{current}')");
         }
         catch (Exception ex)
@@ -78,10 +71,9 @@ public static class RelauncherConfigService
     }
 
     /// <summary>
-    /// Snapshot of the bits of <c>config/relauncher.json</c> the launcher cares about.
-    /// <paramref name="Exists"/> is false when the pack doesn't ship the mod's config.
-    /// <paramref name="TargetJavaMajor"/> is the JVM the mod will relaunch into
-    /// (parsed from <c>"targetJavaVersion": "J25"</c> → 25), or null if unset.
+    /// The parts of <c>config/relauncher.json</c> the launcher uses. <paramref name="Exists"/> is false
+    /// when the pack doesn't ship the config. <paramref name="TargetJavaMajor"/> is the Java version
+    /// the mod relaunches into (<c>"targetJavaVersion": "J25"</c> gives 25), or null if unset.
     /// </summary>
     public sealed record RelauncherInfo(bool Exists, bool Enabled, int? TargetJavaMajor);
 
@@ -101,7 +93,7 @@ public static class RelauncherConfigService
             if (string.IsNullOrWhiteSpace(text) || JsonNode.Parse(text) is not JsonObject obj)
                 return new RelauncherInfo(true, false, null);
 
-            // enableRelauncher defaults to true when absent — the config's presence implies intent.
+            // enableRelauncher defaults to true: shipping the config implies the mod is meant to run.
             var enabled = true;
             if (obj.TryGetPropertyValue("enableRelauncher", out var en) && en is not null)
             {
@@ -114,7 +106,7 @@ public static class RelauncherConfigService
                 var raw = node.GetValue<string>();
                 if (!string.IsNullOrWhiteSpace(raw))
                 {
-                    // "J25" / "Java25" / "25" → 25
+                    // "J25", "Java25" or "25" -> 25
                     var match = Regex.Match(raw, @"\d+");
                     if (match.Success && int.TryParse(match.Value, out var major))
                         target = major;

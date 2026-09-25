@@ -1,0 +1,38 @@
+<UserControl x:Class="CloudLauncher.Views.OfflineBanner"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Visibility="Collapsed">
+    <!--  The control stays Collapsed while online so the Auto row it sits in takes no space.  -->
+    <Border Background="{DynamicResource Surface2Brush}"
+            BorderBrush="{DynamicResource BorderBrush}"
+            BorderThickness="0,0,0,1">
+        <Grid>
+            <!--  Thin warning rail on the left. A full amber bar would read as an error.  -->
+            <Border Width="3" HorizontalAlignment="Left"
+                    Background="{DynamicResource WarningBrush}"/>
+
+            <DockPanel Margin="18,0,10,0" MinHeight="34">
+                <TextBlock DockPanel.Dock="Left" Text="&#xE7BA;"
+                           FontFamily="{DynamicResource IconFont}" FontSize="13"
+                           Foreground="{DynamicResource WarningBrush}"
+                           VerticalAlignment="Center" Margin="0,0,10,0"/>
+
+                <Button x:Name="DismissButton" DockPanel.Dock="Right"
+                        Style="{StaticResource HeaderIconButton}"
+                        FontFamily="{DynamicResource IconFont}" FontSize="10"
+                        MinWidth="26" MinHeight="26" Padding="6" Margin="4,0,0,0"
+                        Content="&#xE8BB;" Click="OnDismiss"
+                        ToolTip="Hide this until the connection drops again"/>
+
+                <Button x:Name="RetryButton" DockPanel.Dock="Right"
+                        Style="{StaticResource LinkButton}"
+                        Content="Retry" Click="OnRetry"
+                        VerticalAlignment="Center" Margin="12,0,0,0"
+                        ToolTip="Ask the server again for whatever this page is showing from cache"/>
+
+                <TextBlock x:Name="MessageText" Style="{StaticResource Body}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+        </Grid>
+    </Border>
+</UserControl>

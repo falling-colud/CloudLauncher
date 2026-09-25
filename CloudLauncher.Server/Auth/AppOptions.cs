@@ -5,11 +5,17 @@ public sealed class AppOptions
     /// <summary>Public URL of this server (used in email links and Google OAuth redirect).</summary>
     public string PublicBaseUrl { get; set; } = "http://localhost:5000";
 
-    /// <summary>Username granted admin during first-run bootstrap — but ONLY while no admin
-    /// account exists yet. Once any admin exists this setting is inert, so it is not a standing
-    /// privilege-escalation backdoor. Override with App:BootstrapAdminUsername; set empty to
-    /// disable bootstrap entirely (seed the first admin out-of-band instead).</summary>
-    public string BootstrapAdminUsername { get; set; } = "colud";
+    /// <summary>Username granted admin during first-run bootstrap, and only while no admin account
+    /// exists yet. Empty by default, so nobody becomes admin unless App:BootstrapAdminUsername names
+    /// the account in the server's own configuration.</summary>
+    public string BootstrapAdminUsername { get; set; } = "";
+
+    /// <summary>What the server answers over plain HTTP: <see cref="DirectHttpUpdatesOnly"/> (the
+    /// launcher update feed and the website) or <see cref="DirectHttpFull"/> (everything).</summary>
+    public string DirectHttp { get; set; } = DirectHttpUpdatesOnly;
+
+    public const string DirectHttpUpdatesOnly = "UpdatesOnly";
+    public const string DirectHttpFull = "Full";
 }
 
 public sealed class GoogleAuthOptions

@@ -5,16 +5,14 @@ using System.Windows.Media;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// Keeps a list looking still while its contents change underneath it.
+/// Keeps a list visually still while its contents change underneath it.
 /// </summary>
 /// <remarks>
-/// <para>Rebuilding an <see cref="ItemsControl"/>'s source keeps the scroll viewer's pixel offset but
-/// not what that offset points at: disable a mod with "Hide disabled" on and the row vanishes, every
-/// row below slides up, and the view appears to jump to a different part of the pack. The fix is the
-/// one every good list uses — remember which item was at the top of the viewport and where exactly it
-/// sat, then put it back there afterwards.</para>
-/// <para>If the anchor item is the one that just disappeared, the next surviving item from the old
-/// order takes its place, so hiding the row you just acted on still leaves the list where it was.</para>
+/// <para>Rebuilding an <see cref="ItemsControl"/>'s source keeps the pixel offset but not the item at
+/// it, so hiding one row makes the view jump. This remembers the item at the top of the viewport and
+/// its exact position, then puts it back.</para>
+/// <para>If that item is the one that disappeared, the next surviving item from the old order takes
+/// its place.</para>
 /// </remarks>
 internal sealed class ListScrollAnchor(ItemsControl items)
 {
@@ -60,7 +58,7 @@ internal sealed class ListScrollAnchor(ItemsControl items)
             var container = items.ItemContainerGenerator.ContainerFromItem(target) as FrameworkElement;
             if (container is null)
             {
-                // Not realised yet — jump roughly to where it should be by row height and try again.
+                // Not realised yet: jump roughly to where it should be by row height and try again.
                 if (newOrder is null) break;
                 var row = EstimateRowHeight(scroll);
                 if (row <= 0) break;
@@ -78,7 +76,7 @@ internal sealed class ListScrollAnchor(ItemsControl items)
     }
 
     /// <summary>The captured item if it is still shown, otherwise the first item after it in the old
-    /// order that is — which is exactly the row that took its place on screen.</summary>
+    /// order that is (the row that took its place on screen).</summary>
     private static object? SurvivingAnchor(Capture capture, IReadOnlyList<object>? previousOrder, IReadOnlyList<object>? newOrder)
     {
         if (capture.Item is null || newOrder is null) return null;
@@ -93,7 +91,7 @@ internal sealed class ListScrollAnchor(ItemsControl items)
     }
 
     /// <summary>The first realised container that is not entirely above the viewport, and its offset
-    /// from the viewport's top edge (usually slightly negative — it is partly scrolled off).</summary>
+    /// from the viewport's top edge (usually slightly negative, as it is partly scrolled off).</summary>
     private (object? Item, double Offset) FindTopVisible(ScrollViewer scroll)
     {
         object? best = null;

@@ -1,0 +1,306 @@
+<UserControl x:Class="CloudLauncher.Views.SharingOverviewPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:v="clr-namespace:CloudLauncher.Views"
+             xmlns:anim="clr-namespace:CloudLauncher.Animations"
+             Background="Transparent">
+    <UserControl.Resources>
+        <v:BoolToVisibilityConverter x:Key="BoolVis"/>
+        <v:NotEmptyToVisibilityConverter x:Key="NotEmptyVis"/>
+
+        <!--  A face chip, used on a SlateBorder so the Slate look draws it as a pixel circle. An
+        explicit Style targeting Border still applies to a SlateBorder.  -->
+        <Style x:Key="FaceChip" TargetType="Border">
+            <Setter Property="Width" Value="24"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="CornerRadius" Value="12"/>
+            <Setter Property="Margin" Value="0,0,-6,0"/>
+            <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Surface2Brush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style x:Key="FaceText" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
+            <Setter Property="FontSize" Value="9"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <!--  One person or team with access. Teams get the people glyph instead of initials so a
+        team can't be mistaken for a person.  -->
+        <DataTemplate x:Key="FaceTemplate">
+            <slate:SlateBorder Style="{StaticResource FaceChip}" ToolTip="{Binding Tip}">
+                <Grid>
+                    <TextBlock Text="{Binding Initials}" Style="{StaticResource FaceText}"
+                               Visibility="{Binding IsTeam, Converter={StaticResource BoolVis}, ConverterParameter=invert}"/>
+                    <TextBlock Text="&#xE716;" FontFamily="{DynamicResource IconFont}" FontSize="11"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextPrimaryBrush}"
+                               Visibility="{Binding IsTeam, Converter={StaticResource BoolVis}}"/>
+                </Grid>
+            </slate:SlateBorder>
+        </DataTemplate>
+
+        <!--  Kind chip: the sidebar's glyph and name for the content type. A fixed width keeps the
+        names in one column.  -->
+        <Style x:Key="KindChip" TargetType="Border" BasedOn="{StaticResource Pill}">
+            <Setter Property="MinWidth" Value="112"/>
+            <Setter Property="Margin" Value="0,0,14,0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <!--  One shared item of any kind. Row text comes from SharingRow; the offline gating of its
+        buttons comes from this panel, since connectivity can change while the list is showing.  -->
+        <DataTemplate x:Key="SharedRowTemplate">
+            <Border Background="Transparent" Padding="14,9" BorderThickness="0,0,0,1"
+                    BorderBrush="{DynamicResource BorderSubtleBrush}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <slate:SlateBorder Grid.Column="0" Style="{StaticResource KindChip}">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                            <TextBlock Text="{Binding TypeGlyph}" FontFamily="{DynamicResource IconFont}"
+                                       FontSize="11" Margin="0,0,6,0" VerticalAlignment="Center"
+                                       Style="{StaticResource PillText}"/>
+                            <TextBlock Text="{Binding Kind}" Style="{StaticResource PillText}"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Name}" Style="{StaticResource H3}"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding SubLine}" Style="{StaticResource Caption}"
+                                   TextTrimming="CharacterEllipsis" Margin="0,1,0,0"
+                                   ToolTip="{Binding SubLine}"/>
+                    </StackPanel>
+
+                    <!--  Faces of who has access, for things I share. The "+3" sits over
+                    the last chip's overlap.  -->
+                    <Grid Grid.Column="2" VerticalAlignment="Center" Margin="12,0,6,0">
+                        <ItemsControl ItemsSource="{Binding Faces}" ItemTemplate="{StaticResource FaceTemplate}"
+                                      Margin="0,0,6,0">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                        <TextBlock Text="{Binding MoreAccessLabel}" Style="{StaticResource Caption}"
+                                   HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,-14,0"
+                                   Visibility="{Binding MoreAccessLabel, Converter={StaticResource NotEmptyVis}}"/>
+                    </Grid>
+
+                    <!--  Instances only: what this PC and the server each hold. Hidden
+                    while that is unknown.  -->
+                    <slate:SlateBorder Grid.Column="3" Style="{StaticResource Pill}" Margin="10,0,0,0"
+                                       VerticalAlignment="Center"
+                                       Visibility="{Binding HasSync, Converter={StaticResource BoolVis}}">
+                        <TextBlock Text="{Binding SyncLabel}" Style="{StaticResource PillText}"/>
+                    </slate:SlateBorder>
+
+                    <!--  Public and Team get a pill; Private is the default and the line above
+                         already says who it is shared with.  -->
+                    <Grid Grid.Column="4" VerticalAlignment="Center" Margin="10,0,0,0">
+                        <slate:SlateBorder Background="{DynamicResource TagPublicBgBrush}" CornerRadius="10" Padding="8,2"
+                                           Visibility="{Binding IsPublic, Converter={StaticResource BoolVis}}">
+                            <TextBlock Text="Public" FontSize="10" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TagPublicFgBrush}"/>
+                        </slate:SlateBorder>
+                        <slate:SlateBorder Background="{DynamicResource TagTeamBgBrush}" CornerRadius="10" Padding="8,2"
+                                           Visibility="{Binding IsTeamVisible, Converter={StaticResource BoolVis}}">
+                            <TextBlock Text="Team" FontSize="10" FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TagTeamFgBrush}"/>
+                        </slate:SlateBorder>
+                    </Grid>
+
+                    <StackPanel Grid.Column="5" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                        <!--  Straight to the access list: the instance's Share & sync tab, a hosted item's
+                        people dialog, or a bundle's own page.  -->
+                        <Button Style="{StaticResource IconButton}" Content="&#xE748;"
+                                FontFamily="{DynamicResource IconFont}" FontSize="13" Margin="0,0,6,0"
+                                Click="OnManageAccess"
+                                Visibility="{Binding CanManageAccess, Converter={StaticResource BoolVis}}"
+                                IsEnabled="{Binding CanAct, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTip="Who can reach this, and what they can do"
+                                ToolTipService.ShowOnDisabled="True"/>
+                        <!--  An instance's one-click action: Update, Download, Add or Remove.
+                        Disabled offline instead of hidden, so it doesn't look like a
+                        missing feature.  -->
+                        <Button Content="{Binding ActionLabel}" Padding="12,4" Margin="0,0,6,0"
+                                Click="OnRowAction"
+                                Visibility="{Binding HasAction, Converter={StaticResource BoolVis}}"
+                                IsEnabled="{Binding CanAct, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTip="{Binding ActionTip, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTipService.ShowOnDisabled="True"/>
+                        <Button Content="Open" Padding="12,4" Click="OnOpenRow"
+                                ToolTip="Open its page"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!--  An invitation waiting for my answer: Accept or Decline.  -->
+        <DataTemplate x:Key="IncomingInviteTemplate">
+            <Border Background="Transparent" Padding="0,7" BorderThickness="0,0,0,1"
+                    BorderBrush="{DynamicResource BorderSubtleBrush}">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Content="Accept" Style="{StaticResource AccentButton}"
+                                Padding="14,5" Click="OnAcceptInvite"
+                                IsEnabled="{Binding CanAct, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTip="{Binding ActionTip, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTipService.ShowOnDisabled="True"/>
+                        <Button Content="Decline" Margin="8,0,0,0" Padding="12,5" Click="OnDeclineInvite"
+                                IsEnabled="{Binding CanAct, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTip="{Binding ActionTip, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTipService.ShowOnDisabled="True"/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Left" Text="&#xE77B;" FontFamily="{DynamicResource IconFont}"
+                               FontSize="14" Foreground="{DynamicResource TextSecondaryBrush}"
+                               VerticalAlignment="Center" Margin="2,0,12,0"/>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Headline}" Style="{StaticResource H3}"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding SubLine}" Style="{StaticResource Caption}"
+                                   TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+        </DataTemplate>
+
+        <!--  An invite I sent. Revoke is styled as destructive; Copy link only shows for link
+        invites, since a named invite has nothing to paste.  -->
+        <DataTemplate x:Key="OutgoingInviteTemplate">
+            <Border Background="Transparent" Padding="0,7" BorderThickness="0,0,0,1"
+                    BorderBrush="{DynamicResource BorderSubtleBrush}">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Style="{StaticResource IconButton}" Content="&#xE8C8;"
+                                FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                ToolTip="Copy the invitation link" Click="OnCopyInviteLink"
+                                Visibility="{Binding IsLink, Converter={StaticResource BoolVis}}"/>
+                        <Button Content="Revoke" Style="{StaticResource DangerButton}"
+                                Margin="8,0,0,0" Padding="12,5" Click="OnRevokeInvite"
+                                IsEnabled="{Binding CanAct, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTip="{Binding ActionTip, RelativeSource={RelativeSource AncestorType={x:Type v:SharingOverviewPanel}}}"
+                                ToolTipService.ShowOnDisabled="True"/>
+                    </StackPanel>
+                    <TextBlock DockPanel.Dock="Left" Text="&#xE71B;" FontFamily="{DynamicResource IconFont}"
+                               FontSize="14" Foreground="{DynamicResource TextSecondaryBrush}"
+                               VerticalAlignment="Center" Margin="2,0,12,0"/>
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Headline}" Style="{StaticResource H3}"
+                                   TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding SubLine}" Style="{StaticResource Caption}"
+                                   TextTrimming="CharacterEllipsis" Margin="0,1,0,0"/>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="0,12,0,0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!--  Row 0: direction and kind filters, the count, and a search over what is already
+        loaded (local, so the 200 ms debounce is enough).  -->
+        <Grid Grid.Row="0" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <ComboBox x:Name="DirectionBox" Grid.Column="0" Width="180" Margin="0,0,8,0"
+                      SelectionChanged="OnFilterChanged"
+                      ToolTip="Things you share, things shared with you, or both"/>
+            <ComboBox x:Name="KindBox" Grid.Column="1" Width="180"
+                      SelectionChanged="OnFilterChanged"
+                      ToolTip="Which kind of thing to list"/>
+            <TextBlock x:Name="SubLabel" Grid.Column="2" Style="{StaticResource Caption}"
+                       VerticalAlignment="Center" Margin="14,0,12,0" TextTrimming="CharacterEllipsis"/>
+            <v:CompactSearchBox x:Name="SearchBox" Grid.Column="3" HorizontalAlignment="Right"
+                                Placeholder="Search what's shared..."
+                                SearchToolTip="Search by name, person or kind (Ctrl+F)"/>
+        </Grid>
+
+        <!--  Row 1: pending invitations first, then the list. PageStateView goes last so it
+        draws on top.  -->
+        <Grid Grid.Row="1">
+            <ScrollViewer x:Name="ContentScroller" VerticalScrollBarVisibility="Auto"
+                          anim:Animate.SmoothScroll="True">
+                <StackPanel Margin="0,0,10,0">
+
+                    <slate:SlateBorder x:Name="InvitesCard" Style="{StaticResource Card}" Margin="0,0,0,14"
+                                       Visibility="Collapsed">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,4">
+                                <TextBlock x:Name="InvitesCountLabel" DockPanel.Dock="Right"
+                                           Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Text="Invitations" Style="{StaticResource H3}"/>
+                            </DockPanel>
+
+                            <TextBlock x:Name="IncomingHeader" Text="Waiting for you"
+                                       Style="{StaticResource Caption}" FontWeight="SemiBold"
+                                       Margin="0,4,0,0" Visibility="Collapsed"/>
+                            <ItemsControl x:Name="IncomingList" ItemTemplate="{StaticResource IncomingInviteTemplate}"/>
+
+                            <!--  Sent invites start collapsed so they don't push the shared
+                            items down the page.  -->
+                            <Button x:Name="OutgoingHeader" Style="{StaticResource LinkButton}"
+                                    HorizontalAlignment="Left" Margin="-2,8,0,0" Visibility="Collapsed"
+                                    Click="OnToggleOutgoing"
+                                    ToolTip="Show or hide the invitations and links you have sent">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock x:Name="OutgoingCaret" Text="&#xE76C;" FontFamily="{DynamicResource IconFont}"
+                                               FontSize="10" Margin="0,0,6,0" VerticalAlignment="Center"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                    <TextBlock x:Name="OutgoingHeaderText" Text="Sent by you" Style="{StaticResource Caption}"
+                                               FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                            <ItemsControl x:Name="OutgoingList" ItemTemplate="{StaticResource OutgoingInviteTemplate}"
+                                          Visibility="Collapsed"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+
+                    <slate:SlateBorder x:Name="ListCard" Style="{StaticResource Card}" Padding="0">
+                        <StackPanel>
+                            <ItemsControl x:Name="RowList" ItemTemplate="{StaticResource SharedRowTemplate}"/>
+                            <!--  Shown in the card when the filters hide everything but
+                            invitations are showing, so the empty list has an explanation.  -->
+                            <TextBlock x:Name="ListNote" Style="{StaticResource Muted}" Margin="16,14"
+                                       TextWrapping="Wrap" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+                </StackPanel>
+            </ScrollViewer>
+
+            <v:PageStateView x:Name="PageStateHost"/>
+        </Grid>
+
+        <!--  Row 2: the tab's status line. A plain line instead of a status-bar band, because
+        the page below already has one.  -->
+        <DockPanel Grid.Row="2" Margin="0,8,0,0">
+            <ProgressBar x:Name="BusyBar" DockPanel.Dock="Right" Width="140" Height="4"
+                         IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center"/>
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
+                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+        </DockPanel>
+    </Grid>
+</UserControl>

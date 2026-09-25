@@ -4,12 +4,8 @@ using CloudLauncher.Shared;
 namespace CloudLauncher.Services;
 
 /// <summary>Which shader loader, if any, an instance can actually run a shader pack with.</summary>
-/// <remarks>
-/// Ordered by what the launcher should believe when more than one is present: Iris and its Forge fork
-/// Oculus own <c>config/iris.properties</c>, while OptiFine owns <c>optionsshaders.txt</c>. The
-/// distinction is not cosmetic — writing Iris's config into an OptiFine-only instance creates a file
-/// nothing reads and reports success for a change that will never happen.
-/// </remarks>
+/// <remarks>Iris and its Forge fork Oculus read <c>config/iris.properties</c>; OptiFine reads
+/// <c>optionsshaders.txt</c>. Writing the wrong one changes nothing in game.</remarks>
 public enum ShaderLoader
 {
     /// <summary>Nothing in <c>mods/</c> can load a shader pack. Installing one is a no-op in game.</summary>
@@ -19,22 +15,22 @@ public enum ShaderLoader
     OptiFine = 3
 }
 
-/// <summary>
-/// The shader packs installed in each instance's <c>game/shaderpacks/</c> folder, and which one Iris
-/// or OptiFine is set to use.
-/// </summary>
-/// <remarks>
-/// Shaders are not mods and not resource packs: they are zips (or folders) dropped in their own
-/// directory, and which one is active lives in the shader loader's config rather than in
-/// <c>options.txt</c>. Iris and its forks (Oculus on Forge) keep it in
-/// <c>config/iris.properties</c> as <c>shaderPack=</c>; OptiFine uses <c>optionsshaders.txt</c>.
-/// Reading and writing those two files is all it takes to switch packs from the launcher, and it is
-/// worth doing here because the alternative is launching the game to find out what is enabled.
-///
-/// Everything that touches disk in bulk (installing, copying, deleting an unpacked folder) has an
-/// <c>…Async</c> twin that runs the same work on a thread-pool thread: a shader pack is routinely
-/// 5-60 MB and an unpacked one is thousands of small files, so doing it inline froze the window.
-/// </remarks>
+/// <summary>Which of an instance's two shaderpacks/ folders a pack was found in.</summary>
+/// <remarks>Same idea as <see cref="ResourcePackOrigin"/>: <c>local/</c> is the per-user, unsynced
+/// side, hard-linked into <c>game/</c> at launch, and the content library puts packs there. Only the
+/// <c>game/</c> copy is shared on a shared instance.</remarks>
+public enum ShaderPackOrigin
+{
+    Game = 0,
+    Local
+}
+
+/// <summary>The shader packs installed in each instance's <c>game/shaderpacks/</c> folder, and which
+/// one Iris or OptiFine is set to use.</summary>
+/// <remarks>The active pack lives in the loader's config: <c>shaderPack=</c> in
+/// <c>config/iris.properties</c> for Iris and Oculus, <c>optionsshaders.txt</c> for OptiFine. Bulk
+/// disk work (install, copy, delete) has an <c>Async</c> twin that runs on the thread pool, since
+/// packs are 5-60 MB or thousands of files.</remarks>
 public sealed class ShaderPackService(AppSettings settings, PackFolderService packs)
 {
     private const string FolderName = "shaderpacks";
@@ -44,9 +40,20 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
 
     public string FolderFor(Guid packId) => Path.Combine(packs.GameDir(packId), FolderName);
 
+    /// <summary>The unsynced side: where the content library puts a shader, and where the launch
+    /// overlay picks it up from.</summary>
+    public string LocalFolderFor(Guid packId) => Path.Combine(packs.LocalDir(packId), FolderName);
+
     /// <summary>The settings key for a shader file inside an instance. Matches the scheme
     /// <c>ResourcePackService.Key</c> uses, so <see cref="AppSettings.ShaderPacks"/> can be shared.</summary>
     public static string Key(Guid packId, string fileName) => $"{packId:N}:{fileName}";
+
+    /// <summary>The settings key qualified by which folder the file lives in.</summary>
+    /// <remarks>The <c>game/</c> form is unchanged so names and provenance stored by earlier versions
+    /// still resolve; the <c>local/</c> form is namespaced so the same file name in both folders gets
+    /// two entries. Same scheme as <c>ResourcePackService.Key</c>.</remarks>
+    public static string Key(Guid packId, string fileName, ShaderPackOrigin origin) =>
+        origin == ShaderPackOrigin.Local ? $"{packId:N}:local/{fileName}" : Key(packId, fileName);
 
     public List<ShaderPackInfo> ScanAll(IReadOnlyList<PackSummary> knownPacks)
     {
@@ -59,58 +66,84 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
         return result.OrderByDescending(r => r.LastModified).ToList();
     }
 
-    public List<ShaderPackInfo> ScanPack(Guid packId, string packName)
+    public List<ShaderPackInfo> ScanPack(Guid packId, string packName) =>
+        ScanPack(packId, packName, includeLocal: true);
+
+    /// <summary>Every shader pack installed in an instance, with which one is active.</summary>
+    /// <param name="includeLocal">Also scan the unsynced <c>local/shaderpacks/</c> folder. The content
+    /// library puts packs there, so without it a just-applied pack is invisible until the next
+    /// launch.</param>
+    public List<ShaderPackInfo> ScanPack(Guid packId, string packName, bool includeLocal)
     {
-        var dir = Path.Combine(packs.GameDir(packId, packName), FolderName);
-        if (!Directory.Exists(dir)) return new();
+        var gameDir = Path.Combine(packs.GameDir(packId, packName), FolderName);
 
         var active = ActiveShader(packId, packName);
         var result = new List<ShaderPackInfo>();
 
-        foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
+        Collect(gameDir, ShaderPackOrigin.Game);
+        if (includeLocal)
         {
-            var name = Path.GetFileName(entry);
-            var isFolder = Directory.Exists(entry);
-            // A zip, or an unpacked shader folder — both are valid to Iris. Anything else (a stray
-            // .txt, the loader's own cache) is not a shader pack.
-            if (!isFolder && !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue;
-            if (isFolder && name.StartsWith('.')) continue;
-
-            long size = 0;
-            DateTime modified;
-            try
-            {
-                modified = isFolder ? Directory.GetLastWriteTime(entry) : File.GetLastWriteTime(entry);
-                size = isFolder ? FolderSize(entry) : new FileInfo(entry).Length;
-            }
-            catch { modified = DateTime.MinValue; }
-
-            var key = Key(packId, name);
-            var stored = settings.GetShaderPack(key);
-            var settingsPath = Path.Combine(dir, name + SettingsSuffix);
-            var hasSettings = File.Exists(settingsPath);
-
-            result.Add(new ShaderPackInfo(
-                Key: key,
-                SourcePackId: packId,
-                SourcePackName: packName,
-                FileName: name,
-                FilePath: entry,
-                // A name the user typed wins over one derived from the file: they renamed it precisely
-                // because the derived one was not good enough.
-                DisplayName: stored is { DisplayName.Length: > 0 } ? stored.DisplayName : PrettyName(name),
-                IsFolder: isFolder,
-                IsActive: string.Equals(active, name, StringComparison.OrdinalIgnoreCase),
-                LastModified: modified,
-                SizeBytes: size,
-                HasSettings: hasSettings,
-                SettingsPath: settingsPath,
-                Source: stored?.Source,
-                ProjectId: stored?.ProjectId,
-                VersionId: stored?.VersionId,
-                VersionNumber: stored?.VersionNumber));
+            try { Collect(LocalFolderFor(packId), ShaderPackOrigin.Local); }
+            catch { /* no local/ folder: no unsynced packs */ }
         }
         return result;
+
+        void Collect(string dir, ShaderPackOrigin origin)
+        {
+            if (!Directory.Exists(dir)) return;
+
+            foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
+            {
+                var name = Path.GetFileName(entry);
+                var isFolder = Directory.Exists(entry);
+                // Zips and unpacked folders are both valid shader packs; anything else (a stray .txt, the
+                // loader's cache) is not.
+                if (!isFolder && !name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) continue;
+                if (isFolder && name.StartsWith('.')) continue;
+
+                // After a launch the overlay has hard-linked this pack into game/, which is already listed, so
+                // skip the local/ copy. A different pack with the same name still shows, so the clash is visible.
+                if (origin == ShaderPackOrigin.Local
+                    && PackFolderService.EntriesReferToSameContent(entry, Path.Combine(gameDir, name)))
+                    continue;
+
+                long size = 0;
+                DateTime modified;
+                try
+                {
+                    modified = isFolder ? Directory.GetLastWriteTime(entry) : File.GetLastWriteTime(entry);
+                    size = isFolder ? FolderSize(entry) : new FileInfo(entry).Length;
+                }
+                catch { modified = DateTime.MinValue; }
+
+                var key = Key(packId, name, origin);
+                var stored = settings.GetShaderPack(key);
+                // Iris writes a pack's tuning next to the copy it loaded, always in game/. That file stays per
+                // instance; linking it would share one tuning across all of them.
+                var settingsPath = Path.Combine(gameDir, name + SettingsSuffix);
+                var hasSettings = File.Exists(settingsPath);
+
+                result.Add(new ShaderPackInfo(
+                    Key: key,
+                    SourcePackId: packId,
+                    SourcePackName: packName,
+                    FileName: name,
+                    FilePath: entry,
+                    // A name the user typed wins over one derived from the file.
+                    DisplayName: stored is { DisplayName.Length: > 0 } ? stored.DisplayName : PrettyName(name),
+                    IsFolder: isFolder,
+                    IsActive: string.Equals(active, name, StringComparison.OrdinalIgnoreCase),
+                    LastModified: modified,
+                    SizeBytes: size,
+                    HasSettings: hasSettings,
+                    SettingsPath: settingsPath,
+                    Source: stored?.Source,
+                    ProjectId: stored?.ProjectId,
+                    VersionId: stored?.VersionId,
+                    VersionNumber: stored?.VersionNumber,
+                    Origin: origin));
+            }
+        }
     }
 
     /// <summary>The shader pack the instance is currently set to load, or null for "none".</summary>
@@ -135,18 +168,12 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
 
     // ── loader detection ─────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Which shader loader the instance has installed, by looking for its jar in <c>game/mods</c>.
-    /// </summary>
-    /// <remarks>
-    /// A shader pack in an instance with no loader does nothing at all, and the game gives no hint:
-    /// it just renders vanilla. Nothing else in the launcher can answer "why did my shader not
-    /// apply?", so the Shaders page asks this and says so up front. The match is deliberately loose —
-    /// jar names carry version suffixes, build numbers and mod-pack renames — and deliberately cheap:
-    /// it reads file names, never opens a jar. A wrong answer costs a banner, not a failed launch.
-    /// OptiFine is reported only when nothing Iris-shaped is present, because an instance carrying
-    /// both loads shaders through Iris.
-    /// </remarks>
+    /// <summary>Which shader loader the instance has installed, by looking for its jar in
+    /// <c>game/mods</c>.</summary>
+    /// <remarks>Without a loader a shader pack does nothing and the game gives no hint, so the Shaders
+    /// page uses this to warn up front. Matching is loose (jar names carry versions and renames) and
+    /// cheap (file names only). OptiFine is reported only when no Iris-like jar is present, since an
+    /// instance with both loads shaders through Iris.</remarks>
     public ShaderLoader DetectLoader(Guid packId, string? packName = null)
     {
         var gameDir = packName is null ? packs.GameDir(packId) : packs.GameDir(packId, packName);
@@ -180,16 +207,11 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
     private static string Collapse(string s) =>
         new(s.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
-    /// <summary>
-    /// Points the instance's shader loader at <paramref name="fileName"/> (null = turn shaders off).
-    /// </summary>
-    /// <remarks>
-    /// Writes only the config the instance's loader actually reads. Iris reads
-    /// <c>config/iris.properties</c> at startup and a missing file simply means "defaults", so it is
-    /// created when Iris or Oculus is present. An OptiFine-only instance gets <c>optionsshaders.txt</c>
-    /// and nothing else — creating an iris.properties there used to leave a file no one reads while
-    /// the launcher reported the change as done.
-    /// </remarks>
+    /// <summary>Points the instance's shader loader at <paramref name="fileName"/> (null = turn
+    /// shaders off).</summary>
+    /// <remarks>Only writes the config the instance's loader reads. <c>config/iris.properties</c> is
+    /// created when Iris or Oculus is present (a missing file means defaults); an OptiFine-only instance
+    /// only gets <c>optionsshaders.txt</c>.</remarks>
     public void SetActiveShader(Guid packId, string? fileName)
     {
         var gameDir = packs.GameDir(packId);
@@ -212,21 +234,29 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
     // ── install / copy / delete ──────────────────────────────────────────────
 
     /// <summary>True when the instance already holds a shader file of this name.</summary>
-    public bool Exists(Guid packId, string fileName)
+    /// <param name="includeLocal">Also count one staged in <c>local/</c> (a library item that hasn't
+    /// been through a launch yet).</param>
+    public bool Exists(Guid packId, string fileName, bool includeLocal = false)
     {
+        // Not a plain name, so nothing of that name can be in the folder.
+        if (!PathSafety.IsSafeFileName(fileName)) return false;
         var path = Path.Combine(FolderFor(packId), fileName);
-        return File.Exists(path) || Directory.Exists(path);
+        if (File.Exists(path) || Directory.Exists(path)) return true;
+        if (!includeLocal) return false;
+        var local = Path.Combine(LocalFolderFor(packId), fileName);
+        return File.Exists(local) || Directory.Exists(local);
     }
 
-    /// <summary>
-    /// A free path for <paramref name="fileName"/> inside <paramref name="dir"/>, appending -2, -3 …
-    /// until nothing is in the way.
-    /// </summary>
-    /// <remarks>Mirrors the resource pack screen's Bump: two downloads of the same pack are two
-    /// packs, and quietly overwriting the first destroys whatever the user had unpacked or tuned.</remarks>
+    /// <summary>A free path for <paramref name="fileName"/> inside <paramref name="dir"/>, appending
+    /// -2, -3 and so on until nothing is in the way.</summary>
+    /// <remarks>Like the resource pack screen's Bump: two downloads of one pack are two packs, and
+    /// overwriting would lose what the user unpacked or tuned.</remarks>
+    /// <exception cref="IOException"><paramref name="fileName"/> is not one plain file name. These
+    /// names come from store listings and other people's packs, so every caller gets the check.</exception>
     public static string NextFreePath(string dir, string fileName)
     {
-        var candidate = Path.Combine(dir, fileName);
+        var candidate = PathSafety.ResolveFileName(dir, fileName)
+                        ?? throw new IOException($"'{fileName}' cannot be used as a file name.");
         if (!File.Exists(candidate) && !Directory.Exists(candidate)) return candidate;
 
         var stem = Path.GetFileNameWithoutExtension(fileName);
@@ -241,31 +271,31 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
 
     /// <summary>Copies a shader zip from anywhere on disk into the instance. Returns the new path.</summary>
     /// <param name="replace">True overwrites a same-named pack; false (the default) installs
-    /// alongside it as "name-2.zip". Only the caller knows which the user asked for.</param>
-    /// <remarks>Installing a pack over itself is a no-op rather than a copy, because the source can
-    /// already BE the destination: "Open folder" on the Shaders page shows the instance's own
-    /// <c>shaderpacks/</c>, and dragging a pack from there back onto the list and choosing "Replace"
-    /// arrives here with both paths equal. Without the <see cref="SamePath"/> guard the replace branch
-    /// deletes the pack first and then copies the (now gone) source onto itself — an empty folder and
-    /// a cheerful "Added 1 shader pack". See <see cref="CopyFolder"/> for the same guard one level
-    /// down.</remarks>
+    /// alongside it as "name-2.zip".</param>
+    /// <remarks>Installing a pack over itself is a no-op. That happens when a pack is dragged from the
+    /// instance's own <c>shaderpacks/</c> back onto the list and "Replace" is chosen; without the
+    /// <see cref="SamePath"/> check, replace would delete the source before copying it.</remarks>
     public string Install(Guid packId, string sourceFile, bool replace = false)
     {
         var dir = FolderFor(packId);
         Directory.CreateDirectory(dir);
-        var name = Path.GetFileName(sourceFile);
+        var name = Path.GetFileName(sourceFile.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        // The replace branches delete what is at this path first, so it has to be a pack inside the
+        // folder and never the folder itself or anything above it.
+        var named = PathSafety.ResolveFileName(dir, name)
+                    ?? throw new IOException($"'{name}' cannot be used as a shader pack name.");
 
         if (Directory.Exists(sourceFile))
         {
             // An unpacked shader folder dropped in from Explorer is as valid as a zip.
-            var folderDest = replace ? Path.Combine(dir, name) : NextFreePath(dir, name);
+            var folderDest = replace ? named : NextFreePath(dir, name);
             if (SamePath(sourceFile, folderDest)) return folderDest;
             if (replace && Directory.Exists(folderDest)) Directory.Delete(folderDest, recursive: true);
             CopyFolder(sourceFile, folderDest);
             return folderDest;
         }
 
-        var dest = replace ? Path.Combine(dir, name) : NextFreePath(dir, name);
+        var dest = replace ? named : NextFreePath(dir, name);
         if (SamePath(sourceFile, dest)) return dest;
         File.Copy(sourceFile, dest, overwrite: replace);
         return dest;
@@ -276,19 +306,19 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
         CancellationToken ct = default) =>
         Task.Run(() => Install(packId, sourceFile, replace), ct);
 
-    /// <summary>Copies a shader into another instance, so a pack you like is one click away in all of them.</summary>
-    /// <remarks>The pack's Iris settings file travels with it. Leaving it behind means the copy opens
-    /// at defaults, which is exactly the thing the user was trying to avoid by copying rather than
-    /// re-downloading.
-    /// <para>Copying a pack into the instance it already lives in returns it untouched: with
-    /// <paramref name="replace"/> set, the folder branch would otherwise delete the source before
-    /// copying it, destroying the pack it was asked to duplicate.</para></remarks>
+    /// <summary>Copies a shader into another instance.</summary>
+    /// <remarks>The pack's Iris settings file goes with it, so the copy keeps its tuning. Copying into
+    /// the instance the pack already lives in returns it untouched; with <paramref name="replace"/> the
+    /// folder branch would otherwise delete the source first.</remarks>
     public string CopyTo(ShaderPackInfo shader, Guid targetPackId, bool replace = false)
     {
         var dir = Path.Combine(packs.GameDir(targetPackId), FolderName);
         Directory.CreateDirectory(dir);
 
-        var dest = replace ? Path.Combine(dir, shader.FileName) : NextFreePath(dir, shader.FileName);
+        var dest = replace
+            ? PathSafety.ResolveFileName(dir, shader.FileName)
+              ?? throw new IOException($"'{shader.FileName}' cannot be used as a shader pack name.")
+            : NextFreePath(dir, shader.FileName);
         if (SamePath(shader.FilePath, dest)) return shader.FilePath;
         if (shader.IsFolder)
         {
@@ -303,8 +333,7 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
             catch { /* the pack copied; its tuning is a bonus, not a failure */ }
         }
 
-        // Carry the provenance across too: the copy is the same pack at the same version, so it stays
-        // updatable in its new instance.
+        // Same pack at the same version, so copy the provenance and keep it updatable.
         if (shader.Source is { } source)
             settings.SetShaderPackProvenance(Key(targetPackId, Path.GetFileName(dest)),
                 source, shader.ProjectId, shader.VersionId, shader.VersionNumber);
@@ -319,20 +348,45 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
 
     /// <summary>Removes the pack, the Iris settings file that belongs to it, and what the launcher
     /// remembered about it.</summary>
+    /// <exception cref="IOException">The pack is not an entry of this instance's shaderpacks folders;
+    /// nothing was deleted.</exception>
     public void Delete(ShaderPackInfo shader)
     {
-        if (shader.IsFolder) Directory.Delete(shader.FilePath, recursive: true);
-        else File.Delete(shader.FilePath);
+        var path = OwnEntry(shader.SourcePackId, shader.FilePath)
+                   ?? throw new IOException("That shader pack is not inside this instance's shaderpacks folder.");
 
-        // The settings file is part of the pack, not of the folder: leaving it orphans a .txt nothing
-        // will ever claim again.
-        if (shader.SettingsPath is { Length: > 0 } sp && File.Exists(sp))
+        // Find the twin on the other side before deleting anything: comparing content needs both paths.
+        // A pack that came through local/ exists twice after a launch and the overlay only adds, so
+        // deleting just one side would look like delete did nothing. A same-named pack with different
+        // content belongs to the instance and is left alone.
+        var otherSide = PathSafety.ResolveFileName(
+            shader.Origin == ShaderPackOrigin.Local ? FolderFor(shader.SourcePackId) : LocalFolderFor(shader.SourcePackId),
+            shader.FileName);
+        string? twin = otherSide is not null && PackFolderService.EntriesReferToSameContent(path, otherSide)
+            ? otherSide
+            : null;
+
+        if (shader.IsFolder) Directory.Delete(path, recursive: true);
+        else File.Delete(path);
+
+        if (twin is not null)
         {
-            try { File.Delete(sp); } catch { /* best effort */ }
+            try
+            {
+                if (Directory.Exists(twin)) Directory.Delete(twin, recursive: true);
+                else if (File.Exists(twin)) File.Delete(twin);
+            }
+            catch { /* the pack is gone from local/; a leftover twin is untidy, not a failure */ }
         }
 
-        // Leaving a deleted pack named in the config makes Iris fall back to "internal" with a
-        // warning; clearing it is the honest state.
+        // Delete the pack's settings file too, or it is left orphaned.
+        if (shader.SettingsPath is { Length: > 0 } sp && OwnEntry(shader.SourcePackId, sp) is { } settingsFile
+            && File.Exists(settingsFile))
+        {
+            try { File.Delete(settingsFile); } catch { /* best effort */ }
+        }
+
+        // A deleted pack left in the config makes Iris fall back to "internal" with a warning.
         if (shader.IsActive) SetActiveShader(shader.SourcePackId, null);
 
         settings.RemoveShaderPack(shader.Key);
@@ -347,8 +401,9 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
     /// Returns false when there was nothing to reset.</summary>
     public bool ResetSettings(ShaderPackInfo shader)
     {
-        if (shader.SettingsPath is not { Length: > 0 } sp || !File.Exists(sp)) return false;
-        File.Delete(sp);
+        if (shader.SettingsPath is not { Length: > 0 } sp || OwnEntry(shader.SourcePackId, sp) is not { } settingsFile
+            || !File.Exists(settingsFile)) return false;
+        File.Delete(settingsFile);
         return true;
     }
 
@@ -370,17 +425,11 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// True when two paths name the same file or folder on disk.
-    /// </summary>
-    /// <remarks>Guards the install/copy paths against source == destination, which is reachable from
-    /// the UI (dragging a pack out of the instance's own shaderpacks/ back onto the list) and is
-    /// silently destructive: the "replace" branches delete the destination first, and for an unpacked
-    /// folder that destination IS the user's pack. Compared as full paths so that "..\shaderpacks\X"
-    /// and an absolute path match, case-insensitively and ignoring a trailing separator because
-    /// Windows treats both spellings as one path. A path the OS cannot even resolve is reported as
-    /// "not the same", leaving the copy to fail the way it always did rather than turning a bad path
-    /// into a silent no-op.</remarks>
+    /// <summary>True when two paths name the same file or folder on disk.</summary>
+    /// <remarks>Guards install/copy against source == destination (reachable by dragging a pack from the
+    /// instance's own shaderpacks/ onto the list), where the replace branches would delete the source.
+    /// Compares full paths case-insensitively, ignoring a trailing separator. A path that can't be
+    /// resolved counts as different, so the copy fails normally.</remarks>
     private static bool SamePath(string a, string b)
     {
         try
@@ -391,16 +440,33 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
         catch { return false; }
     }
 
+    /// <summary>The full path of <paramref name="path"/> when it names an entry directly inside one of
+    /// the instance's two shaderpacks folders, else null. Deletes go through this so a path that
+    /// points anywhere else is never removed.</summary>
+    private string? OwnEntry(Guid packId, string path)
+    {
+        string full;
+        try { full = Path.GetFullPath(path); }
+        catch { return null; }
+        var name = Path.GetFileName(full);
+        foreach (var dir in new[] { FolderFor(packId), LocalFolderFor(packId) })
+        {
+            if (PathSafety.ResolveFileName(dir, name) is { } inside
+                && string.Equals(inside, full, StringComparison.OrdinalIgnoreCase))
+                return inside;
+        }
+        return null;
+    }
+
     private static void CopyFolder(string source, string dest)
     {
-        // Belt and braces for the callers above: copying a folder onto itself would walk it while
-        // writing into it.
+        // Callers check this too; copying a folder onto itself would walk it while writing into it.
         if (SamePath(source, dest)) return;
         Directory.CreateDirectory(dest);
         foreach (var dir in Directory.GetDirectories(source, "*", SearchOption.AllDirectories))
-            Directory.CreateDirectory(dir.Replace(source, dest));
+            Directory.CreateDirectory(Path.Combine(dest, Path.GetRelativePath(source, dir)));
         foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
-            File.Copy(file, file.Replace(source, dest), overwrite: true);
+            File.Copy(file, Path.Combine(dest, Path.GetRelativePath(source, file)), overwrite: true);
     }
 
     private static long FolderSize(string dir)
@@ -409,7 +475,7 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
         catch { return 0; }
     }
 
-    /// <summary>"ComplementaryUnbound_r5.3.zip" → "Complementary Unbound r5.3".</summary>
+    /// <summary>"ComplementaryUnbound_r5.3.zip" -> "Complementary Unbound r5.3".</summary>
     public static string PrettyName(string fileName)
     {
         var name = Path.GetFileNameWithoutExtension(fileName).Replace('_', ' ').Replace('-', ' ');
@@ -430,7 +496,7 @@ public sealed class ShaderPackService(AppSettings settings, PackFolderService pa
                 return trimmed[(eq + 1)..].Trim();
             }
         }
-        catch { /* unreadable config — treat as unset */ }
+        catch { /* unreadable config: treat as unset */ }
         return null;
     }
 
@@ -476,13 +542,24 @@ public sealed record ShaderPackInfo(
     ModSource? Source = null,
     string? ProjectId = null,
     string? VersionId = null,
-    string? VersionNumber = null)
+    string? VersionNumber = null,
+    ShaderPackOrigin Origin = ShaderPackOrigin.Game)
 {
+    /// <summary>True for a pack in the unsynced <c>local/</c> folder, usually one the content library
+    /// applied. It loads like any other but isn't shared with others on a shared instance.</summary>
+    public bool IsLocal => Origin == ShaderPackOrigin.Local;
+
     public string SizeLabel => SizeBytes >= 1024 * 1024
         ? $"{SizeBytes / 1024.0 / 1024:0.#} MB"
-        : SizeBytes > 0 ? $"{SizeBytes / 1024} KB" : "—";
+        : SizeBytes > 0 ? $"{SizeBytes / 1024} KB" : "-";
 
-    public string MetaLabel => $"{SourcePackName}  ·  {SizeLabel}  ·  {LastModified:d MMM yyyy}";
+    /// <summary>The one-line subtitle under a shader pack row: where it came from, how big it is,
+    /// and when it last changed.</summary>
+    /// <remarks><see cref="LastModified"/> is already local time, so it goes through
+    /// <see cref="TimeFormat.FromLocal"/>. The <c>default</c> check avoids <c>new DateTimeOffset</c> on a
+    /// local <c>DateTime.MinValue</c>, which throws east of UTC.</remarks>
+    public string MetaLabel => $"{SourcePackName}  ·  {SizeLabel}  ·  "
+        + (LastModified == default ? "date unknown" : TimeFormat.Date(TimeFormat.FromLocal(LastModified)));
 
     /// <summary>True when the launcher knows which store listing this file came from, which is the
     /// precondition for offering an update.</summary>

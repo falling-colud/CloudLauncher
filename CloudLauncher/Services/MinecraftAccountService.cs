@@ -2,7 +2,16 @@ using System.IO;
 using System.Text.Json;
 using CmlLib.Core.Auth;
 using CmlLib.Core.Auth.Microsoft;
+using CmlLib.Core.Auth.Microsoft.Sessions;
+using XboxAuthNet.Game;
 using XboxAuthNet.Game.Accounts;
+using XboxAuthNet.Game.Authenticators;
+using XboxAuthNet.Game.OAuth;
+using XboxAuthNet.Game.SessionStorages;
+using XboxAuthNet.Game.XboxAuth;
+using XboxAuthNet.OAuth;
+using XboxAuthNet.XboxLive;
+using XboxAuthNet.XboxLive.Requests;
 
 namespace CloudLauncher.Services;
 
@@ -13,8 +22,8 @@ public enum MinecraftAccountKind
 }
 
 /// <summary>
-/// Single Minecraft account record. Microsoft tokens themselves are kept in CmlLib's
-/// own cache; we just persist a stable identifier + display name here.
+/// A saved Minecraft account. Microsoft tokens stay in CmlLib's own cache; this only keeps an id
+/// and a display name.
 /// </summary>
 public sealed class StoredMinecraftAccount
 {
@@ -33,8 +42,7 @@ internal sealed class AccountStoreFile
 }
 
 /// <summary>
-/// Manages a list of saved Minecraft accounts (online + offline).
-/// Exposes the current account and the ability to switch between them.
+/// The saved Minecraft accounts (Microsoft and offline) and which one is current.
 /// </summary>
 public sealed class MinecraftAccountService
 {
@@ -69,17 +77,30 @@ public sealed class MinecraftAccountService
     public bool IsSignedIn => Current is not null;
     public string DisplayName => Current?.Username ?? "(no account)";
 
-    private JELoginHandler GetLoginHandler() =>
-        _loginHandler ??= new JELoginHandlerBuilder()
-            .WithAccountManager(_microsoftAccountPath)
-            .Build();
+    private JELoginHandler GetLoginHandler() => _loginHandler ??= BuildLoginHandler(_microsoftAccountPath);
+
+    /// <summary>CmlLib's login handler, signing in through the launcher's own Azure application when
+    /// <see cref="MicrosoftAuthConfig.ClientId"/> is set and through CmlLib's default client
+    /// when not.</summary>
+    private static JELoginHandler BuildLoginHandler(string accountPath)
+    {
+        var builder = new JELoginHandlerBuilder().WithAccountManager(accountPath);
+        if (MicrosoftAuthConfig.ClientId is { } clientId && !string.IsNullOrWhiteSpace(clientId))
+        {
+            builder
+                .WithOAuthProvider(new MicrosoftOAuthCodeFlowProvider(
+                    new MicrosoftOAuthClientInfo(clientId.Trim(), MicrosoftAuthConfig.Scopes)))
+                .WithXboxAuthProvider(new AzureAppXboxProvider(JELoginHandler.RelyingParty));
+        }
+        return builder.Build();
+    }
 
     // ── adding accounts ──────────────────────────────────────────────────────
 
     /// <summary>Sign in via Microsoft and add the new account. The result becomes current.</summary>
     public async Task<StoredMinecraftAccount> AddMicrosoftAsync(CancellationToken ct = default)
     {
-        AppLog.Log("account", "Starting Microsoft sign-in…");
+        AppLog.Log("account", "Starting Microsoft sign-in...");
         var handler = GetLoginHandler();
         var xboxAccount = handler.AccountManager.NewAccount();
         MSession session;
@@ -122,14 +143,51 @@ public sealed class MinecraftAccountService
         return existing;
     }
 
+    /// <summary>Why a new offline account cannot be added yet, in one sentence for the screen.</summary>
+    public const string OfflineNeedsMicrosoftReason =
+        "Offline accounts need a Microsoft account signed in here first, because that sign-in shows you own Minecraft: Java Edition.";
+
+    /// <summary>
+    /// True when at least one saved Microsoft account has a Minecraft: Java Edition profile.
+    /// </summary>
+    /// <remarks>
+    /// CmlLib's sign-in only completes for accounts that own the game, since its last step reads the
+    /// Java profile from <c>api.minecraftservices.com/minecraft/profile</c>. So an account counts when
+    /// it has a profile id and CmlLib still holds a session for that profile.
+    /// </remarks>
+    public bool HasJavaEditionAccount => _accounts.Any(HasJavaProfile);
+
+    private bool HasJavaProfile(StoredMinecraftAccount account)
+    {
+        if (account.Kind != MinecraftAccountKind.Microsoft || string.IsNullOrWhiteSpace(account.Uuid))
+            return false;
+        try
+        {
+            var id = string.IsNullOrEmpty(account.MicrosoftAccountIdentifier)
+                ? account.Uuid
+                : account.MicrosoftAccountIdentifier;
+            return GetLoginHandler().AccountManager.GetAccounts().TryGetAccount(id, out var cached)
+                   && cached is JEGameAccount { Profile: { } profile }
+                   && string.Equals(profile.UUID, account.Uuid, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("accounts.JavaProfile", ex);
+            return false;
+        }
+    }
+
     /// <summary>Add an offline account with the given username. Becomes current.</summary>
+    /// <remarks>A new offline account needs <see cref="HasJavaEditionAccount"/>. One that is already
+    /// saved is selected again, with or without it.</remarks>
+    /// <exception cref="InvalidOperationException">No Microsoft account with Java Edition is signed in,
+    /// and there is no saved offline account with this name.</exception>
     public StoredMinecraftAccount AddOffline(string username)
     {
-        // Trim first, then validate the trimmed value — otherwise "  ab " passes the length check
-        // and a too-short name gets stored.
+        // Validate the trimmed value, or "  ab " would pass the length check.
         username = username?.Trim() ?? "";
         if (username.Length < 3 || username.Length > 16)
-            throw new ArgumentException("Offline username must be 3 – 16 characters");
+            throw new ArgumentException("Offline username must be 3 - 16 characters");
 
         var existing = _accounts.FirstOrDefault(a =>
             a.Kind == MinecraftAccountKind.Offline &&
@@ -140,6 +198,9 @@ public sealed class MinecraftAccountService
         }
         else
         {
+            if (!HasJavaEditionAccount)
+                throw new InvalidOperationException(OfflineNeedsMicrosoftReason);
+
             existing = new StoredMinecraftAccount
             {
                 Kind = MinecraftAccountKind.Offline,
@@ -157,14 +218,9 @@ public sealed class MinecraftAccountService
 
     /// <summary>Renames an offline account.</summary>
     /// <remarks>
-    /// <para>Offline only, and deliberately so: a Microsoft account's name is Mojang's, refreshed from
-    /// the session on every launch by <c>UpdateMicrosoftAccountFromSession</c>. Letting it be typed
-    /// over here would produce a name that silently reverted the next time the game started.</para>
-    /// <para>The same 3–16 character rule and case-insensitive duplicate check as
-    /// <see cref="AddOffline"/> apply, because the result has to be a name the launcher would have
-    /// accepted in the first place — renaming is not a way in through the back door.</para>
-    /// <para>Renaming the account that is currently in use does not change the selection: it is the
-    /// same account, now spelled differently.</para>
+    /// Offline only: a Microsoft account's name comes from Mojang and is refreshed on every launch by
+    /// <c>UpdateMicrosoftAccountFromSession</c>. The same 3-16 character and duplicate checks as
+    /// <see cref="AddOffline"/> apply. Renaming the current account keeps it selected.
     /// </remarks>
     /// <exception cref="ArgumentException">The name is the wrong length, or another offline account
     /// already has it.</exception>
@@ -175,14 +231,14 @@ public sealed class MinecraftAccountService
             ?? throw new InvalidOperationException("That account is no longer in the list.");
         if (account.Kind != MinecraftAccountKind.Offline)
             throw new InvalidOperationException(
-                "Microsoft accounts are named by Mojang — the name comes back from the sign-in every launch.");
+                "Microsoft accounts are named by Mojang - the name comes back from the sign-in every launch.");
 
         username = username?.Trim() ?? "";
         if (username.Length < 3 || username.Length > 16)
-            throw new ArgumentException("Offline username must be 3 – 16 characters");
+            throw new ArgumentException("Offline username must be 3 - 16 characters");
 
         if (string.Equals(account.Username, username, StringComparison.Ordinal))
-            return account; // nothing changed — don't write the file or wake every listener up
+            return account; // nothing changed: skip the write and the change event
 
         var clash = _accounts.FirstOrDefault(a =>
             a.Id != id &&
@@ -235,7 +291,7 @@ public sealed class MinecraftAccountService
     public async Task<MSession> GetLaunchSessionAsync(CancellationToken ct = default)
     {
         var current = Current
-            ?? throw new InvalidOperationException("No Minecraft account configured — add one from the title-bar chip.");
+            ?? throw new InvalidOperationException("No Minecraft account configured - add one from the title-bar chip.");
 
         if (current.Kind == MinecraftAccountKind.Offline)
         {
@@ -243,7 +299,7 @@ public sealed class MinecraftAccountService
             return MSession.CreateOfflineSession(current.Username);
         }
 
-        AppLog.Log("account", $"Refreshing Microsoft session for {current.Username}…");
+        AppLog.Log("account", $"Refreshing Microsoft session for {current.Username}...");
         var handler = GetLoginHandler();
         var xboxAccount = ResolveXboxAccount(handler, current);
         try
@@ -259,7 +315,7 @@ public sealed class MinecraftAccountService
         {
             AppLog.LogError("silent-auth", ex);
             // Fall back to interactive if silent fails
-            AppLog.Log("account", "Silent auth failed; prompting for sign-in…");
+            AppLog.Log("account", "Silent auth failed; prompting for sign-in...");
             var session = xboxAccount is null
                 ? await ReauthenticateMicrosoftAsync(handler, current, ct)
                 : await handler.AuthenticateInteractively(xboxAccount, ct);
@@ -268,7 +324,7 @@ public sealed class MinecraftAccountService
         }
     }
 
-    /// <summary>Sign out and clear EVERY saved account (Microsoft tokens too).</summary>
+    /// <summary>Signs out and clears every saved account, Microsoft tokens included.</summary>
     public async Task SignOutAllAsync()
     {
         try { if (_loginHandler is not null) await _loginHandler.Signout(); } catch { /* best effort */ }
@@ -294,7 +350,7 @@ public sealed class MinecraftAccountService
         StoredMinecraftAccount account,
         CancellationToken ct)
     {
-        AppLog.Log("account", $"Microsoft token for {account.Username} is missing; prompting for sign-in…");
+        AppLog.Log("account", $"Microsoft token for {account.Username} is missing; prompting for sign-in...");
         var xboxAccount = handler.AccountManager.NewAccount();
         var session = await handler.AuthenticateInteractively(xboxAccount, ct);
         UpdateMicrosoftAccountFromSession(account, xboxAccount, session);
@@ -382,5 +438,50 @@ public sealed class MinecraftAccountService
             File.WriteAllText(_storePath, JsonSerializer.Serialize(file, new JsonSerializerOptions { WriteIndented = true }));
         }
         catch (Exception ex) { AppLog.LogError("accounts.Save", ex); }
+    }
+
+    // ── the launcher's own Azure application ─────────────────────────────────
+
+    /// <summary>
+    /// Xbox Live sign-in for a Microsoft token issued to an Azure application: CmlLib's basic Xbox
+    /// steps with the user-token request swapped for <see cref="AzureUserTokenAuth"/>.
+    /// </summary>
+    private sealed class AzureAppXboxProvider(string relyingParty) : XboxAuthenticationProviderBase(relyingParty)
+    {
+        protected override IAuthenticator CreateAuthenticator()
+        {
+            var steps = new AuthenticatorCollection();
+            steps.AddAuthenticatorWithoutValidator(new AzureUserTokenAuth(Builder.OAuthSessionSource, Builder.SessionSource));
+            steps.AddAuthenticatorWithoutValidator(Builder.XstsTokenAuth());
+            if (Builder.UseXuiClaimsAuth)
+                steps.AddAuthenticatorWithoutValidator(Builder.XuiClaimsAuth());
+            return steps;
+        }
+    }
+
+    /// <summary>Trades the Microsoft token for an Xbox user token. Xbox wants a token issued to an
+    /// Azure application sent with the "d=" prefix; the stock step sends it bare, which only works
+    /// for CmlLib's default client.</summary>
+    private sealed class AzureUserTokenAuth(
+        ISessionSource<MicrosoftOAuthResponse> oauthSource,
+        ISessionSource<XboxAuthTokens> sessionSource) : SessionAuthenticator<XboxAuthTokens>(sessionSource)
+    {
+        protected override async ValueTask<XboxAuthTokens?> Authenticate(AuthenticateContext context)
+        {
+            var token = oauthSource.Get(context.SessionStorage)?.AccessToken;
+            if (string.IsNullOrEmpty(token))
+                throw new XboxAuthException("OAuth access token was empty. Microsoft OAuth is required.", 0);
+
+            var rps = token.StartsWith("d=", StringComparison.Ordinal) || token.StartsWith("t=", StringComparison.Ordinal)
+                ? token
+                : XboxAuthConstants.AzureTokenPrefix + token;
+            var userToken = await new XboxAuthClient(context.HttpClient)
+                .RequestUserToken(new XboxUserTokenRequest { AccessToken = rps })
+                .ConfigureAwait(false);
+
+            var tokens = GetSessionFromStorage() ?? new XboxAuthTokens();
+            tokens.UserToken = userToken;
+            return tokens;
+        }
     }
 }

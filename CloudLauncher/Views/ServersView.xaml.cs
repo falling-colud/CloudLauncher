@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Windows;
@@ -16,19 +16,19 @@ namespace CloudLauncher.Views;
 /// for the ones the user administers.
 /// </summary>
 /// <remarks>
-/// <para>Minecraft keeps its server list per instance, inside <c>servers.dat</c>. With a dozen
-/// instances that means a dozen copies of "the same five servers", no way to see which of them are up
-/// without starting the game, and no way to add a server to a new instance except by typing it in
-/// again. This page reads all of those lists at once, merges entries that point at the same address
-/// into one row, pings them, and lets a server be added, edited, copied between instances, joined
-/// directly, and — for servers the user runs — driven from an RCON console.</para>
-/// <para><c>servers.dat</c> is an ignored file in the pack rules, so it is per-machine: nothing this
-/// page writes is ever synced to a shared pack or to a team mate. The add/edit card says so, because
-/// "did I just add this server for everyone?" is the obvious worry.</para>
-/// <para>Nothing here touches the disk or the network on the UI thread. Scans, pings and RCON all run
-/// off-thread; a server being unreachable is a row state, never a dialog.</para>
+/// <para>Minecraft keeps a server list per instance in <c>servers.dat</c>. This page reads all of them,
+/// merges entries with the same address into one row, pings them, and lets servers be added, edited,
+/// copied between instances, joined directly and driven over RCON.</para>
+/// <para><c>servers.dat</c> is ignored by the pack rules, so nothing written here is synced to a
+/// shared pack; the add/edit card says so.</para>
+/// <para>Scans, pings and RCON run off the UI thread, and an unreachable server is a row state, never
+/// a dialog. The lists are local files and pings go to the game servers, so nothing here is disabled
+/// when CloudLauncher's own server is offline.</para>
+/// <para>Counts, empty panels and errors go through <see cref="PageState"/>, and filling the instance
+/// ComboBox is guarded by <see cref="Reentrancy"/> so its SelectionChanged can't rebuild the page
+/// before anything has been read.</para>
 /// </remarks>
-public partial class ServersView : Page
+public partial class ServersView : Page, IReusablePage, IRefreshablePage
 {
     /// <summary>How many servers are pinged at once. High enough that a list of thirty finishes in a
     /// couple of seconds, low enough not to open thirty sockets at a stroke on a home connection.</summary>
@@ -42,14 +42,32 @@ public partial class ServersView : Page
     /// one of them is decoded at. See <see cref="DecodeFavicon"/>.</summary>
     private const int FaviconPixelSize = 64;
 
-    /// <summary>The longest base64 favicon this will even try to decode. A 64×64 PNG is a few
-    /// kilobytes; 256 KB is generous for one and still a hard ceiling on what an unknown server can
-    /// make the launcher allocate.</summary>
-    private const int MaxFaviconBase64Length = 256 * 1024;
+    /// <summary>The longest base64 favicon this will try to decode, the same limit the ping applies.
+    /// A 64x64 PNG is a few kilobytes.</summary>
+    private const int MaxFaviconBase64Length = MinecraftServerPing.MaxFaviconLength;
+
+    /// <summary>The largest source image decoded, on either side. A favicon is 64x64 by protocol; this
+    /// allows for bigger ones while keeping a hostile one cheap to decode.</summary>
+    private const int MaxFaviconSourcePixels = 1024;
 
     private readonly MainWindow _shell;
     private readonly ServerListService _servers = new(App.State.Packs);
     private readonly ObservableCollection<ServerRow> _rows = new();
+
+    /// <summary>Owns every count, empty panel, error and busy affordance on this page.</summary>
+    private readonly PageState _state;
+
+    /// <summary>Held while the instance ComboBox is being filled, so the SelectionChanged it raises
+    /// synchronously is not mistaken for the user picking an instance.</summary>
+    private readonly Reentrancy _filling = new();
+
+    /// <summary>True once the server lists have actually been read. Until then <see cref="Refresh"/>
+    /// does nothing and leaves the screen to <see cref="_state"/>.</summary>
+    private bool _scanned;
+
+    /// <summary>The standing note under the list: an unreadable instance, or why the instance list
+    /// is stale. Re-stated on every rebuild so a filter change can't drop it.</summary>
+    private string? _note;
 
     private List<PackSummary> _packs = new();
     private List<ServerEntry> _entries = new();
@@ -59,9 +77,8 @@ public partial class ServersView : Page
     private readonly Dictionary<string, ServerPingResult> _pings = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ImageSource> _icons = new(StringComparer.Ordinal);
 
-    /// <summary>What the last scan could not read, if anything. Kept rather than written straight to
-    /// the status line because the ping sweep owns that line while it runs and clears it at the end —
-    /// the warning has to survive the sweep or nobody ever sees it.</summary>
+    /// <summary>What the last scan could not read, if anything. Folded into <see cref="_note"/>
+    /// because the ping sweep writes over the status line.</summary>
     private string _scanWarning = "";
 
     private CancellationTokenSource? _pingCts;
@@ -69,7 +86,16 @@ public partial class ServersView : Page
     private bool _showHidden;
     private bool _loading;
 
-    // ── console state ────────────────────────────────────────────────────────
+    /// <summary>When the last ping sweep finished, so reopening the page does not re-ping
+    /// everything it already has an answer for.</summary>
+    /// <remarks>The page is reused (<see cref="IReusablePage"/>), so <c>Loaded</c> fires on every
+    /// return. Refresh always sweeps.</remarks>
+    private DateTimeOffset _lastPingSweep = DateTimeOffset.MinValue;
+
+    /// <summary>How long a sweep's answers are treated as still true when the page is reopened.</summary>
+    private static readonly TimeSpan PingFreshFor = TimeSpan.FromSeconds(45);
+
+    // ── console state ──
     private RconClient? _rcon;
     private ServerRow? _consoleRow;
     private CancellationTokenSource? _consoleCts;
@@ -81,7 +107,20 @@ public partial class ServersView : Page
         InitializeComponent();
         _shell = shell;
         ServerList.ItemsSource = _rows;
-        Loaded += async (_, _) => await LoadAsync();
+
+        _state = new PageState(ServerList, PageStateHost, nameof(ServersView))
+            .Copy(PageCopy.Servers)
+            .Slots(CountLabel, StatusLabel, BusyBar)
+            .DisableWhileBusy(RefreshButton, SortButton, HiddenToggle, PackFilterBox,
+                              AddServerButton, OpenFolderButton);
+        _state.RetryRequested += () => _ = LoadAsync();
+
+        // Filters rows already read out of servers.dat, so every keystroke is affordable.
+        SearchBox.DebounceMilliseconds = 200;
+        SearchBox.TextChanged += (_, _) => Refresh();
+
+        // A reopen is a quiet refresh: nothing on screen moves unless the rescan finds a change.
+        Loaded += async (_, _) => await LoadAsync(quiet: true);
         // The page can be navigated away from while a sweep or an RCON session is live; both hold a
         // socket, so both are torn down here rather than left to a finaliser.
         Unloaded += (_, _) =>
@@ -96,33 +135,72 @@ public partial class ServersView : Page
     /// <summary>Where a row's status has got to. Also the value the status pill's colour triggers on.</summary>
     public enum PingState { Unknown, Pinging, Online, Offline }
 
-    // ── loading ──────────────────────────────────────────────────────────────
+    // ── loading ──
 
-    private async Task LoadAsync()
+    /// <summary>Re-runs the load in place, for the offline banner's Retry and a page reopen.
+    /// <see cref="PageState"/> keeps the rows on screen and shows the thin refresh bar.</summary>
+    public Task RefreshAsync() => LoadAsync();
+
+    /// <summary>
+    /// Reads the instance list, then reads every instance's <c>servers.dat</c> and pings what it
+    /// found.
+    /// </summary>
+    /// <remarks>The scan runs even when the instance list can't be fetched, since the server lists are
+    /// local files.</remarks>
+    /// <param name="quiet">True when nobody asked (the page opening or reopening): nothing shows unless
+    /// it runs long, and the instance list another page just fetched is reused (see
+    /// <see cref="ApiClient.ListPacksQuickAsync"/>). Refresh and Retry ask the server afresh.</param>
+    private async Task LoadAsync(bool quiet = false)
     {
         if (_loading) return;
         _loading = true;
-        StatusLabel.Text = "Loading…";
         try
         {
-            _packs = await App.State.Api.ListPacksAsync();
-            _packs = _packs.Where(p => !App.State.Settings.IsPackHidden(p.Id)).ToList();
-            RebuildPackFilter();
-            await ScanAsync();
-            if (App.State.Api.PackListStale is { Length: > 0 } why)
-                StatusLabel.Text = $"Showing your last known instances — the server is not answering ({why}).";
+            _state.Begin(null, null, quiet);
+
+            // ListPacksAsync already falls back to its own cache and then to the folders on this PC,
+            // so it only throws when there is no instance list at all.
+            Exception? listFailed = null;
+            try
+            {
+                _packs = (await (quiet ? App.State.Api.ListPacksQuickAsync() : App.State.Api.ListPacksAsync()))
+                    .Where(p => !App.State.Settings.IsPackHidden(p.Id))
+                    .ToList();
+            }
+            catch (Exception ex) { listFailed = ex; }
+
+            using (_filling.Hold()) RebuildPackFilter();
+
+            // The only caller that may skip the ping sweep: every edit path below changes the row
+            // set, and a server that was just added has no answer to reuse.
+            await ScanAsync(allowSkipPing: true);
+
+            if (listFailed is OfflineException offline)
+                _state.Offline(offline.Reason ?? "the server is not answering");
+            else if (listFailed is { } ex2 && _entries.Count == 0)
+                _state.Error("Your instance list could not be read, so there is no multiplayer list "
+                           + "to open.", ex2);
+            else if (listFailed is { } ex3)
+                Failed("Your instance list could not be refreshed - these servers come from the "
+                     + "instances this page already knew about.", ex3);
+            else if (App.State.Api.PackListStale is { Length: > 0 } why)
+                Say($"Showing your last known instances - the server is not answering ({why}). "
+                  + "Pinging the servers themselves still works.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not load instances: " + ex.Message; }
         finally { _loading = false; }
     }
 
     /// <summary>
     /// Re-reads every instance's server list off the UI thread, then rebuilds and re-pings.
     /// </summary>
-    /// <remarks>An instance whose list could not be read is skipped rather than allowed to empty the
-    /// page, but the count is said out loud: a server that is merely unreadable looks exactly like a
-    /// server that has been deleted, and the difference matters before anyone re-adds it by hand.</remarks>
-    private async Task ScanAsync()
+    /// <remarks>Unreadable instances are skipped but counted in the note, so an unreadable server isn't
+    /// mistaken for a deleted one.</remarks>
+    /// <param name="note">What the triggering action did ("Added Foo to MyPack"). Goes into the standing
+    /// note, since the ping sweep would overwrite the status line.</param>
+    /// <param name="allowSkipPing">Lets the sweep be skipped while the answers on screen are fresh
+    /// (<see cref="PingFreshFor"/>). Only the page load passes it; after an edit the rows have
+    /// changed.</param>
+    private async Task ScanAsync(string? note = null, bool allowSkipPing = false)
     {
         var packs = _packs.ToList();
         var unreadable = new List<string>();
@@ -141,14 +219,29 @@ public partial class ServersView : Page
         }
         catch (Exception ex)
         {
-            _scanWarning = "Could not read the server lists: " + ex.Message;
+            AppLog.LogError(nameof(ServersView), ex);
+            _scanWarning = "The multiplayer lists could not be read. The launcher log has the detail.";
             _entries = new List<ServerEntry>();
         }
+        // Scanned, whatever the result, so the empty panel may show now.
+        _scanned = true;
+        var parts = new[] { note, _scanWarning }.Where(p => !string.IsNullOrEmpty(p)).ToList();
+        _note = parts.Count == 0 ? null : string.Join("  ·  ", parts);
         Refresh();
-        if (_scanWarning.Length > 0) StatusLabel.Text = _scanWarning;
+
+        // Skip the sweep when the answers on screen are seconds old (in practice, a page reopen).
+        if (allowSkipPing && DateTimeOffset.UtcNow - _lastPingSweep < PingFreshFor && _rows.Count > 0)
+        {
+            Say($"{_rows.Count} server(s) · pinged {TimeFormat.Ago(_lastPingSweep)}");
+            return;
+        }
+
         await PingVisibleAsync();
     }
 
+    /// <summary>Fills the instance ComboBox. Callers wrap this in <see cref="_filling"/>: setting
+    /// ItemsSource and SelectedItem raises SelectionChanged synchronously, which isn't the user
+    /// choosing an instance.</summary>
     private void RebuildPackFilter()
     {
         var items = new List<PackFilterItem> { new(null, "All instances") };
@@ -165,12 +258,13 @@ public partial class ServersView : Page
     /// Rebuilds the rows from the entries already read, applying the instance filter, the search box,
     /// the hidden toggle and the sort.
     /// </summary>
-    /// <remarks>Entries that share an address are one row: the same server usually appears in several
-    /// instances, and five identical rows differing only in which instance they came from is exactly
-    /// the mess this page exists to clear up. The row remembers all of them, which is what makes
-    /// "Join with…" and the instance list in the tooltip possible.</remarks>
+    /// <remarks>Entries that share an address become one row, which remembers every instance it came
+    /// from (for "Join with..." and the tooltip).</remarks>
     private void Refresh()
     {
+        // Everything below writes a count and picks an empty state, so it has to wait for a scan.
+        if (!_scanned) return;
+
         var keepSelected = (ServerList.SelectedItem as ServerRow)?.Key;
         var query = SearchBox.Text?.Trim() ?? "";
         var packFilter = SelectedPackId;
@@ -184,8 +278,7 @@ public partial class ServersView : Page
 
         foreach (var row in grouped)
         {
-            // Cached icons only. Decoding a favicon is image work, and the ping sweep that follows
-            // this already does it off the UI thread for every row, online or not.
+            // Cached icons only; the ping sweep decodes favicons off the UI thread.
             if (_pings.TryGetValue(row.Key, out var cached)) row.Apply(cached, CachedIcon(row.Key));
             else row.ApplyIcon(CachedIcon(row.Key));
         }
@@ -221,66 +314,60 @@ public partial class ServersView : Page
         if (keepSelected is not null)
             ServerList.SelectedItem = _rows.FirstOrDefault(r => r.Key == keepSelected);
 
-        UpdateEmptyState(query);
-        UpdateSubLabel(_rows.Count);
+        if (_rows.Count == 0) ChooseEmptyCopy(query);
+        // Content(0) is the only way into the empty panel, so it always means a scan happened.
+        RestateCount();
     }
 
-    private void UpdateEmptyState(string query)
-    {
-        EmptyState.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        if (_rows.Count != 0) return;
+    /// <summary>Writes the count slot and the standing note without rebuilding the list, for a ping
+    /// landing, which changes how many are online but not which rows exist.</summary>
+    private void RestateCount() =>
+        _state.Content(_rows.Count, countText: ScopeLabel(_rows.Count), note: _note);
 
-        if (_packs.Count == 0)
-        {
-            EmptyTitle.Text = "No instances yet";
-            EmptyBody.Text = "Servers are read from each instance's multiplayer list, so there is nothing to show " +
-                             "until you have an instance.";
-        }
-        else if (query.Length > 0)
-        {
-            EmptyTitle.Text = "Nothing matches that";
-            EmptyBody.Text = $"No server matches “{query}”. The search looks at the name, the address, the MOTD " +
-                             "and the instance it came from.";
-        }
-        else if (_entries.Count > 0 && !_showHidden)
-        {
-            EmptyTitle.Text = "Only hidden entries here";
-            EmptyBody.Text = "Every server in this instance is a hidden direct-connect entry. Use the eye button " +
-                             "to show them.";
-        }
-        else
-        {
-            EmptyTitle.Text = "No servers yet";
-            EmptyBody.Text = "Servers come from each instance's own multiplayer list. Use “Add server” to put one " +
-                             "in, or add it in-game and refresh.";
-        }
-    }
-
-    private void UpdateSubLabel(int total)
+    /// <summary>The count slot. Only ever called with a number a completed scan produced.</summary>
+    private string ScopeLabel(int total)
     {
-        if (total == 0)
-        {
-            SubLabel.Text = "Every server your instances can join, in one place.";
-            return;
-        }
+        if (total == 0) return "";
         var online = _rows.Count(r => r.State == PingState.Online);
         var instances = SelectedPackId is null
             ? _entries.Select(e => e.SourcePackId).Distinct().Count()
             : 1;
         var consoles = _rows.Count(r => r.HasConsole);
-        SubLabel.Text = $"{total} server(s) across {instances} instance(s) · {online} online" +
-                        (consoles > 0 ? $" · {consoles} with a console" : "");
+        return $"{total} server(s) across {instances} instance(s) · {online} online" +
+               (consoles > 0 ? $" · {consoles} with a console" : "");
     }
 
-    // ── pinging ──────────────────────────────────────────────────────────────
+    /// <summary>
+    /// Picks the empty-state wording for the pass about to finish.
+    /// </summary>
+    /// <remarks>Set per pass, so "nothing matches that" doesn't stick after the search is
+    /// cleared.</remarks>
+    private void ChooseEmptyCopy(string query)
+    {
+        if (_packs.Count == 0)
+            _state.EmptyNext("No instances yet",
+                "Servers are read from each instance's multiplayer list, so there is nothing to show "
+                + "until you have an instance.",
+                PageCopy.Servers.Glyph);
+        else if (query.Length > 0)
+            _state.EmptyFiltered();
+        else if (_entries.Count > 0 && !_showHidden)
+            _state.EmptyNext("Only hidden entries here",
+                "Every server here is a hidden direct-connect entry - one Minecraft keeps but never "
+                + "draws.", PageCopy.Servers.Glyph,
+                actionLabel: "Show hidden entries",
+                action: () => { HiddenToggle.IsChecked = true; _showHidden = true; Refresh(); });
+        // Otherwise the default wording from PageCopy.Servers applies, which explains where servers
+        // come from.
+    }
+
+    // ── pinging ──
 
     /// <summary>
     /// Pings every row on screen, concurrently but capped, and paints each result as it lands.
     /// </summary>
-    /// <remarks>Each row updates the moment its own ping comes back rather than at the end of the
-    /// sweep, so a list with one dead address in it is not held at "pinging…" for the full timeout.
-    /// A previous sweep is cancelled first — pressing refresh twice must not have two sweeps writing
-    /// over each other.</remarks>
+    /// <remarks>Each row updates as its own ping returns, so one dead address doesn't hold up the list.
+    /// A previous sweep is cancelled first so two sweeps never write over each other.</remarks>
     private async Task PingVisibleAsync()
     {
         _pingCts?.Cancel();
@@ -290,7 +377,8 @@ public partial class ServersView : Page
         var rows = _rows.ToList();
         if (rows.Count == 0) return;
         foreach (var row in rows) row.SetPinging();
-        StatusLabel.Text = $"Pinging {rows.Count} server(s)…";
+        // A note rather than a loading state: the rows stay real and clickable while pinging.
+        Say($"Pinging {rows.Count} server(s)...");
 
         using var gate = new SemaphoreSlim(PingConcurrency);
         var tasks = rows.Select(async row =>
@@ -301,9 +389,10 @@ public partial class ServersView : Page
                 try
                 {
                     var result = await MinecraftServerPing.PingAsync(row.Address, ct: ct);
-                    // Decode the favicon here, on the pool thread, and freeze it — a BitmapImage built
-                    // on the UI thread for every row would be a visible hitch on a long list.
-                    var icon = DecodeFavicon(result.FaviconBase64) ?? DecodeFavicon(row.Primary.IconBase64);
+                    // Decoded and frozen on the pool; doing it on the UI thread for every row would
+                    // hitch on a long list.
+                    var icon = await Task.Run(() => DecodeFavicon(result.FaviconBase64)
+                                                    ?? DecodeFavicon(row.Primary.IconBase64), ct);
                     if (ct.IsCancellationRequested) return;
                     await Dispatcher.InvokeAsync(() =>
                     {
@@ -311,12 +400,8 @@ public partial class ServersView : Page
                         if (icon is not null) _icons[row.Key] = icon;
                         var shown = icon ?? CachedIcon(row.Key);
                         row.Apply(result, shown);
-                        // Refresh() builds brand-new ServerRow objects, and typing a character into
-                        // the search box does exactly that in the middle of the sweep. The row this
-                        // ping was started for is then no longer the one on screen, so paint the
-                        // live one with the same address too — otherwise every row the sweep had not
-                        // yet reached when the user typed sits at "not pinged yet" until they press
-                        // refresh by hand.
+                        // Refresh() (typing in the search box, say) replaces the ServerRow objects,
+                        // so also paint the live row with this address.
                         foreach (var live in _rows)
                             if (!ReferenceEquals(live, row) && live.Key == row.Key)
                                 live.Apply(result, shown);
@@ -327,8 +412,8 @@ public partial class ServersView : Page
             catch (OperationCanceledException) { /* the page moved on; the row keeps its last state */ }
             catch (Exception ex)
             {
-                // One row failing in a way the ping itself did not expect must not sink the sweep,
-                // and must not be a dialog either — it becomes that row's offline reason.
+                // An unexpected failure on one row becomes its offline reason, not a dialog or a
+                // failed sweep.
                 await Dispatcher.InvokeAsync(() => row.Apply(ServerPingResult.Failed(ex.Message), null));
             }
         });
@@ -336,28 +421,30 @@ public partial class ServersView : Page
         await Task.WhenAll(tasks);
 
         if (ct.IsCancellationRequested) return;
-        StatusLabel.Text = _scanWarning;
-        UpdateSubLabel(_rows.Count);
+
+        // Only stamped when the sweep completes. A cancelled one leaves rows unpinged, so a reopen
+        // should still sweep.
+        _lastPingSweep = DateTimeOffset.UtcNow;
+
         if (_sort == ServerSort.Status || _sort == ServerSort.Players) Refresh();
+        else RestateCount();
     }
 
-    /// <summary>The icon already decoded for this address, if any. Never decodes: the only places
-    /// that should pay for that are off the UI thread.</summary>
+    /// <summary>The icon already decoded for this address, if any. Never decodes; that only happens
+    /// off the UI thread.</summary>
     private ImageSource? CachedIcon(string key) => _icons.TryGetValue(key, out var icon) ? icon : null;
 
     /// <summary>
     /// Turns a base64 PNG into a frozen image, or null for anything that is not one.
     /// </summary>
     /// <remarks>
-    /// <para>Frozen so it can be handed to the UI thread from the ping's own thread. Both sources
-    /// are other people's data — a server's favicon and whatever the game last wrote into
-    /// servers.dat — so every failure mode here is "no icon", never an exception.</para>
-    /// <para>The two bounds are there because this is the one decode in the client fed straight from
-    /// an untrusted remote host. <see cref="MaxFaviconBase64Length"/> caps what is even attempted, and
-    /// <see cref="BitmapImage.DecodePixelWidth"/> caps what is allocated: without it a server can
-    /// answer the status ping with a 30000×30000 PNG that costs a few kilobytes on the wire and
-    /// several gigabytes once decoded, and one row of a server list takes the launcher down. 64 is the
-    /// size the protocol specifies for a favicon, so nothing legitimate loses detail.</para>
+    /// <para>Frozen so it can pass from the ping's thread to the UI thread. Both sources (a server's
+    /// favicon, servers.dat) are other people's data, so every failure is "no icon", never an
+    /// exception.</para>
+    /// <para>Bounded because the data comes straight from an untrusted host, and a few KB of PNG can
+    /// claim 30000x30000 pixels. <see cref="MaxFaviconBase64Length"/> caps the input, the header is
+    /// checked against <see cref="MaxFaviconSourcePixels"/> before decoding, and the decode is capped
+    /// at <see cref="FaviconPixelSize"/> (the protocol's favicon size) on the longer side.</para>
     /// </remarks>
     private static ImageSource? DecodeFavicon(string? base64)
     {
@@ -366,84 +453,77 @@ public partial class ServersView : Page
         try
         {
             var bytes = Convert.FromBase64String(base64.Trim());
+
+            // Only the header: with no caching, no pixels are decoded until something asks for them.
+            var header = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.DelayCreation,
+                                            BitmapCacheOption.None);
+            if (header.PixelWidth > MaxFaviconSourcePixels || header.PixelHeight > MaxFaviconSourcePixels)
+                return null;
+
             var image = new BitmapImage();
             image.BeginInit();
             image.CacheOption = BitmapCacheOption.OnLoad;
-            image.DecodePixelWidth = FaviconPixelSize;
+            if (header.PixelHeight > header.PixelWidth) image.DecodePixelHeight = FaviconPixelSize;
+            else image.DecodePixelWidth = FaviconPixelSize;
             image.StreamSource = new MemoryStream(bytes);
             image.EndInit();
             image.Freeze();
             return image;
         }
-        catch (FormatException) { return null; }
-        catch (NotSupportedException) { return null; }   // not an image WPF can decode
-        catch (IOException) { return null; }
-        catch (OverflowException) { return null; }       // a header claiming more pixels than fit
+        // The imaging codecs report a bad image as many exception types (format, IO, overflow, COM,
+        // argument...). Each means "no icon".
+        catch (Exception) { return null; }
     }
 
-    // ── toolbar ──────────────────────────────────────────────────────────────
+    // ── toolbar ──
 
     /// <summary>
-    /// The one refresh on this page: re-read every instance's servers.dat AND ping every server again.
+    /// The page's refresh: re-reads every instance's servers.dat and pings every server again.
     /// </summary>
-    /// <remarks>There used to be a separate ping-only button next to it. Two near-identical circular
-    /// glyphs side by side is the duplicate-refresh problem the user reported on the mod hub, and the
-    /// distinction was not one anybody would make at a glance — a refresh should simply refresh.
-    /// Disabled while it runs so it cannot start a second sweep over the first.</remarks>
+    /// <remarks>Disabled while it runs by <see cref="PageState.DisableWhileBusy"/>. Don't also set
+    /// IsEnabled by hand; two writers can leave the button stuck disabled.</remarks>
     private async void OnRefresh(object sender, RoutedEventArgs e)
     {
-        if (!RefreshButton.IsEnabled) return;
-        RefreshButton.IsEnabled = false;
-        try { await LoadAsync(); }
-        catch (Exception ex) { StatusLabel.Text = "Refresh failed: " + ex.Message; }
-        finally { RefreshButton.IsEnabled = true; }
+        // The ping sweep carries on after PageState has re-enabled this button, so say what's happening.
+        if (_loading) { Say("Still working on the last refresh - the servers are being pinged."); return; }
+        await LoadAsync();
     }
 
+    /// <remarks>Guarded by <see cref="_filling"/> rather than <c>IsLoaded</c>, which is already true
+    /// inside the Loaded handler that fills the ComboBox.</remarks>
     private async void OnPackFilterChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (_filling.Busy) return;
         try
         {
             Refresh();
             await PingVisibleAsync();
         }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
+        catch (Exception ex) { Failed("That instance's servers could not be shown.", ex); }
     }
 
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => Refresh();
-
-    /// <summary>Expands the compact search box, or collapses it back when it is already open and empty.</summary>
-    private void OnSearchToggle(object sender, RoutedEventArgs e)
+    /// <summary>Opens the folder the selected instance's <c>servers.dat</c> lives in. With the filter
+    /// on "All instances" that is the first one, the same rule the Config page uses.</summary>
+    private void OnOpenFolder(object sender, RoutedEventArgs e)
     {
-        if (SearchBox.Visibility == Visibility.Visible && SearchBox.Text.Length == 0)
+        if ((SelectedPackId ?? _packs.FirstOrDefault()?.Id) is not { } packId)
         {
-            CollapseSearch();
+            Say("There is no instance to open.");
             return;
         }
-        SearchBox.Visibility = Visibility.Visible;
-        CompactSearchHost.Width = 240;
-        SearchBox.Focus();
-    }
-
-    private void CollapseSearch()
-    {
-        SearchBox.Visibility = Visibility.Collapsed;
-        CompactSearchHost.Width = 36;
-    }
-
-    private void OnSearchPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Escape) return;
-        SearchBox.Text = "";
-        CollapseSearch();
-        ServerList.Focus();
-        e.Handled = true;
-    }
-
-    /// <summary>An empty search box collapses when it loses focus, so the toolbar goes back to its
-    /// compact shape without the user having to close it.</summary>
-    private void OnSearchLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
-    {
-        if (SearchBox.Text.Length == 0) CollapseSearch();
+        try
+        {
+            var dir = App.State.Packs.GameDir(packId);
+            if (!Directory.Exists(dir))
+            {
+                var name = _packs.FirstOrDefault(p => p.Id == packId)?.Name ?? "That instance";
+                Say($"{name} has no game folder yet - launch or sync it once.");
+                return;
+            }
+            // SafeLaunch logs its own failures and never throws.
+            if (!SafeLaunch.OpenFolder(dir)) Say("That folder could not be opened in Explorer.");
+        }
+        catch (Exception ex) { Failed("That folder could not be opened in Explorer.", ex); }
     }
 
     private void OnSortButtonClick(object sender, RoutedEventArgs e)
@@ -471,7 +551,7 @@ public partial class ServersView : Page
 
     private void OnToggleHidden(object sender, RoutedEventArgs e)
     {
-        _showHidden = !_showHidden;
+        _showHidden = HiddenToggle.IsChecked == true;
         HiddenToggle.ToolTip = _showHidden
             ? "Hide the direct-connect entries again"
             : "Show the hidden direct-connect entries Minecraft keeps but never draws";
@@ -482,17 +562,13 @@ public partial class ServersView : Page
     /// Page-level shortcuts: F5 re-reads everything, Ctrl+F opens the search, Delete removes the
     /// selected rows.
     /// </summary>
-    /// <remarks>Delete is deliberately ignored while a text box has focus — the console's command box
-    /// and the search box both live on this page, and deleting a character there must not delete a
-    /// server.</remarks>
+    /// <remarks>Delete is ignored while a text box (search, console) has focus.</remarks>
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
         var typing = Keyboard.FocusedElement is TextBox or PasswordBox;
-        if (e.Key == Key.F5) { _ = LoadAsync(); e.Handled = true; }
+        if (e.Key == Key.F5) { OnRefresh(this, e); e.Handled = true; }
         else if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
         {
-            SearchBox.Visibility = Visibility.Visible;
-            CompactSearchHost.Width = 240;
             SearchBox.Focus();
             e.Handled = true;
         }
@@ -504,7 +580,7 @@ public partial class ServersView : Page
         base.OnPreviewKeyDown(e);
     }
 
-    // ── row actions ──────────────────────────────────────────────────────────
+    // ── row actions ──
 
     private void OnServerSelectionChanged(object sender, SelectionChangedEventArgs e) { }
 
@@ -514,23 +590,22 @@ public partial class ServersView : Page
         {
             if (ServerList.SelectedItem is ServerRow row) await JoinAsync(row, ServerList);
         }
-        catch (Exception ex) { StatusLabel.Text = "Join failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be joined.", ex); }
     }
 
     private async void OnAddServer(object sender, RoutedEventArgs e)
     {
         try
         {
-            if (_packs.Count == 0) { StatusLabel.Text = "Create an instance first — a server list lives inside one."; return; }
+            if (_packs.Count == 0) { Say("Create an instance first - a server list lives inside one."); return; }
             var result = await ServerEditDialog.AddAsync(_shell, _packs, SelectedPackId ?? _packs[0].Id);
             if (result is null) return;
 
             await Task.Run(() => _servers.Add(result.PackId, result.Name, result.Address));
             var into = _packs.FirstOrDefault(p => p.Id == result.PackId)?.Name ?? "the instance";
-            StatusLabel.Text = $"Added {result.Name} to {into}.";
-            await ScanAsync();
+            await ScanAsync($"Added {result.Name} to {into}.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not add that server: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be added.", ex); }
     }
 
     private async void OnJoin(object sender, RoutedEventArgs e)
@@ -540,7 +615,7 @@ public partial class ServersView : Page
             if (sender is not FrameworkElement { Tag: ServerRow row } anchor) return;
             await JoinAsync(row, anchor);
         }
-        catch (Exception ex) { StatusLabel.Text = "Join failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be joined.", ex); }
     }
 
     private async void OnCtxJoin(object sender, RoutedEventArgs e)
@@ -549,7 +624,7 @@ public partial class ServersView : Page
         {
             if (RowFromMenu(sender) is { } row) await JoinAsync(row, ServerList);
         }
-        catch (Exception ex) { StatusLabel.Text = "Join failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be joined.", ex); }
     }
 
     /// <summary>
@@ -579,7 +654,7 @@ public partial class ServersView : Page
             item.Click += async (_, _) =>
             {
                 try { await JoinWithAsync(row, id); }
-                catch (Exception ex) { StatusLabel.Text = "Join failed: " + ex.Message; }
+                catch (Exception ex) { Failed("That server could not be joined.", ex); }
             };
             menu.Items.Add(item);
         }
@@ -589,24 +664,42 @@ public partial class ServersView : Page
 
     private async Task JoinWithAsync(ServerRow row, Guid packId)
     {
-        if (App.State.MinecraftAccounts.Current is null)
+        // The address goes on the game's command line. If ParseAddress rejects it the game would just
+        // stop at the title screen, so say why here.
+        if (MinecraftServerPing.ParseAddress(row.Address).Host.Length == 0)
         {
-            _shell.OpenMcAccount();
-            StatusLabel.Text = "Sign in to a Minecraft account first.";
+            Say("That address cannot be joined directly. Edit the entry to a plain host name or IP.");
             return;
         }
 
-        StatusLabel.Text = $"Launching into {row.DisplayName}…";
+        if (App.State.MinecraftAccounts.Current is null)
+        {
+            _shell.OpenMcAccount();
+            Say("Sign in to a Minecraft account first.");
+            return;
+        }
+
+        Say($"Launching into {row.DisplayName}...");
         try
         {
+            // GetPackAsync falls back to cached details, so this works offline for an instance on this
+            // PC. It can still throw otherwise, and an exception escaping this async void handler's
+            // callee would crash the launcher.
             var pack = await App.State.Api.GetPackAsync(packId);
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
             var proc = await App.State.Launcher.LaunchTrackedAsync(
                 pack, new Progress<string>(_ => { }), joinServerAddress: row.Address);
             _shell.OpenMinecraftHost(pack, proc);
-            StatusLabel.Text = $"{pack.Name} is starting and will connect to {row.Address}.";
+            Say($"{pack.Name} is starting and will connect to {row.Address}.");
         }
-        catch (OperationCanceledException) { StatusLabel.Text = "Launch cancelled."; }
+        catch (OperationCanceledException) { Say("Launch cancelled."); }
+        catch (OfflineException)
+        {
+            Say("That instance has never been downloaded on this PC and the server is not "
+              + "answering, so there is nothing to launch yet. The instances you already have "
+              + "still start normally.");
+        }
+        catch (Exception ex) { Failed("That instance could not be launched.", ex); }
     }
 
     private async void OnEdit(object sender, RoutedEventArgs e)
@@ -615,7 +708,7 @@ public partial class ServersView : Page
         {
             if (sender is FrameworkElement { Tag: ServerRow row }) await EditAsync(row);
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not edit that server: " + ex.Message; }
+        catch (Exception ex) { Failed("That entry could not be edited.", ex); }
     }
 
     private async void OnCtxEdit(object sender, RoutedEventArgs e)
@@ -624,15 +717,14 @@ public partial class ServersView : Page
         {
             if (RowFromMenu(sender) is { } row) await EditAsync(row);
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not edit that server: " + ex.Message; }
+        catch (Exception ex) { Failed("That entry could not be edited.", ex); }
     }
 
     /// <summary>
     /// Edits the entry in one instance.
     /// </summary>
-    /// <remarks>A row can stand for the same address in several instances, and editing it in one of
-    /// them is not the same as editing it everywhere; the status line says which instance was changed,
-    /// and the other copies are left alone rather than silently rewritten.</remarks>
+    /// <remarks>A row can cover several instances; only this instance's copy changes, and the status
+    /// line says which.</remarks>
     private async Task EditAsync(ServerRow row)
     {
         var entry = row.Primary;
@@ -640,11 +732,10 @@ public partial class ServersView : Page
         if (result is null) return;
 
         var changed = await Task.Run(() => _servers.Update(entry, result.Name, result.Address));
-        StatusLabel.Text = changed
+        await ScanAsync(changed
             ? $"Updated {result.Name} in {entry.SourcePackName}." +
               (row.Sources.Count > 1 ? $" The other {row.Sources.Count - 1} instance(s) still have the old entry." : "")
-            : "That entry is no longer in the instance's list — refreshed.";
-        await ScanAsync();
+            : "That entry is no longer in the instance's list - refreshed.");
     }
 
     private async void OnRemove(object sender, RoutedEventArgs e)
@@ -653,7 +744,7 @@ public partial class ServersView : Page
         {
             if (sender is FrameworkElement { Tag: ServerRow row }) await RemoveAsync(new[] { row });
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not remove that server: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be removed.", ex); }
     }
 
     private async void OnCtxRemove(object sender, RoutedEventArgs e)
@@ -662,7 +753,7 @@ public partial class ServersView : Page
         {
             if (RowFromMenu(sender) is { } row) await RemoveAsync(new[] { row });
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not remove that server: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be removed.", ex); }
     }
 
     private async Task RemoveSelectedAsync()
@@ -672,34 +763,32 @@ public partial class ServersView : Page
             var rows = ServerList.SelectedItems.OfType<ServerRow>().ToList();
             if (rows.Count > 0) await RemoveAsync(rows);
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not remove those servers: " + ex.Message; }
+        catch (Exception ex) { Failed("Those servers could not be removed.", ex); }
     }
 
     /// <summary>
     /// Removes the rows' entries from their instances' lists, after one confirmation covering all of
     /// them.
     /// </summary>
-    /// <remarks>When a row stands for several instances, every copy goes — that is what the row on
-    /// screen means, and the confirmation names the instances so it is not a surprise.</remarks>
+    /// <remarks>A row covering several instances removes every copy; the confirmation names them.</remarks>
     private async Task RemoveAsync(IReadOnlyList<ServerRow> rows)
     {
         var entries = rows.SelectMany(r => r.Sources).ToList();
         var instances = entries.Select(e => e.SourcePackName).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var what = rows.Count == 1 ? $"“{rows[0].DisplayName}”" : $"{rows.Count} servers";
+        var what = rows.Count == 1 ? $"'{rows[0].DisplayName}'" : $"{rows.Count} servers";
         var where = instances.Count == 1 ? instances[0] : $"{instances.Count} instances ({string.Join(", ", instances)})";
 
         if (!await AppDialog.ConfirmAsync(_shell, "Remove server",
                 $"Remove {what} from {where}?\n\n" +
-                "This only edits your own copy of the multiplayer list — servers.dat is never synced to a " +
+                "This only edits your own copy of the multiplayer list - servers.dat is never synced to a " +
                 "shared pack. Nothing on the server itself changes.",
                 "Remove", "Cancel", danger: true))
             return;
 
         var removed = await Task.Run(() => entries.Count(entry => _servers.Remove(entry)));
-        StatusLabel.Text = removed == 0
-            ? "Nothing was removed — those entries were already gone."
-            : $"Removed {removed} entr{(removed == 1 ? "y" : "ies")}.";
-        await ScanAsync();
+        await ScanAsync(removed == 0
+            ? "Nothing was removed - those entries were already gone."
+            : $"Removed {removed} entr{(removed == 1 ? "y" : "ies")}.");
     }
 
     private async void OnCopyTo(object sender, RoutedEventArgs e)
@@ -708,7 +797,7 @@ public partial class ServersView : Page
         {
             if (sender is FrameworkElement { Tag: ServerRow row }) await CopyToAsync(row);
         }
-        catch (Exception ex) { StatusLabel.Text = "Copy failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be copied.", ex); }
     }
 
     private async void OnCtxCopyTo(object sender, RoutedEventArgs e)
@@ -717,23 +806,21 @@ public partial class ServersView : Page
         {
             if (RowFromMenu(sender) is { } row) await CopyToAsync(row);
         }
-        catch (Exception ex) { StatusLabel.Text = "Copy failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be copied.", ex); }
     }
 
-    /// <summary>Copies the entry — name, address and favicon — into another instance's list. This is
-    /// the thing that is genuinely painful without a launcher: otherwise it is retyping the address
-    /// into the multiplayer screen of every instance in turn.</summary>
+    /// <summary>Copies the entry (name, address and favicon) into another instance's list.</summary>
     private async Task CopyToAsync(ServerRow row)
     {
         var already = row.Sources.Select(s => s.SourcePackId).ToHashSet();
         var targets = _packs.Where(p => !already.Contains(p.Id)).ToList();
         if (targets.Count == 0)
         {
-            StatusLabel.Text = "Every instance already has this server.";
+            Say("Every instance already has this server.");
             return;
         }
 
-        var picker = new PackPickerDialog(targets, "Copy server to…",
+        var picker = new PackPickerDialog(targets, "Copy server to...",
             $"Pick the instance to add {row.DisplayName} to. Its name and icon come with it.", "Copy")
         { Owner = _shell };
         if (picker.ShowDialog() != true || picker.SelectedPackId is not { } targetId) return;
@@ -741,17 +828,16 @@ public partial class ServersView : Page
         var entry = row.Primary;
         var copied = await Task.Run(() => _servers.CopyTo(entry, targetId));
         var name = targets.First(p => p.Id == targetId).Name;
-        StatusLabel.Text = copied
+        await ScanAsync(copied
             ? $"Copied {row.DisplayName} into {name}."
-            : $"{name} already lists that address.";
-        await ScanAsync();
+            : $"{name} already lists that address.");
     }
 
     private void OnCtxCopyAddress(object sender, RoutedEventArgs e)
     {
         if (RowFromMenu(sender) is not { } row) return;
         ClipboardHelper.TrySetText(row.Address);
-        StatusLabel.Text = $"Copied {row.Address}.";
+        Say($"Copied {row.Address}.");
     }
 
     private async void OnCtxPing(object sender, RoutedEventArgs e)
@@ -766,12 +852,12 @@ public partial class ServersView : Page
                                             ?? DecodeFavicon(row.Primary.IconBase64));
             if (icon is not null) _icons[row.Key] = icon;
             row.Apply(result, icon ?? CachedIcon(row.Key));
-            StatusLabel.Text = result.Online
+            RestateCount();
+            Say(result.Online
                 ? $"{row.DisplayName}: {result.PlayersOnline}/{result.PlayersMax} online, {result.LatencyMs} ms."
-                : $"{row.DisplayName}: {result.Error}.";
-            UpdateSubLabel(_rows.Count);
+                : $"{row.DisplayName}: {result.Error}.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Ping failed: " + ex.Message; }
+        catch (Exception ex) { Failed("That server could not be pinged.", ex); }
     }
 
     private async void OnCtxMoveUp(object sender, RoutedEventArgs e) => await MoveAsync(sender, -1);
@@ -786,13 +872,12 @@ public partial class ServersView : Page
             if (RowFromMenu(sender) is not { } row) return;
             var entry = row.Primary;
             var moved = await Task.Run(() => _servers.Move(entry, delta));
-            if (!moved) { StatusLabel.Text = "That entry is already at the end of the list."; return; }
-            StatusLabel.Text = _sort == ServerSort.List
+            if (!moved) { Say("That entry is already at the end of the list."); return; }
+            await ScanAsync(_sort == ServerSort.List
                 ? $"Moved {row.DisplayName} in {entry.SourcePackName}'s list."
-                : $"Moved {row.DisplayName} in {entry.SourcePackName}'s list — sort by “Order in the game's list” to see it.";
-            await ScanAsync();
+                : $"Moved {row.DisplayName} in {entry.SourcePackName}'s list - sort by 'Order in the game's list' to see it.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not move that entry: " + ex.Message; }
+        catch (Exception ex) { Failed("That entry could not be moved.", ex); }
     }
 
     /// <summary>The row a context-menu item belongs to. Menus are declared inside the item template,
@@ -807,7 +892,7 @@ public partial class ServersView : Page
             : null;
     }
 
-    // ── console ──────────────────────────────────────────────────────────────
+    // ── console ──
 
     private async void OnConsole(object sender, RoutedEventArgs e)
     {
@@ -815,7 +900,7 @@ public partial class ServersView : Page
         {
             if (sender is FrameworkElement { Tag: ServerRow row }) await OpenConsoleAsync(row);
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not open the console: " + ex.Message; }
+        catch (Exception ex) { Failed("That console could not be opened.", ex); }
     }
 
     private async void OnCtxConsole(object sender, RoutedEventArgs e)
@@ -824,7 +909,7 @@ public partial class ServersView : Page
         {
             if (RowFromMenu(sender) is { } row) await OpenConsoleAsync(row);
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not open the console: " + ex.Message; }
+        catch (Exception ex) { Failed("That console could not be opened.", ex); }
     }
 
     private async void OnCtxConsoleSetup(object sender, RoutedEventArgs e)
@@ -833,15 +918,14 @@ public partial class ServersView : Page
         {
             if (RowFromMenu(sender) is { } row) await ConfigureConsoleAsync(row);
         }
-        catch (Exception ex) { StatusLabel.Text = "Could not save those console settings: " + ex.Message; }
+        catch (Exception ex) { Failed("Those console settings could not be saved.", ex); }
     }
 
     /// <summary>
     /// Opens the console pane for a server, asking for its RCON details first if it has none.
     /// </summary>
-    /// <remarks>Only servers the user has configured get a console: RCON is off by default on every
-    /// server and there is nothing to connect to otherwise, so offering a console on all of them
-    /// would be offering a button that cannot work.</remarks>
+    /// <remarks>RCON is off by default on every server, so a console only opens once the user has
+    /// entered RCON details for it.</remarks>
     private async Task OpenConsoleAsync(ServerRow row)
     {
         var admin = App.State.Settings.GetServerAdmin(row.Address);
@@ -888,8 +972,8 @@ public partial class ServersView : Page
             App.State.Settings.RemoveServerAdmin(row.Address);
             App.State.Settings.Save();
             if (_consoleRow?.Key == row.Key) CloseConsole();
-            StatusLabel.Text = $"Forgot the console details for {row.DisplayName}.";
             Refresh();
+            Say($"Forgot the console details for {row.DisplayName}.");
             return false;
         }
 
@@ -900,11 +984,10 @@ public partial class ServersView : Page
         entry.RconPassword = result.Password;
         App.State.Settings.Save();
 
-        // A password change invalidates the open session, so drop it rather than leave a console that
-        // is authenticated with something the user has just replaced.
+        // A changed password invalidates the open session, so drop it.
         if (_consoleRow?.Key == row.Key) CloseConsoleConnection();
-        StatusLabel.Text = $"Saved console details for {row.DisplayName}.";
         Refresh();
+        Say($"Saved console details for {row.DisplayName}.");
         return true;
     }
 
@@ -926,7 +1009,7 @@ public partial class ServersView : Page
             if (_rcon is { IsConnected: true })
             {
                 CloseConsoleConnection();
-                AppendConsole("— disconnected —");
+                AppendConsole("- disconnected -");
                 SetConsoleState(connected: false, "Not connected.");
                 return;
             }
@@ -945,11 +1028,11 @@ public partial class ServersView : Page
         _consoleCts?.Cancel();
         _consoleCts = new CancellationTokenSource();
         ConnectButton.IsEnabled = false;
-        SetConsoleState(connected: false, $"Connecting to {host}:{port}…");
+        SetConsoleState(connected: false, $"Connecting to {host}:{port}...");
         try
         {
             _rcon = await RconClient.ConnectAsync(host, port, admin.RconPassword!, ct: _consoleCts.Token);
-            AppendConsole($"— connected to {host}:{port} —");
+            AppendConsole($"- connected to {host}:{port} -");
             SetConsoleState(connected: true, "Connected. Commands run as the server console.");
             CommandBox.Focus();
         }
@@ -1019,9 +1102,8 @@ public partial class ServersView : Page
     /// <summary>
     /// Enter runs the command; up and down walk the history for this server.
     /// </summary>
-    /// <remarks>The history index sits one past the end when nothing is being recalled, so the first
-    /// press of Up reaches the most recent command and Down walks back out to an empty box — the same
-    /// behaviour as a shell, which is what anyone typing server commands expects.</remarks>
+    /// <remarks>The history index sits one past the end when nothing is recalled, so Up reaches the
+    /// latest command and Down walks back out to an empty box, like a shell.</remarks>
     private async void OnCommandKeyDown(object sender, KeyEventArgs e)
     {
         try
@@ -1066,31 +1148,28 @@ public partial class ServersView : Page
     /// <summary>
     /// Runs one command against the open console and prints what came back.
     /// </summary>
-    /// <remarks>A command with no output still gets a line, because a silent console is
-    /// indistinguishable from a broken one. Minecraft's leading slash is stripped: RCON commands are
-    /// entered without it and a stray "/" is the commonest reason a pasted command does nothing.</remarks>
+    /// <remarks>A command with no output still gets a line, so the console doesn't look broken. A
+    /// leading slash is stripped, since RCON commands don't take one.</remarks>
     private async Task RunCommandAsync(string command)
     {
         if (_rcon is not { IsConnected: true })
         {
-            SetConsoleStatus("Not connected — press Connect first.");
+            SetConsoleStatus("Not connected - press Connect first.");
             return;
         }
 
         var clean = command.TrimStart('/');
         RememberCommand(command);
         AppendConsole("> " + clean);
-        SetConsoleStatus("Running…");
+        SetConsoleStatus("Running...");
         try
         {
             var reply = await _rcon.SendCommandAsync(clean, ct: _consoleCts?.Token ?? CancellationToken.None);
             AppendConsole(string.IsNullOrWhiteSpace(reply)
                 ? "(the server said nothing)"
                 : MinecraftServerPing.StripFormatting(reply));
-            // A command that only half finished comes back with what arrived, but leaves the rest of
-            // its reply in the socket, so RconClient marks the connection unusable. Honour that here:
-            // reading the next command's answer off a stream still carrying this one's tail would show
-            // confident, wrong output.
+            // A half-finished command leaves the rest of its reply in the socket and RconClient marks the
+            // connection unusable; otherwise the next command would read this one's tail.
             if (_rcon is { IsConnected: false }) DropDesynchronisedConsole("That command did not finish.");
             else SetConsoleStatus("");
         }
@@ -1098,8 +1177,7 @@ public partial class ServersView : Page
         catch (TimeoutException ex) { DropDesynchronisedConsole(ex.Message); }
         catch (Exception ex)
         {
-            // A dead socket is the usual cause; say so and put the pane back into its offline state
-            // rather than leaving a Disconnect button that no longer means anything.
+            // Usually a dead socket, so put the pane back into its disconnected state.
             CloseConsoleConnection();
             SetConsoleState(connected: false, "The console connection dropped: " + ex.Message);
         }
@@ -1108,21 +1186,18 @@ public partial class ServersView : Page
     /// <summary>
     /// Drops an RCON connection that can no longer be read in step, and says so in the pane.
     /// </summary>
-    /// <remarks>A timed-out command leaves its own reply — and the empty sentinel command that marks
-    /// the end of it — still on their way from the server. Keeping the socket would mean the next
-    /// command returns this one's output: a console that answers the wrong question without ever
-    /// looking broken, which is worse than an error. Reconnecting is one button, and the scrollback is
-    /// kept so nothing said so far is lost.</remarks>
+    /// <remarks>A timed-out command's reply (and its sentinel) is still in flight, so the next command
+    /// would get this one's output. The scrollback is kept for reconnecting.</remarks>
     private void DropDesynchronisedConsole(string why)
     {
         CloseConsoleConnection();
-        AppendConsole("— disconnected: the server did not finish answering —");
+        AppendConsole("- disconnected: the server did not finish answering -");
         SetConsoleState(connected: false, why + " The console disconnected so it cannot show you a " +
-                                                "stale answer — press Connect to carry on.");
+                                                "stale answer - press Connect to carry on.");
     }
 
     /// <summary>Stores the command in this server's history, newest last, without duplicating the one
-    /// before it. The password is never part of this — only what the user typed into the command box.</summary>
+    /// before it. Only what was typed into the command box is stored, never the password.</summary>
     private void RememberCommand(string command)
     {
         if (_consoleRow is not { } row) return;
@@ -1159,7 +1234,21 @@ public partial class ServersView : Page
 
     private void SetConsoleStatus(string status) => ConsoleStatus.Text = status;
 
-    // ── rows ─────────────────────────────────────────────────────────────────
+    // ── saying things ──
+
+    /// <summary>A one-line note about what just happened, under the list. The next rebuild replaces
+    /// it with the standing note.</summary>
+    private void Say(string? text) => _state.Note(text);
+
+    /// <summary>A user action failed. They get one sentence they can act on; the exception goes to
+    /// the launcher log.</summary>
+    private void Failed(string plain, Exception ex)
+    {
+        AppLog.LogError(nameof(ServersView), ex);
+        Say(plain);
+    }
+
+    // ── rows ──
 
     private sealed record PackFilterItem(Guid? Id, string Label);
 
@@ -1167,11 +1256,9 @@ public partial class ServersView : Page
     /// One server as the page shows it: an address, every instance that lists it, and whatever the
     /// last ping said.
     /// </summary>
-    /// <remarks>Raises change notifications rather than being rebuilt, so a ping landing repaints one
-    /// row instead of rebuilding the list under the user's cursor. It deliberately exposes no
-    /// <see cref="Brush"/> — the status colour is a trigger in the template, so it follows a theme
-    /// change; a brush captured here would be frozen at whatever theme was current when the row was
-    /// built.</remarks>
+    /// <remarks>Raises change notifications so a ping repaints one row instead of rebuilding the list.
+    /// Exposes no <see cref="Brush"/>: the status colour is a template trigger, so it follows theme
+    /// changes.</remarks>
     public sealed class ServerRow : INotifyPropertyChanged
     {
         public ServerRow(string key, List<ServerEntry> sources)
@@ -1190,8 +1277,7 @@ public partial class ServersView : Page
 
         public string Address => Primary.Address;
 
-        /// <summary>The saved label wins over the name in servers.dat: someone who has named the
-        /// server in the launcher has told us what they call it.</summary>
+        /// <summary>The label saved in the launcher wins over the name in servers.dat.</summary>
         public string DisplayName
         {
             get
@@ -1223,9 +1309,9 @@ public partial class ServersView : Page
         public string StatusText => State switch
         {
             PingState.Online => $"{_result?.PlayersOnline ?? 0}/{_result?.PlayersMax ?? 0}",
-            PingState.Pinging => "…",
+            PingState.Pinging => "...",
             PingState.Offline => "OFFLINE",
-            _ => "—"
+            _ => "-"
         };
 
         /// <summary>The line under the name: where it is, which instances have it, and what the last
@@ -1248,7 +1334,7 @@ public partial class ServersView : Page
                     PingState.Online =>
                         $"{_result?.VersionName ?? "online"}{(_result?.LatencyMs is { } ms ? $" · {ms} ms" : "")}",
                     PingState.Offline => _result?.Error ?? "offline",
-                    PingState.Pinging => "pinging…",
+                    PingState.Pinging => "pinging...",
                     _ => "not pinged yet"
                 };
                 return $"{Address}  ·  {where}  ·  {status}";
@@ -1275,14 +1361,14 @@ public partial class ServersView : Page
             ? "Open this server's RCON console"
             : "Set up an RCON console for this server";
 
-        public string ConsoleSetupLabel => HasConsole ? "Console settings…" : "Set up console…";
+        public string ConsoleSetupLabel => HasConsole ? "Console settings..." : "Set up console...";
 
         public string RemoveTooltip => Sources.Count == 1
             ? $"Remove this server from {Primary.SourcePackName}'s list"
             : $"Remove this server from all {Sources.Count} instances that list it";
 
-        /// <summary>Everything known about the server, for the row's tooltip — including who is on it,
-        /// which is the one thing worth hovering a server list for.</summary>
+        /// <summary>Everything known about the server, for the row's tooltip, including who is
+        /// online.</summary>
         public string Tooltip
         {
             get
@@ -1301,7 +1387,7 @@ public partial class ServersView : Page
                 }
                 else if (_result is { } offline)
                 {
-                    lines.Add("Offline — " + offline.Error);
+                    lines.Add("Offline - " + offline.Error);
                 }
                 if (IsHidden) lines.Add("A hidden direct-connect entry.");
                 return string.Join(Environment.NewLine, lines);
@@ -1338,9 +1424,9 @@ public partial class ServersView : Page
 
         public event PropertyChangedEventHandler? PropertyChanged;
 
-        /// <summary>Almost every displayed property is derived from the ping or the settings, so one
-        /// null-name notification (which WPF reads as "everything changed") is both cheaper and less
-        /// error-prone than listing them.</summary>
+        /// <summary>Almost every displayed property derives from the ping or the settings, so one
+        /// null-name notification (which WPF reads as "everything changed") is simpler than listing
+        /// them.</summary>
         private void RaiseAll() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
     }
 }

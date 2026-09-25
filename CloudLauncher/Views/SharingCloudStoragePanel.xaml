@@ -1,0 +1,264 @@
+<UserControl x:Class="CloudLauncher.Views.SharingCloudStoragePanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:v="clr-namespace:CloudLauncher.Views"
+             xmlns:anim="clr-namespace:CloudLauncher.Animations">
+    <UserControl.Resources>
+        <v:BoolToVisibilityConverter x:Key="BoolVis"/>
+
+        <!--  Same styles and sizes as the Storage page so rows read the same on both screens.  -->
+        <Style x:Key="MeterTrack" TargetType="Grid">
+            <Setter Property="Height" Value="6"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+        </Style>
+
+        <Style x:Key="SizeText" TargetType="TextBlock" BasedOn="{StaticResource Body}">
+            <Setter Property="FontFamily" Value="{DynamicResource MonoFont}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <!--  One kind: packs, worlds, resource packs or mods. The bar shows unique bytes, then a
+        paler band for bytes shared with your other things.  -->
+        <DataTemplate x:Key="KindTemplate">
+            <Border Background="Transparent" Padding="0,8" BorderThickness="0,0,0,1"
+                    BorderBrush="{DynamicResource BorderSubtleBrush}">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <slate:SlateBorder Grid.Column="0" Width="10" Height="10" CornerRadius="3"
+                            Background="{Binding Swatch}" VerticalAlignment="Center"
+                            Margin="2,0,12,0"/>
+
+                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,14,0">
+                        <TextBlock Text="{Binding Name}" Style="{StaticResource H3}"/>
+                        <TextBlock Text="{Binding SubLine}" Style="{StaticResource Caption}"
+                                   TextWrapping="Wrap" Margin="0,1,0,5"/>
+                        <Grid Style="{StaticResource MeterTrack}">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="{Binding Unique}"/>
+                                <ColumnDefinition Width="{Binding Shared}"/>
+                                <ColumnDefinition Width="{Binding Rest}"/>
+                            </Grid.ColumnDefinitions>
+                            <slate:SlateBorder Grid.Column="0" CornerRadius="3" Background="{Binding Swatch}"/>
+                            <!--  Same colour at lower opacity, so the band still reads as this row's.  -->
+                            <slate:SlateBorder Grid.Column="1" CornerRadius="3" Opacity="0.4"
+                                    Background="{Binding Swatch}"/>
+                            <slate:SlateBorder Grid.Column="2" CornerRadius="3"
+                                    Background="{DynamicResource Surface4Brush}"/>
+                        </Grid>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="2" VerticalAlignment="Center" MinWidth="86">
+                        <TextBlock Text="{Binding SizeLabel}" Style="{StaticResource SizeText}"/>
+                        <TextBlock Text="unique" Style="{StaticResource Caption}"
+                                   HorizontalAlignment="Right"/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Column="3" Text="{Binding PercentLabel}"
+                               Style="{StaticResource Caption}" MinWidth="42" Margin="10,0,0,0"
+                               HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <!--  One thing you own, ranked by what deleting it would free, with a button to its page.  -->
+        <DataTemplate x:Key="ItemTemplate">
+            <Grid Margin="0,0,0,3">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="26"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Text="{Binding Rank}" Style="{StaticResource Caption}"
+                           VerticalAlignment="Center"/>
+
+                <!--  Same colour dot as the kind rows.  -->
+                <slate:SlateBorder Grid.Column="1" Width="8" Height="8" CornerRadius="2"
+                        Background="{Binding Swatch}" VerticalAlignment="Center"
+                        Margin="0,0,10,0"/>
+
+                <StackPanel Grid.Column="2" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="{Binding Name}" Style="{StaticResource Body}"
+                               TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding SubLine}" Style="{StaticResource Caption}"
+                               TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+
+                <slate:SlateBorder Grid.Column="3" Style="{StaticResource Pill}" Margin="0,0,10,0"
+                        ToolTip="{Binding SharedTip}"
+                        Visibility="{Binding IsShared, Converter={StaticResource BoolVis}}">
+                    <TextBlock Text="shared" Style="{StaticResource PillText}"/>
+                </slate:SlateBorder>
+
+                <TextBlock Grid.Column="4" Text="{Binding SizeLabel}"
+                           Style="{StaticResource SizeText}" MinWidth="72"/>
+
+                <!--  Disabled rather than hidden for kinds with no page, so the column stays even. The
+                tooltip says where that thing lives.  -->
+                <Button Grid.Column="5" Content="Open" Padding="12,4" Margin="10,0,0,0"
+                        Click="OnOpenItem"
+                        IsEnabled="{Binding CanOpen}" ToolTip="{Binding OpenHint}"
+                        ToolTipService.ShowOnDisabled="True"/>
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Margin="0,12,0,0">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!--  Row 0 - title and refresh.  -->
+        <DockPanel Grid.Row="0" Margin="0,0,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="RefreshButton" Style="{StaticResource ToolbarIconButton}" Margin="0"
+                        Content="&#xE72C;" FontFamily="{DynamicResource IconFont}"
+                        Click="OnRefresh"
+                        ToolTip="Ask the server again (F5). It counts this fresh every time, so an upload or a delete shows up on the next press."/>
+            </StackPanel>
+            <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="What your content costs on the server" Style="{StaticResource H3}"/>
+                <TextBlock x:Name="SubLabel" Style="{StaticResource PageSubtitle}"/>
+            </StackPanel>
+        </DockPanel>
+
+        <!--  Row 1 - content. PageStateView is last so it draws over the cards.  -->
+        <Grid Grid.Row="1">
+            <ScrollViewer x:Name="ContentScroller" VerticalScrollBarVisibility="Auto"
+                          anim:Animate.SmoothScroll="True">
+                <StackPanel Margin="0,0,10,0">
+
+                    <!--  Totals: bytes stored, the shared part no single delete can free, and the quota.  -->
+                    <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,14">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <StackPanel Grid.Column="0" Margin="0,0,16,0">
+                                    <TextBlock x:Name="TotalLabel" Style="{StaticResource H1}"/>
+                                    <TextBlock x:Name="TotalNote" Style="{StaticResource Muted}"
+                                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="1" VerticalAlignment="Top"
+                                            Margin="0,4,26,0" MaxWidth="170">
+                                    <TextBlock x:Name="SharedLabel" Style="{StaticResource H3}"
+                                               TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="SharedNote" Style="{StaticResource Caption}"
+                                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                </StackPanel>
+
+                                <StackPanel Grid.Column="2" VerticalAlignment="Top"
+                                            Margin="0,4,0,0" MaxWidth="180">
+                                    <TextBlock x:Name="QuotaLabel" Style="{StaticResource H3}"
+                                               TextWrapping="Wrap"/>
+                                    <TextBlock x:Name="QuotaNote" Style="{StaticResource Caption}"
+                                               TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </Grid>
+
+                            <!--  Account meter: unique, shared and remaining quota. Built in code
+                            because each band's width depends on the other values.  -->
+                            <Grid x:Name="UsageHost" Height="10" Margin="0,18,0,0"/>
+                            <TextBlock x:Name="UsageNote" Style="{StaticResource Caption}"
+                                       Margin="0,8,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+
+                    <!--  By kind  -->
+                    <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,14">
+                        <StackPanel>
+                            <DockPanel>
+                                <TextBlock x:Name="KindCountLabel" DockPanel.Dock="Right"
+                                           Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Text="What the space is" Style="{StaticResource H3}"/>
+                            </DockPanel>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,2,0,2"
+                                       TextWrapping="Wrap"
+                                       Text="'Unique' is what deleting everything of that kind would give back. The paler band beside it is content that kind shares with another of your things: those bytes are stored once, are counted once in the total above, and stay on the server until the last thing holding them is gone."/>
+                            <ItemsControl x:Name="KindList" ItemTemplate="{StaticResource KindTemplate}"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+
+                    <!--  Biggest first  -->
+                    <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,14">
+                        <StackPanel>
+                            <DockPanel>
+                                <TextBlock x:Name="ItemCountLabel" DockPanel.Dock="Right"
+                                           Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Text="What deleting would give back" Style="{StaticResource H3}"/>
+                            </DockPanel>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,2,0,6"
+                                       TextWrapping="Wrap"
+                                       Text="One row per instance, world, resource pack and mod you own, ranked by the bytes only it references. Open goes to that thing's own page - hover it for what is there. Nothing on this tab deletes anything itself."/>
+                            <!--  Computed note on what the rows add up to, so the list isn't read
+                            as the total.  -->
+                            <TextBlock x:Name="ItemsSumNote" Style="{StaticResource Caption}"
+                                       Foreground="{DynamicResource TextTertiaryBrush}"
+                                       Margin="0,0,0,8" TextWrapping="Wrap"/>
+
+                            <Grid Margin="0,0,0,8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ComboBox x:Name="KindBox" Grid.Column="0" Width="200"
+                                          DisplayMemberPath="Label" SelectionChanged="OnKindFilter"
+                                          ToolTip="Which kind of thing to rank"/>
+                                <Button x:Name="ShowAllButton" Grid.Column="2" Padding="12,4"
+                                        Visibility="Collapsed" Click="OnShowAll"/>
+                            </Grid>
+
+                            <ItemsControl x:Name="ItemList" ItemTemplate="{StaticResource ItemTemplate}"/>
+                            <TextBlock x:Name="ItemNote" Style="{StaticResource Muted}"
+                                       Margin="0,10,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+
+                    <!--  How it was counted  -->
+                    <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,4">
+                        <StackPanel>
+                            <TextBlock Text="How this was counted" Style="{StaticResource H3}"/>
+                            <TextBlock x:Name="MethodLabel" Style="{StaticResource Caption}"
+                                       Margin="0,4,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+                </StackPanel>
+            </ScrollViewer>
+
+            <v:PageStateView x:Name="PageStateHost"/>
+        </Grid>
+
+        <!--  Row 2 - status line.  -->
+        <Grid Grid.Row="2" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock x:Name="StatusLabel" Grid.Column="0" Style="{StaticResource Caption}"
+                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+            <ProgressBar x:Name="BusyBar" Grid.Column="1" Width="140" Height="4"
+                         IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center"/>
+        </Grid>
+    </Grid>
+</UserControl>

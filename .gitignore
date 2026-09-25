@@ -20,3 +20,17 @@ Thumbs.db
 # Local secrets / environment
 *.local.json
 appsettings.*.local.json
+
+# Release publishing: local settings and anything key-like never belong in the repo
+tools/release/release.local.json
+tools/release/**/*.pem
+tools/release/**/*.dpapi
+tools/release/**/*.pfx
+tools/release/**/*.p12
+tools/release/**/*.key
+
+# Local tooling and scratch output
+.claude/
+__pycache__/
+*_wpftmp.csproj
+CloudLauncher.Server/blobs-dev/

@@ -12,11 +12,9 @@ namespace CloudLauncher.Views;
 /// already in it.
 /// </summary>
 /// <remarks>
-/// One card for both jobs, because they ask the same three questions and only the instance differs:
-/// adding needs to know which list to write to, editing already knows and must not silently move the
-/// entry somewhere else. The address is validated as it is typed rather than on save, so the hint
-/// line can show the host and port that will actually be used — the commonest mistake here is a
-/// pasted address with a stray <c>https://</c> or a trailing slash on it.
+/// One card for both: adding asks which instance's list to write to, editing keeps the entry where
+/// it is. The address is checked as it is typed so the hint line can show the host and port that
+/// will be used, which catches pasted addresses with <c>https://</c> or a trailing slash.
 /// </remarks>
 public partial class ServerEditDialog : UserControl
 {
@@ -48,7 +46,7 @@ public partial class ServerEditDialog : UserControl
         // "copy to instance" plus a delete, which the page offers as two separate, reversible actions.
         InstanceBox.IsEnabled = !editing;
         InstanceBox.ToolTip = editing
-            ? "The instance this entry lives in. Use “Copy to instance…” to put it in another one."
+            ? "The instance this entry lives in. Use 'Copy to instance...' to put it in another one."
             : "Which instance's server list this entry goes into";
 
         Focusable = true;
@@ -70,7 +68,7 @@ public partial class ServerEditDialog : UserControl
     {
         var card = new ServerEditDialog(
             "Add server",
-            "Adds the server to one instance's multiplayer list, exactly as the in-game “Add Server” button would.",
+            "Adds the server to one instance's multiplayer list, exactly as the in-game 'Add Server' button would.",
             "Add", editing: false, instances, preselect, "", "");
         await host.ShowCardAsync(card, card.Result, card.Cancel);
         return card.Result.Result;
@@ -113,9 +111,8 @@ public partial class ServerEditDialog : UserControl
     /// <summary>
     /// Validates and answers, or explains what is wrong and stays open.
     /// </summary>
-    /// <remarks>The name is allowed to be empty and falls back to the address, which is what the game
-    /// shows for a direct-connect entry; the address is not, because an entry without one is a row
-    /// nobody can join and Minecraft itself would skip it.</remarks>
+    /// <remarks>An empty name falls back to the address, as the game does for direct-connect
+    /// entries. The address is required; Minecraft skips entries without one.</remarks>
     private void Accept()
     {
         var address = AddressBox.Text?.Trim() ?? "";
@@ -124,7 +121,7 @@ public partial class ServerEditDialog : UserControl
         var (host, _) = MinecraftServerPing.ParseAddress(address);
         if (host.Length == 0 || host.Contains(' ') || host.Contains('/'))
         {
-            Fail("That is not a server address — it should be a host name or IP, optionally with :port.");
+            Fail("That is not a server address - it should be a host name or IP, optionally with :port.");
             return;
         }
 

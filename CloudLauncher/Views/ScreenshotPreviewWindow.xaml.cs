@@ -1,22 +1,20 @@
-using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
+using CloudLauncher.Services;
 
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// Full-size viewer for one screenshot — the instance's Screenshots tab, a resource pack's gallery,
+/// Full-size viewer for one screenshot: the instance's Screenshots tab, a resource pack's gallery,
 /// a shader's preview images.
 /// </summary>
 /// <remarks>
-/// It takes the rest of the set as well as the one that was clicked, so the arrows walk the folder
-/// without closing and reopening: looking at screenshots is looking at all of them, and going back
-/// to the grid for every next one is the part that felt broken. For local files it also offers the
-/// things one wants a picture for — the clipboard, a copy elsewhere, and Explorer.
+/// Gets the whole set so the arrows can step through it without going back to the grid. Local files
+/// also get clipboard, copy and Explorer actions.
 /// </remarks>
 public partial class ScreenshotPreviewWindow : Window
 {
@@ -60,8 +58,8 @@ public partial class ScreenshotPreviewWindow : Window
 
     private string CurrentUrl => _items[_index].Url;
 
-    /// <summary>The local file behind the current image, or null when it is a remote URL (a store
-    /// gallery image). Everything that writes, copies or reveals a file is gated on this.</summary>
+    /// <summary>The local file behind the current image, or null for a remote URL (a store gallery
+    /// image). All the file actions are gated on this.</summary>
     private string? CurrentFilePath
     {
         get
@@ -75,8 +73,8 @@ public partial class ScreenshotPreviewWindow : Window
         }
     }
 
-    /// <summary>Points the window at <see cref="_index"/> — title, picture, footer and which of the
-    /// file-only actions make sense for it.</summary>
+    /// <summary>Shows the image at <see cref="_index"/>: title, picture, footer and which file-only
+    /// actions apply to it.</summary>
     private void ApplyCurrent()
     {
         var (url, title) = _items[_index];
@@ -92,14 +90,13 @@ public partial class ScreenshotPreviewWindow : Window
         PreviousButton.IsEnabled = _index > 0;
         NextButton.IsEnabled = _index < _items.Count - 1;
         HintText.Text = hasSiblings
-            ? $"{_index + 1} of {_items.Count} · ← → to step through · Esc to close"
+            ? $"{_index + 1} of {_items.Count} · < > to step through · Esc to close"
             : "Press Esc or click outside the image to close.";
 
         var isLocal = CurrentFilePath is not null;
         CopyImageButton.IsEnabled = isLocal;
         SaveCopyButton.IsEnabled = isLocal;
-        // "Open in browser" on a local PNG launches a web browser on a file, which is not what
-        // anyone wants from a screenshot; for a local file it becomes Explorer instead.
+        // A web browser is no use for a local PNG, so local files get Explorer instead.
         OpenExternallyButton.Content = isLocal ? "Show in Explorer" : "Open in browser";
         OpenExternallyButton.ToolTip = isLocal
             ? "Open the containing folder with this file selected"
@@ -132,8 +129,7 @@ public partial class ScreenshotPreviewWindow : Window
 
             image.BeginInit();
             image.UriSource = new Uri(CurrentUrl, UriKind.Absolute);
-            // A local file is read and closed, so stepping to the next screenshot does not leave a
-            // handle on the last one — which is what stops it being deleted or renamed afterwards.
+            // Read local files fully and close them, so no handle is left behind to block a delete or rename.
             image.CacheOption = CurrentFilePath is not null ? BitmapCacheOption.OnLoad : BitmapCacheOption.Default;
             image.EndInit();
 
@@ -276,24 +272,13 @@ public partial class ScreenshotPreviewWindow : Window
 
     private void OnOpenExternallyClicked(object sender, RoutedEventArgs e)
     {
-        try
+        if (CurrentFilePath is { } path)
         {
-            if (CurrentFilePath is { } path)
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = "explorer.exe",
-                    Arguments = $"/select,\"{path}\"",
-                    UseShellExecute = true
-                });
-                return;
-            }
+            if (!SafeLaunch.RevealFile(path)) ImageStatusText.Text = "Couldn't show this file in Explorer.";
+            return;
+        }
 
-            Process.Start(new ProcessStartInfo(CurrentUrl) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            ShowImageError(ex.Message);
-        }
+        // Gallery URLs come from store listings or other people's uploads, so only web links are opened.
+        if (!SafeLaunch.OpenUrl(CurrentUrl)) ImageStatusText.Text = "Couldn't open this image in your browser.";
     }
 }

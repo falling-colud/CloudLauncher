@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -10,11 +10,11 @@ using CloudLauncher.Shared;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The "Update all" review card (Prism-style): every mod with an available update, each with a
-/// checkbox, and the selected mod's changelog on the right. Locked and update-incompatible mods
-/// start unticked and wear a badge, so a bulk update never pushes past a flag the user set without
-/// them seeing it. The result is the list of (mod, target version) pairs to install, or null.
+/// The "Update all" review card: every mod with an update, each with a checkbox, and the selected
+/// mod's changelog on the right. Returns the (mod, target version) pairs to install, or null.
 /// </summary>
+/// <remarks>Locked and update-incompatible mods start unticked and show a badge, so a bulk update
+/// never overrides those flags unnoticed.</remarks>
 public partial class ModUpdateReviewDialog : UserControl
 {
     private readonly PackDetail _pack;
@@ -46,12 +46,14 @@ public partial class ModUpdateReviewDialog : UserControl
     public Task<List<(PackMod Mod, ModVersion Target)>?> Result => _tcs.Task;
     public void Cancel() => _tcs.TrySetResult(null);
 
-    /// <summary>Shows the card as an in-window overlay. Returns the ticked updates, or null if cancelled.</summary>
+    /// <summary>Shows the card as an in-window overlay. Returns the ticked updates, or null if
+    /// cancelled.</summary>
     public static async Task<List<(PackMod Mod, ModVersion Target)>?> ShowAsync(
         MainWindow host, PackDetail pack, IReadOnlyList<PackMod> updatable)
     {
         var card = new ModUpdateReviewDialog(pack, updatable);
-        await host.ShowCardAsync(card, card.Result, card.Cancel);
+        await host.ShowCardAsync(card, card.Result, card.Cancel,
+            new ResizableCardSpec("mod-update-review", 980, 660, MinWidth: 720, MinHeight: 420));
         return card.Result.Result;
     }
 
@@ -63,7 +65,7 @@ public partial class ModUpdateReviewDialog : UserControl
         UpdateButton.Content = selected == 0 ? "Update selected" : $"Update {selected} selected";
         UpdateButton.IsEnabled = selected > 0;
         FooterNote.Text = held > 0
-            ? $"{held} locked or risky update(s) are unticked — tick them to include them anyway."
+            ? $"{held} locked or risky update(s) are unticked - tick them to include them anyway."
             : "";
     }
 
@@ -87,23 +89,20 @@ public partial class ModUpdateReviewDialog : UserControl
     }
 
     /// <summary>
-    /// Shows what changed between the installed version and the one being offered — every release in
-    /// between, newest first, each under its own heading.
+    /// Shows what changed between the installed version and the offered one: every release in between,
+    /// newest first, each under its own heading.
     /// </summary>
     /// <remarks>
-    /// Showing only the target version's notes answers the wrong question. Nobody updates one version
-    /// at a time: a mod that has published six releases since the copy in the pack is offered as one
-    /// jump, and "what am I actually taking on" is all six sets of notes, not the last one. They are
-    /// fetched from the shared version catalog, so the ones already pulled for the update check cost
-    /// nothing, and the count is capped because a mod left alone for a year should not fire off
-    /// fifty store calls because someone clicked a row.
+    /// An update often skips several releases, so the target's notes alone aren't enough. Notes come from
+    /// the shared version catalog (mostly cached by the update check), and the count is capped.
     /// </remarks>
     private async Task ShowChangelogAsync(UpdateRowVm row)
     {
         var gen = ++_changelogGeneration;
         ChangelogTitle.Text = $"{row.Name} {row.Target.VersionNumber}";
-        ChangelogMeta.Text = $"{ModUpdateChannel.Label(row.Target.ReleaseChannel)} · published {row.Target.DatePublished:yyyy-MM-dd} · {row.Target.Source}";
-        ChangelogStatus.Text = "Loading changelog…";
+        // DatePublished is the store's UTC instant; TimeFormat converts and localises it.
+        ChangelogMeta.Text = $"{ModUpdateChannel.Label(row.Target.ReleaseChannel)} · published {TimeFormat.Date(row.Target.DatePublished)} · {row.Target.Source}";
+        ChangelogStatus.Text = "Loading changelog...";
         ChangelogStatus.Visibility = Visibility.Visible;
         ChangelogView.Visibility = Visibility.Collapsed;
 
@@ -139,12 +138,12 @@ public partial class ModUpdateReviewDialog : UserControl
         ChangelogView.Show(html, isMarkdown: false);
     }
 
-    /// <summary>How many releases to read per mod. Twenty is already more than anyone reads; past
-    /// that the point is "this is a big jump", not the notes.</summary>
+    /// <summary>How many releases to read per mod. Beyond twenty the notes stop being useful; it's just
+    /// a big jump.</summary>
     private const int MaxChangelogVersions = 20;
 
-    /// <summary>The releases this update actually spans: newer than what is installed, no newer than
-    /// the target, and on a channel this mod follows. Newest first, target always included.</summary>
+    /// <summary>The releases this update spans: newer than what is installed, no newer than the
+    /// target, and on a channel this mod follows. Newest first, target always included.</summary>
     private async Task<(List<ModVersion> Versions, bool Truncated)> VersionsInJumpAsync(UpdateRowVm row)
     {
         var target = new List<ModVersion> { row.Target };
@@ -176,16 +175,16 @@ public partial class ModUpdateReviewDialog : UserControl
     }
 
     /// <summary>
-    /// One document from several versions' notes: a heading per release, then its changelog, oldest
-    /// at the bottom. Each version's notes are converted with their own markdown flag first — Modrinth
-    /// publishes markdown and CurseForge publishes HTML, and a jump can span both.
+    /// One document from several versions' notes: a heading per release, then its changelog, oldest at
+    /// the bottom. Each version is converted with its own markdown flag, since Modrinth publishes
+    /// markdown, CurseForge publishes HTML, and a jump can span both.
     /// </summary>
     private async Task<string> BuildChangelogHtmlAsync(UpdateRowVm row, IReadOnlyList<ModVersion> versions)
     {
         if (row.Mod.PrimaryMod is null) return "";
 
-        // A few at a time: the catalog answers cached versions instantly and the ApiClient paces the
-        // rest, but there is no reason to open twenty requests at once either.
+        // A few at a time: cached versions come back instantly and ApiClient paces the rest, but there's
+        // no need for twenty requests at once.
         var gate = new SemaphoreSlim(3, 3);
         var sections = new string?[versions.Count];
         await Task.WhenAll(versions.Select(async (version, index) =>
@@ -212,7 +211,7 @@ public partial class ModUpdateReviewDialog : UserControl
 
             var heading = System.Net.WebUtility.HtmlEncode(version.VersionNumber);
             var meta = System.Net.WebUtility.HtmlEncode(
-                $"{ModUpdateChannel.Label(version.ReleaseChannel)} · {version.DatePublished:d MMM yyyy}" +
+                $"{ModUpdateChannel.Label(version.ReleaseChannel)} · {TimeFormat.Date(version.DatePublished)}" +
                 (isTarget ? " · the version you would install" : ""));
             builder.Append($"<h3>{heading}</h3><p><em>{meta}</em></p>");
 
@@ -262,7 +261,7 @@ public partial class ModUpdateReviewDialog : UserControl
         public string Name => Mod.DisplayName;
         public string Initial => Mod.Initial;
         public string IconUrl => Mod.IconUrl ?? "";
-        public string VersionsLabel => $"{Mod.VersionLabel}  →  {Target.VersionNumber}";
+        public string VersionsLabel => $"{Mod.VersionLabel}  >  {Target.VersionNumber}";
         public string Channel => ModUpdateChannel.Label(Target.ReleaseChannel);
         public bool IsLocked => Mod.Meta.UpdateLocked;
         public bool IsIncompatible => Mod.Meta.UpdateIncompatible;

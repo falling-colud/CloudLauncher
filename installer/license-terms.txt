@@ -1,0 +1,26 @@
+CloudLauncher
+Copyright (c) 2026 falling_colud. All rights reserved.
+
+Please read this before installing.
+
+1. CloudLauncher is free. You may install it and use it on your own computers. You may
+   not sell it, pass on modified copies, or offer it as your own.
+
+2. CloudLauncher is provided "as is", without warranty of any kind. Keep your own backups
+   of anything that matters to you, especially worlds.
+
+3. CloudLauncher is not an official Minecraft product. It is not approved by or associated
+   with Mojang or Microsoft. To play you need your own copy of Minecraft: Java Edition.
+
+4. Mods, modpacks, resource packs and other content you download through CloudLauncher
+   belong to their authors and come with their own licenses.
+
+5. The CloudLauncher online service (accounts, syncing and sharing) has its own terms and
+   privacy policy:
+     https://cloudlauncher.co/terms
+     https://cloudlauncher.co/privacy
+
+6. CloudLauncher includes components made by others under their own licenses. Their
+   notices are in THIRD-PARTY-NOTICES.txt in the installation folder.
+
+Questions: leon.raineri@gmail.com

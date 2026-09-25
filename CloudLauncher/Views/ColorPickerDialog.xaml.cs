@@ -8,22 +8,21 @@ using CloudLauncher.Animations;
 
 namespace CloudLauncher.Views;
 
-/// <summary>What the picker came back with: cancelled (null result) versus a chosen colour, where a
-/// null <see cref="Hex"/> means "clear it".</summary>
+/// <summary>A chosen colour, where a null <see cref="Hex"/> means "clear it". Cancel returns no
+/// choice at all.</summary>
 public readonly record struct ColorChoice(string? Hex);
 
 /// <summary>
-/// A full HSV colour picker — saturation/value square, hue strip, hex entry and preset swatches —
-/// shown as an in-window card like the other dialogs. Used for category colours, where the fixed
-/// eight-colour palette ran out fast on a pack with a dozen categories.
+/// HSV colour picker (saturation/value square, hue strip, hex entry, preset swatches) shown as an
+/// in-window card. Used for category colours, where a fixed eight-colour palette runs out fast.
 /// </summary>
 public partial class ColorPickerDialog : UserControl
 {
     private readonly TaskCompletionSource<ColorChoice?> _tcs = new();
 
-    private double _hue;          // 0–360
-    private double _sat = 1;      // 0–1
-    private double _val = 1;      // 0–1
+    private double _hue;          // 0-360
+    private double _sat = 1;      // 0-1
+    private double _val = 1;      // 0-1
     private bool _syncing;        // guards the hex box <-> sliders round trip
     private bool _draggingShade, _draggingHue;
 
@@ -60,8 +59,8 @@ public partial class ColorPickerDialog : UserControl
 
     private void BuildSwatches(IEnumerable<string>? extra)
     {
-        // The shared accents first, then a broader grid so there's always an unused colour to hand,
-        // then anything already in use in this pack so existing choices are one click away.
+        // Shared accents, then a broader grid so there's always an unused colour, then the colours
+        // already used in this pack.
         var hexes = AccentPalette.Colors.Select(c => c.Hex)
             .Concat(ExtendedPalette())
             .Concat(extra ?? Array.Empty<string>())
@@ -74,7 +73,7 @@ public partial class ColorPickerDialog : UserControl
             var color = ParseHex(hex);
             if (color is null) continue;
 
-            var swatch = new Border
+            var swatch = new CloudLauncher.Controls.SlateBorder
             {
                 Width = 22, Height = 22, CornerRadius = new CornerRadius(5),
                 Margin = new Thickness(0, 0, 6, 6),
@@ -94,7 +93,7 @@ public partial class ColorPickerDialog : UserControl
         }
     }
 
-    /// <summary>Six hues × four shades, giving a broad grid without hand-listing 24 constants.</summary>
+    /// <summary>Six hues x four shades, generated instead of listing 24 constants.</summary>
     private static IEnumerable<string> ExtendedPalette()
     {
         double[] hues = [0, 25, 45, 95, 160, 195, 220, 265, 300, 330];
@@ -162,13 +161,13 @@ public partial class ColorPickerDialog : UserControl
     private void OnHexChanged(object sender, TextChangedEventArgs e)
     {
         if (_syncing) return;
-        if (ParseHex(HexBox.Text) is not { } color) return;   // keep typing until it's valid
+        if (ParseHex(HexBox.Text) is not { } color) return;   // ignore partial input until it parses
         (_hue, _sat, _val) = ToHsv(color);
         SyncAll(skipHexBox: true);
     }
 
-    /// <summary>Pushes the current HSV out to every control at once — the square's hue backdrop, both
-    /// thumbs, the preview and the hex box.</summary>
+    /// <summary>Pushes the current HSV to every control: the square's hue backdrop, both thumbs,
+    /// the preview and the hex box.</summary>
     private void SyncAll(bool skipHexBox = false)
     {
         _syncing = true;

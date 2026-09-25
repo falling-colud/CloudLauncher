@@ -2,22 +2,19 @@ using System.Windows.Media;
 
 namespace CloudLauncher.Services;
 
-/// <summary>
-/// Maps a mod priority band to a stable border color, shared by the List and Graph views so
-/// colored borders mean the same thing everywhere. Priority 0 is neutral (no emphasis);
-/// positive priorities cycle a distinct, theme-friendly palette; negatives are muted grey.
-/// Brushes are frozen and cached for cheap reuse across many item containers.
-/// </summary>
+/// <summary>Maps a mod priority band to a stable border color, shared by the List and Graph views.
+/// Priority 0 is neutral, positive priorities cycle a palette, negatives are muted grey. Brushes are
+/// frozen and cached for reuse across many item containers.</summary>
 public static class PriorityPalette
 {
     private static readonly Color[] Positives =
     [
-        Color.FromRgb(0x5B, 0x9D, 0xF9), // 1 — blue   (info)
-        Color.FromRgb(0x3F, 0xB9, 0x50), // 2 — green  (success)
-        Color.FromRgb(0xE3, 0xB3, 0x41), // 3 — amber  (warning)
-        Color.FromRgb(0xE8, 0x7D, 0x3E), // 4 — orange
-        Color.FromRgb(0xD3, 0x6A, 0x6A), // 5 — red    (shared tag)
-        Color.FromRgb(0xCF, 0xAE, 0xFF), // 6 — purple (team tag)
+        Color.FromRgb(0x5B, 0x9D, 0xF9), // 1 - blue   (info)
+        Color.FromRgb(0x3F, 0xB9, 0x50), // 2 - green  (success)
+        Color.FromRgb(0xE3, 0xB3, 0x41), // 3 - amber  (warning)
+        Color.FromRgb(0xE8, 0x7D, 0x3E), // 4 - orange
+        Color.FromRgb(0xD3, 0x6A, 0x6A), // 5 - red    (shared tag)
+        Color.FromRgb(0xCF, 0xAE, 0xFF), // 6 - purple (team tag)
     ];
 
     private static readonly Color Negative = Color.FromRgb(0x7C, 0x85, 0x97); // tertiary grey

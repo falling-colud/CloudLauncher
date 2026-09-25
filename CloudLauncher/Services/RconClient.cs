@@ -4,8 +4,8 @@ using System.Text;
 
 namespace CloudLauncher.Services;
 
-/// <summary>The server rejected the RCON password. Separate from every other failure because it is
-/// the one the user can fix, and the fix is a specific field in a specific dialog.</summary>
+/// <summary>The server rejected the RCON password. Kept separate from other failures because the
+/// user can fix this one.</summary>
 public sealed class RconAuthenticationException(string message) : Exception(message);
 
 /// <summary>
@@ -13,19 +13,14 @@ public sealed class RconAuthenticationException(string message) : Exception(mess
 /// servers speak.
 /// </summary>
 /// <remarks>
-/// <para>The framing is small and old: a little-endian int32 length covering everything after it, a
-/// little-endian int32 request id, a little-endian int32 type, the body, and two NUL bytes.
-/// Little-endian is worth saying out loud — every other Minecraft protocol is big-endian, and the
-/// original implementation was inherited from Source engine servers rather than written for
-/// Minecraft.</para>
+/// <para>Framing: int32 length (of everything after it), int32 request id, int32 type, the body and
+/// two NUL bytes. All little-endian, unlike every other Minecraft protocol, since it comes from
+/// Source engine servers.</para>
 /// <para>Type 3 authenticates with the password as the body; the server answers type 2 with the same
-/// request id on success, or with request id -1 on failure — that -1 is the only signal that the
-/// password was wrong, and the socket is unusable afterwards. Type 2 runs a command and the output
-/// comes back as type 0.</para>
-/// <para>RCON is plain TCP with no encryption and a single shared password, so the password crosses
-/// the network in clear. That is the protocol, not a choice made here; it is why the console is only
-/// offered for servers the user explicitly configures, and why the password is never written to the
-/// log or echoed into the console scrollback.</para>
+/// request id on success or -1 on failure, after which the socket is unusable. Type 2 runs a command
+/// and the output comes back as type 0.</para>
+/// <para>RCON is unencrypted TCP with one shared password, so the console is only offered for servers
+/// the user configures, and the password is never logged or echoed.</para>
 /// </remarks>
 public sealed class RconClient : IDisposable
 {
@@ -35,20 +30,26 @@ public sealed class RconClient : IDisposable
     private const int TypeCommand = 2;
     private const int TypeLogin = 3;
 
+    /// <summary>Largest packet accepted, going by its length field. Minecraft splits replies at 4096
+    /// bytes; the headroom is for servers that don't, and the cap stops a wrong port (some other
+    /// service) from causing huge allocations.</summary>
+    private const int MaxPacketLength = 1024 * 1024;
+
+    /// <summary>The most reply text one command may gather across all of its fragments.</summary>
+    private const int MaxReplyLength = 4 * 1024 * 1024;
+
     private readonly TcpClient _tcp;
     private readonly NetworkStream _stream;
 
-    /// <summary>One command at a time. The protocol has no way to tell two outstanding replies apart
-    /// beyond the request id, and the fragment-reassembly below reads until its sentinel — two
-    /// concurrent commands would each eat the other's fragments.</summary>
+    /// <summary>One command at a time: the fragment reassembly reads until its sentinel, so two
+    /// concurrent commands would eat each other's fragments.</summary>
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     private int _nextRequestId = 1;
     private bool _disposed;
 
-    /// <summary>Set once a command has been abandoned with its reply still in flight, which leaves
-    /// unread packets in the socket that belong to a command nobody is waiting for any more. The
-    /// connection is then unusable: see <see cref="SendCommandAsync"/>.</summary>
+    /// <summary>Set once a command is abandoned with its reply still in flight. The socket then holds
+    /// stray packets and the connection is unusable; see <see cref="SendCommandAsync"/>.</summary>
     private volatile bool _poisoned;
 
     private RconClient(TcpClient tcp)
@@ -57,19 +58,17 @@ public sealed class RconClient : IDisposable
         _stream = tcp.GetStream();
     }
 
-    /// <summary>True while this connection can still be trusted to answer the command it is asked.
-    /// Goes false after a timed-out command as well as after <see cref="Dispose"/> — the caller's cue
-    /// to drop this client and connect again rather than keep typing into it.</summary>
+    /// <summary>True while this connection can be trusted to answer. Goes false after
+    /// <see cref="Dispose"/> or a command that didn't finish (timed out, cut off at
+    /// <see cref="MaxReplyLength"/>, or failed part-way); the caller should then reconnect.</summary>
     public bool IsConnected => !_disposed && !_poisoned && _tcp.Connected;
 
     /// <summary>
     /// Opens a connection and logs in, or throws.
     /// </summary>
     /// <exception cref="RconAuthenticationException">The password was refused.</exception>
-    /// <remarks>Failure to connect surfaces as the underlying <see cref="SocketException"/> or a
-    /// <see cref="TimeoutException"/>, both of which the console pane reports as text on its own
-    /// status line. Unlike the status ping, being unable to reach a console is worth saying plainly:
-    /// the user asked for this connection by pressing Connect.</remarks>
+    /// <remarks>Connection failures surface as the underlying <see cref="SocketException"/> or a
+    /// <see cref="TimeoutException"/>, which the console pane shows on its status line.</remarks>
     public static async Task<RconClient> ConnectAsync(string host, int port, string password,
                                                       TimeSpan? timeout = null, CancellationToken ct = default)
     {
@@ -107,8 +106,8 @@ public sealed class RconClient : IDisposable
         await WritePacketAsync(id, TypeLogin, password ?? "", ct);
         var reply = await ReadPacketAsync(ct);
 
-        // Some servers send an empty type-0 packet ahead of the auth answer. Skip past it rather than
-        // reading it as the verdict, which would look like a rejection on a correct password.
+        // Some servers send an empty type-0 packet before the auth answer. Skip it, or a correct password
+        // would look rejected.
         if (reply.Type == TypeResponse && reply.RequestId != -1)
             reply = await ReadPacketAsync(ct);
 
@@ -122,22 +121,13 @@ public sealed class RconClient : IDisposable
     /// Runs one command and returns everything the server said in reply, with no trailing newline.
     /// </summary>
     /// <remarks>
-    /// <para>A reply longer than 4096 bytes arrives split across several packets, and the protocol
-    /// gives no "last fragment" flag. The standard answer, and the one used here, is to send a second,
-    /// empty command straight after the real one: the server processes them in order, so the empty
-    /// command's reply cannot arrive until every fragment of the real one has. Fragments are
-    /// concatenated until that sentinel reply shows up, which means long output (a big <c>help</c>, a
-    /// full <c>whitelist list</c>) comes back whole instead of cut off at the first packet.</para>
-    /// <para>A server that ignores the sentinel would leave this waiting, so the read has its own
-    /// timeout; anything already accumulated is returned rather than thrown away.</para>
-    /// <para>The sentinel gets a <em>fresh</em> id per command, taken from the same counter as the
-    /// command itself, and every packet whose id is neither of this command's two is dropped. That
-    /// matters after a timeout: the abandoned command's fragments and its sentinel are still in the
-    /// socket, and with one shared sentinel id for all time the next command would stop at the
-    /// <em>previous</em> command's sentinel and hand back the previous command's output — a console
-    /// that confidently answers the wrong question, for the rest of the session. A timeout therefore
-    /// also poisons the connection (<see cref="IsConnected"/> goes false) so the caller reconnects
-    /// instead of carrying on down a desynchronised stream.</para>
+    /// <para>Replies over 4096 bytes come in several packets with no "last fragment" flag, so an empty
+    /// sentinel command is sent right after this one. The server answers in order, so fragments are
+    /// joined until the sentinel's reply shows up.</para>
+    /// <para>A timeout or <see cref="MaxReplyLength"/> ends the read early and returns what arrived.
+    /// The sentinel gets a fresh id per command and other ids are dropped, so an abandoned command's
+    /// leftovers are never returned. An early end also poisons the connection
+    /// (<see cref="IsConnected"/> goes false).</para>
     /// </remarks>
     public async Task<string> SendCommandAsync(string command, TimeSpan? timeout = null,
                                                CancellationToken ct = default)
@@ -145,7 +135,7 @@ public sealed class RconClient : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_poisoned)
             throw new IOException("This RCON connection is out of step after a command that did not " +
-                                  "answer in time. Reconnect before sending more commands.");
+                                  "finish. Reconnect before sending more commands.");
 
         await _gate.WaitAsync(ct);
         try
@@ -166,18 +156,35 @@ public sealed class RconClient : IDisposable
                 {
                     var packet = await ReadPacketAsync(token);
                     if (packet.RequestId == sentinelId) break;
-                    if (packet.RequestId == id) body.Append(packet.Body);
-                    // Anything else belongs to an earlier command — ids only ever go up — so it is a
-                    // leftover of something that already gave up waiting; drop it.
+                    if (packet.RequestId == id)
+                    {
+                        // The rest of the reply is still coming, so stopping here desyncs the socket like a
+                        // timeout does.
+                        if (body.Length + packet.Body.Length > MaxReplyLength)
+                        {
+                            _poisoned = true;
+                            break;
+                        }
+                        body.Append(packet.Body);
+                    }
+                    // Any other id is a leftover from an earlier, abandoned command (ids only go up);
+                    // drop it.
                 }
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                // Whatever is left of this command is still on its way, so the socket can no longer be
-                // read in step. Partial output beats no output, but this client is finished either way.
+                // The rest of this command's reply is still coming, so the socket is out of step. Return
+                // the partial output, but this client can't be used again.
                 _poisoned = true;
                 if (body.Length == 0)
                     throw new TimeoutException("The server did not answer that command in time.");
+            }
+            catch
+            {
+                // Any other failure part-way through a reply (cancel, bad frame, dropped socket) leaves
+                // the stream out of step too.
+                _poisoned = true;
+                throw;
             }
 
             return body.ToString().TrimEnd('\r', '\n');
@@ -196,15 +203,14 @@ public sealed class RconClient : IDisposable
         _gate.Dispose();
     }
 
-    // ── framing ──────────────────────────────────────────────────────────────
+    // ── framing ──
 
     private readonly record struct RconPacket(int RequestId, int Type, string Body);
 
     private async Task WritePacketAsync(int requestId, int type, string body, CancellationToken ct)
     {
-        // UTF-8, not the ASCII the Source-engine original specified: Minecraft's own RCON encodes
-        // both directions as UTF-8, and decoding as ASCII turns every section sign in a coloured
-        // reply into "?" — which then cannot be stripped, so the console fills with punctuation.
+        // UTF-8 rather than the ASCII of the Source engine spec: Minecraft uses UTF-8 both ways, and ASCII
+        // would turn colour-code section signs into "?" that can't be stripped.
         var payload = Encoding.UTF8.GetBytes(body);
         var buffer = new byte[4 + 4 + 4 + payload.Length + 2];
         WriteLe(buffer, 0, 4 + 4 + payload.Length + 2);   // length excludes itself
@@ -225,9 +231,9 @@ public sealed class RconClient : IDisposable
         var header = new byte[4];
         await ReadExactlyAsync(header, ct);
         var length = ReadLe(header, 0);
-        // 10 is the smallest legal packet (two ints plus the two NULs); the ceiling is a sanity
-        // bound so a wrong port pointing at some other service cannot make us allocate wildly.
-        if (length is < 10 or > 1024 * 1024)
+        // 10 is the smallest legal packet (two ints plus two NULs); negative lengths fail too. Checked
+        // before anything is allocated.
+        if (length is < 10 or > MaxPacketLength)
             throw new IOException("That port answered with something that is not RCON.");
 
         var rest = new byte[length];

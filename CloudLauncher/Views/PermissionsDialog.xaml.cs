@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
 using CloudLauncher.Services;
 using CloudLauncher.Shared;
 
@@ -14,16 +15,12 @@ namespace CloudLauncher.Views;
 /// The sharing screen for an instance, a hosted mod, a shared world or a hosted resource pack.
 /// </summary>
 /// <remarks>
-/// <para>One dialog serves four screens: everything that differs between them is captured in a
-/// <see cref="PermissionTarget"/> of delegates built by the four public constructors, so a new
-/// shareable kind needs a constructor and nothing else.</para>
-/// <para><b>Saving.</b> Permission tick boxes save the moment they are ticked. The dialog used to
-/// collect the whole grid behind a "Save changes" button that was easy to miss — closing the window,
-/// or pressing Escape, threw the edits away without a word, and several of them (a tick removed from
-/// Download) look identical whether they were applied or not. A failed save now puts the row back to
-/// the value the server still holds and says so, which is the only honest thing the UI can show.</para>
-/// <para>This window is modal, so it hosts its own <see cref="IDialogHost"/> overlay: a confirmation
-/// drawn on the main window would appear behind it and could never be clicked.</para>
+/// <para>What differs between the kinds is in a <see cref="PermissionTarget"/> built by the public
+/// constructors, so a new shareable kind only needs a constructor.</para>
+/// <para>Tick boxes save as soon as they change. A failed save puts the row back to the value the
+/// server still holds and says so.</para>
+/// <para>The window is modal, so it hosts its own <see cref="IDialogHost"/> overlay: a confirmation on
+/// the main window would appear behind it.</para>
 /// </remarks>
 public partial class PermissionsDialog : Window, IDialogHost
 {
@@ -39,16 +36,27 @@ public partial class PermissionsDialog : Window, IDialogHost
     /// <summary>Set once the close has been approved, so the Closing handler does not ask twice.</summary>
     private bool _closeApproved;
 
-    /// <summary>The permission presets offered when adding someone. Deliberately short: the four
-    /// tick boxes are there for anything finer, and "what should this person be able to do?" has
-    /// three sensible answers, not sixteen.</summary>
+    /// <summary>Each control's own tooltip, so the offline one can be put back where it was.</summary>
+    private readonly Dictionary<FrameworkElement, object?> _tips = new();
+
+    /// <summary>Waits for typing to stop before asking the server who matches. 450 ms, like the other
+    /// search boxes that hit the network.</summary>
+    private DispatcherTimer? _suggestTimer;
+    private CancellationTokenSource? _suggestCts;
+
+    /// <summary>The permission presets offered when adding someone. The tick boxes cover anything
+    /// finer.</summary>
+    /// <remarks>Least access first, worded the same as the instance's Share tab.</remarks>
     public static IReadOnlyList<PermissionChoice> PermissionChoices { get; } =
     [
+        new("Can view", PackPermissions.View),
         new("Can view and download", PackPermissions.ReadOnly),
-        new("Can also upload changes", PackPermissions.Contributor),
-        new("Full access, can manage sharing", PackPermissions.Full),
-        new("Can view only", PackPermissions.View),
+        new("Can upload changes", PackPermissions.Contributor),
+        new("Can manage sharing", PackPermissions.Full),
     ];
+
+    /// <summary>Index of the preset a new row starts on (view and download).</summary>
+    private const int DefaultChoiceIndex = 1;
 
     public PermissionsDialog(PackDetail pack) : this(new PermissionTarget(
         "instance",
@@ -111,20 +119,77 @@ public partial class PermissionsDialog : Window, IDialogHost
         InitializeComponent();
         _target = target;
         Title = $"{target.DisplayName} permissions";
-        NewCollaboratorPermissionBox.SelectedIndex = 0;
-        NewTeamPermissionBox.SelectedIndex = 0;
+        NewCollaboratorPermissionBox.SelectedIndex = DefaultChoiceIndex;
+        NewTeamPermissionBox.SelectedIndex = DefaultChoiceIndex;
 
         foreach (var c in target.Collaborators)
             Track(new CollaboratorRow(c.UserId, c.Username, c.Permissions), _collaborators);
         foreach (var t in target.Teams)
-            Track(new TeamPermRow(t.TeamId, t.TeamName, t.Permissions), _teams);
+            Track(new TeamPermRow(t.TeamId, t.TeamName, t.Permissions, t.MemberCount), _teams);
 
         CollaboratorsGrid.ItemsSource = _collaborators;
         TeamsGrid.ItemsSource = _teams;
         _collaborators.CollectionChanged += OnRowsChanged;
         _teams.CollectionChanged += OnRowsChanged;
         UpdateEmptyStates();
-        Loaded += async (_, _) => await LoadTeamsAsync();
+
+        App.State.ConnectivityChanged += ApplyConnectivity;
+        Closed += (_, _) =>
+        {
+            App.State.ConnectivityChanged -= ApplyConnectivity;
+            _suggestTimer?.Stop();
+            try { _suggestCts?.Cancel(); } catch (ObjectDisposedException) { /* already finished */ }
+        };
+
+        Loaded += async (_, _) =>
+        {
+            ApplyConnectivity();
+            // Offline, the banner already explains why; don't add a second error about the team list.
+            if (!App.State.IsOffline) await LoadTeamsAsync();
+        };
+    }
+
+    // ── offline ──
+
+    /// <summary>
+    /// Every control here makes a live server call, so offline they are all disabled.
+    /// </summary>
+    /// <remarks>Disabled rather than hidden, with <see cref="ToolTipService.SetShowOnDisabled"/> so the
+    /// tooltip explaining why still shows.</remarks>
+    private void ApplyConnectivity()
+    {
+        var offline = App.State.IsOffline;
+        var why = "The server is not answering"
+                + (App.State.OfflineReason is { Length: > 0 } r ? $" ({r})" : "")
+                + ", so permissions can be read here but not changed.";
+
+        OfflineNoteText.Text = why + " The rows below are the last answer the server gave.";
+        OfflineNote.Visibility = offline ? Visibility.Visible : Visibility.Collapsed;
+
+        foreach (var element in new FrameworkElement[]
+                 {
+                     CollaboratorsGrid, TeamsGrid, NewCollaboratorBox, NewCollaboratorPermissionBox,
+                     AddCollaboratorButton, AvailableTeamsBox, NewTeamPermissionBox, AddTeamButton,
+                     RetryButton
+                 })
+        {
+            // Remember the control's own tooltip so it can be put back once online again.
+            if (!_tips.ContainsKey(element)) _tips[element] = element.ToolTip;
+            element.IsEnabled = !offline;
+            element.ToolTip = offline ? why : _tips[element];
+            ToolTipService.SetShowOnDisabled(element, true);
+        }
+
+        if (offline)
+        {
+            SuggestionList.Visibility = Visibility.Collapsed;
+            RetryButton.IsEnabled = false;
+        }
+        else if (_availableTeams.Count == 0)
+        {
+            // Back online after opening offline: the team picker never got its list.
+            _ = LoadTeamsAsync();
+        }
     }
 
     /// <summary>Adds a row to its collection and subscribes to its edits so the tick saves itself.</summary>
@@ -142,7 +207,7 @@ public partial class PermissionsDialog : Window, IDialogHost
         TeamsEmptyLabel.Visibility = _teams.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    // ── status ───────────────────────────────────────────────────────────────
+    // ── status ──
 
     private void Okay(string message)
     {
@@ -156,6 +221,20 @@ public partial class PermissionsDialog : Window, IDialogHost
         StatusLabel.Text = message;
     }
 
+    /// <summary>
+    /// Puts a refusal on screen in words, and the exception itself in the launcher log.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ShareText.Explain"/> turns the server's error into a sentence, with a fallback for an
+    /// empty body (a 403 from <c>Forbid()</c>, for example).
+    /// </remarks>
+    private void Report(string category, Exception ex, string? what)
+    {
+        AppLog.LogError(category, ex);
+        var sentence = ShareText.Explain(ex);
+        Fail(what is { Length: > 0 } w ? $"{w}: {sentence}" : sentence);
+    }
+
     /// <summary>Rows whose last edit the server refused, so the grid and the server disagree.</summary>
     private IEnumerable<PermRowBase> Unsaved =>
         _collaborators.Cast<PermRowBase>().Concat(_teams).Where(r => r.IsDirty);
@@ -163,22 +242,29 @@ public partial class PermissionsDialog : Window, IDialogHost
     private void RefreshRetryButton() =>
         RetryButton.Visibility = Unsaved.Any() ? Visibility.Visible : Visibility.Collapsed;
 
-    // ── teams available to add ───────────────────────────────────────────────
+    // ── teams available to add ──
 
     private async Task LoadTeamsAsync()
     {
         try
         {
             _availableTeams = await App.State.Api.ListTeamsAsync();
+
+            // Older servers send team grants without a member count. The teams list has it for any team
+            // the caller is on, so fill it in from there.
+            foreach (var row in _teams)
+                if (_availableTeams.FirstOrDefault(t => t.Id == row.TeamId) is { } known)
+                    row.SetMemberCount(known.MemberCount);
+
             var taken = new HashSet<Guid>(_teams.Select(t => t.TeamId));
             AvailableTeamsBox.ItemsSource = _availableTeams.Where(t => !taken.Contains(t.Id)).ToList();
             if (AvailableTeamsBox.Items.Count > 0 && AvailableTeamsBox.SelectedIndex < 0)
                 AvailableTeamsBox.SelectedIndex = 0;
         }
-        catch (Exception ex) { Fail("Could not list your teams: " + ex.Message); }
+        catch (Exception ex) { Report("permissions.teams", ex, "Could not list your teams"); }
     }
 
-    // ── collaborators ────────────────────────────────────────────────────────
+    // ── collaborators ──
 
     private void OnNewCollaboratorKeyDown(object sender, KeyEventArgs e)
     {
@@ -187,13 +273,80 @@ public partial class PermissionsDialog : Window, IDialogHost
         OnAddCollaborator(sender, e);
     }
 
+    // ── who do you mean? ──
+
+    /// <summary>
+    /// Asks the server which accounts start with what has been typed, once typing stops.
+    /// </summary>
+    /// <remarks>
+    /// <c>GET /users?q=</c> is rate-limited and prefix-only, so this waits for a pause in the typing and
+    /// never fires on a single character.
+    /// </remarks>
+    private void OnNewCollaboratorTextChanged(object sender, TextChangedEventArgs e)
+    {
+        _suggestTimer ??= NewSuggestTimer();
+        _suggestTimer.Stop();
+        if (NewCollaboratorBox.Text.Trim().Length < 2)
+        {
+            SuggestionList.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _suggestTimer.Start();
+    }
+
+    private DispatcherTimer NewSuggestTimer()
+    {
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+        timer.Tick += (_, _) => { timer.Stop(); _ = SuggestAsync(NewCollaboratorBox.Text.Trim()); };
+        return timer;
+    }
+
+    private async Task SuggestAsync(string query)
+    {
+        if (query.Length < 2 || App.State.IsOffline) return;
+        try { _suggestCts?.Cancel(); } catch (ObjectDisposedException) { /* already finished */ }
+        var cts = new CancellationTokenSource();
+        _suggestCts = cts;
+        try
+        {
+            var page = await ShareApi.SearchUsersAsync(query, cts.Token);
+            if (cts.IsCancellationRequested) return;
+
+            var already = new HashSet<string>(_collaborators.Select(c => c.Username), StringComparer.OrdinalIgnoreCase);
+            var matches = page.Items
+                .Where(u => !already.Contains(u.Username))
+                .Where(u => !string.Equals(u.Username, query, StringComparison.OrdinalIgnoreCase))
+                .Take(8).ToList();
+
+            SuggestionList.ItemsSource = matches;
+            SuggestionList.Visibility = matches.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            // A failed lookup must not stop somebody typing a name they already know.
+            AppLog.LogError("permissions.usersearch", ex);
+            SuggestionList.Visibility = Visibility.Collapsed;
+        }
+        finally { cts.Dispose(); }
+    }
+
+    private void OnPickSuggestion(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: UserSummary user }) return;
+        NewCollaboratorBox.Text = user.Username;
+        NewCollaboratorBox.CaretIndex = NewCollaboratorBox.Text.Length;
+        SuggestionList.Visibility = Visibility.Collapsed;
+        NewCollaboratorBox.Focus();
+    }
+
     private async void OnAddCollaborator(object sender, RoutedEventArgs e)
     {
         var name = NewCollaboratorBox.Text.Trim();
         if (string.IsNullOrEmpty(name)) return;
         if (_collaborators.Any(c => string.Equals(c.Username, name, StringComparison.OrdinalIgnoreCase)))
         {
-            Fail($"{name} already has access — change the tick boxes on their row instead.");
+            Fail($"{name} already has access - change the tick boxes on their row instead.");
             return;
         }
 
@@ -205,7 +358,7 @@ public partial class PermissionsDialog : Window, IDialogHost
             NewCollaboratorBox.Text = "";
             Okay($"{added.Username} can now {Describe(added.Permissions)}.");
         }
-        catch (Exception ex) { Fail("Could not add " + name + ": " + ex.Message); }
+        catch (Exception ex) { Report("permissions.add", ex, "Could not add " + name); }
     }
 
     private async void OnRemoveCollaborator(object sender, RoutedEventArgs e)
@@ -225,10 +378,10 @@ public partial class PermissionsDialog : Window, IDialogHost
             RefreshRetryButton();
             Okay($"Removed {row.Username}.");
         }
-        catch (Exception ex) { Fail("Could not remove " + row.Username + ": " + ex.Message); }
+        catch (Exception ex) { Report("permissions.remove", ex, "Could not remove " + row.Username); }
     }
 
-    // ── teams ────────────────────────────────────────────────────────────────
+    // ── teams ──
 
     private async void OnAddTeam(object sender, RoutedEventArgs e)
     {
@@ -242,11 +395,12 @@ public partial class PermissionsDialog : Window, IDialogHost
         try
         {
             var added = await _target.AddTeamAsync(t.Id, permissions);
-            Track(new TeamPermRow(added.TeamId, added.TeamName, added.Permissions), _teams);
+            Track(new TeamPermRow(added.TeamId, added.TeamName, added.Permissions,
+                added.MemberCount > 0 ? added.MemberCount : t.MemberCount), _teams);
             await LoadTeamsAsync();
             Okay($"{added.TeamName} ({TeamsView.Plural(t.MemberCount, "member", "members")}) can now {Describe(added.Permissions)}.");
         }
-        catch (Exception ex) { Fail($"Could not share with {t.Name}: {ex.Message}"); }
+        catch (Exception ex) { Report("permissions.addteam", ex, $"Could not share with {t.Name}"); }
     }
 
     private async void OnRemoveTeam(object sender, RoutedEventArgs e)
@@ -272,21 +426,32 @@ public partial class PermissionsDialog : Window, IDialogHost
             await LoadTeamsAsync();
             Okay($"Removed {row.TeamName}.");
         }
-        catch (Exception ex) { Fail($"Could not remove {row.TeamName}: {ex.Message}"); }
+        catch (Exception ex) { Report("permissions.removeteam", ex, $"Could not remove {row.TeamName}"); }
     }
 
-    // ── saving ───────────────────────────────────────────────────────────────
+    // ── saving ──
 
     /// <summary>Pushes one row's new permissions as soon as a tick box changes it.</summary>
     /// <remarks>
-    /// <see langword="async void"/> because it is an event handler; everything inside is guarded, and
-    /// a refusal is reported by putting the row back to the value the server still holds rather than
-    /// leaving the grid showing an access level that was never granted.
+    /// <see langword="async void"/> because it is an event handler, so everything inside is guarded. A
+    /// refusal puts the row back to the value the server still holds.
     /// </remarks>
     private async void OnRowEdited(PermRowBase row)
     {
+        // A grant without View gives no usable access, and the server refuses it. Say so before the
+        // round trip and point at Remove instead.
+        if (!row.View)
+        {
+            // Put back after the tick box's own binding update has finished: this runs inside it,
+            // and a value changed back mid-update is not reliably re-read by the grid's cell.
+            _ = Dispatcher.BeginInvoke(new Action(row.RevertToSaved), DispatcherPriority.Background);
+            Fail($"{row.DisplayName} needs at least View to have any access. To take their access "
+                 + "away, use Remove instead.");
+            return;
+        }
+
         try { await SaveRowAsync(row, revertOnFailure: true); }
-        catch (Exception ex) { Fail(ex.Message); }
+        catch (Exception ex) { Report("permissions", ex, null); }
     }
 
     private async Task SaveRowAsync(PermRowBase row, bool revertOnFailure)
@@ -306,7 +471,7 @@ public partial class PermissionsDialog : Window, IDialogHost
         catch (Exception ex)
         {
             if (revertOnFailure) row.RevertToSaved();
-            Fail($"{row.DisplayName}: {ex.Message}");
+            Report("permissions.save", ex, row.DisplayName);
         }
         finally
         {
@@ -321,20 +486,20 @@ public partial class PermissionsDialog : Window, IDialogHost
         try
         {
             RetryButton.IsEnabled = false;
-            // Reverting here would undo exactly what the user is asking to retry.
+            // No revert here; it would undo what the user is retrying.
             foreach (var row in Unsaved.ToList()) await SaveRowAsync(row, revertOnFailure: false);
             if (!Unsaved.Any()) Okay("All changes saved.");
         }
-        catch (Exception ex) { Fail(ex.Message); }
+        catch (Exception ex) { Report("permissions", ex, null); }
         finally { RetryButton.IsEnabled = true; }
     }
 
-    // ── closing ──────────────────────────────────────────────────────────────
+    // ── closing ──
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();
 
     /// <summary>
-    /// Refuses to close silently while the grid still shows access the server did not accept.
+    /// Asks before closing while the grid still shows access the server did not accept.
     /// </summary>
     /// <remarks>Cancelling the close and re-running it asynchronously is the only way to await a
     /// confirmation from <see cref="Window.Closing"/>, which cannot itself be awaited.</remarks>
@@ -356,10 +521,10 @@ public partial class PermissionsDialog : Window, IDialogHost
             _closeApproved = true;
             Close();
         }
-        catch (Exception ex) { Fail(ex.Message); }
+        catch (Exception ex) { Report("permissions", ex, null); }
     }
 
-    // ── helpers ──────────────────────────────────────────────────────────────
+    // ── helpers ──
 
     private static PackPermissions SelectedPermissions(ComboBox box) =>
         box.SelectedItem is PermissionChoice choice ? choice.Value : PackPermissions.ReadOnly;
@@ -375,7 +540,7 @@ public partial class PermissionsDialog : Window, IDialogHost
         return parts.Count == 0 ? "do nothing" : string.Join(", ", parts);
     }
 
-    // ── in-window dialog host ────────────────────────────────────────────────
+    // ── in-window dialog host ──
 
     public Task<bool> ShowConfirmAsync(string title, string message,
         string confirmText = "Yes", string cancelText = "Cancel", bool danger = false)
@@ -421,7 +586,28 @@ public sealed class TeamPermRow : PermRowBase
     public Guid TeamId { get; }
     public string TeamName { get; }
     public override string DisplayName => TeamName;
-    public TeamPermRow(Guid id, string name, PackPermissions p) : base(p) { TeamId = id; TeamName = name; }
+
+    /// <summary>How many people this row grants access to, or 0 when the server did not say.</summary>
+    public int MemberCount { get; private set; }
+
+    /// <summary>The count as the grid shows it: a dash rather than a misleading zero.</summary>
+    public string MembersLabel => MemberCount > 0 ? MemberCount.ToString("N0") : "-";
+
+    public TeamPermRow(Guid id, string name, PackPermissions p, int memberCount = 0) : base(p)
+    {
+        TeamId = id;
+        TeamName = name;
+        MemberCount = memberCount;
+    }
+
+    /// <summary>Fills in a count that arrived after the row was built (from the team list load).</summary>
+    public void SetMemberCount(int count)
+    {
+        if (count <= 0 || count == MemberCount) return;
+        MemberCount = count;
+        Raise(nameof(MemberCount));
+        Raise(nameof(MembersLabel));
+    }
 }
 
 internal sealed record PermissionTarget(
@@ -440,10 +626,8 @@ internal sealed record PermissionTarget(
 /// The four permission tick boxes of one grid row, plus the value the server is known to hold.
 /// </summary>
 /// <remarks>
-/// Keeping <see cref="Saved"/> alongside the live flags is what lets a refused save be undone
-/// exactly: the row goes back to the last state the server acknowledged, not to some remembered
-/// snapshot of the whole grid. <see cref="PermissionsEdited"/> deliberately does not fire while the
-/// row is being put back, so a revert cannot trigger another save.
+/// <see cref="Saved"/> lets a refused save go back to the last state the server acknowledged.
+/// <see cref="PermissionsEdited"/> doesn't fire during a revert, so a revert can't trigger another save.
 /// </remarks>
 public abstract class PermRowBase : INotifyPropertyChanged
 {
@@ -466,7 +650,7 @@ public abstract class PermRowBase : INotifyPropertyChanged
 
     public bool IsDirty => Effective != Saved;
 
-    /// <summary>Raised when the user changes a tick box — not when the row is rebuilt or reverted.</summary>
+    /// <summary>Raised when the user changes a tick box, not when the row is rebuilt or reverted.</summary>
     public event Action<PermRowBase>? PermissionsEdited;
 
     public bool View { get => _view; set => Set(ref _view, value); }
@@ -499,6 +683,9 @@ public abstract class PermRowBase : INotifyPropertyChanged
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
+
+    /// <summary>Raises the change notification for a property a subclass maintains itself.</summary>
+    protected void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
     private void Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {

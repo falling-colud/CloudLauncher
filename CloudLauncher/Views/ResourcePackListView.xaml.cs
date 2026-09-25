@@ -14,17 +14,12 @@ using Microsoft.Win32;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// The Resources tab inside an instance: every resource pack the instance has, which of them are
-/// turned on, and in what order they override each other.
-/// </summary>
-/// <remarks>
-/// A resource pack is only half-installed by being in <c>resourcepacks/</c> — the game also has to be
-/// told to load it, from the <c>resourcePacks</c> list in options.txt, which is an ordered stack.
-/// This view owns both halves. It shows the stack <b>highest priority first</b>, matching the game's
-/// own screen; the file stores that order reversed, and <see cref="ResourcePackService"/> does the
-/// flip so nothing here has to think about it.
-/// </remarks>
+/// <summary>The Resources tab inside an instance: every resource pack the instance has, which are
+/// turned on, and in what order they override each other.</summary>
+/// <remarks>A pack in <c>resourcepacks/</c> also has to be listed in options.txt's ordered
+/// <c>resourcePacks</c> stack to load; this view manages both. The stack is shown highest priority
+/// first, like the game's screen. The file stores it reversed, and
+/// <see cref="ResourcePackService"/> handles the flip.</remarks>
 public partial class ResourcePackListView : UserControl
 {
     private PackDetail? _pack;
@@ -37,17 +32,15 @@ public partial class ResourcePackListView : UserControl
     private string? _activeFolder;
     private ResourcePackSortMode _sortMode;
 
-    /// <summary>Shown once per visit: the game rewrites options.txt on exit, so a change made while
-    /// it is running is lost. Nagging on every toggle would be worse than the problem.</summary>
+    /// <summary>Shown once per visit: the game rewrites options.txt on exit, so changes made while it
+    /// runs are lost. Warning on every toggle would be too much.</summary>
     private bool _warnedAboutRunningGame;
-
-    private const double SearchCollapsedWidth = 36;
-    private const double SearchExpandedWidth = 240;
 
     public ResourcePackListView()
     {
         InitializeComponent();
         _sortMode = App.State.Settings.ResourcePackSortMode;
+        SearchBox.TextChanged += OnSearchTextChanged;
         _view = (ListCollectionView)CollectionViewSource.GetDefaultView(_rows);
         _view.Filter = RowFilter;
         _view.CustomSort = new StackOrderComparer(() => _sortMode);
@@ -69,19 +62,45 @@ public partial class ResourcePackListView : UserControl
     {
         if (_pack is null) return;
         var generation = ++_scanGeneration;
-        StatusLabel.Text = "Scanning resource packs…";
+        StatusLabel.Text = "Scanning resource packs...";
         BusyBar.Visibility = Visibility.Visible;
 
         var pack = _pack;
         try
         {
-            // Directory walks, zip opens and a options.txt parse — small individually, but a folder of
-            // unpacked packs is thousands of files, so none of it belongs on the UI thread.
+            // Directory walks, zip opens and an options.txt parse. An unpacked pack can be thousands of
+            // files, so keep it off the UI thread.
             var scanned = await Task.Run(() =>
             {
-                var found = App.State.ResourcePacks.ScanPack(pack.Id, pack.Name, pack.IsShared);
+                // Always include local/, even for unshared instances: library items applied to a
+                // private instance land there, and would otherwise be invisible until the first launch.
+                var found = App.State.ResourcePacks.ScanPack(pack.Id, pack.Name, includeLocal: true);
+                var game = found.Where(r => !r.IsLocal).ToList();
+
+                // After a launch the overlay has hard-linked local/ packs into game/, so one file shows
+                // up twice. An instance's own same-named pack is a different file and keeps its row, so
+                // the collision is visible.
+                found = found.Where(r =>
+                {
+                    if (!r.IsLocal) return true;
+                    var twin = game.FirstOrDefault(g =>
+                        string.Equals(g.FileName, r.FileName, StringComparison.OrdinalIgnoreCase));
+                    return twin is null || !PackFolderService.EntriesReferToSameContent(r.FilePath, twin.FilePath);
+                }).ToList();
+
+                var library = SafeLibraryItems();
                 return found
-                    .Select(info => (info, meta: ResourcePackService.ReadMeta(info.FilePath, info.IsFolder)))
+                    .Select(info =>
+                    {
+                        var item = library.FirstOrDefault(i =>
+                            string.Equals(i.FileName, info.FileName, StringComparison.OrdinalIgnoreCase));
+                        var same = item is not null
+                                   && PackFolderService.EntriesReferToSameContent(item.Path, info.FilePath);
+                        return (info,
+                                meta: ResourcePackService.ReadMeta(info.FilePath, info.IsFolder),
+                                fromLibrary: same,
+                                shadows: item is not null && !same);
+                    })
                     .ToList();
             });
 
@@ -93,8 +112,8 @@ public partial class ResourcePackListView : UserControl
                 .ToHashSet(StringComparer.Ordinal);
 
             _rows.Clear();
-            foreach (var (info, meta) in scanned)
-                _rows.Add(new ResourcePackRow(info, meta));
+            foreach (var (info, meta, fromLibrary, shadows) in scanned)
+                _rows.Add(new ResourcePackRow(info, meta, fromLibrary, shadows));
 
             RebuildFolderChips();
             _view.Refresh();
@@ -111,12 +130,17 @@ public partial class ResourcePackListView : UserControl
         }
     }
 
-    /// <summary>
-    /// Re-reads only the enabled stack and repaints the rows from it.
-    /// </summary>
-    /// <remarks>Used after a toggle or a move instead of a full rescan: it keeps the user's selection
-    /// and their scroll position, and re-listing the directory to learn something that lives in one
-    /// small text file would be wasteful.</remarks>
+    /// <summary>The library's resource packs, or none when the folder can't be read, so a library
+    /// problem never fails the instance scan.</summary>
+    private static List<LibraryItem> SafeLibraryItems()
+    {
+        try { return App.State.Library.Scan(LibraryKind.ResourcePack); }
+        catch (Exception ex) { AppLog.LogError(nameof(ResourcePackListView), ex); return []; }
+    }
+
+    /// <summary>Re-reads only the enabled stack and repaints the rows from it.</summary>
+    /// <remarks>Used after a toggle or move instead of a full rescan, which keeps the selection and
+    /// scroll position.</remarks>
     private void RefreshStackState()
     {
         if (_pack is null) return;
@@ -168,8 +192,7 @@ public partial class ResourcePackListView : UserControl
         if (string.IsNullOrWhiteSpace(_searchText)) return true;
         var needle = _searchText.Trim().ToLowerInvariant();
 
-        // "on" / "off" are worth typing: with twenty packs installed, "which ones are actually
-        // loading" is the question this screen exists to answer.
+        // "on" and "off" filter by enabled state.
         if (needle == "on") return row.Enabled;
         if (needle == "off") return !row.Enabled;
 
@@ -194,8 +217,7 @@ public partial class ResourcePackListView : UserControl
             IsActive = string.IsNullOrEmpty(previous)
         });
 
-        // Only folders that hold something from THIS instance: the global screen's folders span every
-        // instance, and listing a dozen empty chips here would be noise.
+        // Only folders holding something from this instance; the global folders span every instance.
         foreach (var (name, members) in App.State.Settings.ResourcePackFolders.OrderBy(k => k.Key))
         {
             var count = members.Count(keys.Contains);
@@ -228,9 +250,7 @@ public partial class ResourcePackListView : UserControl
         {
             if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
             {
-                ExpandSearch();
                 SearchBox.Focus();
-                SearchBox.SelectAll();
                 e.Handled = true;
             }
             else if (e.Key == Key.F5)
@@ -257,56 +277,13 @@ public partial class ResourcePackListView : UserControl
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
     }
 
-    private void OnSearchToggle(object sender, RoutedEventArgs e)
-    {
-        ExpandSearch();
-        SearchBox.Focus();
-        SearchBox.SelectAll();
-    }
-
-    private void ExpandSearch()
-    {
-        CompactSearchHost.Width = SearchExpandedWidth;
-        SearchBox.Visibility = Visibility.Visible;
-    }
-
-    private void CollapseSearch()
-    {
-        CompactSearchHost.Width = SearchCollapsedWidth;
-        SearchBox.Visibility = Visibility.Collapsed;
-        Keyboard.ClearFocus();
-    }
-
+    /// <summary>Filters on every keystroke. It's an in-memory pass over one instance's packs, so no
+    /// debounce is needed.</summary>
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
     {
         _searchText = SearchBox.Text;
         _view.Refresh();
         UpdateStatus();
-    }
-
-    private void OnSearchPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Escape) return;
-        SearchBox.Text = "";
-        _searchText = "";
-        CollapseSearch();
-        _view.Refresh();
-        UpdateStatus();
-        e.Handled = true;
-    }
-
-    private void OnSearchLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
-    {
-        if (e.NewFocus is DependencyObject next && IsDescendantOf(next, CompactSearchHost))
-            return;
-        CollapseSearch();
-    }
-
-    private static bool IsDescendantOf(DependencyObject child, DependencyObject ancestor)
-    {
-        for (var current = child; current is not null; current = VisualTreeHelper.GetParent(current))
-            if (ReferenceEquals(current, ancestor)) return true;
-        return false;
     }
 
     // ── sort ─────────────────────────────────────────────────────────────────
@@ -326,7 +303,7 @@ public partial class ResourcePackListView : UserControl
         if (sender is not MenuItem { Tag: string tag }) return;
         if (!Enum.TryParse<ResourcePackSortMode>(tag, out var parsed)) return;
 
-        // Shared with the global Resource packs screen on purpose: one preference, both lists.
+        // Shared with the global Resource packs screen: one preference for both lists.
         _sortMode = parsed;
         App.State.Settings.ResourcePackSortMode = parsed;
         App.State.Settings.Save();
@@ -353,7 +330,7 @@ public partial class ResourcePackListView : UserControl
         SelectionBar.Visibility = count > 1 ? Visibility.Visible : Visibility.Collapsed;
         SelectionLabel.Text = $"{count} selected";
         BulkDeleteButton.Content = $"Delete {count} files";
-        BulkCopyButton.Content = $"Copy {count} to…";
+        BulkCopyButton.Content = $"Copy {count} to...";
     }
 
     private void OnSelectAll(object sender, RoutedEventArgs e) => ResourcePackGrid.SelectAll();
@@ -385,10 +362,8 @@ public partial class ResourcePackListView : UserControl
 
     // ── enable / order ───────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Warns once when the instance is running, because Minecraft holds options.txt in memory and
-    /// rewrites it from there on exit — a change made now would vanish when the player quits.
-    /// </summary>
+    /// <summary>Warns once when the instance is running: Minecraft rewrites options.txt from memory on
+    /// exit, so a change made now would be lost.</summary>
     private async Task<bool> ConfirmStackWriteAsync()
     {
         if (_pack is null) return false;
@@ -408,8 +383,8 @@ public partial class ResourcePackListView : UserControl
     {
         try
         {
-            // The toggle is bound OneWay, so its visual state comes back from the rescan below rather
-            // than from the click — the grid can never show "on" for a pack the file says is off.
+            // The toggle is bound one-way, so its state comes from the rescan below rather than the
+            // click, and never shows "on" for a pack the file says is off.
             if (sender is not FrameworkElement { DataContext: ResourcePackRow row }) return;
             if (sender is ToggleButton tb) tb.IsChecked = row.Enabled;
             await SetEnabledAsync(new[] { row }, !row.Enabled);
@@ -449,15 +424,12 @@ public partial class ResourcePackListView : UserControl
         var names = rows.Select(r => r.FileName).ToList();
         stack.RemoveAll(n => names.Any(x => string.Equals(x, n, StringComparison.OrdinalIgnoreCase)));
 
-        // Newly enabled packs go on top, in the order they were selected, so a bulk "turn on"
-        // produces the stack the user was looking at rather than a reversed one. Inserted as one
-        // range rather than row by row at index 0: each single insert pushes the previous one down,
-        // which quietly turned the whole selection upside down — and this list is highest priority
-        // first, so that inversion is what the game then loads.
+        // Newly enabled packs go on top in selection order. InsertRange rather than inserting each at
+        // index 0, which would reverse them (and this list is highest priority first).
         if (enabled) stack.InsertRange(0, names);
 
         // The instance's version decides how entries are spelled when options.txt has none to copy
-        // from yet — "file/Name.zip" from 1.13 on, the bare name before that.
+        // from yet: "file/Name.zip" from 1.13 on, the bare name before that.
         App.State.ResourcePacks.SetActive(_pack.Id, _pack.Name, stack, _pack.MinecraftVersion);
         RefreshStackState();
         StatusLabel.Text = rows.Count == 1
@@ -578,7 +550,7 @@ public partial class ResourcePackListView : UserControl
         if (_pack is null || sources.Count == 0) return;
 
         BusyBar.Visibility = Visibility.Visible;
-        StatusLabel.Text = sources.Count == 1 ? "Importing…" : $"Importing {sources.Count} packs…";
+        StatusLabel.Text = sources.Count == 1 ? "Importing..." : $"Importing {sources.Count} packs...";
         var destDir = Path.Combine(App.State.Packs.GameDir(_pack.Id), "resourcepacks");
 
         try
@@ -624,14 +596,69 @@ public partial class ResourcePackListView : UserControl
 
     // ── row actions ──────────────────────────────────────────────────────────
 
-    private async void OnRowCopyTo(object sender, RoutedEventArgs e)
+    /// <summary>Clicking a pack's name opens it, like clicking a mod's name.</summary>
+    /// <remarks>Selects the row first, since the grid's commands act on <see cref="Selected"/> and
+    /// would otherwise open the previously selected pack.</remarks>
+    private void OnRowNameClick(object sender, MouseButtonEventArgs e)
     {
-        try
-        {
-            if (sender is FrameworkElement { DataContext: ResourcePackRow row })
-                await CopyToInstanceAsync(new[] { row });
-        }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
+        if (sender is not FrameworkElement { DataContext: ResourcePackRow row }) return;
+        e.Handled = true;
+        Select(row);
+        OpenDetail(row);
+    }
+
+    /// <summary>Left-click on the "...": the short menu.</summary>
+    /// <remarks>Built on demand from <see cref="ContentMenu"/>'s helpers so it matches the mods menu and
+    /// the global Resource packs page. The full menu is the grid's own <c>ContextMenu</c>.</remarks>
+    private void OnRowOptions(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: ResourcePackRow row } button) return;
+        Select(row);
+
+        var menu = ContentMenu.New(row.DisplayName,
+            row.Enabled ? $"on · priority {row.Priority}" : "off - the game is not loading it");
+        menu.Items.Add(ContentMenu.Item("Open pack", () => OpenDetail(row), ContentMenu.Glyph(0xE7C3)));
+        menu.Items.Add(ContentMenu.Item(row.Enabled ? "Turn off" : "Turn on",
+            () => _ = SetEnabledAsync([row], !row.Enabled), ContentMenu.Glyph(0xE768)));
+        if (row.Enabled)
+            menu.Items.Add(ContentMenu.Item("Move to top of stack",
+                () => _ = MoveToEndAsync(toTop: true), ContentMenu.Glyph(0xE74A)));
+        menu.Items.Add(ContentMenu.Item("Reveal in Explorer", () => Reveal(row), ContentMenu.Glyph(0xE8DA)));
+        menu.Items.Add(ContentMenu.Item("Delete file", () => _ = DeleteAsync([row]), ContentMenu.Glyph(0xE74D)));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(ContentMenu.Item("More options...",
+            () => ContentMenu.ShowInstead(menu, () => ResourcePackGrid.ContextMenu),
+            ContentMenu.Glyph(0xE712)));
+
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    /// <summary>Right-click on the "...": the full menu the grid already carries.</summary>
+    /// <remarks><c>e.Handled</c> stops the event reaching the grid, which would open a second
+    /// menu.</remarks>
+    private void OnRowOptionsRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: ResourcePackRow row } button) return;
+        e.Handled = true;
+        Select(row);
+
+        var menu = ResourcePackGrid.ContextMenu;
+        if (menu is null) return;
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    /// <summary>Makes one row the selection, unless it is already part of a multi-row one.</summary>
+    /// <remarks>The same rule <see cref="OnGridPreviewMouseRightButtonDown"/> applies: acting inside an
+    /// existing selection keeps it, so "Delete 5 files" means what it says.</remarks>
+    private void Select(ResourcePackRow row)
+    {
+        if (ResourcePackGrid.SelectedItems.Contains(row)) return;
+        ResourcePackGrid.SelectedItems.Clear();
+        ResourcePackGrid.SelectedItem = row;
     }
 
     private async void OnCtxCopyTo(object sender, RoutedEventArgs e)
@@ -665,7 +692,7 @@ public partial class ResourcePackListView : UserControl
 
         var target = targets.First(p => p.Id == targetId);
         BusyBar.Visibility = Visibility.Visible;
-        StatusLabel.Text = $"Copying to {target.Name}…";
+        StatusLabel.Text = $"Copying to {target.Name}...";
         try
         {
             var sources = rows.Select(r => (r.FilePath, r.FileName, r.IsFolder)).ToList();
@@ -691,11 +718,6 @@ public partial class ResourcePackListView : UserControl
         finally { BusyBar.Visibility = Visibility.Collapsed; }
     }
 
-    private void OnRowReveal(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { DataContext: ResourcePackRow row }) Reveal(row);
-    }
-
     private void OnCtxReveal(object sender, RoutedEventArgs e)
     {
         foreach (var row in Selected().Take(5)) Reveal(row);
@@ -703,29 +725,13 @@ public partial class ResourcePackListView : UserControl
 
     private void Reveal(ResourcePackRow row)
     {
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
-                "explorer.exe", $"/select,\"{row.FilePath}\"")
-            { UseShellExecute = true });
-        }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
+        if (!SafeLaunch.RevealFile(row.FilePath)) StatusLabel.Text = "Explorer could not be opened.";
     }
 
     private void OnCtxCopyPath(object sender, RoutedEventArgs e)
     {
         if (Selected() is not [var row]) return;
         if (ClipboardHelper.TrySetText(row.FilePath)) StatusLabel.Text = "Path copied.";
-    }
-
-    private async void OnRowDelete(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (sender is FrameworkElement { DataContext: ResourcePackRow row })
-                await DeleteAsync(new[] { row });
-        }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
     }
 
     private async void OnCtxDelete(object sender, RoutedEventArgs e)
@@ -748,14 +754,14 @@ public partial class ResourcePackListView : UserControl
             ? $"Delete {rows[0].FileName} from {_pack.Name}? This removes the file from disk."
             : $"Delete these {rows.Count} resource packs from {_pack.Name}?\n\n"
               + string.Join("\n", rows.Take(8).Select(r => "• " + r.FileName))
-              + (rows.Count > 8 ? $"\n…and {rows.Count - 8} more" : "");
+              + (rows.Count > 8 ? $"\n...and {rows.Count - 8} more" : "");
 
         if (!await AppDialog.ConfirmAsync(_ownerWindow, "Delete resource packs", message,
                 rows.Count == 1 ? "Delete" : $"Delete {rows.Count} files", "Cancel", danger: true))
             return;
 
         BusyBar.Visibility = Visibility.Visible;
-        StatusLabel.Text = "Deleting…";
+        StatusLabel.Text = "Deleting...";
         var failures = new List<string>();
         try
         {
@@ -785,8 +791,8 @@ public partial class ResourcePackListView : UserControl
         if (Selected() is [var row]) RenameDisplayName(row);
     }
 
-    /// <summary>Renames the label the launcher shows. The file on disk keeps its name — that is what
-    /// "Rename file on disk…" is for, and it is the riskier of the two.</summary>
+    /// <summary>Renames the label the launcher shows. The file keeps its name; "Rename file on
+    /// disk..." does that.</summary>
     private void RenameDisplayName(ResourcePackRow row)
     {
         var dlg = new SimpleInputDialog("Rename resource pack", "Display name", row.DisplayName)
@@ -814,6 +820,11 @@ public partial class ResourcePackListView : UserControl
 
             var wanted = ResourcePackService.SanitizeFileName(dlg.Result ?? "", row.IsFolder);
             if (string.Equals(wanted, row.FileName, StringComparison.Ordinal)) return;
+            if (!PathSafety.IsSafeFileName(wanted))
+            {
+                StatusLabel.Text = $"Rename failed: '{wanted}' cannot be used as a file name.";
+                return;
+            }
 
             // Renaming rewrites the options.txt entry too, so a pack that was on stays on.
             if (row.Enabled && !await ConfirmStackWriteAsync()) return;
@@ -856,7 +867,7 @@ public partial class ResourcePackListView : UserControl
         }
 
         if (root.Items.Count > 0) root.Items.Add(new Separator());
-        var create = new MenuItem { Header = "Create folder…" };
+        var create = new MenuItem { Header = "Create folder..." };
         create.Click += (_, _) =>
         {
             var dlg = new SimpleInputDialog("New folder", "Name", "") { Owner = _ownerWindow };
@@ -904,7 +915,7 @@ public partial class ResourcePackListView : UserControl
             ? Visibility.Visible
             : Visibility.Collapsed;
 
-        CtxCopyTo.Header = single ? "Copy to instance…" : $"Copy {rows.Count} to instance…";
+        CtxCopyTo.Header = single ? "Copy to instance..." : $"Copy {rows.Count} to instance...";
         CtxDelete.Header = single ? "Delete file" : $"Delete {rows.Count} files";
     }
 
@@ -950,7 +961,7 @@ public partial class ResourcePackListView : UserControl
             return;
         }
 
-        StatusLabel.Text = $"Creating hosted resource pack for {row.FileName}…";
+        StatusLabel.Text = $"Creating hosted resource pack for {row.FileName}...";
         BusyBar.Visibility = Visibility.Visible;
         try
         {
@@ -1014,13 +1025,10 @@ public partial class ResourcePackListView : UserControl
         return null;
     }
 
-    /// <summary>
-    /// Orders the grid: the enabled stack first, in priority order, then everything else by the
-    /// user's chosen sort.
-    /// </summary>
-    /// <remarks>Column sorting is off precisely so this holds — the stack's order is data, not a
-    /// view preference, and a grid that let you sort it by Size would be showing a priority column
-    /// whose numbers ran 4, 1, 7 down the page.</remarks>
+    /// <summary>Orders the grid: the enabled stack first, in priority order, then everything else by
+    /// the user's chosen sort.</summary>
+    /// <remarks>Column sorting is off so the stack order, which is data, always shows as it
+    /// is.</remarks>
     private sealed class StackOrderComparer(Func<ResourcePackSortMode> mode) : System.Collections.IComparer
     {
         public int Compare(object? x, object? y)
@@ -1042,8 +1050,8 @@ public partial class ResourcePackListView : UserControl
     }
 }
 
-/// <summary>A folder chip above the grid. Holds no brushes — selected state is a bool the template
-/// triggers on, so a theme change repaints it.</summary>
+/// <summary>A folder chip above the grid. Holds no brushes: the template triggers on the selected
+/// state, so a theme change repaints it.</summary>
 public sealed class RpFolderChip
 {
     public string Id { get; init; } = "";
@@ -1054,13 +1062,12 @@ public sealed class RpFolderChip
 }
 
 /// <summary>One installed resource pack, as the grid shows it.</summary>
-/// <remarks>Enabled state and stack position change without a rescan — toggling a pack rewrites one
-/// line of options.txt, and re-listing the directory to find that out would throw away the user's
-/// selection and scroll position — so those two are the only mutable properties and they raise
-/// change notifications.</remarks>
+/// <remarks>Enabled state and stack position change without a rescan (which would lose the
+/// selection and scroll position), so they are the only mutable, notifying properties.</remarks>
 public sealed class ResourcePackRow : INotifyPropertyChanged
 {
-    public ResourcePackRow(ResourcePackInfo info, ResourcePackMeta meta)
+    public ResourcePackRow(ResourcePackInfo info, ResourcePackMeta meta,
+                           bool fromLibrary = false, bool shadowsLibrary = false)
     {
         Info = info;
         DisplayName = info.DisplayName;
@@ -1068,7 +1075,19 @@ public sealed class ResourcePackRow : INotifyPropertyChanged
         IconSource = meta.Icon;
         PackDescription = meta.Description;
         PackFormat = meta.PackFormat;
+        IsFromLibrary = fromLibrary;
+        ShadowsLibrary = shadowsLibrary;
     }
+
+    /// <summary>This file is the one copy kept in the launcher's library, hard-linked in here.</summary>
+    public bool IsFromLibrary { get; }
+
+    /// <summary>A same-named library item exists but this is a different file. The launch overlay never
+    /// overwrites, so this copy is the one the game loads and the library version is inert here.</summary>
+    public bool ShadowsLibrary { get; }
+
+    public Visibility LibraryPillVisibility => IsFromLibrary ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ShadowPillVisibility => ShadowsLibrary ? Visibility.Visible : Visibility.Collapsed;
 
     public ResourcePackInfo Info { get; private set; }
 
@@ -1079,7 +1098,8 @@ public sealed class ResourcePackRow : INotifyPropertyChanged
     public long SizeBytes => Info.SizeBytes;
     public DateTimeOffset Modified => Info.LastModified;
 
-    /// <summary>"game" or "local" — which of the instance's two resourcepacks/ folders this is in.</summary>
+    /// <summary>"game" or "local": which of the instance's two resourcepacks/ folders this is
+    /// in.</summary>
     public string Folder => Info.IsLocal ? "local" : "game";
 
     public string DisplayName { get; private set; }
@@ -1093,8 +1113,8 @@ public sealed class ResourcePackRow : INotifyPropertyChanged
     public bool Enabled => StackIndex >= 0;
     public int Priority => StackIndex >= 0 ? StackIndex + 1 : 0;
 
-    /// <summary>Rank in the stack, or an en dash when the pack is off.</summary>
-    public string PriorityLabel => Enabled ? Priority.ToString() : "–";
+    /// <summary>Rank in the stack, or a dash when the pack is off.</summary>
+    public string PriorityLabel => Enabled ? Priority.ToString() : "-";
 
     public string Initial => string.IsNullOrWhiteSpace(DisplayName) ? "?"
         : DisplayName.Trim()[..1].ToUpperInvariant();
@@ -1113,9 +1133,11 @@ public sealed class ResourcePackRow : INotifyPropertyChanged
             var lines = new List<string>
             {
                 DisplayName,
-                Enabled ? $"On · priority {Priority} (higher rows override lower ones)" : "Off — not loaded by the game",
+                Enabled ? $"On · priority {Priority} (higher rows override lower ones)" : "Off - not loaded by the game",
                 $"{FileName} · {SizeLabel} · modified {Modified.LocalDateTime:g}"
             };
+            if (IsFromLibrary) lines.Add("The shared copy - one file, used by every instance you put it in");
+            if (ShadowsLibrary) lines.Add("This instance has its own copy of this file; the shared one is not in use here");
             if (PackFormat is int pf) lines.Add($"pack_format {pf}");
             if (HasDescription) lines.Add(PackDescription!);
             return string.Join("\n", lines);

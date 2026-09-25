@@ -1,6 +1,7 @@
 ﻿<Page x:Class="CloudLauncher.Views.WorldDetailView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:local="clr-namespace:CloudLauncher.Views"
       Title="World"
       Background="{DynamicResource Surface0Brush}">
@@ -12,28 +13,44 @@
         </Grid.RowDefinitions>
 
         <!-- Header -->
-        <Border Grid.Row="0" Style="{StaticResource ElevatedCard}"
-                Margin="24,18,24,16" Padding="20">
+        <slate:SlateBorder Grid.Row="0" Style="{StaticResource ElevatedCard}"
+                Margin="24,18,24,16" Padding="24">
+            <DockPanel LastChildFill="True">
+
+            <!--  72px tile with the same art as the world's card in the grid: the save's icon.png, or a
+            gradient hashed from its name.  -->
+            <slate:SlateBorder x:Name="HeroIconTile" DockPanel.Dock="Left"
+                    Width="72" Height="72" CornerRadius="12" ClipToBounds="True"
+                    Background="{DynamicResource Surface2Brush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                    VerticalAlignment="Top" Margin="0,0,18,0">
+                <Grid>
+                    <TextBlock x:Name="HeroIconFallback" Style="{StaticResource H1}"
+                               Foreground="White" Opacity="0.92"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    <Image x:Name="HeroIconImage" Stretch="UniformToFill"/>
+                </Grid>
+            </slate:SlateBorder>
+
             <StackPanel>
                 <DockPanel Margin="0,0,0,8">
-                    <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                    <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
                             Background="{DynamicResource Surface4Brush}">
                         <TextBlock x:Name="SourcePackLabel" Style="{StaticResource PillText}"
                                    Foreground="{DynamicResource TextSecondaryBrush}"/>
-                    </Border>
+                    </slate:SlateBorder>
                     <TextBlock x:Name="WorldNameLabel" Style="{StaticResource H2}"
                                TextTrimming="CharacterEllipsis"/>
                 </DockPanel>
                 <TextBlock x:Name="MetaLabel" Style="{StaticResource Muted}"/>
 
-                <!-- Actions live at the right edge, in the order they are reached for: play, then
-                     the copy/export group behind one menu, then the destructive one on its own. -->
+                <!-- Actions: play, then copy/export behind one menu, then the destructive one on its own. -->
                 <DockPanel Margin="0,14,0,0">
                     <Button DockPanel.Dock="Right" Style="{StaticResource PlayButton}"
                             Click="OnPlay" Padding="14,5" MinHeight="34" MinWidth="120"
                             ToolTip="Launch a compatible instance with this world">
                         <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="&#xE768;" FontFamily="{StaticResource IconFont}"
+                            <TextBlock Text="&#xE768;" FontFamily="{DynamicResource IconFont}"
                                        FontSize="11" Margin="0,0,6,0" VerticalAlignment="Center"/>
                             <TextBlock Text="Play with..." VerticalAlignment="Center" FontWeight="SemiBold"/>
                         </StackPanel>
@@ -46,28 +63,35 @@
                             <ContextMenu>
                                 <MenuItem Header="Duplicate" Click="OnDuplicate">
                                     <MenuItem.Icon>
-                                        <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                        <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                     </MenuItem.Icon>
                                 </MenuItem>
                                 <MenuItem Header="Copy to instance..." Click="OnCopyToInstance">
                                     <MenuItem.Icon>
-                                        <TextBlock Text="&#xE8DE;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                        <TextBlock Text="&#xE8DE;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                     </MenuItem.Icon>
                                 </MenuItem>
                                 <MenuItem Header="Export as .zip..." Click="OnExportZip">
                                     <MenuItem.Icon>
-                                        <TextBlock Text="&#xEDE1;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                        <TextBlock Text="&#xEDE1;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <!--  Shortcut to the upload on the Overview tab.  -->
+                                <MenuItem Header="Host on CloudLauncher..." Click="OnHostWorld"
+                                          ToolTip="Zip this save and publish it as a hosted world, so the people and teams you share it with can download it">
+                                    <MenuItem.Icon>
+                                        <TextBlock Text="&#xE8EC;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                     </MenuItem.Icon>
                                 </MenuItem>
                                 <Separator/>
                                 <MenuItem Header="Back up now" Click="OnBackupNow">
                                     <MenuItem.Icon>
-                                        <TextBlock Text="&#xE8F7;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                        <TextBlock Text="&#xE8F7;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                     </MenuItem.Icon>
                                 </MenuItem>
                                 <MenuItem Header="Rename folder on disk..." Click="OnRenameFolder">
                                     <MenuItem.Icon>
-                                        <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                        <TextBlock Text="&#xE8AC;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                     </MenuItem.Icon>
                                 </MenuItem>
                             </ContextMenu>
@@ -88,27 +112,27 @@
                             VerticalAlignment="Center" Visibility="Collapsed"/>
                 </DockPanel>
             </StackPanel>
-        </Border>
+            </DockPanel>
+        </slate:SlateBorder>
 
         <TabControl Grid.Row="1" Margin="24,0,24,0" Padding="0,12,0,0"
                     Background="Transparent" BorderThickness="0">
             <TabItem Header="Overview">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="0,18,0,18">
-                        <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                        <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Style="{StaticResource H3}" Text="Display name" Margin="0,0,0,8"/>
                                 <DockPanel>
                                     <Button DockPanel.Dock="Right" Content="Save" Click="OnSaveName"/>
                                     <TextBox x:Name="NameBox" Margin="0,0,8,0"
-                                             ToolTip="The name this launcher shows. The name Minecraft shows comes from level.dat — use Rename on the Worlds page to change both."/>
+                                             ToolTip="The name this launcher shows. The name Minecraft shows comes from level.dat - use Rename on the Worlds page to change both."/>
                                 </DockPanel>
                             </StackPanel>
-                        </Border>
+                        </slate:SlateBorder>
 
-                        <!-- Everything read out of level.dat. Seed first: copying it is the single
-                             most common reason anyone opens this panel. -->
-                        <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                        <!-- Values read from level.dat. Seed first: it is what people most often copy. -->
+                        <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Style="{StaticResource H3}" Text="World info" Margin="0,0,0,10"/>
 
@@ -117,7 +141,7 @@
                                                VerticalAlignment="Center"/>
                                     <Button x:Name="CopySeedButton" DockPanel.Dock="Right"
                                             Style="{StaticResource IconButton}" Click="OnCopySeed"
-                                            Content="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                            Content="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                             ToolTip="Copy the seed"/>
                                     <TextBlock x:Name="SeedLabel" VerticalAlignment="Center"
                                                FontFamily="Consolas" TextTrimming="CharacterEllipsis"
@@ -172,9 +196,9 @@
                                            Text="This world's level.dat could not be read, so its seed and settings are unknown. That usually means Minecraft has the world open."
                                            Visibility="Collapsed"/>
                             </StackPanel>
-                        </Border>
+                        </slate:SlateBorder>
 
-                        <Border Style="{StaticResource Card}" Margin="0,0,0,12">
+                        <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,12">
                             <StackPanel>
                                 <CheckBox x:Name="ShareWorldBox"
                                           Content="Share this world"
@@ -191,17 +215,26 @@
                                         <Button x:Name="UploadSharedWorldButton" DockPanel.Dock="Right"
                                                 Content="Upload version"
                                                 Style="{StaticResource AccentButton}"
-                                                Click="OnShareOrUploadWorld" Padding="14,5"/>
+                                                Click="OnShareOrUploadWorld" Padding="14,5"
+                                                ToolTipService.ShowOnDisabled="True"/>
                                         <Button x:Name="WorldPermissionsButton" DockPanel.Dock="Right"
                                                 Content="Manage collaborators..."
                                                 Click="OnEditSharedWorldPermissions"
-                                                Margin="0,0,8,0" Padding="14,5"/>
+                                                Margin="0,0,8,0" Padding="14,5"
+                                                ToolTipService.ShowOnDisabled="True"/>
                                         <Button x:Name="DeleteHostedWorldButton" DockPanel.Dock="Right"
                                                 Content="Delete hosted world..."
                                                 Style="{StaticResource DangerButton}"
                                                 Click="OnDeleteHostedWorld"
                                                 Margin="0,0,8,0" Padding="14,5"
+                                                ToolTipService.ShowOnDisabled="True"
                                                 ToolTip="Take this world down from the server. Your local save is untouched."/>
+                                        <!--  Takes Delete's place for a copy of someone else's hosted world
+                                        shared directly with this user.  -->
+                                        <Button x:Name="LeaveHostedWorldButton" DockPanel.Dock="Right"
+                                                Content="Leave..." Click="OnLeaveHostedWorld"
+                                                Style="{StaticResource SubtleButton}"
+                                                Margin="0,0,8,0" Padding="14,5" Visibility="Collapsed"/>
                                         <TextBlock Style="{StaticResource H3}" Text="Hosted world"
                                                    VerticalAlignment="Center"/>
                                     </DockPanel>
@@ -219,39 +252,44 @@
 
                                     <TextBlock Style="{StaticResource Caption}" Text="Summary"/>
                                     <TextBox x:Name="SummaryBox" Margin="0,4,0,12" MaxLength="512"
+                                             TextChanged="OnOverviewEdited"
                                              ToolTip="Short description shown when browsing shared worlds"/>
 
                                     <TextBlock Style="{StaticResource Caption}" Text="Description"/>
                                     <TextBox x:Name="DescriptionBox" Margin="0,4,0,12"
                                              AcceptsReturn="True" TextWrapping="Wrap"
                                              VerticalScrollBarVisibility="Auto"
-                                             MinHeight="90" MaxHeight="220" MaxLength="4096"/>
+                                             MinHeight="90" MaxHeight="220" MaxLength="4096"
+                                             TextChanged="OnOverviewEdited"/>
 
                                     <TextBlock Style="{StaticResource Caption}" Text="Visibility when shared"/>
-                                    <ComboBox x:Name="VisibilityBox" Margin="0,4,0,12">
+                                    <ComboBox x:Name="VisibilityBox" Margin="0,4,0,12"
+                                              SelectionChanged="OnOverviewSelectionEdited"
+                                              ToolTipService.ShowOnDisabled="True">
                                         <ComboBoxItem Content="Private"/>
                                         <ComboBoxItem Content="Team"/>
                                         <ComboBoxItem Content="Public"/>
                                     </ComboBox>
 
                                     <DockPanel>
-                                        <Button DockPanel.Dock="Right" Content="Save overview"
-                                                Click="OnSaveOverview" Padding="14,5"/>
+                                        <Button x:Name="SaveOverviewButton" DockPanel.Dock="Right" Content="Save overview"
+                                                Click="OnSaveOverview" Padding="14,5"
+                                                ToolTipService.ShowOnDisabled="True"/>
                                         <TextBlock x:Name="OverviewSaveStatus" Style="{StaticResource Caption}"
-                                                   VerticalAlignment="Center"/>
+                                                   VerticalAlignment="Center" TextWrapping="Wrap"/>
                                     </DockPanel>
                                 </StackPanel>
                             </StackPanel>
-                        </Border>
+                        </slate:SlateBorder>
 
-                        <Border Style="{StaticResource Card}">
+                        <slate:SlateBorder Style="{StaticResource Card}">
                             <StackPanel>
                                 <TextBlock Style="{StaticResource H3}" Text="Local folder" Margin="0,0,0,8"/>
                                 <TextBlock x:Name="WorldFolderPathLabel" Style="{StaticResource Muted}"
                                            TextWrapping="Wrap" Margin="0,0,0,10"/>
                                 <Button Content="Open folder" HorizontalAlignment="Left" Click="OnOpenFolder"/>
                             </StackPanel>
-                        </Border>
+                        </slate:SlateBorder>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -259,15 +297,15 @@
             <TabItem Header="Versions">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel Margin="0,18,0,18">
-                        <Border x:Name="VersionsDisabledPanel" Style="{StaticResource Card}">
+                        <slate:SlateBorder x:Name="VersionsDisabledPanel" Style="{StaticResource Card}">
                             <TextBlock Style="{StaticResource Muted}"
                                        Text="Enable sharing on the Overview tab to upload and view hosted versions."
                                        TextWrapping="Wrap"/>
-                        </Border>
+                        </slate:SlateBorder>
 
-                        <Border x:Name="VersionsPanel" Style="{StaticResource Card}" Padding="0" Visibility="Collapsed">
+                        <slate:SlateBorder x:Name="VersionsPanel" Style="{StaticResource Card}" Padding="0" Visibility="Collapsed">
                             <DockPanel>
-                                <Border DockPanel.Dock="Top"
+                                <slate:SlateBorder DockPanel.Dock="Top"
                                         Background="{DynamicResource Surface3Brush}"
                                         BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
                                         Padding="14,10" CornerRadius="10,10,0,0">
@@ -275,15 +313,16 @@
                                         <Button x:Name="RefreshVersionsButton" DockPanel.Dock="Right"
                                                 Content="Refresh" Click="OnRefreshSharedWorldVersions"
                                                 Padding="10,4"/>
-                                        <Button DockPanel.Dock="Right"
+                                        <Button x:Name="VersionsUploadButton" DockPanel.Dock="Right"
                                                 Content="Upload version"
                                                 Style="{StaticResource AccentButton}"
                                                 Click="OnShareOrUploadWorld"
-                                                Margin="0,0,8,0" Padding="10,4"/>
+                                                Margin="0,0,8,0" Padding="10,4"
+                                                ToolTipService.ShowOnDisabled="True"/>
                                         <TextBlock Text="Uploaded versions" Style="{StaticResource H3}"
                                                    VerticalAlignment="Center"/>
                                     </DockPanel>
-                                </Border>
+                                </slate:SlateBorder>
                                 <ItemsControl x:Name="UploadedVersionsList">
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
@@ -293,20 +332,23 @@
                                                     BorderThickness="0,0,0,1">
                                                 <Border.ContextMenu>
                                                     <ContextMenu>
-                                                        <MenuItem Header="Download to instance..." Click="OnDownloadVersion">
+                                                        <MenuItem Header="Download to instance..." Click="OnDownloadVersion"
+                                                                  IsEnabled="{Binding CanDownload}">
                                                             <MenuItem.Icon>
-                                                                <TextBlock Text="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                                <TextBlock Text="&#xE896;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                             </MenuItem.Icon>
                                                         </MenuItem>
                                                         <MenuItem Header="Copy download link" Click="OnCopyVersionLink">
                                                             <MenuItem.Icon>
-                                                                <TextBlock Text="&#xE71B;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
+                                                                <TextBlock Text="&#xE71B;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                                             </MenuItem.Icon>
                                                         </MenuItem>
-                                                        <Separator/>
-                                                        <MenuItem Header="Delete version..." Click="OnDeleteVersion">
+                                                        <!--  Deleting a version is the owner's alone on the server.  -->
+                                                        <Separator Visibility="{Binding DeleteVisibility}"/>
+                                                        <MenuItem Header="Delete version..." Click="OnDeleteVersion"
+                                                                  Visibility="{Binding DeleteVisibility}">
                                                             <MenuItem.Icon>
-                                                                <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                                                <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="12"
                                                                            Foreground="{DynamicResource DangerBrush}"/>
                                                             </MenuItem.Icon>
                                                         </MenuItem>
@@ -316,23 +358,26 @@
                                                     <!-- Row actions at the right edge, in the same order as the menu. -->
                                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
                                                             Click="OnDeleteVersion" Tag="{Binding}"
-                                                            Content="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                            Content="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                                             Foreground="{DynamicResource DangerBrush}"
+                                                            Visibility="{Binding DeleteVisibility}"
                                                             ToolTip="Delete this uploaded version"/>
                                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
                                                             Click="OnCopyVersionLink" Tag="{Binding}"
-                                                            Content="&#xE71B;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                            Content="&#xE71B;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                                             ToolTip="Copy this version's download link"/>
                                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
                                                             Click="OnDownloadVersion" Tag="{Binding}"
-                                                            Content="&#xE896;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                                                            ToolTip="Download this version into an instance"/>
-                                                    <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                            Content="&#xE896;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                                            IsEnabled="{Binding CanDownload}"
+                                                            ToolTip="{Binding DownloadHint}"
+                                                            ToolTipService.ShowOnDisabled="True"/>
+                                                    <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
                                                             Background="{DynamicResource Surface4Brush}"
                                                             VerticalAlignment="Center" Margin="12,0,8,0">
                                                         <TextBlock Text="{Binding McVersionLabel}" Style="{StaticResource PillText}"
                                                                    Foreground="{DynamicResource TextSecondaryBrush}"/>
-                                                    </Border>
+                                                    </slate:SlateBorder>
                                                     <StackPanel>
                                                         <TextBlock Text="{Binding VersionString}" FontWeight="SemiBold"/>
                                                         <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
@@ -351,23 +396,23 @@
                                            Text="No hosted versions uploaded yet."
                                            Margin="14" Visibility="Collapsed"/>
                             </DockPanel>
-                        </Border>
+                        </slate:SlateBorder>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
 
             <TabItem Header="Backups">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <Border Style="{StaticResource Card}" Margin="0,18,0,18" Padding="0">
+                    <slate:SlateBorder Style="{StaticResource Card}" Margin="0,18,0,18" Padding="0">
                         <DockPanel>
-                            <Border DockPanel.Dock="Top"
+                            <slate:SlateBorder DockPanel.Dock="Top"
                                     Background="{DynamicResource Surface3Brush}"
                                     BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
                                     Padding="14,10" CornerRadius="10,10,0,0">
                                 <DockPanel>
                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
                                             Click="OnOpenBackupsFolder"
-                                            Content="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                            Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                             ToolTip="Open the backups folder in Explorer"/>
                                     <Button x:Name="BackupNowButton" DockPanel.Dock="Right"
                                             Content="Back up now" Style="{StaticResource AccentButton}"
@@ -379,10 +424,10 @@
                                                    Margin="0,2,0,0"/>
                                     </StackPanel>
                                 </DockPanel>
-                            </Border>
+                            </slate:SlateBorder>
                             <TextBlock x:Name="BackupsEmptyLabel" DockPanel.Dock="Top"
                                        Style="{StaticResource Muted}"
-                                       Text="No backups yet. Take one before a risky session — restoring puts this exact save back."
+                                       Text="No backups yet. Take one before a risky session - restoring puts this exact save back."
                                        TextWrapping="Wrap" Margin="14" Visibility="Collapsed"/>
                             <ItemsControl x:Name="BackupsList">
                                 <ItemsControl.ItemTemplate>
@@ -394,12 +439,12 @@
                                             <DockPanel>
                                                 <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
                                                         Click="OnDeleteBackup" Tag="{Binding}"
-                                                        Content="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                        Content="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                                         Foreground="{DynamicResource DangerBrush}"
                                                         ToolTip="Delete this backup"/>
                                                 <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
                                                         Click="OnRevealBackup" Tag="{Binding}"
-                                                        Content="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                                        Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                                         ToolTip="Show this backup in Explorer"/>
                                                 <Button DockPanel.Dock="Right" Content="Restore"
                                                         Click="OnRestoreBackup" Tag="{Binding}"
@@ -416,31 +461,31 @@
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
                         </DockPanel>
-                    </Border>
+                    </slate:SlateBorder>
                 </ScrollViewer>
             </TabItem>
 
             <TabItem Header="Player Data">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <Border Style="{StaticResource Card}" Margin="0,18,0,18" Padding="0">
+                    <slate:SlateBorder Style="{StaticResource Card}" Margin="0,18,0,18" Padding="0">
                         <DockPanel>
-                            <Border DockPanel.Dock="Top"
+                            <slate:SlateBorder DockPanel.Dock="Top"
                                     Background="{DynamicResource Surface3Brush}"
                                     BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
                                     Padding="14,10" CornerRadius="10,10,0,0">
                                 <DockPanel>
                                     <Button x:Name="OpenPlayerDataButton" DockPanel.Dock="Right"
                                             Style="{StaticResource IconButton}"
-                                            Content="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="13"
+                                            Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="13"
                                             Click="OnOpenPlayerDataFolder"
                                             ToolTip="Open playerdata folder in Explorer"/>
-                                    <Border DockPanel.Dock="Left" Width="28" Height="28"
+                                    <slate:SlateBorder DockPanel.Dock="Left" Width="28" Height="28"
                                             Background="{DynamicResource AccentSoftBrush}"
                                             CornerRadius="6" Margin="0,0,12,0">
-                                        <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}"
-                                                   FontSize="14" Foreground="{DynamicResource AccentBrush}"
+                                        <TextBlock Text="&#xE77B;" FontFamily="{DynamicResource IconFont}"
+                                                   FontSize="14" Foreground="{DynamicResource AccentTextBrush}"
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </Border>
+                                    </slate:SlateBorder>
                                     <StackPanel VerticalAlignment="Center">
                                         <TextBlock Text="Player data" FontWeight="SemiBold" FontSize="13"/>
                                         <TextBlock x:Name="PlayerDataPathLabel"
@@ -449,7 +494,7 @@
                                                    TextTrimming="CharacterEllipsis"/>
                                     </StackPanel>
                                 </DockPanel>
-                            </Border>
+                            </slate:SlateBorder>
                             <TextBlock x:Name="PlayerDataMissingLabel"
                                        Style="{StaticResource Muted}"
                                        Text="No player data folder exists for this world yet."
@@ -461,44 +506,71 @@
                                 <local:FolderView x:Name="PlayerDataView" Margin="6"/>
                             </Border>
                         </DockPanel>
-                    </Border>
+                    </slate:SlateBorder>
                 </ScrollViewer>
             </TabItem>
 
-            <TabItem Header="Compatibility">
+            <!--  Which instances have this world, with ticks to copy it into others. Folders on the Worlds
+            page only group worlds; anything that moves files is here.  -->
+            <TabItem Header="Instances">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <Border Style="{StaticResource Card}" Margin="0,18,0,18">
-                        <StackPanel>
-                            <TextBlock Style="{StaticResource H3}" Text="Instance compatibility" Margin="0,0,0,4"/>
-                            <TextBlock Style="{StaticResource Muted}"
-                                       Text="Choose which instances may launch this world."
-                                       TextWrapping="Wrap" Margin="0,0,0,10"/>
+                    <StackPanel Margin="0,18,0,18">
 
-                            <CheckBox x:Name="AllPacksBox" Content="Compatible with all instances"
-                                      Click="OnAllPacksToggled" Margin="0,0,0,12"/>
+                        <!--  "Where this goes", as on the resource and shader pack pages. A world is
+                        copied, never shared: ticking an empty box copies the save in, and unticking
+                        never deletes a copy (that is done from the Worlds page).  -->
+                        <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource H3}" Text="Where this goes" Margin="0,0,0,4"/>
+                                <TextBlock x:Name="InstanceStateNote" Style="{StaticResource Muted}"
+                                           TextWrapping="Wrap" Margin="0,0,0,10"/>
+                                <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
+                                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                        CornerRadius="6" Padding="6">
+                                    <ItemsControl x:Name="InstanceStateList">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <DockPanel Margin="6,5">
+                                                    <!--  Two-way: the handler reads the whole column back,
+                                                    and the reload after the write fixes any box the
+                                                    engine disagrees with.  -->
+                                                    <CheckBox DockPanel.Dock="Left" Margin="0,0,10,0"
+                                                              VerticalAlignment="Top"
+                                                              IsChecked="{Binding IsOffered, Mode=TwoWay}"
+                                                              IsEnabled="{Binding CanTick}"
+                                                              Click="OnInstanceTick"
+                                                              ToolTipService.ShowOnDisabled="True"
+                                                              ToolTip="{Binding TickTip}"/>
+                                                    <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                            Margin="6,0,0,0" VerticalAlignment="Top">
+                                                        <TextBlock Text="{Binding VersionLabel}"
+                                                                   Style="{StaticResource PillText}"/>
+                                                    </slate:SlateBorder>
+                                                    <!--  Flags a copy that has been played since, so its
+                                                    tick doesn't suggest the two are the same world.  -->
+                                                    <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                                            Margin="6,0,0,0" VerticalAlignment="Top"
+                                                            Visibility="{Binding DivergedVisibility}">
+                                                        <TextBlock Text="DIVERGED" Style="{StaticResource PillText}"
+                                                                   Foreground="{DynamicResource WarningBrush}"/>
+                                                    </slate:SlateBorder>
+                                                    <StackPanel>
+                                                        <TextBlock Text="{Binding PackName}" FontWeight="SemiBold"
+                                                                   TextTrimming="CharacterEllipsis"
+                                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                        <TextBlock Text="{Binding StateLine}"
+                                                                   Style="{StaticResource Caption}"
+                                                                   TextWrapping="Wrap"/>
+                                                    </StackPanel>
+                                                </DockPanel>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </slate:SlateBorder>
+                            </StackPanel>
+                        </slate:SlateBorder>
 
-                            <Border x:Name="PackListWrap" Background="{DynamicResource Surface1Brush}"
-                                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-                                    CornerRadius="6" Padding="6">
-                                <ItemsControl x:Name="PackCheckList">
-                                    <ItemsControl.ItemTemplate>
-                                        <DataTemplate>
-                                            <DockPanel Margin="6,4">
-                                                <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
-                                                        Margin="6,0,0,0">
-                                                    <TextBlock Text="{Binding VersionLabel}" Style="{StaticResource PillText}"/>
-                                                </Border>
-                                                <CheckBox IsChecked="{Binding IsCompatible, Mode=TwoWay}"
-                                                          IsEnabled="{Binding IsEditable}"
-                                                          Click="OnPackCompatibilityChanged"
-                                                          Content="{Binding PackName}" Tag="{Binding PackId}"/>
-                                            </DockPanel>
-                                        </DataTemplate>
-                                    </ItemsControl.ItemTemplate>
-                                </ItemsControl>
-                            </Border>
-                        </StackPanel>
-                    </Border>
+                    </StackPanel>
                 </ScrollViewer>
             </TabItem>
         </TabControl>

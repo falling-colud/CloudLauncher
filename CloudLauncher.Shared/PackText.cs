@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Markdig;
@@ -7,8 +8,8 @@ namespace CloudLauncher.Shared;
 
 public static partial class PackText
 {
-    // GFM-ish feature set for community descriptions — tables, task lists, autolinks, ~~strike~~,
-    // heading anchors — without Markdig's exotic extras (maths, smarty-pants) that could misfire on
+    // GFM-like features for community descriptions (tables, task lists, autolinks, ~~strike~~,
+    // heading anchors) without Markdig's extras such as maths and smarty-pants, which can misfire on
     // arbitrary READMEs. Built once; the pipeline is immutable and thread-safe.
     private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder()
         .UsePipeTables().UseGridTables().UseAutoLinks().UseTaskLists()
@@ -16,12 +17,11 @@ public static partial class PackText
         .Build();
 
     /// <summary>
-    /// Renders arbitrary community Markdown to display HTML with a real CommonMark/GFM engine
-    /// (Markdig). Unlike the hand-rolled <see cref="MarkdownLiteToHtml"/>, this correctly handles
-    /// linked-image badges, tables, and Markdown that embeds raw HTML (e.g. a
-    /// <c>&lt;div align="center"&gt;</c> around a badge row) — the case that made whole descriptions
-    /// render as raw text. The result is sanitized (Markdig passes untrusted HTML straight through)
-    /// and wrapped in <c>.md</c> so the existing description CSS applies.
+    /// Renders community Markdown to display HTML with Markdig (CommonMark/GFM). Unlike
+    /// <see cref="MarkdownLiteToHtml"/>, it handles linked-image badges, tables and Markdown with
+    /// embedded raw HTML (e.g. a <c>&lt;div align="center"&gt;</c> around a badge row). The result is
+    /// sanitized, since Markdig passes untrusted HTML straight through, and wrapped in <c>.md</c> so the
+    /// description CSS applies.
     /// </summary>
     public static string MarkdownToHtml(string? markdown)
     {
@@ -76,15 +76,26 @@ public static partial class PackText
     public static bool LooksLikeHtml(string? text) =>
         !string.IsNullOrWhiteSpace(text) && Regex.IsMatch(text, @"<\s*(p|div|h[1-6]|img|ul|ol|li|br|a)\b", RegexOptions.IgnoreCase);
 
-    /// <summary>True when HTML-looking content still carries raw Markdown that the store never
-    /// converted — an <c>![alt](url)</c> image or a <c>#</c> heading, neither of which survives in
-    /// genuinely-rendered HTML. That's the signature of a README pasted into a store's editor.</summary>
+    /// <summary>True when HTML-looking content still carries raw Markdown the store never converted:
+    /// an <c>![alt](url)</c> image or a <c>#</c> heading, neither of which survives in real rendered
+    /// HTML. Typical of a README pasted into a store's editor.</summary>
     public static bool LooksLikeUnconvertedMarkdown(string? text) =>
         !string.IsNullOrWhiteSpace(text)
+        // Real block structure means this is genuine HTML. Without this check, one "# comment" line in
+        // a code block or one literal ![alt](url) would send a good description through
+        // HtmlBlocksToLineBreaks, which removes every table, list, heading and <pre>.
+        && !HasStructuralHtml(text!)
         && (Regex.IsMatch(text, @"!\[[^\]]*\]\([^)]*\)")
             || Regex.IsMatch(text, @"(?m)^[ \t]{0,3}#{1,6}[ \t]"));
 
-    /// <summary>Turns an HTML wrapper's block tags (<c>&lt;p&gt;</c>, <c>&lt;br&gt;</c>, list items…)
+    /// <summary>
+    /// True when the markup has block structure a Markdown reflow would destroy: the tags
+    /// <see cref="HtmlBlocksToLineBreaks"/> turns into blank lines.
+    /// </summary>
+    private static bool HasStructuralHtml(string html) =>
+        Regex.IsMatch(html, @"(?i)<\s*(table|thead|tbody|tr|td|th|pre|ul|ol|li|h[1-6]|blockquote)\b");
+
+    /// <summary>Turns an HTML wrapper's block tags (<c>&lt;p&gt;</c>, <c>&lt;br&gt;</c>, list items...)
     /// into the blank lines Markdown needs, so pasted-but-unconverted Markdown reflows into real
     /// paragraphs. Inline tags (<c>&lt;a&gt;</c>, <c>&lt;img&gt;</c>, emphasis) are left for Markdig
     /// to pass through.</summary>
@@ -95,30 +106,420 @@ public static partial class PackText
         return s;
     }
 
-    /// <summary>Strips the script-execution vectors from untrusted description HTML before it's shown
-    /// in the (JS-enabled) WebView2. Not a full allow-list sanitizer, but it removes the tags and
-    /// attributes that can run code — script/style/iframe/object/embed and friends, inline
-    /// <c>on*</c> handlers, and <c>javascript:</c>/<c>vbscript:</c>/<c>data:text/html</c> URLs — while
-    /// leaving ordinary formatting, images and links (the badges) intact.</summary>
+    /// <summary>Strips everything that can run code or pull in another document from untrusted
+    /// description HTML before it is shown in the (script-enabled) WebView2, while leaving ordinary
+    /// formatting, images and links (the badges) intact.</summary>
+    /// <remarks>
+    /// <para>The input is read tag by tag the way a browser's tokenizer reads it, and the output is
+    /// rebuilt from what was read: text has its <c>&lt;</c> escaped, kept tags are written out again
+    /// with double-quoted attributes, and comments, doctypes and processing instructions are dropped.
+    /// Nothing is copied through that a browser could parse differently, which a pattern-based filter
+    /// can't guarantee.</para>
+    /// <para>Removed: script-bearing, embedding and form elements (with their content where a browser
+    /// would not show it anyway), <c>on*</c> handlers, and URLs whose scheme is not http, https, mailto,
+    /// a command link or <c>data:image</c>. <c>xmp</c>, <c>textarea</c> and <c>plaintext</c> become
+    /// <c>pre</c> blocks showing the same text.</para>
+    /// </remarks>
     public static string? SanitizeDescriptionHtml(string? html)
     {
         if (string.IsNullOrWhiteSpace(html)) return null;
-        var s = html;
+        var sb = new StringBuilder(html.Length + 64);
+        var n = html.Length;
+        var i = 0;
+        while (i < n)
+        {
+            var lt = html.IndexOf('<', i);
+            if (lt < 0)
+            {
+                AppendHtmlText(sb, html, i, n);
+                break;
+            }
+            AppendHtmlText(sb, html, i, lt);
 
-        // Executable / embedding elements: drop the whole element where it has content, then any
-        // stray open/close/void tags that remain.
-        s = Regex.Replace(s, @"(?is)<\s*(script|style|iframe|object|embed|noscript|template)\b[^>]*>.*?<\s*/\s*\1\s*>", "");
-        s = Regex.Replace(s, @"(?is)<\s*/?\s*(script|style|iframe|object|embed|link|meta|base|form|input|button)\b[^>]*>", "");
+            // What follows '<' decides whether this is markup, as in a browser's tokenizer.
+            var next = lt + 1 < n ? html[lt + 1] : '\0';
+            if (IsAsciiLetter(next) || (next == '/' && lt + 2 < n && IsAsciiLetter(html[lt + 2])))
+            {
+                // A tag that runs off the end of the input is dropped, which is what a browser does.
+                if (!TryReadHtmlTag(html, lt, out var tag)) break;
+                i = WriteSanitizedTag(sb, html, tag);
+            }
+            else if (next == '!')
+                i = SkipMarkupDeclaration(html, lt);
+            else if (next == '/' && lt + 2 < n && html[lt + 2] == '>')
+                i = lt + 3;                          // "</>" is ignored
+            else if (next == '?' || (next == '/' && lt + 2 < n))
+                i = SkipToTagClose(html, lt);        // a bogus comment
+            else
+            {
+                sb.Append("&lt;");
+                i = lt + 1;
+            }
+        }
+        return sb.ToString().Trim();
+    }
 
-        // Inline event handlers (onclick, onerror, onload, …).
-        s = Regex.Replace(s, @"(?is)\son[a-z]+\s*=\s*(""[^""]*""|'[^']*'|[^\s>]+)", "");
+    // ── description sanitiser internals ──────────────────────────────────────
 
-        // Script-bearing URLs in href/src, quoted or bare.
-        s = Regex.Replace(s, @"(?is)\s(href|src)\s*=\s*""\s*(?:javascript|vbscript|data:text/html)[^""]*""", " $1=\"#\"");
-        s = Regex.Replace(s, @"(?is)\s(href|src)\s*=\s*'\s*(?:javascript|vbscript|data:text/html)[^']*'", " $1='#'");
-        s = Regex.Replace(s, @"(?is)\s(href|src)\s*=\s*(?:javascript|vbscript|data:text/html)[^\s>]*", " $1=#");
+    private sealed class HtmlTag
+    {
+        public string Name = "";
+        public bool IsEnd;
+        public bool SelfClosing;
+        public int End;
+        public readonly List<(string Name, string? Value)> Attributes = new();
+    }
 
-        return s.Trim();
+    /// <summary>Removed together with everything up to their end tag: a browser would not show that
+    /// content, or would run or embed it.</summary>
+    private static readonly HashSet<string> DescriptionDropWithContent = new(StringComparer.Ordinal)
+    {
+        "script", "style", "iframe", "object", "embed", "applet", "noscript", "noembed", "noframes",
+        "template", "title",
+    };
+
+    /// <summary>Removed as tags; whatever they wrap stays.</summary>
+    private static readonly HashSet<string> DescriptionDropTag = new(StringComparer.Ordinal)
+    {
+        "link", "meta", "base", "form", "input", "button", "frame", "frameset", "portal", "fencedframe",
+        "isindex", "keygen", "param", "bgsound", "html", "head", "body",
+        "animate", "set", "animatemotion", "animatetransform", "animatecolor", "handler", "listener",
+    };
+
+    /// <summary>Elements whose content a browser shows as literal text; they become pre blocks.</summary>
+    private static readonly HashSet<string> DescriptionTextElements = new(StringComparer.Ordinal)
+    {
+        "xmp", "textarea", "plaintext",
+    };
+
+    /// <summary>Attributes a browser loads or navigates to as a URL.</summary>
+    private static readonly HashSet<string> DescriptionUrlAttributes = new(StringComparer.Ordinal)
+    {
+        "href", "src", "action", "formaction", "poster", "background", "cite", "data", "codebase",
+        "longdesc", "lowsrc", "dynsrc", "usemap", "manifest", "icon", "profile", "archive", "classid",
+        "xlink:href",
+    };
+
+    private static readonly HashSet<string> DescriptionDropAttributes = new(StringComparer.Ordinal)
+    {
+        "srcdoc", "ping", "download", "xml:base", "http-equiv", "attributename",
+    };
+
+    private static void AppendHtmlText(StringBuilder sb, string html, int from, int to)
+    {
+        for (var i = from; i < to; i++)
+        {
+            var c = html[i];
+            if (c == '<') sb.Append("&lt;");
+            else sb.Append(c);
+        }
+    }
+
+    private static bool IsAsciiLetter(char c) => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z';
+
+    private static bool IsHtmlSpace(char c) => c is ' ' or '\t' or '\n' or '\r' or '\f';
+
+    private static string LowerAscii(string s)
+    {
+        foreach (var c in s)
+            if (c is >= 'A' and <= 'Z')
+                return string.Create(s.Length, s, (span, src) =>
+                {
+                    for (var k = 0; k < src.Length; k++)
+                        span[k] = src[k] is >= 'A' and <= 'Z' ? (char)(src[k] + 32) : src[k];
+                });
+        return s;
+    }
+
+    /// <summary>Reads one start or end tag at <paramref name="start"/> (a '&lt;') the way the HTML
+    /// tokenizer does, attributes included. False when the input ends inside the tag.</summary>
+    private static bool TryReadHtmlTag(string html, int start, out HtmlTag tag)
+    {
+        var n = html.Length;
+        var result = new HtmlTag { IsEnd = html[start + 1] == '/' };
+        tag = result;
+        var p = start + (result.IsEnd ? 2 : 1);
+        var nameStart = p;
+        while (p < n && !IsHtmlSpace(html[p]) && html[p] != '/' && html[p] != '>') p++;
+        result.Name = LowerAscii(html[nameStart..p]);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        while (p < n)
+        {
+            var c = html[p];
+            if (IsHtmlSpace(c)) { p++; continue; }
+            if (c == '>')
+            {
+                result.End = p + 1;
+                return true;
+            }
+            if (c == '/')
+            {
+                // A slash is self-closing only right before '>'; anywhere else it is skipped.
+                if (p + 1 < n && html[p + 1] == '>')
+                {
+                    result.SelfClosing = true;
+                    result.End = p + 2;
+                    return true;
+                }
+                p++;
+                continue;
+            }
+
+            // An attribute name takes its first character whatever it is (even '='), then runs to
+            // whitespace, '/', '>' or '='.
+            var nameFrom = p++;
+            while (p < n && !IsHtmlSpace(html[p]) && html[p] != '/' && html[p] != '>' && html[p] != '=') p++;
+            var attrName = LowerAscii(html[nameFrom..p]);
+
+            var q = p;
+            while (q < n && IsHtmlSpace(html[q])) q++;
+            string? value = null;
+            if (q < n && html[q] == '=')
+            {
+                q++;
+                while (q < n && IsHtmlSpace(html[q])) q++;
+                if (q >= n) return false;
+                var quote = html[q];
+                if (quote is '"' or '\'')
+                {
+                    var close = html.IndexOf(quote, q + 1);
+                    if (close < 0) return false;
+                    value = html[(q + 1)..close];
+                    p = close + 1;
+                }
+                else if (quote == '>')
+                {
+                    value = "";
+                    p = q;
+                }
+                else
+                {
+                    var valueFrom = q;
+                    while (q < n && !IsHtmlSpace(html[q]) && html[q] != '>') q++;
+                    value = html[valueFrom..q];
+                    p = q;
+                }
+            }
+            else
+            {
+                p = q;
+            }
+
+            // A repeated attribute is ignored by the browser, so it is here too.
+            if (seen.Add(attrName)) result.Attributes.Add((attrName, value));
+        }
+        return false;
+    }
+
+    /// <summary>Writes the sanitised form of <paramref name="tag"/> and returns where reading
+    /// resumes.</summary>
+    private static int WriteSanitizedTag(StringBuilder sb, string html, HtmlTag tag)
+    {
+        var name = tag.Name;
+        if (!IsPlainHtmlName(name)) return tag.End;
+
+        if (tag.IsEnd)
+        {
+            if (!DescriptionDropWithContent.Contains(name) && !DescriptionDropTag.Contains(name)
+                && !DescriptionTextElements.Contains(name))
+                sb.Append("</").Append(name).Append('>');
+            return tag.End;
+        }
+
+        if (DescriptionDropWithContent.Contains(name))
+        {
+            var close = FindHtmlEndTag(html, tag.End, name);
+            if (close < 0) return tag.End;
+            return TryReadHtmlTag(html, close, out var endTag) ? endTag.End : html.Length;
+        }
+
+        if (DescriptionTextElements.Contains(name))
+        {
+            int contentEnd, resume;
+            var close = name == "plaintext" ? -1 : FindHtmlEndTag(html, tag.End, name);
+            if (close < 0)
+            {
+                contentEnd = html.Length;
+                resume = html.Length;
+            }
+            else
+            {
+                contentEnd = close;
+                resume = TryReadHtmlTag(html, close, out var endTag) ? endTag.End : html.Length;
+            }
+            var content = html[tag.End..contentEnd];
+            // A textarea still decodes character references; the other two show every character as typed.
+            var text = name == "textarea" ? content.Replace("<", "&lt;") : content.Replace("&", "&amp;").Replace("<", "&lt;");
+            sb.Append("<pre>").Append(text).Append("</pre>");
+            return resume;
+        }
+
+        if (DescriptionDropTag.Contains(name)) return tag.End;
+
+        sb.Append('<').Append(name);
+        var written = 0;
+        foreach (var (attrName, value) in tag.Attributes)
+        {
+            if (!IsAllowedDescriptionAttribute(name, attrName, value)) continue;
+            sb.Append(' ').Append(attrName);
+            if (value is not null) sb.Append("=\"").Append(value.Replace("\"", "&quot;")).Append('"');
+            written++;
+        }
+        if (tag.SelfClosing) sb.Append(written > 0 ? " /" : "/");
+        sb.Append('>');
+        return tag.End;
+    }
+
+    /// <summary>Index of the first <c>&lt;/name</c> followed by whitespace, '/' or '&gt;' at or after
+    /// <paramref name="from"/>, or -1. The same test a browser uses to end raw text.</summary>
+    private static int FindHtmlEndTag(string html, int from, string name)
+    {
+        var at = from;
+        while ((at = html.IndexOf("</", at, StringComparison.Ordinal)) >= 0)
+        {
+            var after = at + 2 + name.Length;
+            if (after < html.Length
+                && string.Compare(html, at + 2, name, 0, name.Length, StringComparison.OrdinalIgnoreCase) == 0
+                && (IsHtmlSpace(html[after]) || html[after] is '/' or '>'))
+                return at;
+            at += 2;
+        }
+        return -1;
+    }
+
+    /// <summary>Skips a comment, doctype or other <c>&lt;!</c> declaration.</summary>
+    private static int SkipMarkupDeclaration(string html, int from)
+    {
+        if (string.CompareOrdinal(html, from, "<!--", 0, 4) != 0) return SkipToTagClose(html, from);
+        var body = from + 4;
+        if (body < html.Length && html[body] == '>') return body + 1;
+        if (body + 1 < html.Length && html[body] == '-' && html[body + 1] == '>') return body + 2;
+        var dash = html.IndexOf("--", body, StringComparison.Ordinal);
+        while (dash >= 0)
+        {
+            if (dash + 2 < html.Length && html[dash + 2] == '>') return dash + 3;
+            if (dash + 3 < html.Length && html[dash + 2] == '!' && html[dash + 3] == '>') return dash + 4;
+            dash = html.IndexOf("--", dash + 1, StringComparison.Ordinal);
+        }
+        return html.Length;
+    }
+
+    private static int SkipToTagClose(string html, int from)
+    {
+        var close = html.IndexOf('>', from + 1);
+        return close < 0 ? html.Length : close + 1;
+    }
+
+    private static bool IsPlainHtmlName(string name)
+    {
+        if (name.Length == 0 || !IsAsciiLetter(name[0])) return false;
+        foreach (var c in name)
+            if (!(c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_' or ':' or '.')) return false;
+        return true;
+    }
+
+    private static bool IsAllowedDescriptionAttribute(string tagName, string name, string? value)
+    {
+        if (name.Length == 0 || !(IsAsciiLetter(name[0]) || name[0] == '_')) return false;
+        foreach (var c in name)
+            if (!(c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-' or '_' or ':' or '.')) return false;
+        if (name.StartsWith("on", StringComparison.Ordinal)) return false;
+        if (DescriptionDropAttributes.Contains(name)) return false;
+        // A named image becomes a property of document, which could shadow what the page's own
+        // script calls.
+        if (name == "name" && tagName is "img" or "image") return false;
+        if (DescriptionUrlAttributes.Contains(name))
+        {
+            // A link to an image data URL is never a real link; an image source often is one.
+            var navigates = name is "href" or "xlink:href" or "action" or "formaction";
+            return IsSafeDescriptionUrl(DecodeCharacterReferences(value ?? ""), allowDataImage: !navigates);
+        }
+        if (name is "srcset" or "imagesrcset") return IsSafeSrcset(DecodeCharacterReferences(value ?? ""));
+        if (name == "style") return IsSafeInlineStyle(DecodeCharacterReferences(value ?? ""));
+        return true;
+    }
+
+    /// <summary>True when a (decoded) URL is relative or uses a scheme a description may carry.</summary>
+    private static bool IsSafeDescriptionUrl(string url, bool allowDataImage = true)
+    {
+        // The part before the first ':', '/', '?' or '#', skipping the control characters and spaces a
+        // browser ignores in and around a scheme.
+        var prefix = new StringBuilder();
+        var delimiter = '\0';
+        var scanned = Math.Min(url.Length, 4096);
+        for (var k = 0; k < scanned && prefix.Length <= 64; k++)
+        {
+            var c = url[k];
+            if (c <= ' ' || c == '\u007F') continue;
+            if (c is ':' or '/' or '?' or '#') { delimiter = c; break; }
+            prefix.Append(c);
+        }
+        var text = prefix.ToString();
+        // An entity this reader does not know could be hiding the colon of a scheme.
+        if (text.IndexOf('&') >= 0) return false;
+        if (delimiter != ':')
+            // Relative, unless ignorable characters filled the whole window without reaching the end.
+            return delimiter != '\0' || prefix.Length > 64 || url.Length <= 4096;
+        return text.ToLowerInvariant() switch
+        {
+            "http" or "https" or "mailto" or CommandRunUriScheme => true,
+            "data" => allowDataImage && IsDataImageUrl(url),
+            _ => false
+        };
+    }
+
+    private static bool IsDataImageUrl(string url)
+    {
+        var head = new StringBuilder(16);
+        foreach (var c in url)
+        {
+            if (c <= ' ' || c == '\u007F') continue;
+            head.Append(c);
+            if (head.Length == 11) break;
+        }
+        return head.ToString().Equals("data:image/", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsSafeSrcset(string srcset)
+    {
+        foreach (var candidate in srcset.Split(','))
+        {
+            var url = candidate.TrimStart().Split((char[]?)null, 2, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+            if (url is not null && !IsSafeDescriptionUrl(url)) return false;
+        }
+        return true;
+    }
+
+    private static bool IsSafeInlineStyle(string css)
+    {
+        var s = Regex.Replace(css, @"/\*.*?\*/", "", RegexOptions.Singleline);
+        // CSS escapes can spell anything, and ordinary inline styles never need them.
+        if (s.IndexOf('\\') >= 0) return false;
+        var squashed = new string(s.Where(c => c > ' ').ToArray()).ToLowerInvariant();
+        if (squashed.Contains("expression(") || squashed.Contains("javascript:") || squashed.Contains("vbscript:")
+            || squashed.Contains("behavior:") || squashed.Contains("-moz-binding") || squashed.Contains("@import"))
+            return false;
+        foreach (Match m in CssUrlRegex().Matches(s))
+            if (!IsSafeDescriptionUrl(m.Groups[2].Value)) return false;
+        return true;
+    }
+
+    /// <summary>Decodes character references the way a browser does in an attribute value, including
+    /// numeric ones without a closing semicolon, so a scheme cannot hide behind them.</summary>
+    private static string DecodeCharacterReferences(string raw)
+    {
+        if (raw.IndexOf('&') < 0) return raw;
+        var numeric = NumericCharacterReferenceRegex().Replace(raw, m =>
+        {
+            var hex = m.Groups[1].Success;
+            var digits = (hex ? m.Groups[1].Value : m.Groups[2].Value).TrimStart('0');
+            if (digits.Length == 0 || digits.Length > 8) return "�";
+            var code = Convert.ToInt64(digits, hex ? 16 : 10);
+            if (code > 0x10FFFF || code is >= 0xD800 and <= 0xDFFF) return "�";
+            return char.ConvertFromUtf32((int)code);
+        });
+        return WebUtility.HtmlDecode(numeric);
     }
 
     /// <summary>
@@ -158,8 +559,8 @@ public static partial class PackText
         // A Minecraft command looks like "/word" optionally followed by space-separated
         // args ("/give @p diamond"). Reject site-relative URLs that merely start with "/":
         // CurseForge wraps outbound links as "/linkout?remoteUrl=..." and internal links as
-        // "/minecraft/mc-mods/...". Treating those as commands turns real links — and the
-        // images inside them — into bogus, HTML-escaped command blocks.
+        // "/minecraft/mc-mods/...". Treating those as commands would turn real links (and the
+        // images inside them) into bogus command blocks.
         return MinecraftCommandTextRegex().IsMatch(href);
     }
 
@@ -190,18 +591,17 @@ public static partial class PackText
         if (string.IsNullOrWhiteSpace(content))
             return "<p><em>No description.</em></p>";
 
-        // Read-only display renderer (mod / pack browse). The full Markdig path handles badges,
-        // tables and Markdown-with-embedded-HTML; the HTML branch is for stores that ship HTML
-        // (CurseForge). Only fall back to auto-detection when the source didn't declare a format.
-        // NOTE: this is the *display* path — the description editor calls MarkdownLiteToHtml directly,
-        // so its round-trip HTML is unaffected.
+        // Read-only display renderer (mod / pack browse). Markdig handles badges, tables and
+        // Markdown with embedded HTML; the HTML branch is for stores that ship HTML (CurseForge).
+        // Auto-detect only when the source didn't declare a format. The description editor calls
+        // MarkdownLiteToHtml directly, so its round-trip HTML is unaffected.
         string html;
         if (isMarkdown || !LooksLikeHtml(content))
             html = MarkdownToHtml(content);
         else if (LooksLikeUnconvertedMarkdown(content))
             // "HTML" that's really Markdown the author pasted into a store's editor without it being
-            // converted (CF wraps a README in <p>/<br> tags, leaving ![badge](…) literal). Re-open the
-            // block tags into line breaks so the Markdown structure re-emerges, then render properly.
+            // converted (CF wraps a README in <p>/<br> tags, leaving ![badge](...) literal). Turn the
+            // block tags back into line breaks so the Markdown structure re-emerges, then render it.
             html = MarkdownToHtml(HtmlBlocksToLineBreaks(content));
         else
             html = SanitizeDescriptionHtml(content) ?? content;
@@ -265,8 +665,8 @@ public static partial class PackText
             return RenderCommandBlockHtml(label, href, runnableCommands);
         });
 
-        // Convert any un-normalized editing blocks (mc-cmd-editing) that survived
-        // into the proper viewer format — either an expandable block or a run-link.
+        // Convert any un-normalized editing blocks (mc-cmd-editing) that survived into the
+        // viewer format: either an expandable block or a run-link.
         html = HtmlEditingCommandBlockRegex().Replace(html, match =>
         {
             var label = WebUtility.HtmlDecode(match.Groups[1].Value).Trim();
@@ -291,17 +691,12 @@ public static partial class PackText
 
         if (runnable)
         {
-            // Hosted Minecraft window: render as a clickable link that runs the command when clicked.
-            // Wrapped in <p> so it is always a block-level element in the DOM — this prevents the
-            // WPF WebBrowser (IE legacy host) from silently dropping adjacent <p> text nodes when
-            // the engine falls back to IE7 quirks mode (e.g. on first launch before the
-            // FEATURE_BROWSER_EMULATION registry key has taken effect, or when NavigateToString
-            // ignores the X-UA-Compatible meta tag for about: URLs).
-            // onclick runs the command via window.external (reliable on the first
-            // click even when the hosted IE control is inactive); the href is kept so
-            // right-click "Open" and the window.external fallback still navigate, which
-            // the WPF Navigating handler intercepts as a backup path.
-            return $"""<p><a class="mc-cmd-run" href="{EscapeHtmlAttribute(CommandRunUri(command))}" data-cmd="{EscapeHtmlAttribute(command)}" title="{EscapeHtmlAttribute(command)}" onclick="return mcRunCmd(this)">{EscapeHtml(safeLabel)}</a></p>""";
+            // Hosted Minecraft window: a link that runs the command when clicked. Wrapped in <p> so it
+            // is always a block element; the legacy IE WebBrowser host can drop adjacent <p> text in
+            // IE7 quirks mode. onclick runs the command via window.external (works on the first click
+            // even when the IE control is inactive); the href stays so right-click "Open" still
+            // navigates, and the WPF Navigating handler catches that as a fallback.
+            return $"""<p><a class="mc-cmd-run" href="{EscapeHtmlAttribute(CommandRunUri(command))}" data-cmd="{EscapeHtmlAttribute(command)}" title="{EscapeHtmlAttribute(command)}" onclick="{RunCommandHandler}">{EscapeHtml(safeLabel)}</a></p>""";
         }
 
         // Non-hosted (main launcher viewer / saved format): keep the expandable
@@ -309,7 +704,7 @@ public static partial class PackText
         return $"""
                <div class="mc-cmd">
                  <div class="mc-cmd-head">
-                   <button type="button" class="mc-cmd-toggle" aria-expanded="false" onclick="toggleMcCmd(this)">&#9654;</button>
+                   <button type="button" class="mc-cmd-toggle" aria-expanded="false" onclick="{ToggleCommandHandler}">&#9654;</button>
                    <span class="mc-cmd-label">{EscapeHtml(safeLabel)}</span>
                  </div>
                  <div class="mc-cmd-body" style="display:none"><code>{EscapeHtml(command)}</code></div>
@@ -440,12 +835,10 @@ public static partial class PackText
     /// The colours the generated description and editor HTML is painted with.
     /// </summary>
     /// <remarks>
-    /// Descriptions are rendered as a web document inside the launcher, so none of WPF's theming
-    /// reaches them — left alone they stay on the stock dark palette with blue links whatever the
-    /// user picked, which is exactly what someone with a green theme notices first. The client sets
+    /// Descriptions are a web document, so WPF theming doesn't reach them. The client sets
     /// <see cref="Current"/> from the active theme; the stylesheet below is written in the default
-    /// colours and <see cref="Recolour"/> maps them across, so there is one stylesheet rather than a
-    /// templating layer, and the default theme costs nothing.
+    /// colours and <see cref="Recolour"/> maps them across, so there is one stylesheet and the default
+    /// theme costs nothing.
     /// </remarks>
     public sealed record HtmlPalette(
         string Background, string Surface, string SurfaceAlt, string ScrollTrack,
@@ -453,8 +846,8 @@ public static partial class PackText
         string Text, string TextStrong, string TextSoft,
         string Link, string LinkHover)
     {
-        /// <summary>The colours the stylesheet is literally written in — replacing these with
-        /// themselves is a no-op, which is how the default theme stays byte-identical.</summary>
+        /// <summary>The colours the stylesheet is written in. Replacing these with themselves is a
+        /// no-op, so the default theme's output is unchanged.</summary>
         public static readonly HtmlPalette Default = new(
             Background: "#0B0D11", Surface: "#11141B", SurfaceAlt: "#181C25", ScrollTrack: "#14171F",
             Border: "#2E3445", BorderStrong: "#3A4254",
@@ -466,8 +859,8 @@ public static partial class PackText
         public bool IsDefault => this == Default;
     }
 
-    /// <summary>Maps the stylesheet's default colours onto the active palette. Case-sensitive on
-    /// purpose: every one of these appears in the CSS as an upper-case hex colour and nowhere else.</summary>
+    /// <summary>Maps the stylesheet's default colours onto the active palette. Case-sensitive because
+    /// each of these appears in the CSS as an upper-case hex colour and nowhere else.</summary>
     private static string Recolour(string html)
     {
         var p = HtmlPalette.Current;
@@ -487,7 +880,28 @@ public static partial class PackText
             .Replace(d.Link, p.Link);
     }
 
-    public static string WrapHtmlDocument(string? bodyHtml, bool interactive = true, bool runnableCommands = false, bool legacyIe = true)
+    /// <summary>The inline handlers the viewer's own command blocks use. They are allowed by hash in the
+    /// page's content security policy, so the markup and the policy share these strings.</summary>
+    private const string ToggleCommandHandler = "toggleMcCmd(this)";
+    private const string RunCommandHandler = "return mcRunCmd(this)";
+
+    /// <summary>Nonce for the scripts the launcher writes into its own description and editor pages.
+    /// One per process, so the same description always renders to the same document.</summary>
+    private static readonly string ScriptNonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18));
+
+    /// <summary>A content security policy meta tag that lets through the launcher's nonce-carrying
+    /// scripts and the given inline handlers, and nothing else that could run or leave the page.</summary>
+    private static string ContentSecurityPolicyMeta(IEnumerable<string> inlineHandlers)
+    {
+        var hashes = inlineHandlers.Distinct(StringComparer.Ordinal)
+            .Select(h => "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(h))) + "'");
+        var policy = "default-src 'none'; img-src http: https: data:; media-src http: https:; style-src 'unsafe-inline'; "
+                     + $"script-src 'nonce-{ScriptNonce}' 'unsafe-hashes' {string.Join(' ', hashes)}; "
+                     + "base-uri 'none'; form-action 'none'; frame-src 'none'; object-src 'none'";
+        return $"\n<meta http-equiv=\"Content-Security-Policy\" content=\"{policy}\"/>";
+    }
+
+    public static string WrapHtmlDocument(string? bodyHtml, bool interactive = true, bool runnableCommands = false, bool legacyIe = false)
     {
         bodyHtml ??= "";
         var script = interactive
@@ -551,11 +965,10 @@ public static partial class PackText
         var rewriteCall = runnableCommands && interactive
             ? "<script>rewriteMcCmdBlocks();</script>"
             : "";
-        // Drive scrolling from inside the Trident/IE document. The WPF WebBrowser
-        // hosts an HWND that swallows the mouse wheel before it can reach WPF
-        // (airspace), so routed PreviewMouseWheel handlers never fire over the
-        // page. Handling the wheel here scrolls <body> (the overflow:auto
-        // container) directly and cancels the default to avoid double-stepping.
+        // Drive scrolling from inside the Trident/IE document: the WPF WebBrowser's HWND
+        // swallows the mouse wheel before WPF sees it (airspace), so PreviewMouseWheel never
+        // fires over the page. This scrolls <body> (the overflow:auto container) directly and
+        // cancels the default to avoid double-stepping.
         var wheelScript =
             "<script>(function(){" +
             "function s(){var e=window.event||arguments[0];" +
@@ -568,13 +981,11 @@ public static partial class PackText
             "document.addEventListener('DOMMouseScroll',s,false);}" +
             "document.onmousewheel=s;" +
             "})();</script>";
-        // Spoiler support. The legacy IE/Trident host has no native <details> toggle,
-        // and CurseForge ships spoiler bodies with their inner HTML escaped (revealed by
-        // JS on their site) — so images and links inside show up as raw &lt;img&gt; text.
-        // For every <details>/.spoiler block: un-escape the body so the real tags render,
-        // then wire the <summary> as a click-to-toggle (open by default so content shows).
-        // &amp; is intentionally left escaped — browsers decode it fine inside href/src,
-        // and touching it would corrupt real links that happen to share the block.
+        // Spoiler support. The legacy IE host has no native <details> toggle, and CurseForge ships
+        // spoiler bodies with their inner HTML escaped (their site reveals them with JS), so images
+        // and links show up as raw &lt;img&gt; text. For each <details>/.spoiler block: un-escape the
+        // body, then wire the <summary> as a click-to-toggle (open by default). &amp; stays escaped:
+        // browsers decode it in href/src, and un-escaping it would corrupt real links in the block.
         var spoilerScript =
             "<script>(function(){" +
             "function ue(s){var t=s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'\"').replace(/&#39;/g,\"'\");" +
@@ -592,39 +1003,76 @@ public static partial class PackText
             "};})(sm[i]);}" +
             "})();</script>";
 
-        // Chromium (WebView2) path: same spoiler un-escape, but lean on the native <details>
-        // toggle instead of the IE manual wiring, and reveal spoilers by default so their
-        // images show. (CurseForge still ships spoiler bodies HTML-escaped, so the un-escape
-        // pass is needed in both engines.)
-        var spoilerScriptModern =
-            "<script>(function(){" +
-            "function ue(s){var t=s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'\"').replace(/&#39;/g,\"'\");" +
-            "return t.replace(/<(\\/?)(script|iframe|object|embed|link|meta)/gi,'&lt;$1$2');}" +
-            "var r=[],i,j,d=document.getElementsByTagName('details');" +
-            "for(i=0;i<d.length;i++)r.push(d[i]);" +
-            "var a=document.getElementsByTagName('*');" +
-            "for(j=0;j<a.length;j++){var c=' '+(a[j].className||'')+' ';if(c.indexOf('spoiler')!==-1)r.push(a[j]);}" +
-            "for(i=0;i<r.length;i++){try{var h=r[i].innerHTML;if(h&&h.indexOf('&lt;')!==-1)r[i].innerHTML=ue(h);}catch(e){}}" +
-            // Some authors' raw <img>/<a> tags arrive HTML-escaped and parse into literal text
-            // nodes (rendered as '<img ...>' text) anywhere in the body — not only inside a
-            // spoiler. Re-parse those text nodes; skip real <code>/<pre> so samples survive.
-            "function sk(el){while(el&&el.nodeType===1){var t=el.tagName.toLowerCase();" +
-            "if(t==='code'||t==='pre'||t==='textarea'||t==='script'||t==='style')return true;el=el.parentNode;}return false;}" +
-            "var re=/<(?:img|a|br|hr|b|i|u|strong|em|sup|sub|span|kbd|small)\\b[^<]*>/i;" +
-            "var tn=[],w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false),x;" +
-            "while(x=w.nextNode())tn.push(x);" +
-            "for(i=0;i<tn.length;i++){var nd=tn[i],tx=nd.nodeValue;" +
-            "if(!tx||tx.indexOf('<')===-1||!re.test(tx)||sk(nd.parentNode))continue;" +
-            "var safe=tx.replace(/<(\\/?)(script|iframe|object|embed|link|meta|base)/gi,'&lt;$1$2');" +
-            "var sp=document.createElement('span');sp.innerHTML=safe;nd.parentNode.replaceChild(sp,nd);}" +
-            "var dd=document.getElementsByTagName('details');" +
-            "for(i=0;i<dd.length;i++){try{dd[i].open=true;}catch(e){}}" +
-            "})();</script>";
+        // Chromium (WebView2) path: the same spoiler un-escape, but using the native <details>
+        // toggle, with spoilers open by default so their images show. Markup revived this way never
+        // went through SanitizeDescriptionHtml, so put() parses it into an inert template and clean()
+        // applies the same rules before it joins the page. Escaped <img>/<a> tags elsewhere in the
+        // body (which parse into literal text) are re-parsed the same way; real <code>/<pre> is
+        // skipped so samples survive.
+        var spoilerScriptModern = """
+            <script>(function(){
+            function ok(u,img){var s=String(u==null?'':u).replace(/[\u0000- \u007f]+/g,'').toLowerCase(),m=/^[^:\/?#]*/.exec(s)[0];
+            if(s.charAt(m.length)!==':')return true;
+            if(m==='http'||m==='https'||m==='mailto'||m==='cloudlauncher-cmd')return true;
+            return !!img&&s.indexOf('data:image/')===0;}
+            function okSet(v){var p=String(v).split(','),i,t;
+            for(i=0;i<p.length;i++){t=p[i].replace(/^\s+/,'').split(/\s+/)[0];if(t&&!ok(t,true))return false;}return true;}
+            function okCss(v){var s=String(v).replace(/\/\*[\s\S]*?\*\//g,''),q,m,re=/url\(\s*(['"]?)([\s\S]*?)\1\s*\)/gi;
+            if(s.indexOf('\\')>=0)return false;
+            q=s.replace(/[\u0000- ]+/g,'').toLowerCase();
+            if(/expression\(|javascript:|vbscript:|behavior:|-moz-binding|@import/.test(q))return false;
+            while((m=re.exec(s)))if(!ok(m[2],true))return false;return true;}
+            var DROP=/^(script|style|iframe|object|embed|applet|noscript|noembed|noframes|template|title|link|meta|base|form|input|button|frame|frameset|portal|fencedframe|isindex|keygen|param|bgsound|xmp|textarea|plaintext|animate|set|animatemotion|animatetransform|animatecolor|handler|listener)$/;
+            var NAV=/^(href|xlink:href|action|formaction)$/;
+            var RES=/^(src|poster|background|cite|data|codebase|longdesc|lowsrc|dynsrc|usemap|manifest|icon|profile|archive|classid)$/;
+            var GONE=/^(srcdoc|ping|download|xml:base|http-equiv|attributename)$/;
+            function clean(root){var els=root.querySelectorAll('*'),i,j,el,t,a,n,v,bad;
+            for(i=els.length-1;i>=0;i--){el=els[i];t=String(el.localName||'').toLowerCase();
+            if(DROP.test(t)){if(el.parentNode)el.parentNode.removeChild(el);continue;}
+            for(j=el.attributes.length-1;j>=0;j--){a=el.attributes[j];n=a.name.toLowerCase();v=a.value;
+            bad=n.indexOf('on')===0||GONE.test(n)||(n==='name'&&(t==='img'||t==='image'))
+            ||(NAV.test(n)&&!ok(v,false))||(RES.test(n)&&!ok(v,true))
+            ||((n==='srcset'||n==='imagesrcset')&&!okSet(v))||(n==='style'&&!okCss(v));
+            if(bad)el.removeAttribute(a.name);}}}
+            function put(el,html){var t=document.createElement('template');t.innerHTML=html;clean(t.content);
+            while(el.firstChild)el.removeChild(el.firstChild);el.appendChild(t.content);}
+            function ue(s){var t=s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+            return t.replace(/<(\/?)(script|iframe|object|embed|link|meta)/gi,'&lt;$1$2');}
+            var r=[],i,j,d=document.getElementsByTagName('details');
+            for(i=0;i<d.length;i++)r.push(d[i]);
+            var a=document.getElementsByTagName('*');
+            for(j=0;j<a.length;j++){var c=' '+(a[j].className||'')+' ';if(c.indexOf('spoiler')!==-1)r.push(a[j]);}
+            for(i=0;i<r.length;i++){try{var h=r[i].innerHTML;if(h&&h.indexOf('&lt;')!==-1)put(r[i],ue(h));}catch(e){}}
+            function sk(el){while(el&&el.nodeType===1){var t=el.tagName.toLowerCase();
+            if(t==='code'||t==='pre'||t==='textarea'||t==='script'||t==='style')return true;el=el.parentNode;}return false;}
+            var re=/<(?:img|a|br|hr|b|i|u|strong|em|sup|sub|span|kbd|small)\b[^<]*>/i;
+            var tn=[],w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false),x;
+            while(x=w.nextNode())tn.push(x);
+            for(i=0;i<tn.length;i++){var nd=tn[i],tx=nd.nodeValue;
+            if(!tx||tx.indexOf('<')===-1||!re.test(tx)||sk(nd.parentNode))continue;
+            var safe=tx.replace(/<(\/?)(script|iframe|object|embed|link|meta|base)/gi,'&lt;$1$2');
+            var sp=document.createElement('span');put(sp,safe);nd.parentNode.replaceChild(sp,nd);}
+            var dd=document.getElementsByTagName('details');
+            for(i=0;i<dd.length;i++){try{dd[i].open=true;}catch(e){}}
+            })();</script>
+            """;
+
+        // Every script the launcher writes into the page carries the per-process nonce, and the
+        // content security policy allows nothing else: no other script, frame, form target or
+        // connection, whatever a description contains.
+        var contentSecurityPolicy = "";
+        if (!legacyIe)
+        {
+            var open = $"<script nonce=\"{ScriptNonce}\">";
+            script = script.Replace("<script>", open);
+            rewriteCall = rewriteCall.Replace("<script>", open);
+            spoilerScriptModern = spoilerScriptModern.Replace("<script>", open);
+            contentSecurityPolicy = ContentSecurityPolicyMeta([ToggleCommandHandler, RunCommandHandler]);
+        }
 
         // IE needs a <details> element shim to make the tag stylable; Chromium has it natively.
-        // The extra body-level style gives a natively-collapsed spoiler the same ▸ marker the
-        // IE data-open path uses (kept out of the shared <style> so it can't fight IE, which
-        // never sets the [open] attribute).
+        // The extra body-level style gives a natively collapsed spoiler the same marker the IE
+        // data-open path uses. It is kept out of the shared <style> because IE never sets [open].
         var detailsShim = legacyIe
             ? "<script>try{document.createElement('details');document.createElement('summary');}catch(e){}</script>"
             : "";
@@ -632,18 +1080,16 @@ public static partial class PackText
             ? ""
             : "<style>details:not([open]) > summary:before{content:\"\\25B8  \"}</style>";
 
-        // The X-UA-Compatible meta tag must be one of the FIRST head children
-        // (per MS docs) — it forces the WPF WebBrowser host into Edge/IE11 mode
-        // even when the FEATURE_BROWSER_EMULATION registry tweak hasn't taken
-        // effect yet for this process. Without it, IE7 quirks mode silently
-        // drops <p> blocks that sit between inline anchors, which makes the
-        // rich-description text vanish around mc-cmd-run links.
+        // The X-UA-Compatible meta tag must be one of the first head children (per MS docs). It
+        // forces the WPF WebBrowser host into IE11 mode even before FEATURE_BROWSER_EMULATION takes
+        // effect for this process; IE7 quirks mode drops <p> blocks between inline anchors, which
+        // hides description text around mc-cmd-run links.
         return Recolour("""
                <!DOCTYPE html>
                <html><head>
                <meta http-equiv="X-UA-Compatible" content="IE=edge"/>
                <meta charset="utf-8"/>
-               """ + detailsShim + script + """
+               """ + contentSecurityPolicy + detailsShim + script + """
                <style>
                html {
                  margin: 0;
@@ -713,6 +1159,35 @@ public static partial class PackText
                pre code { background: transparent; padding: 0; }
                table { border-collapse: collapse; width: 100%; margin: 12px 0; }
                td, th { border: 1px solid #2E3445; padding: 6px 10px; }
+               th { background: #181C25; color: #EEF1F7; font-weight: 600; text-align: left; }
+               /* Checklists written in the editor. Spans rather than <input>, because the
+                  description sanitizer drops inputs - see SanitizeDescriptionHtml. */
+               ul.task-list { list-style: none; margin-left: 2px; padding-left: 0; }
+               ul.task-list li.task { display: flex; align-items: flex-start; gap: 9px; margin: 0 0 8px; }
+               li.task .task-box {
+                 flex: 0 0 auto;
+                 width: 16px;
+                 height: 16px;
+                 margin-top: 4px;
+                 border-radius: 5px;
+                 border: 1.5px solid #3A4254;
+                 background: #11141B;
+                 position: relative;
+               }
+               li.task.done .task-box { background: #5B9DF9; border-color: #5B9DF9; }
+               li.task.done .task-box:after {
+                 content: "";
+                 position: absolute;
+                 left: 4px;
+                 top: 1px;
+                 width: 4px;
+                 height: 8px;
+                 border-right: 2px solid #0B0D11;
+                 border-bottom: 2px solid #0B0D11;
+                 transform: rotate(40deg);
+               }
+               li.task.done .task-text { color: #5C6478; text-decoration: line-through; }
+               li.task .task-text { flex: 1; min-width: 0; }
                details {
                  border: 1px solid #2E3445;
                  border-radius: 10px;
@@ -785,152 +1260,17 @@ public static partial class PackText
                + modernStyle + "</body></html>";
     }
 
-    public static string WrapEditorDocument(string? bodyHtml)
-    {
-        bodyHtml = string.IsNullOrWhiteSpace(bodyHtml) ? "<p><br></p>" : PrepareEditorBodyHtml(bodyHtml);
-        var sb = new StringBuilder();
-        sb.Append("<!DOCTYPE html><html><head>");
-        sb.Append("<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"/>");
-        sb.Append("<meta charset=\"utf-8\"/>");
-        sb.Append(EditorScript);
-        sb.Append(Recolour(EditorStyles));
-        sb.Append("</head><body><div id=\"toolbar\">");
-        sb.Append("<button type=\"button\" title=\"Bold\" onclick=\"execFmt('bold')\"><b>B</b></button>");
-        sb.Append("<button type=\"button\" title=\"Italic\" onclick=\"execFmt('italic')\"><i>I</i></button>");
-        sb.Append("<button type=\"button\" title=\"Underline\" onclick=\"execFmt('underline')\"><u>U</u></button>");
-        sb.Append("<span class=\"sep\"></span>");
-        sb.Append("<button type=\"button\" title=\"Heading\" onclick=\"insertHeading(2)\">H</button>");
-        sb.Append("<button type=\"button\" title=\"Bullet list\" onclick=\"execFmt('insertUnorderedList')\">&#8226;</button>");
-        sb.Append("<button type=\"button\" title=\"Numbered list\" onclick=\"execFmt('insertOrderedList')\">1.</button>");
-        sb.Append("<button type=\"button\" title=\"Quote\" onclick=\"execFmt('formatBlock','blockquote')\">&ldquo;</button>");
-        sb.Append("<span class=\"sep\"></span>");
-        sb.Append("<button type=\"button\" title=\"Insert link\" class=\"wide-btn\" onclick=\"insertLink()\">Link</button>");
-        sb.Append("<button type=\"button\" class=\"wide-btn cmd-btn\" title=\"Insert command\" onclick=\"insertCommand()\">/cmd</button>");
-        sb.Append("</div><div id=\"editor-wrap\"><div id=\"editor\" class=\"content\" contenteditable=\"true\" ");
-        sb.Append("oninput=\"onEditorInput()\" onkeyup=\"onEditorKeyUp(event)\" onpaste=\"onEditorPaste()\">");
-        sb.Append(bodyHtml);
-        sb.Append("</div></div>");
-        sb.Append("<div id=\"modal-overlay\" class=\"modal-hidden\" tabindex=\"-1\" onclick=\"onModalOverlayClick(event)\">");
-        sb.Append("<div id=\"modal-dialog\" onclick=\"event.stopPropagation();\">");
-        sb.Append("<div id=\"modal-title\"></div>");
-        sb.Append("<div id=\"modal-fields\"></div>");
-        sb.Append("<div id=\"modal-actions\">");
-        sb.Append("<button type=\"button\" id=\"modal-cancel\" onclick=\"hideEditorModal(null)\">Cancel</button>");
-        sb.Append("<button type=\"button\" id=\"modal-ok\" onclick=\"submitEditorModal()\">Insert</button>");
-        sb.Append("</div></div></div></body></html>");
-        return sb.ToString();
-    }
-
-    private const string EditorScript =
-        "<script>" +
-        "var modalCallback=null;" +
-        "function notifyChanged(){try{window.external.NotifyChanged();}catch(e){}}" +
-        "function getSelectedText(){if(window.getSelection){var sel=window.getSelection();if(sel&&sel.rangeCount>0)return sel.toString();}if(document.selection&&document.selection.type!=='Control'){return document.selection.createRange().text;}return '';}" +
-        "function htmlEscape(value){return String(value||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}" +
-        "function insertHtml(html){var editor=document.getElementById('editor');editor.focus();try{if(document.execCommand('insertHTML',false,html))return true;}catch(e){}editor.innerHTML+=html;return true;}" +
-        "function execFmt(cmd,value){var editor=document.getElementById('editor');editor.focus();try{document.execCommand(cmd,false,value||null);}catch(e){}notifyChanged();}" +
-        "function insertHeading(level){execFmt('formatBlock','<H'+level+'>');}" +
-        "function showEditorModal(title,fields,okLabel,callback){" +
-        "var overlay=document.getElementById('modal-overlay');var titleEl=document.getElementById('modal-title');var fieldsEl=document.getElementById('modal-fields');var okBtn=document.getElementById('modal-ok');if(!overlay||!titleEl||!fieldsEl||!okBtn)return;" +
-        "modalCallback=callback;titleEl.textContent=title||'';okBtn.textContent=okLabel||'Insert';fieldsEl.innerHTML='';" +
-        "for(var i=0;i<fields.length;i++){" +
-        "var field=fields[i];var wrap=document.createElement('div');wrap.className='modal-field';" +
-        "var label=document.createElement('label');label.setAttribute('for','modal-field-'+i);label.textContent=field.label||'';wrap.appendChild(label);" +
-        "var input=document.createElement('input');input.type='text';input.id='modal-field-'+i;input.className=field.mono?'modal-input-mono':'';" +
-        "if(field.placeholder)input.placeholder=field.placeholder;input.value=field.value||'';" +
-        "input.onfocus=function(){this.select();};" +
-        "input.onkeydown=function(e){var key=e.keyCode||e.which;if(key===13){submitEditorModal();if(e.preventDefault)e.preventDefault();}else if(key===27){hideEditorModal(null);if(e.preventDefault)e.preventDefault();}};" +
-        "wrap.appendChild(input);fieldsEl.appendChild(wrap);}" +
-        "overlay.className='';applyEditorModalLayout();overlay.focus();setTimeout(function(){applyEditorModalLayout();var first=document.getElementById('modal-field-0');if(first){first.focus();first.select();}},0);}" +
-        "function hideEditorModal(result){var overlay=document.getElementById('modal-overlay');if(overlay)overlay.className='modal-hidden';var cb=modalCallback;modalCallback=null;if(cb)cb(result);}" +
-        "function readEditorModalValues(){var fieldsEl=document.getElementById('modal-fields');if(!fieldsEl)return null;var inputs=fieldsEl.getElementsByTagName('input');var values=[];for(var i=0;i<inputs.length;i++)values.push(inputs[i].value);return values;}" +
-        "function submitEditorModal(){hideEditorModal(readEditorModalValues());}" +
-        "function onModalOverlayClick(e){if(!e||e.target===document.getElementById('modal-overlay'))hideEditorModal(null);}" +
-        "function onModalKeyDown(e){if(!e||!modalCallback)return;var key=e.keyCode||e.which;if(key===27){hideEditorModal(null);if(e.preventDefault)e.preventDefault();}else if(key===13){submitEditorModal();if(e.preventDefault)e.preventDefault();}}" +
-        "function insertLink(){var selected=getSelectedText();showEditorModal('Insert link',[" +
-        "{label:'Link text',placeholder:'Display text',value:selected||''}," +
-        "{label:'URL',placeholder:'https://example.com',value:'https://'}" +
-        "],'Add link',function(values){" +
-        "if(!values)return;var text=(values[0]||'').replace(/^\\s+|\\s+$/g,'');var url=(values[1]||'').replace(/^\\s+|\\s+$/g,'');if(!url)return;if(!text)text=url;" +
-        "insertHtml('<a href=\"'+htmlEscape(url)+'\">'+htmlEscape(text)+'</a>');notifyChanged();});}" +
-        "function insertCommand(){showEditorModal('Insert command',[" +
-        "{label:'Button label',placeholder:'Run command',value:'Run command'}," +
-        "{label:'Minecraft command',placeholder:'give @p diamond',value:'give @p diamond',mono:true}" +
-        "],'/cmd',function(values){" +
-        "if(!values)return;var label=(values[0]||'').replace(/^\\s+|\\s+$/g,'');var command=(values[1]||'').replace(/^\\s+|\\s+$/g,'');if(!label||!command)return;" +
-        "if(command.charAt(0)!=='/')command='/'+command;var editor=document.getElementById('editor');editor.focus();" +
-        "var html='<div class=\"mc-cmd mc-cmd-editing\" contenteditable=\"false\"><div class=\"mc-cmd-head\">" +
-        "<span class=\"mc-cmd-label\" contenteditable=\"true\">'+label.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+" +
-        "'</span></div><div class=\"mc-cmd-body\"><code contenteditable=\"true\">'+command.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')+" +
-        "'</code></div></div><p><br></p>';insertHtml(html);notifyChanged();});}" +
-        "function onEditorInput(){notifyChanged();}" +
-        "function onEditorKeyUp(e){if(e&&(e.ctrlKey||e.metaKey))notifyChanged();}" +
-        "function onEditorPaste(){setTimeout(notifyChanged,0);}" +
-        "function initEditorModal(){var overlay=document.getElementById('modal-overlay');if(overlay)overlay.onkeydown=onModalKeyDown;}" +
-        "function applyEditorLayout(){" +
-        "var toolbar=document.getElementById('toolbar');var wrap=document.getElementById('editor-wrap');if(!wrap)return;" +
-        "document.documentElement.style.overflow='hidden';document.body.style.overflow='hidden';" +
-        "document.body.style.display='flex';document.body.style.flexDirection='column';document.body.style.height='100%';" +
-        "try{document.body.style.zoom='1';}catch(e){}" +
-        "function fixH(){try{" +
-        "var tbH=toolbar?toolbar.offsetHeight:0;" +
-        "var h=document.body.clientHeight-tbH;" +
-        "if(h>0){wrap.style.flex='none';wrap.style.height=h+'px';}" +
-        "}catch(e){}}" +
-        "fixH();setTimeout(fixH,0);}" +
-        "function applyEditorModalLayout(){try{var overlay=document.getElementById('modal-overlay');var dialog=document.getElementById('modal-dialog');var fields=document.getElementById('modal-fields');if(!overlay||!dialog||!fields)return;var h=document.body.clientHeight||document.documentElement.clientHeight||0;if(h<=0)return;var maxH=Math.max(220,Math.floor(h*0.88));dialog.style.maxHeight=maxH+'px';var used=dialog.offsetHeight-fields.offsetHeight;fields.style.maxHeight=Math.max(84,maxH-used-2)+'px';fields.style.overflowY='auto';}catch(e){}}" +
-        "window.onload=function(){applyEditorLayout();initEditorModal();};" +
-        "window.onresize=function(){applyEditorLayout();applyEditorModalLayout();};" +
-        "</script>";
-
-    private const string EditorStyles =
-        "<style>" +
-        ".content{padding:0}img{max-width:100%;height:auto;border-radius:10px;margin:14px 0;display:block}" +
-        "a{color:#5B9DF9;text-decoration:none}a:hover{text-decoration:underline}" +
-        "h1,h2,h3,h4{color:#EEF1F7;margin:20px 0 10px;font-weight:600}" +
-        "p,li{margin:0 0 10px}ul,ol{margin:0 0 14px 22px;padding:0}" +
-        "strong,b{color:#EEF1F7;font-weight:600}em,i{color:#C4CAD6}" +
-        "hr{border:none;border-top:1px solid #2E3445;margin:16px 0}" +
-        "blockquote{margin:14px 0;padding:12px 16px;border-left:3px solid #3A4254;background:#11141B;border-radius:0 10px 10px 0;color:#A8B0BF}" +
-        "code{font-family:Consolas,monospace;font-size:15px;background:#181C25;padding:2px 6px;border-radius:4px;color:#EEF1F7}" +
-        "pre{background:#11141B;border:1px solid #2E3445;border-radius:10px;padding:12px 14px;overflow-x:auto;margin:14px 0}" +
-        "pre code{background:transparent;padding:0}" +
-        ".mc-cmd:not(.mc-cmd-editing){margin:10px 0 14px;border:1px solid #2E3445;border-radius:10px;background:#11141B;overflow:hidden}" +
-        ".mc-cmd-editing{margin:4px 0}" +
-        ".mc-cmd-editing .mc-cmd-label{color:#5B9DF9;font-weight:600;text-decoration:underline;cursor:pointer;outline:none}" +
-        ".mc-cmd-editing:hover .mc-cmd-label{color:#8BB9FF}" +
-        ".mc-cmd-editing .mc-cmd-body{display:block;padding:2px 0 0 0}" +
-        ".mc-cmd-editing code{display:inline;outline:none;white-space:pre-wrap;word-break:break-word;font-size:13px;color:#5C6478;background:transparent;padding:0}" +
-        "html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#0B0D11;color:#A8B0BF;font-family:Segoe UI,sans-serif;font-size:18px;line-height:1.6}" +
-        "#toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:6px 10px;border-bottom:1px solid #2E3445;background:#0B0D11;flex-shrink:0;width:100%;box-sizing:border-box}" +
-        "#toolbar button{border:1px solid transparent;background:transparent;color:#C4CAD6;border-radius:6px;min-width:32px;height:26px;padding:0 8px;cursor:pointer;font-size:15px;font-family:Segoe UI,sans-serif;font-weight:600;line-height:1}" +
-        "#toolbar button.wide-btn{min-width:52px;padding:0 10px}" +
-        "#toolbar button:hover{background:#181C25;color:#EEF1F7;border-color:#2E3445}" +
-        "#toolbar .sep{width:1px;height:18px;background:#2E3445;margin:0 3px}" +
-        "#toolbar .cmd-btn{color:#5B9DF9;font-weight:700}" +
-        "#editor-wrap{flex:1;min-height:0;overflow:auto;overflow-x:hidden}" +
-        "#editor{min-height:0;padding:16px 18px 20px;outline:none;box-sizing:border-box;font-size:18px}" +
-        "#modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(7,9,12,0.72);display:flex;align-items:center;justify-content:center;z-index:1000;padding:18px;box-sizing:border-box}" +
-        "#modal-overlay.modal-hidden{display:none}" +
-        "#modal-dialog{width:520px;max-width:96%;background:#141820;border:1px solid #2E3445;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,0.45);padding:18px 20px 16px;font-size:15px;box-sizing:border-box;overflow:hidden}" +
-        "#modal-title{color:#EEF1F7;font-size:17px;font-weight:600;margin:0 0 14px}" +
-        "#modal-fields{overflow-y:auto;padding-right:2px}" +
-        ".modal-field{margin:0 0 12px}" +
-        ".modal-field label{display:block;color:#A8B0BF;font-size:13px;font-weight:600;margin:0 0 6px}" +
-        ".modal-field input{width:100%;box-sizing:border-box;background:#0B0D11;border:1px solid #2E3445;border-radius:8px;color:#EEF1F7;font-size:15px;padding:9px 11px;font-family:Segoe UI,sans-serif;outline:none}" +
-        ".modal-field input.modal-input-mono{font-family:Consolas,monospace;font-size:14px}" +
-        ".modal-field input:focus{border-color:#5B9DF9;box-shadow:0 0 0 2px rgba(91,157,249,0.25)}" +
-        "#modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;padding-top:4px}" +
-        "#modal-actions button{border-radius:8px;font-size:14px;font-weight:600;padding:8px 14px;cursor:pointer;font-family:Segoe UI,sans-serif;line-height:1.2}" +
-        "#modal-cancel{background:transparent;border:1px solid #2E3445;color:#C4CAD6}" +
-        "#modal-cancel:hover{background:#181C25;color:#EEF1F7;border-color:#3A4254}" +
-        "#modal-ok{background:#5B9DF9;border:1px solid #5B9DF9;color:#0B0D11}" +
-        "#modal-ok:hover{background:#7AB2FF;border-color:#7AB2FF}" +
-        "</style>";
-
     public static string PrepareEditorBodyHtml(string html)
     {
         if (string.IsNullOrWhiteSpace(html)) return "<p><br></p>";
+
+        // NormalizeEditorHtmlForSave strips contenteditable from everything on the way out, so
+        // a saved checklist comes back with a box the caret can be typed into and backspaced
+        // through. Put the guard back, the same way command blocks get theirs back below.
+        html = Regex.Replace(
+            html,
+            @"(?i)<span(?![^>]*\bcontenteditable\b)(?=[^>]*\bclass\s*=\s*""[^""]*\btask-box\b)",
+            "<span contenteditable=\"false\"");
 
         html = HtmlCommandBlockRegex().Replace(html, match =>
         {
@@ -947,10 +1287,9 @@ public static partial class PackText
             return RenderEditingCommandBlockHtml(label, command);
         });
 
-        // Recovery: re-render any editing-form blocks that survived a previous save
-        // (e.g. older versions saved them without converting back to the canonical form).
-        // This restores the contenteditable attributes so the user can edit the label
-        // and command again instead of seeing inert plain text.
+        // Recovery: re-render editing-form blocks left in saved HTML (older versions saved them
+        // without converting back to the canonical form), restoring contenteditable so the label
+        // and command can be edited again.
         return HtmlEditingCommandBlockRegex().Replace(html, match =>
         {
             var label = WebUtility.HtmlDecode(match.Groups[1].Value);
@@ -1054,7 +1393,7 @@ public static partial class PackText
             return "@@CLGUARD" + (guards.Count - 1) + "@@";
         }
 
-        // Command blocks → [label](/command). Cover canonical, legacy read-only and editing forms.
+        // Command blocks -> [label](/command). Cover canonical, legacy read-only and editing forms.
         s = HtmlCommandBlockRegex().Replace(s, m =>
             "\n\n" + Guard(CommandMarkdownLink(m.Groups[1].Value, m.Groups[2].Value)) + "\n\n");
         s = HtmlReadOnlyCommandBlockRegex().Replace(s, m =>
@@ -1072,11 +1411,11 @@ public static partial class PackText
             return "\n\n" + Guard("```\n" + code + "\n```") + "\n\n";
         });
 
-        // Inline code → `text`.
+        // Inline code -> `text`.
         s = Regex.Replace(s, @"(?is)<code[^>]*>(.*?)</code>", m =>
             Guard("`" + WebUtility.HtmlDecode(StripTags(m.Groups[1].Value)) + "`"));
 
-        // Images → ![alt](src) (before the link pass so the leading ! is preserved).
+        // Images -> ![alt](src) (before the link pass so the leading ! is preserved).
         s = Regex.Replace(s, @"(?is)<img\b[^>]*>", m =>
         {
             var src = AttributeValue(m.Value, "src");
@@ -1130,7 +1469,8 @@ public static partial class PackText
         return $"[{label}]({command})";
     }
 
-    /// <summary>Convert leftover inline tags to markdown. Does not HTML-decode — the caller decodes once.</summary>
+    /// <summary>Convert leftover inline tags to markdown. Does not HTML-decode; the caller decodes
+    /// once.</summary>
     private static string InlineHtmlToMarkdown(string html)
     {
         if (string.IsNullOrEmpty(html)) return "";
@@ -1314,7 +1654,8 @@ public static partial class PackText
     {
         html = "";
         length = 0;
-        var prefix = image ? "!(" : "[";
+        // Image syntax is ![alt](url), so an image starts with "![", not "!(".
+        var prefix = image ? "![" : "[";
         if (!text.AsSpan(start).StartsWith(prefix)) return false;
 
         var labelStart = start + prefix.Length;
@@ -1404,9 +1745,17 @@ public static partial class PackText
     [GeneratedRegex(@"^\[([^\]]+)\]:\s*(\S+)")]
     private static partial Regex ReferenceDefinitionRegex();
 
+    // &#106; &#x6A; and the same without the semicolon, which browsers still decode.
+    [GeneratedRegex(@"&#(?:[xX]([0-9a-fA-F]+)|([0-9]+));?")]
+    private static partial Regex NumericCharacterReferenceRegex();
+
+    // url(...) in an inline style. Group 2 is the target, quotes removed.
+    [GeneratedRegex(@"url\(\s*(['""]?)(.*?)\1\s*\)", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex CssUrlRegex();
+
     // A Minecraft command: a leading slash, a command word, then optional space-separated
-    // args. Deliberately does NOT match URL-ish hrefs like "/linkout?remoteUrl=..." or
-    // "/minecraft/mc-mods/sodium" (a '?' or '/' immediately after the command word fails).
+    // args. Doesn't match URL-like hrefs such as "/linkout?remoteUrl=..." or
+    // "/minecraft/mc-mods/sodium" (a '?' or '/' right after the command word fails).
     [GeneratedRegex(@"^/[A-Za-z][A-Za-z0-9_]*(?:\s.*)?$")]
     private static partial Regex MinecraftCommandTextRegex();
 
@@ -1421,11 +1770,10 @@ public static partial class PackText
     [GeneratedRegex("(?is)<a\\s+[^>]*href\\s*=\\s*\"(/[^\"]*)\"[^>]*>(.*?)</a>")]
     private static partial Regex HtmlCommandAnchorRegex();
 
-    // Canonical saved form: outer div has class containing 'mc-cmd' (but NOT 'mc-cmd-editing'),
-    // and contains a <button>, a <span class="mc-cmd-label">, a body div, and a <code>. Attribute
-    // order inside any tag is irrelevant — the IE legacy WebBrowser host frequently reorders
-    // attributes when serializing innerHTML, and the previous strict pattern would silently miss
-    // those, causing command blocks to lose their formatting on reload (and when sharing packs).
+    // Canonical saved form: outer div with a class containing 'mc-cmd' (but not 'mc-cmd-editing'),
+    // containing a <button>, a <span class="mc-cmd-label">, a body div and a <code>. Attribute
+    // order inside a tag doesn't matter: the legacy IE WebBrowser host reorders attributes when
+    // serializing innerHTML.
     [GeneratedRegex(
         "(?is)" +
         "<div\\b(?=[^>]*?\\bclass\\s*=\\s*[\"'](?:[^\"']*\\s)?mc-cmd(?:\\s[^\"']*)?[\"'])(?![^>]*?\\bclass\\s*=\\s*[\"'][^\"']*\\bmc-cmd-editing\\b)[^>]*>" +

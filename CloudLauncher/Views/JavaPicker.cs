@@ -10,9 +10,8 @@ public enum JavaChoiceKind { Auto, Install, Browse }
 /// <summary>One row of a Java runtime picker: automatic, a detected installation, or "browse".</summary>
 public sealed record JavaChoice(string Label, string? Path, JavaChoiceKind Kind);
 
-/// <summary>Shared plumbing for the two Java pickers (the launcher default in Settings and the
-/// per-instance override on a pack's Options tab): the same detected-installations list, the same
-/// file dialog, the same way of showing a stored path that isn't among the detected ones.</summary>
+/// <summary>Shared code for the two Java pickers: the launcher default in Settings and the
+/// per-instance override on a pack's Options tab.</summary>
 public static class JavaPicker
 {
     public static async Task<List<JavaChoice>> BuildChoicesAsync(string autoLabel, bool refresh = false)
@@ -23,7 +22,7 @@ public static class JavaPicker
         catch { installs = Array.Empty<LaunchService.JavaInstall>(); }
         foreach (var j in installs)
             list.Add(new JavaChoice($"Java {j.Major}  ·  {j.Path}{(j.Managed ? "   (downloaded by the launcher)" : "")}", j.Path, JavaChoiceKind.Install));
-        list.Add(new JavaChoice("Browse for java.exe…", null, JavaChoiceKind.Browse));
+        list.Add(new JavaChoice("Browse for java.exe...", null, JavaChoiceKind.Browse));
         return list;
     }
 

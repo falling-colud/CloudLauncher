@@ -74,12 +74,10 @@ public sealed record CreateModRequest(
 
 /// <summary>Patch for a hosted mod. Every property is optional; null leaves the stored value alone.</summary>
 /// <param name="McVersionsCsv">Replaces the mod's advertised Minecraft versions.</param>
-/// <param name="LoadersCsv">Replaces the mod's advertised loaders; normalised to lower case server-side.</param>
-/// <remarks>
-/// The two compatibility fields are editable here because uploading a version was previously the
-/// only thing that could write them: a mod created against the wrong Minecraft version stayed wrong
-/// forever, and the only way to correct it was to upload a file that said otherwise.
-/// </remarks>
+/// <param name="LoadersCsv">Replaces the mod's advertised loaders; normalised to lower case
+/// server-side.</param>
+/// <remarks>Compatibility is editable here so a mod created with the wrong Minecraft version can be
+/// corrected without uploading a new file.</remarks>
 public sealed record UpdateModRequest(
     string? Name,
     string? Summary,
@@ -98,13 +96,8 @@ public sealed record CreateModVersionRequest(
 
 /// <summary>Patch for one uploaded version of a hosted mod. Every property is optional; null leaves
 /// the stored value alone.</summary>
-/// <remarks>
-/// A version could previously only be uploaded or deleted. Correcting a typo in the version string,
-/// a changelog written in a hurry, or a channel set to "release" by accident therefore meant deleting
-/// the file and uploading the same bytes again under a new id — which broke every link to the old one
-/// and lost its publish date. Patching leaves the blob, the id and the publish date alone and edits
-/// only what the owner typed.
-/// </remarks>
+/// <remarks>Edits metadata in place, keeping the blob, id and publish date, so fixing a typo doesn't
+/// mean re-uploading the file under a new id.</remarks>
 public sealed record UpdateModVersionRequest(
     string? VersionString = null,
     string? Changelog = null,
@@ -113,12 +106,9 @@ public sealed record UpdateModVersionRequest(
     string? LoadersCsv = null);
 
 /// <summary>How <c>GET /mods/browse</c> orders its results.</summary>
-/// <remarks>
-/// Sent as a plain string rather than an enum so an older server that does not know the parameter
-/// ignores it, and a newer client asking for a mode this server has never heard of falls back to the
-/// default instead of erroring. Only the CloudLauncher sources honour it — CurseForge and Modrinth
-/// results arrive in the store's own order.
-/// </remarks>
+/// <remarks>A plain string rather than an enum, so older servers ignore it and unknown modes fall
+/// back to the default instead of erroring. Only the CloudLauncher sources honour it; CurseForge
+/// and Modrinth results keep the store's own order.</remarks>
 public static class ModBrowseSort
 {
     public const string Updated = "updated";

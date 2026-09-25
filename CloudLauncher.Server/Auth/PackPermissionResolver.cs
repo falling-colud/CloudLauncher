@@ -33,6 +33,12 @@ public class PackPermissionResolver(AppDbContext db)
         foreach (var p in teamPerms)
             perms |= p;
 
+        // Team visibility grants what Public grants, but only to members of a team the pack is shared
+        // with, whatever that team's own grant is. It adds ReadOnly rather than Full so a View-only team
+        // is not upgraded.
+        if (pack.Visibility == PackVisibility.Team && teamPerms.Count > 0)
+            perms |= PackPermissions.ReadOnly;
+
         return perms;
     }
 }

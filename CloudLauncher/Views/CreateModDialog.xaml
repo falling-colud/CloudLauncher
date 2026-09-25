@@ -1,6 +1,7 @@
 <Window x:Class="CloudLauncher.Views.CreateModDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:slate="clr-namespace:CloudLauncher.Controls"
         xmlns:anim="clr-namespace:CloudLauncher.Animations"
         Title="Create mod" Width="520" Height="660"
         WindowStartupLocation="CenterOwner"
@@ -17,7 +18,7 @@
         <StackPanel Grid.Row="0" Margin="0,0,0,16">
             <TextBlock Style="{StaticResource H2}" Text="Create a mod"/>
             <TextBlock Style="{StaticResource Muted}"
-                       Text="Set up the project shell — you can upload the first version now or later."/>
+                       Text="Set up the project shell - you can upload the first version now or later."/>
         </StackPanel>
 
         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto"
@@ -36,7 +37,7 @@
                 <TextBox x:Name="DescriptionBox" Margin="0,0,0,12" MaxLength="4096"
                          AcceptsReturn="True" TextWrapping="Wrap"
                          VerticalScrollBarVisibility="Auto" MinHeight="80" MaxHeight="140"
-                         ToolTip="The long text shown on the mod's page — Markdown is rendered"/>
+                         ToolTip="The long text shown on the mod's page - Markdown is rendered"/>
 
                 <TextBlock Style="{StaticResource Caption}" Text="Visibility" Margin="0,0,0,4"/>
                 <ComboBox x:Name="VisibilityBox" Margin="0,0,0,12"
@@ -63,19 +64,19 @@
                               Checked="OnFormCheckedChanged" Unchecked="OnFormCheckedChanged"/>
                 </StackPanel>
 
-                <!-- Optional first jar. Kept optional on purpose: the mod page is useful on its own
-                     (collaborators, visibility), and the upload card opens straight after Create. -->
-                <Border Background="{DynamicResource Surface1Brush}"
+                <!-- Optional first jar: the mod page is useful on its own (collaborators,
+                visibility), and the upload card opens right after Create. -->
+                <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
                         BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
                         CornerRadius="6" Padding="12">
                     <DockPanel>
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="10,0,0,0"
                                     VerticalAlignment="Center">
                             <Button x:Name="ClearJarButton" Style="{StaticResource IconButton}"
-                                    Content="&#xE711;" FontFamily="{StaticResource IconFont}" FontSize="12"
+                                    Content="&#xE711;" FontFamily="{DynamicResource IconFont}" FontSize="12"
                                     Click="OnClearFirstJar" Visibility="Collapsed"
                                     ToolTip="Don't upload a jar yet"/>
-                            <Button Content="Choose jar…" Click="OnPickFirstJar" Padding="12,5" MinWidth="0"/>
+                            <Button Content="Choose jar..." Click="OnPickFirstJar" Padding="12,5" MinWidth="0"/>
                         </StackPanel>
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock Style="{StaticResource Caption}" Text="First version (optional)"
@@ -86,7 +87,7 @@
                                        Text="Pick a jar and the upload dialog opens once the mod exists."/>
                         </StackPanel>
                     </DockPanel>
-                </Border>
+                </slate:SlateBorder>
 
                 <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" Margin="0,14,0,0"
                            TextWrapping="Wrap"/>

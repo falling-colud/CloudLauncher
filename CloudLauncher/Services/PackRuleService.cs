@@ -5,7 +5,7 @@ using Microsoft.Extensions.FileSystemGlobbing;
 
 namespace CloudLauncher.Services;
 
-// Keep these local types — they match the Shared DTOs by value so JSON serialization
+// Keep these local types; they match the Shared DTOs by value so JSON serialization
 // works in both directions. The shared PackRule is the wire DTO; this is the service model.
 
 public enum RuleAction
@@ -23,8 +23,8 @@ public sealed class PackRule
     [JsonIgnore]
     public string ActionLabel => Action switch
     {
-        RuleAction.Local   => "→ local",
-        RuleAction.Shared  => "→ shared",
+        RuleAction.Local   => "> local",
+        RuleAction.Shared  => "> shared",
         RuleAction.Ignored => "ignored",
         _                  => ""
     };
@@ -58,18 +58,18 @@ public sealed class PackRuleService
         Path.Combine(packRoot, ".rules.json");
 
     /// <summary>Pull the admin-defined global default rules from the server and
-    /// cache them locally. Safe to call at startup — silently no-ops on network
-    /// failure so first-time/offline launches still work from the local cache.</summary>
+    /// cache them locally. Safe to call at startup: does nothing on network failure,
+    /// so first-time/offline launches still work from the local cache.</summary>
     public async Task SyncGlobalDefaultsFromServerAsync(CancellationToken ct = default)
     {
         try
         {
             var resp = await _api.GetDefaultRulesAsync(ct);
-            if (resp.Rules.Count == 0) return; // no admin override yet — keep local
+            if (resp.Rules.Count == 0) return; // no admin override yet; keep local
             var local = resp.Rules.Select(PackRule.FromShared).ToList();
             SaveGlobalDefaults(local);
         }
-        catch { /* offline / not logged in — fall back to last cached copy */ }
+        catch { /* offline or not logged in: fall back to the last cached copy */ }
     }
 
     /// <summary>Admin-only: push the global default rules to the server. The local
@@ -92,7 +92,7 @@ public sealed class PackRuleService
         }
         catch { /* corrupt */ }
 
-        // No pack-specific rules yet — fall back to global defaults if they exist.
+        // No pack-specific rules yet; fall back to global defaults if they exist.
         return LoadGlobalDefaults() ?? new();
     }
 
@@ -102,7 +102,7 @@ public sealed class PackRuleService
     /// </summary>
     public void SyncFromServer(string packRoot, IReadOnlyList<CloudLauncher.Shared.PackFileRule> serverRules)
     {
-        if (serverRules.Count == 0) return; // nothing on server yet — keep local copy
+        if (serverRules.Count == 0) return; // nothing on server yet; keep local copy
         var local = serverRules.Select(PackRule.FromShared).ToList();
         Save(packRoot, local);
     }
@@ -144,10 +144,9 @@ public sealed class PackRuleService
     }
 
     /// <summary>
-    /// Match a relative path against the rule list. The most specific matching rule wins —
-    /// a deeper/longer pattern (e.g. <c>mods/1.12.2/</c>) overrides a broader one (<c>mods/</c>)
-    /// regardless of list order, so nested overrides and carve-out exceptions behave intuitively.
-    /// Among equally specific matches, the earlier rule in the list wins.
+    /// Match a relative path against the rule list. The most specific matching rule wins: a
+    /// deeper/longer pattern (e.g. <c>mods/1.12.2/</c>) overrides a broader one (<c>mods/</c>)
+    /// regardless of list order. Among equally specific matches, the earlier rule in the list wins.
     /// </summary>
     public RuleMatchResult Match(string relativePath, List<PackRule> rules)
     {
@@ -160,7 +159,7 @@ public sealed class PackRuleService
         {
             if (!Matches(norm, rule.Pattern)) continue;
             var score = Specificity(rule.Pattern);
-            if (score > bestScore) // strictly greater → ties keep the earlier rule
+            if (score > bestScore) // strictly greater, so ties keep the earlier rule
             {
                 best = rule;
                 bestScore = score;
@@ -194,7 +193,7 @@ public sealed class PackRuleService
     }
 
     /// <summary>Public form of the rule matcher so other policies (see <see cref="PrivateAssetPolicy"/>)
-    /// use exactly the pattern semantics the rules editor documents: trailing <c>/</c> = whole folder,
+    /// use the same pattern semantics the rules editor documents: trailing <c>/</c> = whole folder,
     /// no wildcard = exact path, otherwise a glob.</summary>
     public static bool PatternMatches(string relativePath, string pattern) =>
         Matches(relativePath.Replace('\\', '/'), pattern);
@@ -203,25 +202,61 @@ public sealed class PackRuleService
     {
         if (string.IsNullOrEmpty(pattern)) return false;
 
-        // Normalise pattern
+        var compiled = CompiledPatterns.GetOrAdd(pattern, Compile);
+        if (compiled.Exact is { } exact)
+            return string.Equals(path, exact, StringComparison.OrdinalIgnoreCase);
+        if (compiled.Prefix is { } prefix)
+            return path.Length > prefix.Length && path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
+        return compiled.Glob!.Match(path).HasMatches;
+    }
+
+    /// <summary>
+    /// A pattern in the form it is actually tested in, cached per pattern string: classifying an
+    /// instance runs every rule against every file, and building a glob matcher per pair dominated
+    /// that cost.
+    /// </summary>
+    /// <remarks>Three shapes, as documented in the rules editor: a plain folder with a trailing
+    /// <c>/</c> is a "starts with" test (most rules), a pattern without wildcards is an exact compare,
+    /// and anything else uses FileSystemGlobbing. A built <see cref="Matcher"/> is read-only, so
+    /// sharing one across threads is safe.</remarks>
+    private sealed class CompiledPattern
+    {
+        public string? Exact;
+        public string? Prefix;
+        public Matcher? Glob;
+    }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CompiledPattern> CompiledPatterns =
+        new(StringComparer.Ordinal);
+
+    private static CompiledPattern Compile(string pattern)
+    {
         var p = pattern.Replace('\\', '/');
 
-        // Folder prefix shorthand: pattern ends with '/' → match everything inside
+        // Folder prefix shorthand: a trailing '/' matches everything inside
         if (p.EndsWith('/'))
+        {
+            var folder = p;
             p += "**";
+            // Only a plain folder path is a prefix test; "./x/", "/x/" and anything with a wildcard
+            // keep the glob engine's own reading of them.
+            if (folder.IndexOfAny(Wildcards) < 0 && !folder.StartsWith('/') &&
+                !folder.Split('/').Any(segment => segment is "." or ".."))
+                return new CompiledPattern { Prefix = folder };
+        }
 
-        // If the pattern contains no wildcard, treat it as exact match
+        // No wildcard: exact match
         if (!p.Contains('*') && !p.Contains('?'))
-            return string.Equals(path, p, StringComparison.OrdinalIgnoreCase);
+            return new CompiledPattern { Exact = p };
 
         // Use FileSystemGlobbing for wildcard patterns
         var matcher = new Matcher(StringComparison.OrdinalIgnoreCase);
         matcher.AddInclude(p);
-        return matcher.Match(path).HasMatches;
+        return new CompiledPattern { Glob = matcher };
     }
 
     /// <summary>
-    /// Apply rules to a list of relative paths, returning those that are NOT ignored,
+    /// Apply rules to a list of relative paths, returning those that are not ignored,
     /// each annotated with its match result.
     /// </summary>
     public List<(string RelativePath, RuleMatchResult Match)> Apply(

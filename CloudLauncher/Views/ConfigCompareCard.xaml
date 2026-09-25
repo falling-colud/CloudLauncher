@@ -1,11 +1,11 @@
 <UserControl x:Class="CloudLauncher.Views.ConfigCompareCard"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
              xmlns:anim="clr-namespace:CloudLauncher.Animations">
     <UserControl.Resources>
-        <!-- The tint behind an added or removed line. Drawn as a separate rectangle rather than as the
-             row's own background so the line's text keeps full contrast, and themed with
-             DynamicResource so a theme switch repaints an open diff. -->
+        <!-- Tint behind an added or removed line. A separate rectangle keeps the text at full contrast,
+        and DynamicResource repaints an open diff on a theme switch. -->
         <Style x:Key="DiffTint" TargetType="Rectangle">
             <Setter Property="Fill" Value="Transparent"/>
             <Setter Property="Opacity" Value="0.18"/>
@@ -36,15 +36,19 @@
         </Style>
     </UserControl.Resources>
 
-    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+    <!--  Fixed size and shadow are for the floating card. Embed() strips both when the control is
+    hosted in a page pane.  -->
+    <slate:SlateBorder x:Name="CardRoot"
+            Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="22" Width="1040" Height="680">
-        <Border.Effect>
+        <slate:SlateBorder.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
-        </Border.Effect>
+        </slate:SlateBorder.Effect>
         <DockPanel>
             <DockPanel DockPanel.Dock="Top">
-                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;"
-                        FontFamily="{StaticResource IconFont}" FontSize="13" Click="OnClose"
+                <Button x:Name="CloseIconButton"
+                        DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;"
+                        FontFamily="{DynamicResource IconFont}" FontSize="13" Click="OnClose"
                         VerticalAlignment="Top" ToolTip="Close (Esc)"/>
                 <StackPanel>
                     <TextBlock x:Name="TitleLabel" Style="{StaticResource H2}" TextTrimming="CharacterEllipsis"/>
@@ -61,17 +65,17 @@
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0">
-                    <TextBlock Style="{StaticResource Caption}" Text="LEFT — the file as it is here"
+                    <TextBlock Style="{StaticResource Caption}" Text="LEFT - the file as it is here"
                                FontWeight="SemiBold" Foreground="{DynamicResource DangerBrush}"/>
                     <ComboBox x:Name="LeftBox" Margin="0,4,0,0" DisplayMemberPath="Label"
                               SelectionChanged="OnSideChanged"
                               ToolTip="Removed lines come from this instance"/>
                 </StackPanel>
                 <Button Grid.Column="1" Style="{StaticResource IconButton}" Content="&#xE8AB;"
-                        FontFamily="{StaticResource IconFont}" FontSize="13" Click="OnSwap"
+                        FontFamily="{DynamicResource IconFont}" FontSize="13" Click="OnSwap"
                         VerticalAlignment="Bottom" Margin="0,0,0,2" ToolTip="Swap the two sides"/>
                 <StackPanel Grid.Column="2">
-                    <TextBlock Style="{StaticResource Caption}" Text="RIGHT — compared against this"
+                    <TextBlock Style="{StaticResource Caption}" Text="RIGHT - compared against this"
                                FontWeight="SemiBold" Foreground="{DynamicResource SuccessBrush}"/>
                     <ComboBox x:Name="RightBox" Margin="0,4,0,0" DisplayMemberPath="Label"
                               SelectionChanged="OnSideChanged"
@@ -90,12 +94,13 @@
                     <Button x:Name="CopyRightButton" Content="Copy right over left" Click="OnCopyRightToLeft"
                             Margin="0,0,8,0" Padding="12,5"
                             ToolTip="Replace the left instance's file with the right one. The replaced file is backed up first."/>
-                    <Button Content="Close" Style="{StaticResource AccentButton}" Click="OnClose" Padding="16,5"/>
+                    <Button x:Name="CloseButton" Content="Close" Style="{StaticResource AccentButton}"
+                            Click="OnClose" Padding="16,5"/>
                 </StackPanel>
             </Grid>
 
             <!-- The diff -->
-            <Border Margin="0,14,0,0" CornerRadius="8"
+            <slate:SlateBorder Margin="0,14,0,0" CornerRadius="8"
                     Background="{DynamicResource LogBackgroundBrush}"
                     BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1">
                 <Grid>
@@ -138,7 +143,7 @@
 
                     <StackPanel x:Name="SameState" HorizontalAlignment="Center" VerticalAlignment="Center"
                                 MaxWidth="440" Visibility="Collapsed">
-                        <TextBlock x:Name="SameGlyph" Text="&#xE73E;" FontFamily="{StaticResource IconFont}"
+                        <TextBlock x:Name="SameGlyph" Text="&#xE73E;" FontFamily="{DynamicResource IconFont}"
                                    FontSize="30" HorizontalAlignment="Center"
                                    Foreground="{DynamicResource SuccessBrush}"/>
                         <TextBlock x:Name="SameTitle" Style="{StaticResource H3}" Text="These files are identical"
@@ -147,7 +152,7 @@
                                    TextAlignment="Center"/>
                     </StackPanel>
                 </Grid>
-            </Border>
+            </slate:SlateBorder>
         </DockPanel>
-    </Border>
+    </slate:SlateBorder>
 </UserControl>

@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Signs launcher update packages. Windows only: the release key is kept with DPAPI. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>cl-signer</AssemblyName>
+    <RootNamespace>CloudLauncher.Signer</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- ProtectedData (DPAPI) ships with the Windows desktop runtime, so no packages are needed. -->
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The launcher's own verifier and the types it needs, so a release is checked here by the same
+         code that checks it before an install. -->
+    <Compile Include="..\..\..\CloudLauncher\Services\UpdateVerifier.cs" Link="Linked\UpdateVerifier.cs" />
+    <Compile Include="..\..\..\CloudLauncher\Services\AppVersion.cs" Link="Linked\AppVersion.cs" />
+    <Compile Include="..\..\..\CloudLauncher.Shared\Launcher.cs" Link="Linked\Launcher.cs" />
+  </ItemGroup>
+
+</Project>

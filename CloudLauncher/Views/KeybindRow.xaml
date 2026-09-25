@@ -10,7 +10,7 @@
                 Padding="12,6" MinHeight="32"
                 ToolTip="Click then press a key to rebind"
                 HorizontalContentAlignment="Center">
-            <TextBlock x:Name="KeyDisplay" Text="—" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+            <TextBlock x:Name="KeyDisplay" Text="-" FontFamily="{DynamicResource MonoFont}" FontSize="12"/>
         </Button>
     </DockPanel>
 </UserControl>

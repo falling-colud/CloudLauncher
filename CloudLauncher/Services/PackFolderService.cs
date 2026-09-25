@@ -7,45 +7,64 @@ using Microsoft.Win32.SafeHandles;
 
 namespace CloudLauncher.Services;
 
+/// <summary>What <see cref="PackFolderService.LinkOrCopyFile"/> ended up doing.</summary>
+public enum FileLinkOutcome
+{
+    /// <summary>The destination was already this same file. Nothing was written.</summary>
+    AlreadySameFile = 0,
+    /// <summary>A hard link: one copy of the bytes, two directory entries.</summary>
+    Linked,
+    /// <summary>The filesystem refused a link (another volume, non-NTFS), so the bytes
+    /// were copied.</summary>
+    Copied,
+    /// <summary>Something else was already in the way and overwriting was not allowed.</summary>
+    Blocked
+}
+
 public sealed class PackFolderService(AppSettings settings, ApiClient api)
 {
     private PackAssetService? _assets;
     public void SetPackAssets(PackAssetService assets) => _assets = assets;
 
-    // Set via setter (not ctor) because ModMetadataService already depends on this service —
-    // a ctor dependency would be a cycle. Used to drop the cached mods.json after a sync pulls a
-    // collaborator's newer copy, so their flags aren't shadowed by our stale in-memory doc.
+    // Set via a setter like the ones below: the library is built on top of this service, so it cannot
+    // be a constructor argument. Optional; when null, nothing is held back at the sync boundary.
+    private ContentLibraryService? _library;
+    public void SetLibrary(ContentLibraryService library) => _library = library;
+
+    // Set via a setter because ModMetadataService depends on this service. Lets a sync drop the cached
+    // mods.json after pulling a collaborator's newer copy, so our stale in-memory copy does not win.
     private ModMetadataService? _modMetadata;
     public void SetModMetadata(ModMetadataService metadata) => _modMetadata = metadata;
 
-    /// <summary>Same cycle-breaking setter for the planning boards (plans.json lives beside mods.json).</summary>
+    /// <summary>Same cycle-breaking setter for the planning boards (plans.json lives beside
+    /// mods.json).</summary>
     private ModPlanService? _modPlans;
     public void SetModPlans(ModPlanService plans) => _modPlans = plans;
 
-    /// <summary>Resolves <paramref name="relative"/> under <paramref name="gameDir"/> and
-    /// guarantees the result stays inside the pack's game directory. Manifest relative paths
-    /// originate from whoever uploaded the shared pack and are untrusted; without this guard a
-    /// crafted <c>..</c>/rooted path would let a malicious manifest write or delete files
-    /// outside the pack folder (zip-slip / arbitrary file write) on every subscriber that
-    /// syncs. Throws when the path escapes containment. Defense-in-depth alongside the
-    /// server-side validation in SyncController.</summary>
-    private static string SafeResolve(string gameDir, string relative)
+    /// <summary>Resolves <paramref name="relative"/> under <paramref name="gameDir"/>, or returns
+    /// null when it is not a plain relative path that stays inside the pack's game directory.
+    /// Manifest paths come from whoever uploaded the shared pack, so they are checked here as well
+    /// as in SyncController.</summary>
+    private static string? SafeResolve(string gameDir, string? relative) =>
+        PathSafety.ResolveInside(gameDir, relative);
+
+    /// <summary>True for a lower- or upper-case hex SHA-256, the only hash the
+    /// manifest carries.</summary>
+    private static bool IsSha256Hex(string? hash) =>
+        hash is { Length: 64 } && hash.All(Uri.IsHexDigit);
+
+    /// <summary>A manifest path as it can safely appear in a log line.</summary>
+    private static string Printable(string? path)
     {
-        var rootFull = Path.GetFullPath(gameDir);
-        var full = Path.GetFullPath(Path.Combine(rootFull, relative.Replace('/', Path.DirectorySeparatorChar)));
-        var prefix = rootFull.EndsWith(Path.DirectorySeparatorChar) ? rootFull : rootFull + Path.DirectorySeparatorChar;
-        if (!full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(full, rootFull, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException($"Sync entry escapes the pack folder and was rejected: '{relative}'");
-        return full;
+        if (path is null) return "(none)";
+        var s = new string(path.Select(c => char.IsControl(c) ? '?' : c).ToArray());
+        return s.Length > 120 ? s[..120] + "..." : s;
     }
 
     // ── folder resolution ────────────────────────────────────────────────────
 
-    // In-memory cache: packId → absolute pack root path.
-    // ConcurrentDictionary because PackRoot() is called from the UI thread and from Task.Run
-    // workers (mod inventory scans, manifest hashing, sync) — a plain Dictionary can corrupt
-    // or throw under concurrent writes.
+    // In-memory cache: packId -> absolute pack root path. Concurrent because PackRoot() is called
+    // from the UI thread and from background workers (mod scans, manifest hashing, sync).
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, string> _rootCache = new();
 
     /// <summary>
@@ -53,7 +72,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
     /// Lookup order:
     ///   1. In-memory cache
     ///   2. Scan packs/ for a folder whose .packid matches the ID   (named folders)
-    ///   3. Legacy fallback — folder named after the raw GUID        (old packs)
+    ///   3. Legacy fallback: folder named after the raw GUID       (old packs)
     /// If none found and <paramref name="name"/> is provided, creates a new named folder.
     /// </summary>
     public string PackRoot(Guid packId, string? name = null)
@@ -69,7 +88,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             return found;
         }
 
-        // 2. Legacy: folder named after the GUID (e.g. existing packs before this change)
+        // 2. Legacy: folder named after the GUID (packs created by older versions)
         var legacy = Path.Combine(settings.PacksRoot, packId.ToString("N"));
         if (Directory.Exists(legacy))
         {
@@ -86,16 +105,10 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         return root;
     }
 
-    /// <summary>Forgets every resolved pack root so the next lookup scans the current PacksRoot.</summary>
-    /// <remarks>
-    /// <para>The cache is a per-session map of pack id to absolute path, and every entry in it was
-    /// resolved against whatever <c>settings.PacksRoot</c> said at the time. Point the launcher at a
-    /// different instances folder and every cached entry is a path into the old one — which is why
-    /// changing the folder used to end in "restart CloudLauncher". Clearing it is enough: the next
-    /// <see cref="PackRoot"/> re-scans for the <c>.packid</c> marker under the new root.</para>
-    /// <para>Only call this when the root itself has changed. Dropping the cache is otherwise pure
-    /// cost — every pack has to be found by scanning directories again.</para>
-    /// </remarks>
+    /// <summary>Forgets every resolved pack root so the next lookup scans the current
+    /// PacksRoot.</summary>
+    /// <remarks>Call it when the instances folder changes, since cached paths point into the old
+    /// one. Otherwise it only costs a rescan.</remarks>
     public void InvalidateRootCache() => _rootCache.Clear();
 
     /// <summary>Creates and registers a new named pack folder.</summary>
@@ -115,32 +128,28 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         return path;
     }
 
-    /// <summary>Renames the on-disk pack folder to match a new instance name. Folders are
-    /// located by their <c>.packid</c> marker, so this is purely cosmetic — keeping the folder
-    /// name in step with the instance name. It is best-effort: if the folder can't be moved
-    /// (e.g. it's locked because the instance is running, or a same-named folder already
-    /// exists for another instance), the old folder is left in place and the new name still
-    /// applies server-side. Returns the resulting absolute root path. Renaming within the same
-    /// PacksRoot is a same-volume metadata rename, so it is fast and synchronous.</summary>
+    /// <summary>Renames the on-disk pack folder to match a new instance name. Cosmetic only, since
+    /// folders are found by their <c>.packid</c> marker. Best effort: if the folder is locked
+    /// (instance running) or the name is taken, the old folder stays. Returns the resulting
+    /// absolute root path.</summary>
     public string TryRenameFolder(Guid packId, string newName)
     {
         string current;
         try { current = PackRoot(packId); }
-        catch { return ""; } // no folder exists yet — nothing to rename
+        catch { return ""; } // no folder exists yet, nothing to rename
 
         var parent = settings.PacksRoot;
         var slug = Slugify(newName);
         var target = Path.Combine(parent, slug);
 
-        // Already named correctly — just make sure the marker file is present.
+        // Already named correctly; just make sure the marker file is present.
         if (string.Equals(Path.GetFullPath(current), Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
         {
             EnsurePackIdFile(current, packId);
             return current;
         }
 
-        // Collision with a different instance's folder — disambiguate with a short id suffix
-        // (mirrors CreateNamedFolder).
+        // Collision with another instance's folder: add a short id suffix (as CreateNamedFolder does).
         if (Directory.Exists(target))
             target = Path.Combine(parent, $"{slug}-{packId:N}"[..(slug.Length + 9)]);
 
@@ -149,7 +158,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             Directory.CreateDirectory(parent);
             Directory.Move(current, target);
         }
-        catch (IOException) { return current; }                 // locked (running instance) — keep old name
+        catch (IOException) { return current; }                 // locked (running instance), keep old name
         catch (UnauthorizedAccessException) { return current; }
 
         EnsurePackIdFile(target, packId);
@@ -184,8 +193,11 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         var s = new string(name.Select(c => invalid.Contains(c) || c == '\\' || c == '/' ? '-' : c).ToArray());
         s = Regex.Replace(s, @"\s+", "-");
         s = Regex.Replace(s, @"-{2,}", "-");
-        s = s.Trim('-').ToLowerInvariant();
-        return string.IsNullOrEmpty(s) ? "pack" : s;
+        // Pack names come from whoever owns the pack. Win32 drops trailing dots, so "." and ".." end up
+        // empty here, and a device name such as "con" is kept readable but made into a plain name.
+        s = s.Trim('-').ToLowerInvariant().TrimEnd('.');
+        if (string.IsNullOrEmpty(s)) return "pack";
+        return PathSafety.IsSafeFileName(s) ? s : "pack-" + s.Replace('.', '-');
     }
 
     // ── sub-directory helpers ────────────────────────────────────────────────
@@ -193,8 +205,17 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
     public string GameDir(Guid packId)   => Path.Combine(PackRoot(packId), "game");
     public string LocalDir(Guid packId)  => Path.Combine(PackRoot(packId), "local");
 
-    // Kept for migration/legacy — no longer used as a sync source.
+    // Legacy, kept for migration. Not a sync source.
     public string SharedDir(Guid packId) => Path.Combine(PackRoot(packId), "shared");
+
+    /// <summary>Where a dedicated server for this pack actually runs: the mirror of game/, the
+    /// loader's installed libraries, server.properties, the world, ops/whitelist/bans.</summary>
+    public string ServerRunDir(Guid packId) => Path.Combine(PackRoot(packId), "server-run");
+
+    /// <summary>The user's server-only files, laid over the mirror after every sync so a
+    /// server-specific config (or a server-only mod) wins over the client's copy and survives the
+    /// next mirror.</summary>
+    public string ServerOverrideDir(Guid packId) => Path.Combine(PackRoot(packId), "server");
 
     // name-aware overloads (used when creating a new pack)
     public string GameDir(Guid packId, string name)   => Path.Combine(PackRoot(packId, name), "game");
@@ -227,7 +248,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         Directory.CreateDirectory(GameDir(packId));
     }
 
-    // No-op — shared/ folder is no longer used; sync goes directly from/to game/.
+    // No-op: the shared/ folder is unused; sync goes directly to and from game/.
     public void EnsureSharedFolders(Guid packId) { }
 
     // ── file listing ─────────────────────────────────────────────────────────
@@ -261,8 +282,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
 
     public void MoveFileBetweenFolders(string sourceRoot, string destRoot, string relativePath)
     {
-        var src = Path.Combine(sourceRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
-        var dst = Path.Combine(destRoot,   relativePath.Replace('/', Path.DirectorySeparatorChar));
+        var (src, dst) = ResolveTransfer(sourceRoot, destRoot, relativePath);
         if (!File.Exists(src)) throw new FileNotFoundException(src);
         Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
         if (File.Exists(dst)) File.Delete(dst);
@@ -271,11 +291,20 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
 
     public void CopyFileBetweenFolders(string sourceRoot, string destRoot, string relativePath)
     {
-        var src = Path.Combine(sourceRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
-        var dst = Path.Combine(destRoot,   relativePath.Replace('/', Path.DirectorySeparatorChar));
+        var (src, dst) = ResolveTransfer(sourceRoot, destRoot, relativePath);
         if (!File.Exists(src)) throw new FileNotFoundException(src);
         Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
         File.Copy(src, dst, overwrite: true);
+    }
+
+    /// <summary>Both ends of a move or copy, each held inside its own root.</summary>
+    private static (string Source, string Destination) ResolveTransfer(string sourceRoot, string destRoot, string relativePath)
+    {
+        var src = PathSafety.ResolveInside(sourceRoot, relativePath);
+        var dst = PathSafety.ResolveInside(destRoot, relativePath);
+        if (src is null || dst is null)
+            throw new InvalidOperationException($"'{Printable(relativePath)}' is not a path inside the instance folder.");
+        return (src, dst);
     }
 
     /// <summary>
@@ -292,29 +321,65 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             OverlayFilesIntoGame(localDir, gameDir, overwriteExisting: false);
     }
 
-    private static void OverlayFilesIntoGame(string sourceRoot, string gameRoot, bool overwriteExisting)
+    private static void OverlayFilesIntoGame(string sourceRoot, string gameRoot, bool overwriteExisting) =>
+        LinkOrCopyTree(sourceRoot, gameRoot, overwriteExisting);
+
+    /// <summary>
+    /// Puts <paramref name="existingPath"/> at <paramref name="linkPath"/>, sharing the bytes when
+    /// the filesystem allows it and copying them when it does not.
+    /// </summary>
+    /// <param name="overwriteExisting">False leaves anything already at the destination alone and
+    /// reports <see cref="FileLinkOutcome.Blocked"/>. The launch overlay uses this so an instance's
+    /// own file wins.</param>
+    /// <param name="preferHardLink">False forces a real copy, for callers that know a link is wrong
+    /// here (a file the user will edit in one place only, for example).</param>
+    public static FileLinkOutcome LinkOrCopyFile(
+        string existingPath, string linkPath, bool overwriteExisting = false, bool preferHardLink = true)
     {
-        foreach (var srcFile in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+        if (File.Exists(linkPath))
         {
-            var rel = Path.GetRelativePath(sourceRoot, srcFile).Replace('\\', '/');
-            var destFile = Path.Combine(gameRoot, rel.Replace('/', Path.DirectorySeparatorChar));
-
-            if (File.Exists(destFile))
-            {
-                if (PathsReferToSameFile(srcFile, destFile))
-                    continue;
-                if (!overwriteExisting)
-                    continue;
-                File.Delete(destFile);
-            }
-
-            Directory.CreateDirectory(Path.GetDirectoryName(destFile)!);
-            if (!TryCreateHardLink(destFile, srcFile))
-                File.Copy(srcFile, destFile, overwrite: true);
+            if (PathsReferToSameFile(existingPath, linkPath)) return FileLinkOutcome.AlreadySameFile;
+            if (!overwriteExisting) return FileLinkOutcome.Blocked;
+            File.Delete(linkPath);
         }
+        else if (Directory.Exists(linkPath))
+        {
+            // A folder with the file's name is in the way. Copying onto it would throw, so treat it
+            // like any other file already there.
+            if (!overwriteExisting) return FileLinkOutcome.Blocked;
+            Directory.Delete(linkPath, recursive: true);
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(linkPath)!);
+        if (preferHardLink && TryCreateHardLink(linkPath, existingPath)) return FileLinkOutcome.Linked;
+        File.Copy(existingPath, linkPath, overwrite: true);
+        return FileLinkOutcome.Copied;
     }
 
-    private static bool TryCreateHardLink(string linkPath, string existingPath)
+    /// <summary>Recursively <see cref="LinkOrCopyFile"/>s a whole tree, for the content that
+    /// is a folder rather than a zip (an unpacked resource or shader pack) and for the
+    /// launch overlay.</summary>
+    public static (int Linked, int Copied, int Skipped) LinkOrCopyTree(
+        string sourceRoot, string destRoot, bool overwriteExisting = false, bool preferHardLink = true)
+    {
+        int linked = 0, copied = 0, skipped = 0;
+        foreach (var srcFile in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.AllDirectories))
+        {
+            var destFile = Path.Combine(destRoot, Path.GetRelativePath(sourceRoot, srcFile));
+            switch (LinkOrCopyFile(srcFile, destFile, overwriteExisting, preferHardLink))
+            {
+                case FileLinkOutcome.Linked: linked++; break;
+                case FileLinkOutcome.Copied: copied++; break;
+                default: skipped++; break;
+            }
+        }
+        return (linked, copied, skipped);
+    }
+
+    /// <summary>Creates a hard link, or returns false when the filesystem will not have one
+    /// (another volume, a non-NTFS drive, not Windows). Unlike symlinks, hard links need no
+    /// elevation.</summary>
+    public static bool TryCreateHardLink(string linkPath, string existingPath)
     {
         if (!OperatingSystem.IsWindows())
             return false;
@@ -325,7 +390,37 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
     [DllImport("Kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool CreateHardLinkW(string lpFileName, string lpExistingFileName, IntPtr lpSecurityAttributes);
 
-    private static bool PathsReferToSameFile(string pathA, string pathB)
+    /// <summary>
+    /// Whether two paths are the same on-disk content: the same file, or for an unpacked pack
+    /// folder, a sampled match.
+    /// </summary>
+    /// <remarks>For folders it compares the file count and the first file (ordinal by relative
+    /// path), which is enough to recognise a folder this launcher linked. It is not proof of
+    /// equality, so never rely on it before deleting something the user may have edited.</remarks>
+    public static bool EntriesReferToSameContent(string pathA, string pathB)
+    {
+        if (File.Exists(pathA) || File.Exists(pathB))
+            return PathsReferToSameFile(pathA, pathB);
+
+        if (!Directory.Exists(pathA) || !Directory.Exists(pathB)) return false;
+
+        try
+        {
+            var a = Directory.EnumerateFiles(pathA, "*", SearchOption.AllDirectories)
+                .Select(f => Path.GetRelativePath(pathA, f)).OrderBy(s => s, StringComparer.Ordinal).ToList();
+            var b = Directory.EnumerateFiles(pathB, "*", SearchOption.AllDirectories)
+                .Select(f => Path.GetRelativePath(pathB, f)).OrderBy(s => s, StringComparer.Ordinal).ToList();
+            if (a.Count != b.Count) return false;
+            if (a.Count == 0) return true;
+            if (!string.Equals(a[0], b[0], StringComparison.OrdinalIgnoreCase)) return false;
+            return PathsReferToSameFile(Path.Combine(pathA, a[0]), Path.Combine(pathB, b[0]));
+        }
+        catch { return false; }
+    }
+
+    /// <summary>True when two paths are two names for one file (same volume serial and file index,
+    /// i.e. a hard link). No hashing and no false positives from matching metadata.</summary>
+    public static bool PathsReferToSameFile(string pathA, string pathB)
     {
         if (!File.Exists(pathA) || !File.Exists(pathB))
             return false;
@@ -334,8 +429,6 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             return true;
 
         // On Windows compare the underlying file IDs (volume serial + file index).
-        // Two paths with the same ID are hard links to the same inode — no content
-        // check needed and no false positives from coincidentally equal metadata.
         if (OperatingSystem.IsWindows())
             return TryGetFileId(pathA, out var idA) && TryGetFileId(pathB, out var idB) && idA == idB;
 
@@ -431,40 +524,57 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
     // ── sync ─────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Uploads files from game/ that are selected by <paramref name="sharedPaths"/>.
-    /// The caller should pass the relative paths of files that should be synced
-    /// (i.e. those matching "shared" rules). Files are read directly from game/.
+    /// Uploads the files in game/ listed in <paramref name="sharedPaths"/> (the relative paths
+    /// matching "shared" rules).
     /// </summary>
-    /// <summary>Returns the new manifest version the server assigned at commit, so callers
-    /// can record it authoritatively instead of issuing a second manifest fetch.</summary>
+    /// <returns>The new manifest version the server assigned at commit, so callers can record it
+    /// without fetching the manifest again.</returns>
     public async Task<long> UploadSharedAsync(Guid packId, long baseVersion, IReadOnlyCollection<string> sharedPaths, IProgress<string>? log, CancellationToken ct = default)
     {
         void Report(string m) { log?.Report(m); AppLog.Log("upload", m); }
 
         var gameDir = GameDir(packId);
-        ProgressHub.Indeterminate(packId, "Building manifest…");
+        ProgressHub.Indeterminate(packId, "Building manifest...");
 
         // Private assets never leave this machine, whatever the rules say (see PrivateAssetPolicy).
-        // Done here rather than in the caller so no upload path - button, script, future automation -
-        // can forget it. Reported loudly: an omission the owner cannot see is how the bundle leaked.
+        // Done here so no upload path can skip it, and reported so the owner can see what was left out.
         var (publicPaths, privatePaths) = PrivateAssetPolicy.Partition(sharedPaths, settings);
         if (privatePaths.Count > 0)
             Report($"Kept private on this machine (not uploaded): {PrivateAssetPolicy.Describe(privatePaths, settings)}");
         sharedPaths = publicPaths;
 
-        // Manifest names can differ from local paths in exactly one case: a jar that LOW MODE renamed to
-        // .jar.disabled is shared under its enabled name, so this machine's low mode never becomes everyone's
-        // baseline and mod updates keep flowing to other players. Hand-disabled jars keep their name - that
-        // rename is a deliberate whole-pack action.
-        // The same masking applies to config CONTENT: a file low mode turned down is hashed and uploaded as
-        // the player's own pre-low-mode values, so low mode can safely edit shared configs too. Null means
-        // "nothing masked here", and the file on disk is uploaded verbatim.
+        // Also hold back library items marked "keep on this machine". The launch overlay puts
+        // library files into game/, where resourcepacks/ and shaderpacks/ are shared by default. A
+        // rule pattern cannot tell them from the instance's own packs, so the test is file identity.
+        if (_library is { } library)
+        {
+            var keptLocal = new List<string>();
+            var stillShared = new List<string>();
+            foreach (var rel in publicPaths)
+                (library.IsKeepLocalPath(gameDir, rel) ? keptLocal : stillShared).Add(rel);
+            if (keptLocal.Count > 0)
+            {
+                Report($"Kept on this machine (shared copy, not uploaded): {ContentLibraryService.Describe(keptLocal)}");
+                sharedPaths = stillShared;
+            }
+        }
+
+        // Manifest names differ from local paths in one case: a jar low mode renamed to
+        // .jar.disabled is shared under its enabled name, so this machine's low mode does not
+        // spread to other players. Hand-disabled jars keep their name. Config content is masked the
+        // same way: a file low mode changed is uploaded with the player's pre-low-mode values. Null
+        // means nothing is masked and the file is uploaded as is.
         var entryPaths = await Task.Run(() =>
         {
             var result = new List<(ManifestEntry Entry, string Abs, byte[]? Masked)>();
             foreach (var rel in sharedPaths)
             {
-                var abs = Path.Combine(gameDir, rel.Replace('/', Path.DirectorySeparatorChar));
+                var abs = SafeResolve(gameDir, rel);
+                if (abs is null)
+                {
+                    Report($"Skipped (not a path inside game/): {Printable(rel)}");
+                    continue;
+                }
                 if (!File.Exists(abs)) continue;
 
                 var masked = LowModeService.SharedContentFor(gameDir, rel);
@@ -503,8 +613,8 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         foreach (var hash in missingSet)
         {
             ct.ThrowIfCancellationRequested();
-            // Skip (don't crash) if the server asks for a blob we have no local path for — a
-            // malformed/mismatched response otherwise threw KeyNotFoundException and aborted sync.
+            // Skip a blob the server asks for that we have no local path for, rather
+            // than aborting the sync.
             if (!byHash.TryGetValue(hash, out var pair)) continue;
             i++;
             Report($"Uploading {i}/{missingSet.Count}: {pair.Entry.RelativePath}");
@@ -517,7 +627,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             await api.UploadBlobAsync(packId, hash, body, ct);
         }
 
-        ProgressHub.Indeterminate(packId, "Committing…");
+        ProgressHub.Indeterminate(packId, "Committing...");
         var commit = await api.CommitUploadAsync(packId, new BeginUploadRequest(baseVersion, entries), ct);
         Report($"Committed {entries.Count} file(s). New manifest version: {commit.NewVersion}");
         SaveSyncManifestLock(packId, entries.Select(e => e.RelativePath));
@@ -525,19 +635,36 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         return commit.NewVersion;
     }
 
-    public async Task DownloadSharedAsync(Guid packId, IProgress<string>? log, CancellationToken ct = default)
+    /// <param name="job">
+    /// The pausable job this download belongs to, when one is driving it. Stopping it rolls back
+    /// the files that were not here before; files it replaced keep their new, hash-verified copy.
+    /// </param>
+    public async Task DownloadSharedAsync(
+        Guid packId, IProgress<string>? log, CancellationToken ct = default, PackJob? job = null)
     {
         void Report(string m) { log?.Report(m); AppLog.Log("download", m); }
 
         var gameDir = GameDir(packId);
         Directory.CreateDirectory(gameDir);
-        ProgressHub.Indeterminate(packId, "Fetching manifest…");
+        ProgressHub.Indeterminate(packId, "Fetching manifest...");
         var manifest = await api.GetManifestAsync(packId, ct);
         Report($"Server manifest has {manifest.Entries.Count} files at version {manifest.Version}");
 
-        // A manifest can still carry private paths - an older upload from before the policy existed, or
-        // a collaborator's copy - and must not be allowed to overwrite the real files here. They are
-        // dropped from the working set entirely, so neither the download loop nor the prune below sees them.
+        // Every path and hash in the manifest comes from whoever last uploaded the pack. An entry that
+        // is not a plain relative path inside game/, or whose hash is not a SHA-256, is dropped here,
+        // before any other check reads it, so neither the download loop nor the prune below sees it.
+        bool Usable(ManifestEntry? e) => e is not null && SafeResolve(gameDir, e.RelativePath) is not null && IsSha256Hex(e.Hash);
+        var unsafeEntries = manifest.Entries.Where(e => !Usable(e)).ToList();
+        if (unsafeEntries.Count > 0)
+        {
+            var sample = string.Join(", ", unsafeEntries.Take(5).Select(e => Printable(e?.RelativePath)));
+            Report($"Skipped {unsafeEntries.Count} manifest entr(ies) with an unsafe path or hash: {sample}");
+            manifest = manifest with { Entries = manifest.Entries.Where(Usable).ToList() };
+        }
+
+        // A manifest can still carry private paths (an upload from before the policy existed, or a
+        // collaborator's copy). They must not overwrite the real files here, so they are dropped
+        // from the working set before the download loop and the prune.
         var privateOnServer = manifest.Entries.Where(e => PrivateAssetPolicy.IsPrivate(e.RelativePath, settings)).ToList();
         if (privateOnServer.Count > 0)
         {
@@ -545,10 +672,23 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             manifest = manifest with { Entries = manifest.Entries.Where(e => !PrivateAssetPolicy.IsPrivate(e.RelativePath, settings)).ToList() };
         }
 
-        // Whose machine is this? The owner's private files are protected from the prune below; on any
-        // other machine a private path that arrived through an earlier sync is exactly what should be
-        // pruned once the server stops listing it. If the pack cannot be fetched, err on the side of
-        // keeping files - a lost network is not a reason to delete anything.
+        // Same identity test as the upload side. A collaborator's same-named pack would replace
+        // the directory entry via File.Move below, and the instance would stop using the
+        // library file unnoticed.
+        if (_library is { } keepLibrary)
+        {
+            var kept = manifest.Entries.Where(e => keepLibrary.IsKeepLocalPath(gameDir, e.RelativePath)).ToList();
+            if (kept.Count > 0)
+            {
+                Report($"Ignoring server copies of files kept on this machine: {ContentLibraryService.Describe(kept.Select(e => e.RelativePath).ToList())}");
+                var keptPaths = new HashSet<string>(kept.Select(e => e.RelativePath), StringComparer.OrdinalIgnoreCase);
+                manifest = manifest with { Entries = manifest.Entries.Where(e => !keptPaths.Contains(e.RelativePath)).ToList() };
+            }
+        }
+
+        // The owner's private files are protected from the prune below; on other machines a private
+        // path from an earlier sync is pruned once the server stops listing it. If the pack cannot
+        // be fetched, keep files.
         bool protectPrivate;
         try
         {
@@ -562,9 +702,8 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         var serverPaths = new HashSet<string>(manifest.Entries.Select(e => e.RelativePath), StringComparer.OrdinalIgnoreCase);
         var localByPath = await Task.Run(() =>
         {
-            // Build manually (not ToDictionary) so two manifest entries differing only in case —
-            // legal on the Linux server, a duplicate key on Windows — don't throw ArgumentException
-            // and permanently break sync for every Windows subscriber.
+            // Built by hand rather than ToDictionary: two entries differing only in case are legal
+            // on the Linux server but would throw here and break sync on every Windows client.
             var map = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
             foreach (var e in manifest.Entries)
             {
@@ -582,9 +721,11 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         foreach (var e in manifest.Entries)
         {
             ct.ThrowIfCancellationRequested();
+            if (job is not null) await job.Gate.WaitAsync(ct);
             i++;
             if (localByPath.TryGetValue(e.RelativePath, out var localHash) && localHash == e.Hash) continue;
             var abs = SafeResolve(gameDir, e.RelativePath);
+            if (abs is null) continue;   // already filtered out above
             Directory.CreateDirectory(Path.GetDirectoryName(abs)!);
             Report($"Downloading {i}/{total}: {e.RelativePath}");
             ProgressHub.Report(packId,
@@ -593,10 +734,8 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
                 -1,
                 e.RelativePath);
 
-            // Download to a temp file, verify its hash, then atomically replace the real file.
-            // Writing straight to `abs` (as before) truncated the existing good copy immediately,
-            // so a network drop / cancel left a corrupt half-file at the final path with the
-            // previous good version already destroyed. Never verified the bytes, either.
+            // Download to a temp file, verify its hash, then atomically replace the real file, so a
+            // dropped connection or cancel never leaves a half-written file in place of the good copy.
             var tmp = abs + ".cldownload";
             try
             {
@@ -611,7 +750,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
                             $"Downloading {i}/{total}: {e.RelativePath}",
                             currentFraction,
                             e.RelativePath);
-                    }, ct);
+                    }, ct, job?.Gate);
                 }
 
                 string actualHash;
@@ -622,6 +761,9 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
                         $"Downloaded '{e.RelativePath}' failed integrity check (expected {e.Hash}, got {actualHash}).");
 
                 File.Move(tmp, abs, overwrite: true);
+                // A path that had no local copy is one this download brought in, so a stop can
+                // take it back out. A replaced file stays: its new copy is complete and verified.
+                if (localHash is null) job?.TrackCreatedFile(abs);
             }
             catch
             {
@@ -642,26 +784,34 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         var previousServerPaths = LoadSyncManifestLock(packId);
         foreach (var rel in previousServerPaths)
         {
-            // The owner's private path is never pruned: the lock may list it from an upload made before
-            // the policy existed, and "no longer on the server" is exactly the state the policy creates
-            // on purpose. Elsewhere it is pruned like any other file the server stopped listing.
+            if (serverPaths.Contains(rel)) continue;
+            // Guard the delete sink too: the sync-lock list was itself populated from server-supplied
+            // paths, so each one is resolved again here and anything that is not a plain path inside
+            // game/ is left alone.
+            var abs = SafeResolve(gameDir, rel);
+            if (abs is null) continue;
+            // Never prune the owner's private paths: the lock may list them from an upload made
+            // before the policy existed, and the policy is what keeps them off the server.
+            // Elsewhere they are pruned like any other file.
             if (protectPrivate && PrivateAssetPolicy.IsPrivate(rel, settings)) continue;
-            if (!serverPaths.Contains(rel))
+            // Library items kept on this machine are never pruned: that setting keeps them off the
+            // server, and pruning would remove the pack from an instance it was applied to.
+            if (_library?.IsKeepLocalPath(gameDir, rel) == true) continue;
+            if (!File.Exists(abs)) continue;
+            // A junction or symbolic link partway down can point anywhere, so nothing reached through
+            // one is deleted.
+            if (PathSafety.CrossesLink(gameDir, abs))
             {
-                // Guard the delete sink too: the sync-lock list was itself populated from
-                // server-supplied paths, so an unchecked traversal here is an arbitrary-delete
-                // primitive. Skip anything that would escape the pack folder.
-                string abs;
-                try { abs = SafeResolve(gameDir, rel); }
-                catch (InvalidOperationException) { continue; }
-                if (File.Exists(abs)) { File.Delete(abs); Report($"Removed (no longer on server): {rel}"); }
+                Report($"Kept (inside a linked folder): {Printable(rel)}");
+                continue;
             }
+            File.Delete(abs);
+            Report($"Removed (no longer on server): {rel}");
         }
 
         SaveSyncManifestLock(packId, manifest.Entries.Select(e => e.RelativePath));
-        // Drop the cached mods.json / plans.json so a collaborator's freshly-synced flags, categories
-        // and planning boards are read from disk next time, instead of being overwritten by our
-        // stale in-memory copies.
+        // Drop the cached mods.json / plans.json so the synced flags, categories and planning boards
+        // are read from disk next time instead of being overwritten by stale in-memory copies.
         _modMetadata?.Invalidate(packId);
         _modPlans?.Invalidate(packId);
         Report("Done.");
@@ -676,7 +826,8 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         Stream destination,
         long totalBytes,
         Action<double> progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        PauseGate? pause = null)
     {
         if (totalBytes <= 0)
         {
@@ -692,6 +843,8 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
             await destination.WriteAsync(buffer.AsMemory(0, read), ct);
             done += read;
             progress(Math.Min(1.0, done / (double)totalBytes));
+            // Checked mid-file, so pausing during one large file stops the transfer.
+            if (pause is { IsPaused: true }) await pause.WaitAsync(ct);
         }
     }
 }

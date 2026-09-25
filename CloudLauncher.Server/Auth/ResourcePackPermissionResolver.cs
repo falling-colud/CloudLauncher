@@ -33,6 +33,12 @@ public class ResourcePackPermissionResolver(AppDbContext db)
         foreach (var p in teamPerms)
             perms |= p;
 
+        // Team visibility, as on instances and bundles: anyone on a team the pack is shared with may see
+        // and download it, whatever that team's own grant says. ReadOnly rather than Full, so a View-only
+        // team grant isn't upgraded past downloading.
+        if (pack.Visibility == PackVisibility.Team && teamPerms.Count > 0)
+            perms |= PackPermissions.ReadOnly;
+
         return perms;
     }
 }

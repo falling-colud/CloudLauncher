@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Text.RegularExpressions;
@@ -29,16 +28,19 @@ public partial class ResourcePackBrowserView : Page
     /// <summary>0 = relevance, 1 = latest, 2 = downloads. Mapped per store when searching.</summary>
     private int _sortMode;
 
-    /// <summary>Display names and file stems of every pack already installed anywhere, so a row can
-    /// say "Installed" instead of quietly producing a second copy.</summary>
+    /// <summary>Display names and file stems of every pack installed anywhere, so a row can say
+    /// "Installed" instead of downloading a second copy.</summary>
     private HashSet<string> _installedNames = new(StringComparer.OrdinalIgnoreCase);
 
     private CancellationTokenSource _cts = new();
+    /// <summary>The page load in flight, so a reset can wait for it instead of racing it.</summary>
+    private Task? _inFlight;
     private bool _isLoading;
     private bool _hasMore;
     private int _offset;
-    private const int PageSize = 25;
-    private const int MaxResults = 200;
+    private const int PageSize = 50;   // both stores cap a page at 50
+    /// <summary>Safety stop so a runaway pager can't fill memory; not a browsing limit.</summary>
+    private const int MaxResults = 2000;
 
     public ResourcePackBrowserView(MainWindow shell)
     {
@@ -59,8 +61,7 @@ public partial class ResourcePackBrowserView : Page
         };
     }
 
-    /// <summary>Ctrl+F focuses search and F5 re-runs it, the same two keys every other list in the
-    /// app answers to.</summary>
+    /// <summary>Ctrl+F focuses search and F5 re-runs it, as on the other lists.</summary>
     private async void OnShellKeyDown(object sender, KeyEventArgs e)
     {
         if (!IsVisible) return;
@@ -109,18 +110,23 @@ public partial class ResourcePackBrowserView : Page
         StatusLabel.Text = text;
     }
 
-    /// <summary>
-    /// Builds the set of pack names already installed across every instance.
-    /// </summary>
-    /// <remarks>One scan, reused for every result row. It runs off the UI thread because it walks
-    /// each instance's resourcepacks/ folder, and a failure is not worth surfacing: the worst case is
-    /// that a row does not say "Installed".</remarks>
+    /// <summary>Builds the set of pack names already installed across every instance.</summary>
+    /// <remarks>Runs off the UI thread; failures are ignored (a row just won't say "Installed"). Scans
+    /// each instance with <c>includeLocal</c> forced on instead of using
+    /// <see cref="ResourcePackService.ScanAll"/>, which skips <c>local/resourcepacks/</c> on non-shared
+    /// instances, where this page's downloads land.</remarks>
     private async Task RefreshInstalledIndexAsync()
     {
         try
         {
             var packs = await App.State.Api.ListPacksAsync();
-            _installedNames = await Task.Run(() => App.State.ResourcePacks.ScanAll(packs)
+            _installedNames = await Task.Run(() => packs
+                .SelectMany(p =>
+                {
+                    try { return App.State.ResourcePacks.ScanPack(p.Id, p.Name, includeLocal: true); }
+                    // An instance that has never been launched has no folders yet.
+                    catch { return new List<ResourcePackInfo>(); }
+                })
                 .SelectMany(i => new[] { i.DisplayName, Path.GetFileNameWithoutExtension(i.FileName) })
                 .Where(n => !string.IsNullOrWhiteSpace(n))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase));
@@ -137,7 +143,7 @@ public partial class ResourcePackBrowserView : Page
     }
 
     // Render rich HTML/markdown descriptions in an embedded WebView2. Its HWND draws over
-    // WPF (airspace), so hide it off-tab. Scrolling is native — no manual wheel routing.
+    // WPF (airspace), so hide it off-tab. Scrolling is native, no manual wheel routing.
     private void OnPackTabsChanged(object sender, SelectionChangedEventArgs e)
     {
         if (e.Source != PackTabs) return;
@@ -292,12 +298,9 @@ public partial class ResourcePackBrowserView : Page
         FilterCategoryList.ItemsSource = source;
     }
 
-    /// <summary>
-    /// Loads the category list belonging to whichever store the active chip points at.
-    /// </summary>
-    /// <remarks>The two stores' category vocabularies do not line up, so there is no merged list to
-    /// show — the panel is hidden entirely for the hosted chips, which have no categories at all, and
-    /// for a store that returned nothing because it is unreachable.</remarks>
+    /// <summary>Loads the category list for the store the active chip points at.</summary>
+    /// <remarks>The stores' categories don't line up, so there's no merged list. The panel is hidden
+    /// for hosted chips (no categories) and when the store returned nothing.</remarks>
     private async Task RefreshCategoryFilterAsync()
     {
         var generation = ++_categoryGeneration;
@@ -332,6 +335,10 @@ public partial class ResourcePackBrowserView : Page
     private async Task ResetAndLoadAsync()
     {
         _cts.Cancel();
+        // Wait for the cancelled load before clearing anything: its finally resets the in-progress flag
+        // (otherwise the new load returns at the guard and the list stays empty), and a late page can't
+        // append into the cleared list.
+        if (_inFlight is { } pending) { try { await pending; } catch { /* it was cancelled */ } }
         _cts = new CancellationTokenSource();
         _offset = 0;
         _rows.Clear();
@@ -340,17 +347,22 @@ public partial class ResourcePackBrowserView : Page
         EmptyState.Visibility = Visibility.Collapsed;
         CountLabel.Text = "";
         ClearDetail();
-        await LoadMoreAsync(_cts.Token);
+        await (_inFlight = LoadMoreAsync(_cts.Token));
     }
 
     private async void OnResultsScroll(object sender, ScrollChangedEventArgs e)
     {
-        if (_isLoading || !_hasMore || _activeChip is null) return;
-        if (e.OriginalSource is ScrollViewer sv &&
-            sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 200)
+        if (e.OriginalSource is not ScrollViewer sv) return;
+        try
         {
-            await LoadMoreAsync(_cts.Token);
+            await InfiniteScroll.FillAheadAsync(
+                sv,
+                () => !_isLoading && _hasMore && _activeChip is not null && _rows.Count < MaxResults,
+                () => _rows.Count,
+                () => _inFlight = LoadMoreAsync(_cts.Token));
         }
+        catch (OperationCanceledException) { }
+        catch (Exception) { /* LoadMoreAsync reports its own failures */ }
     }
 
     private async Task LoadMoreAsync(CancellationToken ct)
@@ -521,51 +533,60 @@ public partial class ResourcePackBrowserView : Page
         await DownloadRowAsync(_currentRow, sender as Button, row);
     }
 
+    /// <summary>Downloads a pack, then asks <see cref="ImportContentCard"/> which instances get it
+    /// (possibly none).</summary>
+    /// <remarks>The card places it like Import does: one copy in the library, hard-linked into each
+    /// ticked instance's <c>local/resourcepacks/</c> and materialised into <c>game/</c> at launch. The
+    /// Resource packs page scans <c>local/</c> too, so the pack shows up there straight away.</remarks>
     private async Task DownloadRowAsync(RpBrowseRow row, Button? button, RpVersionRow? version = null)
     {
-        var packs = await App.State.Api.ListPacksAsync();
-        if (packs.Count == 0)
+        // The row's button is off in these cases; a double-click or the detail pane still lands here.
+        if (!row.CanDownload)
         {
-            // A status line rather than a modal: the user is mid-browse and nothing here needs an
-            // acknowledgement, it just needs to say why nothing happened.
-            Fail("Create an instance first — a resource pack is installed into one.");
+            await AppDialog.MessageAsync(_shell,
+                row.HasFile ? "Download not available" : "Nothing to download", row.DownloadTooltip);
             return;
         }
-        var picker = new PackPickerDialog(packs,
-            "Pick an instance",
-            "The downloaded .zip is copied into resourcepacks/.",
-            "Pick") { Owner = _shell };
-        if (picker.ShowDialog() != true || picker.SelectedPackId is null) return;
 
-        var pack = packs.First(p => p.Id == picker.SelectedPackId.Value);
+        // No instances is fine: the pack can go into the library, and the card explains that.
+        var packs = await App.State.Api.ListPacksAsync();
+
+        // Named after the project's title, which reads better in a list than the store's build file
+        // name. Staged before the button is disabled, so a failure here doesn't leave it stuck.
+        using var staged = StagedDownload.For(LibraryKind.ResourcePack, $"{SafeFileBase(row.Title)}.zip");
+
         if (button is not null) button.IsEnabled = false;
         try
         {
-            string? zipPath = null;
+            // Null for a hosted pack, which is identified by its hosting id (see RecordProvenance).
+            ModVersion? fetched = null;
             if (row.Kind == RpBrowseRowKind.External && row.External is { } ext)
-                zipPath = await DownloadExternalZipAsync(ext, version?.ExternalVersion);
+                fetched = await DownloadExternalZipAsync(ext, version?.ExternalVersion, staged.FilePath);
             else if (row.Kind == RpBrowseRowKind.CloudLauncher && row.Hosted is { } rp)
-                zipPath = await DownloadHostedZipAsync(rp, version?.HostedVersion);
+                await DownloadHostedZipAsync(rp, version?.HostedVersion, staged.FilePath);
+            else throw new InvalidOperationException("Download failed.");
 
-            if (zipPath is null) throw new InvalidOperationException("Download failed.");
-
-            Note("Installing…");
-            var source = zipPath;
-            var dest = await Task.Run(() =>
+            // The listing's title, so the library entry carries it to every instance.
+            var outcome = await ImportContentCard.ShowAsync(_shell, new ImportRequest(
+                ImportContentKind.ResourcePack, packs, PrePickedPath: staged.FilePath,
+                SourceIsFixed: true,
+                DisplayName: row.Title,
+                OriginSource: row.External?.Source, OriginProjectId: row.External?.Id,
+                OriginVersionId: fetched?.Id, OriginVersionNumber: fetched?.VersionNumber));
+            if (outcome is null)
             {
-                var dir = ResourcePacksDir(pack);
-                var target = UniqueZipPath(dir, $"{SafeFileBase(row.Title)}.zip");
-                File.Copy(source, target, overwrite: false);
-                try { File.Delete(source); } catch { /* temp file, best effort */ }
-                return target;
-            });
+                Note("Nothing was installed - the download was thrown away.");
+                DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondaryBrush");
+                DownloadStatus.Text = "Nothing was installed - the download was thrown away.";
+                return;
+            }
 
-            RecordProvenance(pack, dest, row, version);
+            RecordProvenance(outcome, staged.FileName, row, fetched);
             await RefreshInstalledIndexAsync();
 
-            Okay($"Installed to {dest}");
+            Okay(outcome.Summary);
             DownloadStatus.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
-            DownloadStatus.Text = $"Installed to {dest}";
+            DownloadStatus.Text = outcome.Summary;
         }
         catch (Exception ex)
         {
@@ -579,42 +600,45 @@ public partial class ResourcePackBrowserView : Page
         }
     }
 
-    /// <summary>
-    /// Records which store listing this zip came from, and names it after the project.
-    /// </summary>
-    /// <remarks>A resource pack has no identity of its own once it is on disk — no manifest id, no
-    /// version. Unless this is written at install time the launcher can never match the file back to
-    /// the listing, which is exactly what checking for an update needs. A hosted pack gets its
-    /// hosting link instead, which serves the same purpose.</remarks>
-    private static void RecordProvenance(PackSummary pack, string destPath, RpBrowseRow row, RpVersionRow? version)
+    /// <summary>Records what the library can't carry for this zip.</summary>
+    /// <remarks>
+    /// <para>Store provenance normally travels in the import request: the library entry
+    /// keeps it and <see cref="ContentLibraryService.ApplyAsync"/> copies it to every
+    /// instance the pack reaches.</para>
+    /// <para>A hosting link isn't a store listing and <see cref="LibraryItem"/> has no field for it, so
+    /// a hosted pack's id is written here, under both the <c>local/</c> and <c>game/</c> keys (the
+    /// launch overlay moves a local/ pack into game/).</para>
+    /// <para>When the import got no library copy (<see cref="ImportOutcome.AddedToLibrary"/> is false),
+    /// the pack went straight into <c>game/resourcepacks/</c>, so its provenance and display name are
+    /// written here too. The file name is the one <see cref="StagedDownload"/> reserved.</para>
+    /// </remarks>
+    private static void RecordProvenance(ImportOutcome outcome, string fileName, RpBrowseRow row,
+                                         ModVersion? fetched)
     {
-        var key = ResourcePackService.Key(pack.Id, Path.GetFileName(destPath));
+        foreach (var packId in outcome.Targets)
+        {
+            if (row.Kind == RpBrowseRowKind.CloudLauncher && row.Hosted is { } hosted)
+                foreach (var origin in new[] { ResourcePackOrigin.Local, ResourcePackOrigin.Game })
+                    App.State.ResourcePacks.LinkHostedResourcePack(
+                        ResourcePackService.Key(packId, fileName, origin), hosted.Id);
 
-        if (row.Kind == RpBrowseRowKind.External && row.External is { } ext)
-        {
-            var chosen = version?.ExternalVersion;
-            App.State.ResourcePacks.SetProvenance(key, ext.Source, ext.Id, chosen?.Id, chosen?.VersionNumber);
-            App.State.ResourcePacks.Rename(key, ext.Name);
-        }
-        else if (row.Kind == RpBrowseRowKind.CloudLauncher && row.Hosted is { } hosted)
-        {
-            App.State.ResourcePacks.LinkHostedResourcePack(key, hosted.Id);
-            App.State.ResourcePacks.Rename(key, hosted.Name);
+            if (outcome.AddedToLibrary) continue;
+
+            var gameKey = ResourcePackService.Key(packId, fileName, ResourcePackOrigin.Game);
+            if (row.External is { } ext)
+                App.State.ResourcePacks.SetProvenance(gameKey, ext.Source, ext.Id,
+                    fetched?.Id, fetched?.VersionNumber);
+            App.State.ResourcePacks.Rename(gameKey, row.Title);
         }
     }
 
-    private static string ResourcePacksDir(PackSummary pack)
-    {
-        App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
-        var folder = Path.Combine(App.State.Packs.GameDir(pack.Id, pack.Name), "resourcepacks");
-        Directory.CreateDirectory(folder);
-        return folder;
-    }
-
-    private async Task<string?> DownloadExternalZipAsync(ModSummary mod, ModVersion? selectedVersion = null)
+    /// <summary>Fetches the pack and returns the version it actually took.</summary>
+    /// <remarks>Without a pinned version, the newest one matching the filter is resolved here, and
+    /// that is the version the provenance has to name.</remarks>
+    private async Task<ModVersion> DownloadExternalZipAsync(ModSummary mod, ModVersion? selectedVersion, string destPath)
     {
         StatusLabel.Foreground = (Brush)FindResource("TextSecondaryBrush");
-        StatusLabel.Text = $"Fetching '{mod.Name}'…";
+        StatusLabel.Text = $"Fetching '{mod.Name}'...";
 
         ModVersion latest = selectedVersion
             ?? await ResolveLatestCompatibleVersionAsync(mod)
@@ -626,10 +650,9 @@ public partial class ResourcePackBrowserView : Page
         if (string.IsNullOrWhiteSpace(file.DownloadUrl))
             throw new InvalidOperationException("No download URL.");
 
-        var tmp = Path.Combine(Path.GetTempPath(), $"cl rp-{Guid.NewGuid():N}.zip");
         DownloadStatus.Text = StatusLabel.Text;
-        await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, tmp, null, _cts.Token);
-        return tmp;
+        await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, destPath, null, _cts.Token);
+        return latest;
     }
 
     private async Task<ModVersion?> ResolveLatestCompatibleVersionAsync(ModSummary mod)
@@ -672,19 +695,18 @@ public partial class ResourcePackBrowserView : Page
         return string.IsNullOrWhiteSpace(url) ? file : file with { DownloadUrl = url };
     }
 
-    private async Task<string?> DownloadHostedZipAsync(HostedResourcePackSummary summary, HostedResourcePackVersionInfo? picked = null)
+    private async Task DownloadHostedZipAsync(HostedResourcePackSummary summary, HostedResourcePackVersionInfo? picked,
+                                              string destPath)
     {
         var detail = await App.State.Api.GetResourcePackAsync(summary.Id);
         var version = picked ?? detail.Versions.OrderByDescending(v => v.PublishedAt).FirstOrDefault()
             ?? throw new InvalidOperationException("This hosted pack has no uploads yet.");
 
-        var tmp = Path.Combine(Path.GetTempPath(), $"cl-hosted-rp-{Guid.NewGuid():N}.zip");
         StatusLabel.Foreground = (Brush)FindResource("TextSecondaryBrush");
-        StatusLabel.Text = $"Downloading '{summary.Name}'…";
+        StatusLabel.Text = $"Downloading '{summary.Name}'...";
         DownloadStatus.Text = StatusLabel.Text;
         await using var stream = await App.State.Api.DownloadResourcePackVersionAsync(summary.Id, version.Id);
-        await using (var fs = File.Create(tmp)) await stream.CopyToAsync(fs);
-        return tmp;
+        await using (var fs = File.Create(destPath)) await stream.CopyToAsync(fs);
     }
 
     private async void OnResultSelected(object sender, SelectionChangedEventArgs e)
@@ -699,8 +721,8 @@ public partial class ResourcePackBrowserView : Page
         DetailPlaceholder.Visibility = Visibility.Collapsed;
         DetailPanel.Visibility = Visibility.Visible;
         ShowDetailShell(row);
-        ShowOverview("Loading…");
-        ScreenshotsEmptyText.Text = "Loading screenshots…";
+        ShowOverview("Loading...");
+        ScreenshotsEmptyText.Text = "Loading screenshots...";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
         ScreenshotList.Visibility = Visibility.Collapsed;
@@ -779,9 +801,13 @@ public partial class ResourcePackBrowserView : Page
         {
             var detail = await App.State.Api.GetResourcePackAsync(hosted.Id, ct);
             ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
+            var canDownload = detail.EffectivePermissions.HasFlag(PackPermissions.Download);
+            var hint = canDownload
+                ? "Download this version"
+                : $"You can see this pack but not download it. Ask {detail.OwnerUsername} for download access.";
             VersionsGrid.ItemsSource = detail.Versions
                 .OrderByDescending(v => v.PublishedAt)
-                .Select(RpVersionRow.FromHosted).ToList();
+                .Select(v => RpVersionRow.FromHosted(v, canDownload, hint)).ToList();
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -799,6 +825,8 @@ public partial class ResourcePackBrowserView : Page
         SelectedIconFallback.Text = row.Initial;
         SetSelectedIcon(row.IconUrl);
         DownloadStatus.Text = "";
+        DownloadSelectedButton.IsEnabled = row.CanDownload;
+        DownloadSelectedButton.ToolTip = row.DownloadTooltip;
         PackTabs.SelectedIndex = 0;
     }
 
@@ -812,7 +840,7 @@ public partial class ResourcePackBrowserView : Page
         WorldNameLabel.Text = "";
         WorldMetaLabel.Text = "";
         SelectedIconFallback.Text = "";
-        SelectedIconImage.Source = null;
+        SetSelectedIcon(null);
         ShowOverview("");
         ScreenshotList.ItemsSource = null;
         VersionsGrid.ItemsSource = null;
@@ -874,17 +902,15 @@ public partial class ResourcePackBrowserView : Page
     private void OpenUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return;
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { DownloadStatus.Text = ex.Message; }
+        if (!SafeLaunch.OpenUrl(url)) DownloadStatus.Text = "That link could not be opened.";
     }
 
     private void SetSelectedIcon(string? iconUrl)
     {
-        SelectedIconImage.Source = null;
-        if (string.IsNullOrWhiteSpace(iconUrl)) return;
-
-        try { SelectedIconImage.Source = new BitmapImage(new Uri(iconUrl, UriKind.Absolute)); }
-        catch { SelectedIconImage.Source = null; }
+        // Via the icon cache rather than a bare BitmapImage: the URL comes from store metadata, and the
+        // cache caps the download, bounds the decode and never reads from another computer.
+        IconLoader.SetDecodeWidth(SelectedIconImage, 128);
+        IconLoader.SetUrl(SelectedIconImage, string.IsNullOrWhiteSpace(iconUrl) ? null : iconUrl);
     }
 
     private static string BuildExternalProjectUrl(ModSummary mod)
@@ -918,22 +944,9 @@ public partial class ResourcePackBrowserView : Page
         var s = sb.ToString().Trim();
         if (string.IsNullOrEmpty(s)) s = "resource-pack";
         if (s.Length > 96) s = s[..96];
-        return string.IsNullOrWhiteSpace(Path.GetExtension(s)) ? s : Path.GetFileNameWithoutExtension(s);
-    }
-
-    private static string UniqueZipPath(string folder, string fileName)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var clean = new string((fileName ?? "pack.zip").Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Trim();
-        if (!clean.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) clean += ".zip";
-
-        var candidate = Path.Combine(folder, clean);
-        var stem = Path.GetFileNameWithoutExtension(clean);
-        var ext = ".zip";
-        var n = 2;
-        while (File.Exists(candidate))
-            candidate = Path.Combine(folder, $"{stem}-{n++}{ext}");
-        return candidate;
+        var stem = string.IsNullOrWhiteSpace(Path.GetExtension(s)) ? s : Path.GetFileNameWithoutExtension(s);
+        // A listing titled after a device name (CON, NUL, COM1...) would not name a file at all.
+        return PathSafety.IsSafeFileName(stem + ".zip") ? stem : "resource-pack";
     }
 
     private static string InitialFor(string name) =>
@@ -989,11 +1002,23 @@ public partial class ResourcePackBrowserView : Page
         /// <summary>True when a pack of this name is already installed in one of the instances.</summary>
         public bool IsInstalled { get; private set; }
 
-        public string DownloadLabel => IsInstalled ? "Installed" : "Download";
+        /// <summary>False for a hosted pack page with no uploaded zip behind it yet.</summary>
+        public bool HasFile => Hosted is null || Hosted.VersionCount > 0;
 
-        public string DownloadTooltip => IsInstalled
-            ? "Already installed — downloading again adds a second copy"
-            : "Download into one of your instances";
+        /// <summary>False for a hosted pack shared with this person as "can view" only; the server
+        /// would refuse the download.</summary>
+        public bool MayDownload => Hosted is null || Hosted.EffectivePermissions.HasFlag(PackPermissions.Download);
+
+        public bool CanDownload => HasFile && MayDownload;
+
+        public string DownloadLabel => !HasFile ? "No file" : IsInstalled ? "Installed" : "Download";
+
+        public string DownloadTooltip =>
+            !HasFile ? "The owner has published this pack's page but has not uploaded a zip to it yet."
+            : !MayDownload ? $"You can see this pack but not download it. Ask {Hosted!.OwnerUsername} for download access."
+            : IsInstalled ? "Already installed - downloading again adds a second copy"
+            : "Download it, then tick the instances that should get it - or none, and the launcher "
+            + "keeps it for later";
 
         /// <summary>Returns true only when the flag changed, so the caller refreshes the list once
         /// rather than on every row.</summary>
@@ -1022,22 +1047,29 @@ public partial class ResourcePackBrowserView : Page
         public string DateLabel { get; init; } = "";
         public string SizeLabel { get; init; } = "";
 
+        /// <summary>Whether this person may download this version; a hosted pack shared as "can view"
+        /// may not.</summary>
+        public bool CanDownload { get; init; } = true;
+        public string DownloadHint { get; init; } = "Download this version";
+
         public static RpVersionRow FromExternal(ModVersion version) => new()
         {
             ExternalVersion = version,
             VersionNumber = version.VersionNumber,
-            McVersion = string.Join(", ", version.GameVersions.Take(2)) + (version.GameVersions.Length > 2 ? "…" : ""),
-            DateLabel = version.DatePublished.LocalDateTime.ToString("yyyy-MM-dd"),
+            McVersion = string.Join(", ", version.GameVersions.Take(2)) + (version.GameVersions.Length > 2 ? "..." : ""),
+            DateLabel = TimeFormat.Date(version.DatePublished),
             SizeLabel = version.Files.FirstOrDefault()?.Size is long size ? FormatSize(size) : ""
         };
 
-        public static RpVersionRow FromHosted(HostedResourcePackVersionInfo v) => new()
+        public static RpVersionRow FromHosted(HostedResourcePackVersionInfo v, bool canDownload, string hint) => new()
         {
             HostedVersion = v,
             VersionNumber = v.VersionString,
             McVersion = v.McVersionsCsv ?? "",
-            DateLabel = v.PublishedAt.LocalDateTime.ToString("yyyy-MM-dd"),
-            SizeLabel = FormatSize(v.FileSize)
+            DateLabel = TimeFormat.Date(v.PublishedAt),
+            SizeLabel = FormatSize(v.FileSize),
+            CanDownload = canDownload,
+            DownloadHint = hint
         };
 
         private static string FormatSize(long bytes) => bytes switch

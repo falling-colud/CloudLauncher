@@ -1,7 +1,7 @@
 namespace CloudLauncher.Shared;
 
-/// <summary>Admin view of the global settings. Secret values are never returned — only
-/// boolean flags telling whether they're set, plus the non-secret default rules.</summary>
+/// <summary>Admin view of the global settings. Secrets are never returned, only flags saying
+/// whether they are set, plus the non-secret default rules.</summary>
 public sealed record GlobalSettingsView(
     bool HasCurseForgeApiKey,
     bool HasModrinthToken,

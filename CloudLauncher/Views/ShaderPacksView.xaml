@@ -1,12 +1,21 @@
 ﻿<Page x:Class="CloudLauncher.Views.ShaderPacksView"
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:views="clr-namespace:CloudLauncher.Views"
-      xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Shaders"
       Background="{DynamicResource Surface0Brush}">
-    <Grid Margin="24,18,24,0">
+
+    <!--  Same six-row layout as Worlds and Resource packs (header, actions, divider, strip, content,
+    status), so buttons sit in the same places. Rows are grouped into user folders and each has a
+    selection circle: the chosen pack is on by default in every compatible instance. A circle
+    rather than a switch because an instance has one shader slot, so choosing a pack unchooses the
+    previous one, and clicking the chosen pack again means no shader. Clicking a row opens the
+    pack's page, where its instances can be narrowed. Folders are named lists in
+    AppSettings.ShaderFolders, like the folders on the Instances page.  -->
+    <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -14,67 +23,97 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Header -->
-        <DockPanel Grid.Row="0" Margin="0,0,0,14">
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="AddFromFileButton" Click="OnAddFromFile" Margin="0,0,8,0" Padding="12,5"
-                        ToolTip="Copy a shader zip or unpacked shader folder from this PC into an instance">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="&#xE710;" FontFamily="{StaticResource IconFont}" FontSize="12"
-                                   Margin="0,0,7,0" VerticalAlignment="Center"/>
-                        <TextBlock Text="Add from file…" VerticalAlignment="Center"/>
-                    </StackPanel>
-                </Button>
-                <Button x:Name="BrowseButton" Content="Get shaders" Style="{StaticResource AccentButton}"
-                        Click="OnToggleBrowse" Margin="0,0,8,0" Padding="12,5"
-                        ToolTip="Search Modrinth and CurseForge for shader packs"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE8DA;" FontFamily="{StaticResource IconFont}"
-                        FontSize="13" Click="OnOpenFolder" Margin="0,0,4,0"
-                        ToolTip="Open the instance's shaderpacks folder"/>
-                <Button Style="{StaticResource IconButton}" Content="&#xE72C;" FontFamily="{StaticResource IconFont}"
-                        FontSize="13" Click="OnRefresh" ToolTip="Refresh (F5)"/>
-            </StackPanel>
-            <StackPanel>
-                <TextBlock Style="{StaticResource H2}" Text="Shader packs"/>
-                <TextBlock x:Name="SubLabel" Style="{StaticResource Muted}" Margin="0,2,0,0"
-                           Text="Shaders installed in your instances. Pick one to make it the active pack."/>
+        <!-- ── Row 0: title and a one-line description ── -->
+        <DockPanel Grid.Row="0" Style="{StaticResource PageHeaderPanel}">
+            <StackPanel VerticalAlignment="Center">
+                <TextBlock Style="{StaticResource H1}" Text="Shaders"/>
+                <TextBlock Style="{StaticResource PageSubtitle}"
+                           Text="Every shader pack on this PC, across all your instances. File them into folders, and click one to open its own page."/>
             </StackPanel>
         </DockPanel>
 
-        <!-- Filters: instance, sort, folders, search -->
-        <DockPanel Grid.Row="1" Margin="0,0,0,10">
-            <ComboBox x:Name="PackFilterBox" DockPanel.Dock="Left" Width="220"
-                      DisplayMemberPath="Label" SelectionChanged="OnPackFilterChanged"
-                      ToolTip="Which instance to show shaders for — and where new shaders are installed"/>
+        <!-- ── Row 1: actions bar ────────────────────────────── -->
+        <Grid Grid.Row="1" Style="{StaticResource PageFilterBar}">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
 
-            <Button x:Name="SortButton" DockPanel.Dock="Left"
-                    Style="{StaticResource IconButton}" Click="OnSortButtonClick"
-                    Content="&#xE8CB;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                    Margin="8,0,0,0" Padding="8,5" ToolTip="Sort shader packs">
-                <Button.ContextMenu>
-                    <ContextMenu Opened="OnSortMenuOpened">
-                        <MenuItem x:Name="SortRecentMenuItem" Header="Recently added" Tag="RecentlyAdded"
-                                  IsCheckable="True" Click="OnSortMenuItemClick"/>
-                        <MenuItem x:Name="SortNameMenuItem" Header="Name" Tag="Name"
-                                  IsCheckable="True" Click="OnSortMenuItemClick"/>
-                        <MenuItem x:Name="SortSizeMenuItem" Header="Size" Tag="Size"
-                                  IsCheckable="True" Click="OnSortMenuItemClick"/>
-                        <MenuItem x:Name="SortInstanceMenuItem" Header="Instance" Tag="Instance"
-                                  IsCheckable="True" Click="OnSortMenuItemClick"/>
-                    </ContextMenu>
-                </Button.ContextMenu>
-            </Button>
+            <WrapPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,-3,0,-3">
+                <!--  The one accent button, always Import on a content page: pick the file, then the
+                instances (or none). Hosting is a step inside it.  -->
+                <Button x:Name="ImportButton" Style="{StaticResource AccentButton}"
+                        Margin="0,3,8,3" Click="OnImport"
+                        ToolTip="Bring a shader zip (or an unpacked shader folder) in, and into any instances you choose. You can also drop one onto this page.">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE898;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Import" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="BrowseButton" Style="{StaticResource HeaderActionButton}"
+                        Click="OnBrowse"
+                        ToolTip="Search CurseForge and Modrinth for shader packs" Margin="0,3,8,3">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE896;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Browse" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </WrapPanel>
 
-            <Button DockPanel.Dock="Left" Style="{StaticResource IconButton}" Click="OnCreateFolder"
-                    Content="&#xE8F4;" FontFamily="{StaticResource IconFont}" FontSize="13"
-                    Margin="4,0,0,0" Padding="8,5" ToolTip="Create a folder to group shader packs"/>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <views:CompactSearchBox x:Name="SearchBox" Margin="0,0,8,0"
+                                        Placeholder="Filter shaders"
+                                        SearchToolTip="Filter by name, file or instance (Ctrl+F)"/>
+                <!--  Icon-only utilities: open folder, then refresh. shaderpacks/ is per instance, so
+                Open folder resolves an instance first (OnOpenFolder).  -->
+                <Button x:Name="OpenFolderButton" Style="{StaticResource HeaderIconButton}"
+                        Click="OnOpenFolder"
+                        Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}"
+                        ToolTip="Open an instance's shaderpacks folder"/>
+                <Button x:Name="RefreshButton" Style="{StaticResource HeaderIconButton}"
+                        Click="OnRefresh"
+                        Content="&#xE72C;" FontFamily="{DynamicResource IconFont}"
+                        ToolTip="Re-read every instance's shaderpacks folder and your own packs (F5)"/>
+            </StackPanel>
+        </Grid>
 
-            <TextBox x:Name="SearchBox" DockPanel.Dock="Right" Width="240" Margin="12,0,0,0"
-                     TextChanged="OnSearchChanged" PreviewKeyDown="OnSearchKeyDown"
-                     ToolTip="Filter by shader name or instance (Ctrl+F)"/>
+        <Border Grid.Row="2" Style="{StaticResource PageDivider}"/>
 
-            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
-                          Margin="10,0,0,0">
+        <!-- ── Row 3: sort, instance scope, folders ─────────────────────── -->
+        <Grid Grid.Row="3" Margin="28,4,28,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center"
+                        Margin="0,0,12,0">
+                <Button x:Name="SortButton" Style="{StaticResource ToolbarIconButton}"
+                        Click="OnSortButtonClick"
+                        Content="&#xE8CB;" FontFamily="{DynamicResource IconFont}"
+                        ToolTip="Sort shader packs">
+                    <Button.ContextMenu>
+                        <ContextMenu Opened="OnSortMenuOpened">
+                            <MenuItem x:Name="SortRecentMenuItem" Header="Recently added" Tag="RecentlyAdded"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortNameMenuItem" Header="Name" Tag="Name"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortSizeMenuItem" Header="Size" Tag="Size"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                            <MenuItem x:Name="SortInstanceMenuItem" Header="Instances using it" Tag="Instance"
+                                      IsCheckable="True" Click="OnSortMenuItemClick"/>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+                <ComboBox x:Name="PackScopeBox" Width="240" Margin="0,0,8,0"
+                          SelectionChanged="OnPackScopeChanged"
+                          ToolTip="Narrow the page to one instance - only that instance's shader packs are listed"/>
+            </StackPanel>
+
+            <ScrollViewer Grid.Column="1" VerticalAlignment="Center"
+                          HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                 <ItemsControl x:Name="FolderStrip">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
@@ -83,544 +122,95 @@
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <Border Padding="0" Margin="0,2,8,2" Cursor="Hand"
-                                    Background="{DynamicResource Surface3Brush}"
-                                    BorderThickness="1" CornerRadius="14"
+                            <!--  Active state is an accent border plus a bolder label, set by
+                            DataTriggers on DynamicResource brushes. ThemeService creates new
+                            brushes on every apply, so a brush baked into the row would keep the
+                            previous accent until the page is rebuilt.  -->
+                            <slate:SlateBorder Style="{StaticResource FolderChipBorder}"
+                                    ToolTip="{Binding ToolTipText}"
                                     MouseLeftButtonUp="OnFolderChipClick"
-                                    MouseRightButtonUp="OnFolderChipRightClick"
-                                    ToolTip="{Binding ToolTipText}">
-                                <Border.Style>
-                                    <Style TargetType="Border">
-                                        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                                <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Border.Style>
-                                <Border.ContextMenu>
+                                    MouseRightButtonUp="OnFolderChipRightClick">
+                                <slate:SlateBorder.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="Rename folder…" Click="OnFolderRename"/>
-                                        <MenuItem Header="Delete folder…" Click="OnFolderDelete"/>
+                                        <MenuItem Header="Rename folder..." Click="OnFolderRename"/>
+                                        <MenuItem Header="Delete folder..." Click="OnFolderDelete"/>
                                     </ContextMenu>
-                                </Border.ContextMenu>
+                                </slate:SlateBorder.ContextMenu>
                                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                    <TextBlock Text="{Binding Icon}" FontFamily="{StaticResource IconFont}" FontSize="11"
-                                               Margin="12,0,6,0" VerticalAlignment="Center"
-                                               Foreground="{DynamicResource TextPrimaryBrush}"/>
-                                    <TextBlock Text="{Binding Label}" Margin="0,0,4,0" Padding="0,5,0,5"
-                                               VerticalAlignment="Center"
-                                               Foreground="{DynamicResource TextPrimaryBrush}"
-                                               FontWeight="{Binding LabelWeight}"/>
-                                    <TextBlock Text="{Binding CountLabel}" Margin="0,0,12,0"
-                                               VerticalAlignment="Center" FontSize="11"
-                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                    <TextBlock Text="{Binding Icon}" Style="{StaticResource FolderChipGlyph}"/>
+                                    <TextBlock Text="{Binding Label}" Style="{StaticResource FolderChipLabel}"/>
+                                    <TextBlock Text="{Binding CountLabel}" Style="{StaticResource FolderChipCount}"/>
+                                    <!--  No settings pane: rename and delete are on this chip's
+                                    right-click menu, and packs are filed in from their own row
+                                    menu.  -->
                                 </StackPanel>
-                            </Border>
+                            </slate:SlateBorder>
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
             </ScrollViewer>
-        </DockPanel>
-
-        <!-- "this instance cannot load shaders" warning -->
-        <Border x:Name="LoaderWarning" Grid.Row="2" Margin="0,0,0,10" Padding="12,9" CornerRadius="8"
-                Background="{DynamicResource Surface2Brush}"
-                BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1"
-                Visibility="Collapsed">
-            <DockPanel>
-                <Button x:Name="LoaderWarningButton" DockPanel.Dock="Right" Content="Open mods"
-                        Click="OnOpenModsForLoader" Padding="12,4" Margin="12,0,0,0"
-                        VerticalAlignment="Center"
-                        ToolTip="Open this instance's mods so you can install Iris (or Oculus on Forge)"/>
-                <TextBlock Text="&#xE7BA;" FontFamily="{StaticResource IconFont}" FontSize="14"
-                           Foreground="{DynamicResource WarningBrush}" VerticalAlignment="Center"
-                           Margin="0,0,10,0"/>
-                <TextBlock x:Name="LoaderWarningText" Style="{StaticResource Caption}"
-                           VerticalAlignment="Center" TextWrapping="Wrap"
-                           Foreground="{DynamicResource TextSecondaryBrush}"/>
-            </DockPanel>
-        </Border>
-
-        <!-- Installed shaders + browse panel -->
-        <Grid Grid.Row="3">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" MinWidth="320"/>
-                <ColumnDefinition x:Name="BrowseColumn" Width="0"/>
-            </Grid.ColumnDefinitions>
-
-            <Border Grid.Column="0" Style="{StaticResource Card}" Padding="0">
-                <Grid>
-                    <ListBox x:Name="ShaderList" Background="Transparent" BorderThickness="0"
-                             SelectionMode="Extended"
-                             AllowDrop="True" DragOver="OnListDragOver" Drop="OnListDrop"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                             anim:Animate.EntranceStagger="True"
-                             SelectionChanged="OnShaderSelected"
-                             MouseDoubleClick="OnShaderDoubleClick">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <Border Padding="14,10" Margin="4,3" CornerRadius="8"
-                                        Background="{DynamicResource Surface2Brush}"
-                                        BorderThickness="1"
-                                        anim:Animate.HoverLift="True"
-                                        ToolTip="{Binding ToolTipText}">
-                                    <Border.Style>
-                                        <!-- DynamicResource, so the accent on the active row follows a
-                                             theme change instead of keeping the colour it was built with. -->
-                                        <Style TargetType="Border">
-                                            <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
-                                            <Style.Triggers>
-                                                <DataTrigger Binding="{Binding IsActive}" Value="True">
-                                                    <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
-                                                </DataTrigger>
-                                            </Style.Triggers>
-                                        </Style>
-                                    </Border.Style>
-
-                                    <Border.ContextMenu>
-                                        <ContextMenu>
-                                            <MenuItem Header="{Binding ApplyLabel}" Click="OnCtxApply">
-                                                <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE706;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                </MenuItem.Icon>
-                                            </MenuItem>
-                                            <MenuItem Header="Update…" Click="OnCtxUpdate"
-                                                      ToolTip="Check the store this pack came from for a newer version">
-                                                <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE895;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                </MenuItem.Icon>
-                                            </MenuItem>
-                                            <Separator/>
-                                            <MenuItem Header="Reveal in Explorer" Click="OnCtxReveal">
-                                                <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8DA;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                </MenuItem.Icon>
-                                            </MenuItem>
-                                            <MenuItem Header="Rename…" Click="OnCtxRename">
-                                                <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8AC;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                </MenuItem.Icon>
-                                            </MenuItem>
-                                            <Separator/>
-                                            <MenuItem Header="Copy to instance…" Click="OnCtxCopyTo">
-                                                <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8C8;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                </MenuItem.Icon>
-                                            </MenuItem>
-                                            <MenuItem Header="Copy to all instances" Click="OnCtxCopyToAll"/>
-                                            <MenuItem Header="Add to folder" SubmenuOpened="OnCtxAddToFolderOpened">
-                                                <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE8B7;" FontFamily="{StaticResource IconFont}" FontSize="12"/>
-                                                </MenuItem.Icon>
-                                            </MenuItem>
-                                            <Separator/>
-                                            <MenuItem Header="Copy file path" Click="OnCtxCopyPath"/>
-                                            <MenuItem Header="Open settings file" Click="OnCtxOpenSettings"
-                                                      ToolTip="Iris keeps this pack's tuned options in shaderpacks/&lt;file&gt;.txt"/>
-                                            <MenuItem Header="Reset settings…" Click="OnCtxResetSettings"/>
-                                            <Separator/>
-                                            <MenuItem Header="Delete…" Click="OnCtxDelete"
-                                                      Foreground="{DynamicResource DangerBrush}">
-                                                <MenuItem.Icon>
-                                                    <TextBlock Text="&#xE74D;" FontFamily="{StaticResource IconFont}" FontSize="12"
-                                                               Foreground="{DynamicResource DangerBrush}"/>
-                                                </MenuItem.Icon>
-                                            </MenuItem>
-                                        </ContextMenu>
-                                    </Border.ContextMenu>
-
-                                    <DockPanel>
-                                        <!-- Row actions live at the right edge. -->
-                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
-                                                    VerticalAlignment="Center">
-                                            <Button Content="{Binding ApplyLabel}" Click="OnApply" Tag="{Binding}"
-                                                    Margin="0,0,6,0" Padding="10,4"
-                                                    ToolTip="Make this the shader pack this instance loads"/>
-                                            <Button Style="{StaticResource IconButton}" Content="&#xE895;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
-                                                    Click="OnUpdate" Tag="{Binding}"
-                                                    Visibility="{Binding UpdateVisibility}"
-                                                    ToolTip="Look for a newer version in the store this came from"/>
-                                            <Button Style="{StaticResource IconButton}" Content="&#xE8DA;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
-                                                    Click="OnReveal" Tag="{Binding}" ToolTip="Show in Explorer"/>
-                                            <Button Style="{StaticResource IconButton}" Content="&#xE8C8;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
-                                                    Click="OnCopyTo" Tag="{Binding}"
-                                                    ToolTip="Copy this shader into another instance"/>
-                                            <Button Style="{StaticResource IconButton}" Content="&#xE74D;"
-                                                    FontFamily="{StaticResource IconFont}" FontSize="12"
-                                                    Click="OnDelete" Tag="{Binding}"
-                                                    Foreground="{DynamicResource DangerBrush}"
-                                                    ToolTip="Delete this shader pack"/>
-                                        </StackPanel>
-                                        <Border DockPanel.Dock="Left" Width="34" Height="34" CornerRadius="8"
-                                                Background="{DynamicResource AccentSoftBrush}" Margin="0,0,12,0"
-                                                VerticalAlignment="Center">
-                                            <TextBlock Text="&#xE706;" FontFamily="{StaticResource IconFont}"
-                                                       FontSize="14" Foreground="{DynamicResource AccentBrush}"
-                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                        </Border>
-                                        <StackPanel VerticalAlignment="Center">
-                                            <StackPanel Orientation="Horizontal">
-                                                <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"
-                                                           TextTrimming="CharacterEllipsis" MaxWidth="360"/>
-                                                <Border Style="{StaticResource Pill}" Margin="8,0,0,0"
-                                                        Background="{DynamicResource AccentBrush}"
-                                                        Visibility="{Binding ActiveVisibility}">
-                                                    <TextBlock Text="ACTIVE" Style="{StaticResource PillText}"
-                                                               Foreground="{DynamicResource TextOnAccentBrush}"/>
-                                                </Border>
-                                                <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
-                                                        Visibility="{Binding FolderVisibility}"
-                                                        ToolTip="An unpacked shader folder rather than a zip">
-                                                    <TextBlock Text="FOLDER" Style="{StaticResource PillText}"/>
-                                                </Border>
-                                                <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
-                                                        Visibility="{Binding TunedVisibility}"
-                                                        ToolTip="This pack has its own saved Iris settings — they travel with it when you copy it">
-                                                    <TextBlock Text="TUNED" Style="{StaticResource PillText}"/>
-                                                </Border>
-                                                <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
-                                                        Visibility="{Binding SourceVisibility}"
-                                                        ToolTip="Installed from a store, so the launcher can update it">
-                                                    <TextBlock Text="{Binding SourceLabel}" Style="{StaticResource PillText}"/>
-                                                </Border>
-                                            </StackPanel>
-                                            <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
-                                                       Margin="0,2,0,0"/>
-                                        </StackPanel>
-                                    </DockPanel>
-                                </Border>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-
-                    <StackPanel x:Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                MaxWidth="460" Visibility="Collapsed">
-                        <TextBlock Text="&#xE706;" FontFamily="{StaticResource IconFont}" FontSize="34"
-                                   HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                        <TextBlock Style="{StaticResource H3}" Text="No shader packs yet"
-                                   HorizontalAlignment="Center" Margin="0,12,0,6"/>
-                        <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" TextAlignment="Center"
-                                   Text="Find one in the store, add a zip you already have, or drop a zip straight onto this list. Shaders need Iris (or Oculus on Forge) installed in the instance to do anything."/>
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,14,0,0">
-                            <Button Content="Get shaders" Style="{StaticResource AccentButton}"
-                                    Click="OnToggleBrowse" Padding="14,5" Margin="0,0,8,0"/>
-                            <Button Content="Add from file…" Click="OnAddFromFile" Padding="14,5"/>
-                        </StackPanel>
-                    </StackPanel>
-
-                    <StackPanel x:Name="EmptyFilteredState" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                MaxWidth="440" Visibility="Collapsed">
-                        <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="30"
-                                   HorizontalAlignment="Center" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                        <TextBlock x:Name="EmptyFilteredTitle" Style="{StaticResource H3}" Text="Nothing matched"
-                                   HorizontalAlignment="Center" Margin="0,12,0,6" TextWrapping="Wrap"
-                                   TextAlignment="Center"/>
-                        <TextBlock x:Name="EmptyFilteredDetail" Style="{StaticResource Muted}" TextWrapping="Wrap"
-                                   TextAlignment="Center"
-                                   Text="Every shader pack is still there — the search, folder or instance filter is hiding them."/>
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,14,0,0">
-                            <Button Content="Clear filters" Click="OnClearFilters" Padding="14,5"/>
-                        </StackPanel>
-                    </StackPanel>
-                </Grid>
-            </Border>
-
-            <!-- Browse panel: results on the left, project detail on the right -->
-            <Border x:Name="BrowsePanel" Grid.Column="1" Style="{StaticResource Card}" Padding="14"
-                    Margin="14,0,0,0" Visibility="Collapsed">
-                <DockPanel>
-                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
-                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;"
-                                FontFamily="{StaticResource IconFont}" FontSize="12"
-                                Click="OnToggleBrowse" ToolTip="Close the store panel"/>
-                        <TextBlock Style="{StaticResource H3}" Text="Find shaders" VerticalAlignment="Center"/>
-                    </DockPanel>
-
-                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
-                        <Button DockPanel.Dock="Right" Content="Search" Click="OnSearchStores"
-                                Style="{StaticResource AccentButton}" Margin="8,0,0,0" Padding="12,5"/>
-                        <TextBox x:Name="StoreQueryBox" KeyDown="OnStoreQueryKey"
-                                 ToolTip="Search Modrinth and CurseForge for shader packs"/>
-                    </DockPanel>
-
-                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
-                        <CheckBox x:Name="AnyVersionBox" DockPanel.Dock="Right" Content="Any version"
-                                  VerticalAlignment="Center" Margin="10,0,0,0"
-                                  Checked="OnAnyVersionChanged" Unchecked="OnAnyVersionChanged"
-                                  ToolTip="Off: only packs listed for the target instance's Minecraft version"/>
-                        <TextBlock x:Name="InstallTargetLabel" Style="{StaticResource Caption}"
-                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
-                                   ToolTip="Where an Install from this panel puts the zip"/>
-                    </DockPanel>
-
-                    <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
-                        <Button x:Name="CancelDownloadButton" DockPanel.Dock="Right" Content="Cancel"
-                                Click="OnCancelDownload" Padding="10,3" Margin="8,0,0,0"
-                                Visibility="Collapsed" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="BrowseStatus" Style="{StaticResource Caption}"
-                                   TextWrapping="Wrap" VerticalAlignment="Center"/>
-                    </DockPanel>
-                    <ProgressBar x:Name="DownloadProgress" DockPanel.Dock="Bottom" Height="3"
-                                 Visibility="Collapsed" Minimum="0" Maximum="100"/>
-
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="5*" MinWidth="240"/>
-                            <ColumnDefinition Width="14"/>
-                            <ColumnDefinition Width="6*"/>
-                        </Grid.ColumnDefinitions>
-
-                        <Grid Grid.Column="0">
-                            <ListBox x:Name="StoreResults" Background="Transparent" BorderThickness="0"
-                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                     ScrollViewer.ScrollChanged="OnStoreResultsScroll"
-                                     SelectionChanged="OnStoreResultSelected"
-                                     MouseDoubleClick="OnStoreResultDoubleClick">
-                                <ListBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <Border Padding="6,8" Background="Transparent">
-                                            <Border.ContextMenu>
-                                                <ContextMenu>
-                                                    <MenuItem Header="Install latest" Click="OnCtxStoreInstall"/>
-                                                    <MenuItem Header="Choose version…" Click="OnCtxStoreChooseVersion"/>
-                                                    <Separator/>
-                                                    <MenuItem Header="Open project page" Click="OnCtxStoreOpenPage"/>
-                                                    <MenuItem Header="Copy project URL" Click="OnCtxStoreCopyUrl"/>
-                                                </ContextMenu>
-                                            </Border.ContextMenu>
-                                            <Grid>
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="54"/>
-                                                    <ColumnDefinition Width="*"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-
-                                                <Border Grid.Column="0" Width="44" Height="44"
-                                                        Background="{DynamicResource Surface3Brush}"
-                                                        BorderBrush="{DynamicResource BorderBrush}"
-                                                        BorderThickness="1" CornerRadius="8"
-                                                        ClipToBounds="True" VerticalAlignment="Top">
-                                                    <Grid>
-                                                        <TextBlock Text="{Binding Initial}" Style="{StaticResource H3}"
-                                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                                        <Image Source="{Binding IconUrl}" Stretch="UniformToFill"/>
-                                                    </Grid>
-                                                </Border>
-
-                                                <StackPanel Grid.Column="1" Margin="0,0,10,0">
-                                                    <DockPanel>
-                                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
-                                                                Margin="6,0,0,0"
-                                                                ToolTip="Which store this result came from">
-                                                            <TextBlock Text="{Binding SourceBadge}"
-                                                                       Style="{StaticResource PillText}"/>
-                                                        </Border>
-                                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
-                                                                   FontSize="13" TextTrimming="CharacterEllipsis"/>
-                                                    </DockPanel>
-                                                    <TextBlock Text="{Binding Summary}" Style="{StaticResource Caption}"
-                                                               TextWrapping="Wrap" Margin="0,2,0,0"
-                                                               MaxHeight="34" TextTrimming="CharacterEllipsis"/>
-                                                    <TextBlock Text="{Binding Meta}" Style="{StaticResource Caption}"
-                                                               Margin="0,3,0,0"
-                                                               Foreground="{DynamicResource TextTertiaryBrush}"
-                                                               TextTrimming="CharacterEllipsis"/>
-                                                </StackPanel>
-
-                                                <Button Grid.Column="2" Content="Install" Click="OnInstallFromStore"
-                                                        Tag="{Binding}" Padding="10,3" MinWidth="0"
-                                                        VerticalAlignment="Center"
-                                                        ToolTip="Install the newest version for this instance — right-click for Choose version…"/>
-                                            </Grid>
-                                        </Border>
-                                    </DataTemplate>
-                                </ListBox.ItemTemplate>
-                            </ListBox>
-
-                            <StackPanel x:Name="StoreEmptyState" HorizontalAlignment="Center"
-                                        VerticalAlignment="Center" MaxWidth="260" Visibility="Collapsed">
-                                <TextBlock Text="&#xE721;" FontFamily="{StaticResource IconFont}" FontSize="26"
-                                           HorizontalAlignment="Center"
-                                           Foreground="{DynamicResource TextTertiaryBrush}"/>
-                                <TextBlock x:Name="StoreEmptyTitle" Style="{StaticResource H3}" Text="Search for a shader"
-                                           HorizontalAlignment="Center" Margin="0,10,0,4" TextAlignment="Center"
-                                           TextWrapping="Wrap"/>
-                                <TextBlock x:Name="StoreEmptyDetail" Style="{StaticResource Muted}"
-                                           TextAlignment="Center" TextWrapping="Wrap"
-                                           Text="Try “complementary”, “BSL” or “rethinking voxels”."/>
-                            </StackPanel>
-
-                            <ProgressBar x:Name="StoreLoadingBar" Height="2" VerticalAlignment="Top"
-                                         IsIndeterminate="True" Visibility="Collapsed" Background="Transparent"/>
-                        </Grid>
-
-                        <Border Grid.Column="1" Width="1" HorizontalAlignment="Center"
-                                Background="{DynamicResource BorderSubtleBrush}"/>
-
-                        <Grid Grid.Column="2">
-                            <TextBlock x:Name="DetailPlaceholder" Style="{StaticResource Muted}"
-                                       Text="Pick a result to see its screenshots, description, links and versions — a shader pack is chosen on how it looks."
-                                       TextWrapping="Wrap" TextAlignment="Center" MaxWidth="320"
-                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-
-                            <Grid x:Name="DetailPanel" Visibility="Collapsed">
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto"/>
-                                    <RowDefinition Height="*"/>
-                                </Grid.RowDefinitions>
-
-                                <Grid Grid.Row="0" Margin="0,0,0,10">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="54"/>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <Border Grid.Column="0" Width="44" Height="44"
-                                            Background="{DynamicResource Surface3Brush}"
-                                            BorderBrush="{DynamicResource BorderBrush}"
-                                            BorderThickness="1" CornerRadius="8"
-                                            ClipToBounds="True" VerticalAlignment="Top">
-                                        <Grid>
-                                            <TextBlock x:Name="SelectedIconFallback" Style="{StaticResource H3}"
-                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                            <Image x:Name="SelectedIconImage" Stretch="UniformToFill"/>
-                                        </Grid>
-                                    </Border>
-                                    <StackPanel Grid.Column="1">
-                                        <DockPanel>
-                                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="10,0,0,0">
-                                                <Button x:Name="OpenProjectButton" Content="Open page"
-                                                        Click="OnOpenSelectedProject" Padding="10,4"
-                                                        MinWidth="0" MinHeight="0" Margin="0,0,6,0"/>
-                                                <Button x:Name="InstallSelectedButton" Content="Install"
-                                                        Style="{StaticResource AccentButton}"
-                                                        Click="OnInstallSelected" Padding="10,4"
-                                                        MinWidth="0" MinHeight="0"/>
-                                            </StackPanel>
-                                            <TextBlock x:Name="StoreNameLabel" Style="{StaticResource H3}"
-                                                       TextWrapping="Wrap" TextTrimming="CharacterEllipsis"/>
-                                        </DockPanel>
-                                        <TextBlock x:Name="StoreMetaLabel" Style="{StaticResource Caption}"
-                                                   Margin="0,2,0,0" TextWrapping="Wrap"/>
-                                    </StackPanel>
-                                </Grid>
-
-                                <TabControl Grid.Row="1" x:Name="DetailTabs" anim:Animate.TabTransition="True">
-                                    <TabItem Header="Screenshots">
-                                        <Grid Margin="0,10,0,0">
-                                            <TextBlock x:Name="ScreenshotsEmptyText" Style="{StaticResource Muted}"
-                                                       Text="This pack published no screenshots."
-                                                       HorizontalAlignment="Center" VerticalAlignment="Center"
-                                                       TextWrapping="Wrap" TextAlignment="Center"/>
-                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                                          anim:Animate.SmoothScroll="True">
-                                                <ItemsControl x:Name="ScreenshotList">
-                                                    <ItemsControl.ItemsPanel>
-                                                        <ItemsPanelTemplate>
-                                                            <WrapPanel/>
-                                                        </ItemsPanelTemplate>
-                                                    </ItemsControl.ItemsPanel>
-                                                    <ItemsControl.ItemTemplate>
-                                                        <DataTemplate>
-                                                            <Border Width="190" Margin="0,0,10,10"
-                                                                    Style="{StaticResource Card}" Padding="8"
-                                                                    Cursor="Hand" ToolTip="Open screenshot"
-                                                                    MouseLeftButtonUp="OnOpenScreenshot">
-                                                                <StackPanel>
-                                                                    <Border Height="100"
-                                                                            Background="{DynamicResource Surface0Brush}"
-                                                                            BorderBrush="{DynamicResource BorderBrush}"
-                                                                            BorderThickness="1" CornerRadius="6"
-                                                                            ClipToBounds="True">
-                                                                        <Image Source="{Binding ImageUrl}" Stretch="UniformToFill"/>
-                                                                    </Border>
-                                                                    <TextBlock Text="{Binding Title}" Style="{StaticResource Caption}"
-                                                                               Margin="0,6,0,0" TextWrapping="Wrap"/>
-                                                                </StackPanel>
-                                                            </Border>
-                                                        </DataTemplate>
-                                                    </ItemsControl.ItemTemplate>
-                                                </ItemsControl>
-                                            </ScrollViewer>
-                                        </Grid>
-                                    </TabItem>
-
-                                    <TabItem Header="Overview">
-                                        <Border CornerRadius="8" ClipToBounds="True" Margin="0,10,0,0"
-                                                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
-                                            <Border x:Name="OverviewHost" ClipToBounds="True"
-                                                    Background="{DynamicResource Surface0Brush}">
-                                                <views:RichDescriptionView x:Name="OverviewBrowser"/>
-                                            </Border>
-                                        </Border>
-                                    </TabItem>
-
-                                    <TabItem Header="Links">
-                                        <StackPanel Margin="0,12,0,0">
-                                            <WrapPanel>
-                                                <Button x:Name="ProjectPageButton" Content="Project page" Click="OnOpenLink"
-                                                        Margin="0,0,10,10" Padding="14,6"/>
-                                                <Button x:Name="IssuesButton" Content="Issues" Click="OnOpenLink"
-                                                        Margin="0,0,10,10" Padding="14,6"/>
-                                                <Button x:Name="SourceButton" Content="Source" Click="OnOpenLink"
-                                                        Margin="0,0,10,10" Padding="14,6"/>
-                                                <Button x:Name="WikiButton" Content="Wiki" Click="OnOpenLink"
-                                                        Margin="0,0,10,10" Padding="14,6"/>
-                                                <Button x:Name="DiscordButton" Content="Discord" Click="OnOpenLink"
-                                                        Margin="0,0,10,10" Padding="14,6"/>
-                                            </WrapPanel>
-                                            <TextBlock x:Name="LinksEmptyText" Style="{StaticResource Muted}"
-                                                       TextWrapping="Wrap"
-                                                       Text="This project exposes no extra links."/>
-                                        </StackPanel>
-                                    </TabItem>
-
-                                    <TabItem Header="Versions">
-                                        <Border Margin="0,10,0,0" CornerRadius="6"
-                                                Background="{DynamicResource Surface0Brush}"
-                                                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
-                                            <DataGrid x:Name="VersionsGrid" AutoGenerateColumns="False"
-                                                      CanUserAddRows="False" HeadersVisibility="Column"
-                                                      RowHeaderWidth="0" SelectionMode="Single" IsReadOnly="True"
-                                                      Background="Transparent" BorderThickness="0">
-                                                <DataGrid.Columns>
-                                                    <DataGridTextColumn Header="Version" Binding="{Binding VersionNumber}" Width="*"/>
-                                                    <DataGridTextColumn Header="MC" Binding="{Binding McVersions}" Width="110"/>
-                                                    <DataGridTextColumn Header="Channel" Binding="{Binding Channel}" Width="70"/>
-                                                    <DataGridTextColumn Header="Date" Binding="{Binding DateLabel}" Width="88"/>
-                                                    <DataGridTextColumn Header="Size" Binding="{Binding SizeLabel}" Width="70"/>
-                                                    <DataGridTemplateColumn Width="82">
-                                                        <DataGridTemplateColumn.CellTemplate>
-                                                            <DataTemplate>
-                                                                <Button Content="Install" Style="{StaticResource AccentButton}"
-                                                                        Padding="6,2" MinWidth="0" MinHeight="0" FontSize="11"
-                                                                        Click="OnInstallVersionClick"/>
-                                                            </DataTemplate>
-                                                        </DataGridTemplateColumn.CellTemplate>
-                                                    </DataGridTemplateColumn>
-                                                </DataGrid.Columns>
-                                            </DataGrid>
-                                        </Border>
-                                    </TabItem>
-                                </TabControl>
-                            </Grid>
-                        </Grid>
-                    </Grid>
-                </DockPanel>
-            </Border>
         </Grid>
 
-        <!-- Status line -->
-        <DockPanel Grid.Row="4" Margin="0,10,0,12">
-            <TextBlock x:Name="CountLabel" DockPanel.Dock="Right" Style="{StaticResource Caption}"
-                       VerticalAlignment="Center" Margin="12,0,0,0"/>
-            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" TextWrapping="Wrap"
-                       VerticalAlignment="Center"
-                       Foreground="{DynamicResource TextSecondaryBrush}"/>
-        </DockPanel>
+        <!-- ── Row 4: the loader banner, then the list ─────────────────────── -->
+        <!--  AllowDrop is on this Grid, not the list, because PageState collapses the list while
+        the page is empty and the empty panel invites dropping a zip.  -->
+        <Grid Grid.Row="4" Margin="28,0,28,16"
+              Background="Transparent"
+              AllowDrop="True" DragOver="OnListDragOver" Drop="OnListDrop">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+
+            <!--  Shown when an instance has no Iris, Oculus or OptiFine. Without one, turning a shader
+            on changes nothing in game and the game gives no hint, so the page says so; the defaults
+            engine never auto-activates a shader there either. Collapsed otherwise.  -->
+            <slate:SlateBorder x:Name="LoaderWarning" Grid.Row="0" Margin="0,0,0,10" Padding="12,9" CornerRadius="8"
+                    Background="{DynamicResource Surface2Brush}"
+                    BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1"
+                    Visibility="Collapsed">
+                <DockPanel>
+                    <Button x:Name="LoaderWarningButton" DockPanel.Dock="Right" Content="Open mods"
+                            Click="OnOpenModsForLoader" Padding="12,4" Margin="12,0,0,0"
+                            VerticalAlignment="Center"
+                            ToolTip="Open that instance's mods so you can install Iris (or Oculus on Forge)"/>
+                    <TextBlock Text="&#xE7BA;" FontFamily="{DynamicResource IconFont}" FontSize="14"
+                               Foreground="{DynamicResource WarningBrush}" VerticalAlignment="Center"
+                               Margin="0,0,10,0"/>
+                    <TextBlock x:Name="LoaderWarningText" Style="{StaticResource Caption}"
+                               VerticalAlignment="Center" TextWrapping="Wrap"
+                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                </DockPanel>
+            </slate:SlateBorder>
+
+            <Grid Grid.Row="1">
+                <views:ContentListView x:Name="PackList"/>
+
+                <!--  Last child so it draws over the list. Loading, empty, error and offline states are
+                all this control, driven by Views/PageState.cs.  -->
+                <views:PageStateView x:Name="PageStateHost"/>
+            </Grid>
+        </Grid>
+
+        <!-- ── Row 5: status left, count and progress right ───────────────── -->
+        <!--  The count lives here rather than in the header, where a change would go unnoticed.  -->
+        <Border Grid.Row="5" Style="{StaticResource PageStatusBar}">
+            <DockPanel>
+                <TextBlock x:Name="CountLabel" DockPanel.Dock="Right"
+                           Style="{StaticResource Caption}" VerticalAlignment="Center"
+                           Margin="12,0,0,0"/>
+                <!--  No Click handler: PageState.Slots routes this button to its own
+                     CancelRequested, and a handler here as well would cancel twice.  -->
+                <Button x:Name="BusyCancelButton" DockPanel.Dock="Right" Content="Cancel"
+                        Padding="10,2" MinHeight="0" MinWidth="0" Margin="12,0,0,0"
+                        Visibility="Collapsed" VerticalAlignment="Center"
+                        ToolTip="Stop the operation in progress"/>
+                <ProgressBar x:Name="BusyBar" DockPanel.Dock="Right" Width="140" Height="4"
+                             IsIndeterminate="True" Visibility="Collapsed"
+                             VerticalAlignment="Center" Margin="12,0,0,0"/>
+                <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
+                           VerticalAlignment="Center" TextWrapping="Wrap"/>
+            </DockPanel>
+        </Border>
     </Grid>
 </Page>

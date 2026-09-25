@@ -1,0 +1,16 @@
+# /etc/logrotate.d/cloudlauncher
+# The unit appends stdout/stderr to these files, so they are copied and truncated in place.
+# SELinux: the folder needs the var_log_t label for logrotate to touch it:
+#   sudo semanage fcontext -a -t var_log_t '/home/opc/everything/cloud/cloudlauncher/logs(/.*)?'
+#   sudo restorecon -Rv /home/opc/everything/cloud/cloudlauncher/logs
+/home/opc/everything/cloud/cloudlauncher/logs/*.log {
+    su opc opc
+    daily
+    rotate 30
+    maxage 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

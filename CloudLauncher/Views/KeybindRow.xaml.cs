@@ -52,12 +52,12 @@ public partial class KeybindRow : UserControl
     private void OnKeyButtonClick(object sender, RoutedEventArgs e)
     {
         _capturing = true;
-        KeyDisplay.Text = "Press a key…";
+        KeyDisplay.Text = "Press a key...";
         KeyButton.Background = (Brush)FindResource("AccentSoftBrush");
         Keyboard.Focus(KeyButton);
         KeyButton.PreviewKeyDown += OnPreviewKeyDown;
         KeyButton.PreviewMouseDown += OnPreviewMouseDown;
-        // Lose focus → cancel
+        // Lose focus -> cancel
         KeyButton.LostKeyboardFocus += OnLostFocus;
     }
 

@@ -1,12 +1,13 @@
 ﻿<UserControl x:Class="CloudLauncher.Views.ModUpdateReviewDialog"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
              xmlns:views="clr-namespace:CloudLauncher.Views">
-    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
-            BorderThickness="1" CornerRadius="12" Padding="22" Width="980" Height="660">
-        <Border.Effect>
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="22">
+        <slate:SlateBorder.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
-        </Border.Effect>
+        </slate:SlateBorder.Effect>
         <DockPanel>
             <TextBlock x:Name="TitleLabel" DockPanel.Dock="Top" Style="{StaticResource H2}"
                        TextTrimming="CharacterEllipsis" Text="Update mods"/>
@@ -29,7 +30,7 @@
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- LEFT: the updates, each with a checkbox -->
+                <!-- Left: the updates, each with a checkbox -->
                 <DockPanel Grid.Column="0">
                     <Grid DockPanel.Dock="Top" Margin="2,0,2,8">
                         <TextBlock x:Name="CountLabel" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
@@ -38,7 +39,7 @@
                             <Button Content="None" Style="{StaticResource LinkButton}" FontSize="11" Click="OnSelectNone"/>
                         </StackPanel>
                     </Grid>
-                    <Border Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                    <slate:SlateBorder Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
                             BorderThickness="1" CornerRadius="6">
                         <ListBox x:Name="List" Background="Transparent" BorderThickness="0"
                                  SelectionChanged="OnSelectionChanged"
@@ -53,7 +54,7 @@
                                         </Grid.ColumnDefinitions>
                                         <CheckBox Grid.Column="0" IsChecked="{Binding IsSelected, Mode=TwoWay}"
                                                   VerticalAlignment="Center" Margin="2,0,10,0" Click="OnCheckChanged"/>
-                                        <Border Grid.Column="1" Width="30" Height="30" CornerRadius="6" ClipToBounds="True"
+                                        <slate:SlateBorder Grid.Column="1" Width="30" Height="30" CornerRadius="6" ClipToBounds="True"
                                                 Background="{DynamicResource Surface3Brush}" BorderBrush="{DynamicResource BorderBrush}"
                                                 BorderThickness="1" Margin="0,0,10,0" VerticalAlignment="Center">
                                             <Grid>
@@ -62,26 +63,26 @@
                                                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                                 <Image Source="{Binding IconUrl}" Stretch="UniformToFill"/>
                                             </Grid>
-                                        </Border>
+                                        </slate:SlateBorder>
                                         <StackPanel Grid.Column="2" VerticalAlignment="Center">
                                             <StackPanel Orientation="Horizontal">
                                                 <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
                                                            Foreground="{DynamicResource TextPrimaryBrush}"
                                                            TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MaxWidth="210"/>
-                                                <Border Style="{StaticResource Pill}" Background="{Binding ChannelBrush}" Margin="8,0,0,0">
+                                                <slate:SlateBorder Style="{StaticResource Pill}" Background="{Binding ChannelBrush}" Margin="8,0,0,0">
                                                     <TextBlock Text="{Binding Channel}" Style="{StaticResource PillText}" Foreground="White"/>
-                                                </Border>
-                                                <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                </slate:SlateBorder>
+                                                <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"
                                                         Visibility="{Binding LockedVisibility}"
-                                                        ToolTip="Locked in Modpack Management — left unticked, tick it to update anyway">
+                                                        ToolTip="Locked in Modpack Management - left unticked, tick it to update anyway">
                                                     <TextBlock Text="LOCKED" Style="{StaticResource PillText}"/>
-                                                </Border>
-                                                <Border Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                </slate:SlateBorder>
+                                                <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"
                                                         Background="{DynamicResource DangerBrush}"
                                                         Visibility="{Binding IncompatibleVisibility}"
-                                                        ToolTip="Marked update-incompatible — updating it may break your setup">
+                                                        ToolTip="Marked update-incompatible - updating it may break your setup">
                                                     <TextBlock Text="RISKY" Style="{StaticResource PillText}" Foreground="White"/>
-                                                </Border>
+                                                </slate:SlateBorder>
                                             </StackPanel>
                                             <TextBlock Text="{Binding VersionsLabel}" Style="{StaticResource Caption}"
                                                        Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0"
@@ -91,10 +92,10 @@
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
-                    </Border>
+                    </slate:SlateBorder>
                 </DockPanel>
 
-                <!-- RIGHT: the selected update's changelog -->
+                <!-- Right: the selected update's changelog -->
                 <DockPanel Grid.Column="2">
                     <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
                         <TextBlock x:Name="ChangelogTitle" Style="{StaticResource H3}" TextTrimming="CharacterEllipsis"
@@ -102,7 +103,7 @@
                         <TextBlock x:Name="ChangelogMeta" Style="{StaticResource Caption}"
                                    Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0" TextWrapping="Wrap"/>
                     </StackPanel>
-                    <Border CornerRadius="8" ClipToBounds="True"
+                    <slate:SlateBorder CornerRadius="8" ClipToBounds="True"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                             Background="{DynamicResource Surface0Brush}">
                         <Grid>
@@ -112,9 +113,9 @@
                                        TextWrapping="Wrap" MaxWidth="360" TextAlignment="Center"
                                        Text="Select an update to read its changelog."/>
                         </Grid>
-                    </Border>
+                    </slate:SlateBorder>
                 </DockPanel>
             </Grid>
         </DockPanel>
-    </Border>
+    </slate:SlateBorder>
 </UserControl>

@@ -166,11 +166,9 @@ public sealed class MinecraftInstanceService
             _running[packId] = process;
         }
 
-        // Close the check-then-subscribe race: if the process exited just before/while we
-        // subscribed, the Exited event may never reach our handler, leaving the pack stuck
-        // "Running" forever. Re-check now and remove if already gone. RemoveRunning is
-        // idempotent (ReferenceEquals guard), so a duplicate removal from a late Exited
-        // event is harmless.
+        // Check-then-subscribe race: if the process exited before we subscribed, Exited never fires
+        // and the pack would stay "Running". RemoveRunning is idempotent (ReferenceEquals guard), so a
+        // late Exited is harmless.
         if (HasExited(process))
         {
             RemoveRunning(packId, process);

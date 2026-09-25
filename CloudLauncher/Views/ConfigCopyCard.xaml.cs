@@ -8,26 +8,20 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// An in-window card that picks which instances a config file — or a whole folder of them — is copied
-/// into, and says up front what that would do to each one.
-/// </summary>
-/// <remarks>
-/// <para>The point of the checklist is that copying one instance's config into several others is a
-/// single decision, not five repetitions of the same dialog. The point of the per-instance summary is
-/// that the two things the user cannot see from a file name are whether they are about to replace
-/// something and whether the destination's sync rules will push their change out to other people. Both
-/// are answered on the row, before anything is written.</para>
-///
-/// <para>Nothing is ticked when the card opens. The alternative — everything ticked — turns a
-/// mis-aimed click into an overwrite across every instance at once.</para>
-/// </remarks>
+/// <summary>An in-window card that picks which instances a config file (or a folder of them) is
+/// copied into, and shows what that would do to each one.</summary>
+/// <remarks>Each row says whether the copy would replace existing files and whether the
+/// destination's sync rules would share the change with other people, before anything is written.
+/// Nothing is ticked at first, so a stray click can't overwrite every instance.</remarks>
 public partial class ConfigCopyCard : UserControl
 {
     private readonly TaskCompletionSource<bool> _tcs = new();
     private readonly ObservableCollection<TargetRow> _targets = new();
     private readonly IReadOnlyList<PackSummary> _allTargets;
     private readonly IReadOnlyList<string> _paths;
+
+    /// <summary>Set by <see cref="Embed"/>. Suppresses the fixed card size and the focus grab.</summary>
+    private bool _embedded;
 
     /// <summary>The instances the user ticked, or null when the card was cancelled.</summary>
     public List<PackSummary>? ChosenTargets { get; private set; }
@@ -48,7 +42,7 @@ public partial class ConfigCopyCard : UserControl
         _paths = paths;
         TargetList.ItemsSource = _targets;
 
-        TitleLabel.Text = paths.Count == 1 ? "Copy this file to…" : $"Copy {paths.Count} files to…";
+        TitleLabel.Text = paths.Count == 1 ? "Copy this file to..." : $"Copy {paths.Count} files to...";
         SubLabel.Text = paths.Count == 1
             ? $"{paths[0]} from {sourceName}."
             : $"{paths.Count} files from {sourceName}, keeping the same folder structure.";
@@ -58,9 +52,20 @@ public partial class ConfigCopyCard : UserControl
         Loaded += (_, _) =>
         {
             Animate.SlideFadeIn(this, 0, 14, 200);
-            Focus();
+            if (!_embedded) Focus();
             _ = LoadPreviewAsync();
         };
+    }
+
+    /// <summary>Turns the floating card into a pane: drops the fixed 640x580 size and the shadow so it
+    /// fills its cell. Cancel and Copy stay, since the host still needs both answers.</summary>
+    /// <remarks>Call it before the control is loaded.</remarks>
+    public void Embed()
+    {
+        _embedded = true;
+        CardRoot.Width = double.NaN;
+        CardRoot.Height = double.NaN;
+        CardRoot.Effect = null;
     }
 
     public void Close() => _tcs.TrySetResult(true);
@@ -71,11 +76,9 @@ public partial class ConfigCopyCard : UserControl
         base.OnPreviewKeyDown(e);
     }
 
-    /// <summary>
-    /// Works out, per instance, how many of the files already exist and whether the destination's rules
-    /// make these paths Shared. Reading a dozen <c>.rules.json</c> files and stat-ing a few hundred
-    /// paths is quick but it is still disk work, so it happens off the UI thread behind a spinner.
-    /// </summary>
+    /// <summary>Works out, per instance, how many of the files already exist and whether the
+    /// destination's rules make these paths Shared. Disk work, so it runs off the UI thread behind a
+    /// spinner.</summary>
     private async Task LoadPreviewAsync()
     {
         try
@@ -105,7 +108,7 @@ public partial class ConfigCopyCard : UserControl
         {
             BusyState.Visibility = Visibility.Collapsed;
             FooterNote.Text = "Could not inspect the other instances: " + ex.Message;
-            // Still offer the targets — the copy itself reports its own failures per file.
+            // Still offer the targets; the copy reports its own failures per file.
             foreach (var pack in _allTargets) _targets.Add(new TargetRow(pack, 0, _paths.Count, false));
         }
     }
@@ -130,9 +133,8 @@ public partial class ConfigCopyCard : UserControl
 
     private void SetAll(bool value)
     {
-        // The rows are plain objects rebound wholesale rather than notifying — cheaper than an
-        // INotifyPropertyChanged implementation for a list this size, and the checkbox state is the
-        // only thing that changes.
+        // The rows are plain objects, so rebind them all rather than implementing
+        // INotifyPropertyChanged for the one property that changes.
         var snapshot = _targets.ToList();
         foreach (var row in snapshot) row.IsChecked = value;
         _targets.Clear();
@@ -160,9 +162,9 @@ public partial class ConfigCopyCard : UserControl
         public bool Shared { get; } = shared;
 
         public string MetaLabel { get; } = existing == 0
-            ? total == 1 ? "Does not have this file — it will be created" : $"None of the {total} files exist here yet"
+            ? total == 1 ? "Does not have this file - it will be created" : $"None of the {total} files exist here yet"
             : existing == total
-                ? total == 1 ? "Already has this file — it will be replaced" : $"All {total} files exist here and will be replaced"
+                ? total == 1 ? "Already has this file - it will be replaced" : $"All {total} files exist here and will be replaced"
                 : $"{existing} of {total} files exist here and will be replaced";
 
         public Visibility SharedVisibility => Shared ? Visibility.Visible : Visibility.Collapsed;

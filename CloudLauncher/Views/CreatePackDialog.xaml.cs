@@ -20,9 +20,8 @@ public partial class CreatePackDialog : Window
 
     private void OnSummaryChanged(object sender, TextChangedEventArgs e) => UpdateSummaryCounter();
 
-    /// <summary>Counts down to the server's summary limit, and turns red once over it.</summary>
-    /// <remarks>The server truncates silently, so without this the first sign that a long summary
-    /// was cut is seeing it cut in the browser.</remarks>
+    /// <summary>Counts down to the server's summary limit and turns red once over it.</summary>
+    /// <remarks>The server truncates long summaries without saying so.</remarks>
     private void UpdateSummaryCounter()
     {
         if (SummaryCounter is null || SummaryBox is null) return;
@@ -176,11 +175,10 @@ public partial class CreatePackDialog : Window
         System.Windows.Input.Mouse.OverrideCursor = System.Windows.Input.Cursors.Wait;
         try
         {
-            // Pressing Create again after the publish step failed must not make a second instance:
-            // the first press already created one and only the visibility call went wrong.
+            // A retry after a failed publish reuses the instance the first press created.
             if (CreatedPack is null)
             {
-                StatusLabel.Text = "Creating…";
+                StatusLabel.Text = "Creating...";
                 CreatedPack = await App.State.Api.CreatePackAsync(
                     new CreatePackRequest(name, null, isEmpty, mc, loader, loaderVersion,
                         Summary: summary.Length == 0 ? null : summary));
@@ -188,7 +186,7 @@ public partial class CreatePackDialog : Window
             }
 
             if (visibility != PackVisibility.Private && !await TryPublishAsync(CreatedPack, visibility))
-                return; // message is on the status line; Create now retries just the publish
+                return; // error is on the status line; pressing Create again retries only the publish
 
             DialogResult = true;
             Close();
@@ -202,19 +200,16 @@ public partial class CreatePackDialog : Window
     }
 
     /// <summary>
-    /// Applies a non-Private visibility to the instance that was just created, turning server
-    /// hosting on with it.
+    /// Applies a non-Private visibility to the instance that was just created, and turns on server
+    /// hosting with it.
     /// </summary>
     /// <remarks>
-    /// Create has no visibility field, so publishing is a second call. Hosting has to go with it:
-    /// visibility and hosting are independent flags, and a pack that is Public but not hosted shows
-    /// up in everyone's browser with an Add button that hands them an empty instance.
-    /// Returning false leaves the created instance in place and Private, which is the safe end of
-    /// the mistake, and lets the user press Create again to retry only this step.
+    /// Create has no visibility field, so this is a second call. A Public pack that isn't hosted would
+    /// hand everyone who adds it an empty instance. On failure the instance stays Private.
     /// </remarks>
     private async Task<bool> TryPublishAsync(PackSummary pack, PackVisibility visibility)
     {
-        StatusLabel.Text = "Publishing…";
+        StatusLabel.Text = "Publishing...";
         try
         {
             var published = await App.State.Api.UpdatePackAsync(pack.Id,
@@ -226,15 +221,14 @@ public partial class CreatePackDialog : Window
         catch (Exception ex)
         {
             StatusLabel.Text = $"'{pack.Name}' was created but couldn't be published: {ex.Message} "
-                               + "It is private for now — press Create to try publishing again, "
+                               + "It is private for now - press Create to try publishing again, "
                                + "or Cancel and publish it later from its Options.";
             return false;
         }
     }
 
-    /// <remarks>Once the instance exists on the server, Cancel can only decline the publish step —
-    /// it cannot un-create it. Report success so the caller still lists the new instance instead of
-    /// leaving it invisible until the next refresh.</remarks>
+    /// <remarks>Cancel can't undo a created instance, so it reports success and the caller lists the
+    /// new instance right away.</remarks>
     private void OnCancel(object sender, RoutedEventArgs e)
     {
         DialogResult = CreatedPack is not null;

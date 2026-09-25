@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CloudLauncher invitation</title>
+<meta name="description" content="Someone shared something with you on CloudLauncher. Open the link in the launcher to accept it.">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#141413">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="CloudLauncher">
+<meta property="og:title" content="CloudLauncher invitation">
+<meta property="og:description" content="Someone shared a Minecraft pack with you. Open this link in CloudLauncher to accept it.">
+<meta property="og:image" content="https://cloudlauncher.co/img/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<!-- Served for /invitations/<token> as well as /invite.html, so every URL here is absolute. -->
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" href="/img/logo.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="preload" href="/fonts/pixelify-sans-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/slate-icons.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/site.css?v=0.9.0">
+<script src="/site.js?v=0.9.0" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="wrap top-in">
+    <a class="brand" href="/">
+      <svg class="logo" viewBox="0 0 32 32" shape-rendering="crispEdges" aria-hidden="true"><path class="logo-tile" fill="#601B00" d="M3 0h26v1h-26zM2 1h28v1h-28zM1 2h30v1h-30zM0 3h32v1h-32zM0 4h32v1h-32zM0 5h32v1h-32zM0 6h32v1h-32zM0 7h32v1h-32zM0 8h32v1h-32zM0 9h32v1h-32zM0 10h32v1h-32zM0 11h32v1h-32zM0 12h32v1h-32zM0 13h32v1h-32zM0 14h32v1h-32zM0 15h32v1h-32zM0 16h32v1h-32zM0 17h32v1h-32zM0 18h32v1h-32zM0 19h32v1h-32zM0 20h32v1h-32zM0 21h32v1h-32zM0 22h32v1h-32zM0 23h32v1h-32zM0 24h32v1h-32zM0 25h32v1h-32zM0 26h32v1h-32zM0 27h32v1h-32zM0 28h32v1h-32zM1 29h30v1h-30zM2 30h28v1h-28zM3 31h26v1h-26z"/><path fill="#FFF" fill-opacity=".1" d="M3 0h26v1h-26zM2 1h1v1h-1zM29 1h1v1h-1zM1 2h1v1h-1zM30 2h1v1h-1zM0 3h1v1h-1zM31 3h1v1h-1z"/><path fill="#000" fill-opacity=".22" d="M0 28h1v1h-1zM31 28h1v1h-1zM1 29h1v1h-1zM30 29h1v1h-1zM2 30h1v1h-1zM29 30h1v1h-1zM3 31h26v1h-26z"/><path fill="#000" fill-opacity=".45" d="M26 15h1v1h-1zM27 16h1v1h-1zM26 17h2v1h-2zM26 18h3v1h-3zM27 19h1v1h-1zM27 20h1v1h-1zM27 21h2v1h-2zM26 22h3v1h-3zM7 23h1v1h-1zM24 23h5v1h-5zM8 24h20v1h-20zM10 25h16v1h-16z"/><path class="logo-cloud" fill="#F5F4EF" d="M14 9h3v1h-3zM12 10h7v1h-7zM11 11h9v1h-9zM10 12h14v1h-14zM10 13h15v1h-15zM10 14h16v1h-16zM7 15h19v1h-19zM6 16h21v1h-21zM6 17h20v1h-20zM5 18h21v1h-21zM5 19h22v1h-22zM5 20h22v1h-22zM5 21h22v1h-22zM6 22h20v1h-20zM8 23h16v1h-16z"/><path fill="#000" fill-opacity=".12" d="M26 16h1v1h-1zM5 20h1v1h-1zM26 20h1v1h-1zM5 21h3v1h-3zM24 21h3v1h-3zM6 22h20v1h-20zM8 23h16v1h-16z"/></svg>
+      <span>CloudLauncher</span>
+    </a>
+    <a class="btn btn-accent btn-sm px sh" href="/download"><span class="i" aria-hidden="true">&#xE896;</span><span class="lbl">Download</span></a>
+  </div>
+</header>
+
+<main id="main" class="inv">
+  <div class="wrap">
+    <div class="inv-card px sh">
+      <p class="eyebrow"><span class="i" aria-hidden="true">&#xE72D;</span>CloudLauncher invitation</p>
+      <h1>Someone shared something with you.</h1>
+      <p class="lead">This is a share link for CloudLauncher, a Minecraft launcher for Windows. It opens in the launcher rather than in the browser, because you accept it with your CloudLauncher account.</p>
+
+      <div class="inv-link-block" data-has-token hidden>
+        <p class="inv-label" id="inv-link-label">Your link</p>
+        <div class="inv-link px p1">
+          <code data-invite-link aria-labelledby="inv-link-label"></code>
+          <button class="btn btn-sm px sh" type="button" data-copy><span class="i" aria-hidden="true">&#xE8C8;</span>Copy link</button>
+        </div>
+        <p class="inv-status" data-copy-status role="status" aria-live="polite"></p>
+      </div>
+      <p class="inv-label" data-no-token hidden>Paste the link you were sent into the launcher, as below.</p>
+
+      <ol class="steps">
+        <li>
+          <b>Install CloudLauncher</b> and sign in, or make an account.
+          <span class="step-cta"><a class="btn btn-accent px sh" href="/download"><span class="i" aria-hidden="true">&#xE896;</span>Download for Windows</a></span>
+        </li>
+        <li><b>Open Sharing</b> in the sidebar and press <b>Redeem a link</b>.</li>
+        <li><b>Paste the link.</b> The launcher shows who is sharing what, and what it lets you do, before you press Accept.</li>
+        <li><b>Play.</b> A shared instance lands in your instances: open it and press Download to fetch its files.</li>
+      </ol>
+
+      <p class="inv-fine">An invitation sent to you by name only works for that account. A link can expire or be taken back; if yours doesn't work, ask whoever sent it for a new one.</p>
+    </div>
+  </div>
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-in">
+    <a class="brand" href="/">
+      <svg class="logo" viewBox="0 0 16 16" shape-rendering="crispEdges" aria-hidden="true"><path class="logo-tile" fill="#601B00" d="M2 0h12v1h-12zM1 1h14v1h-14zM0 2h16v1h-16zM0 3h16v1h-16zM0 4h16v1h-16zM0 5h16v1h-16zM0 6h16v1h-16zM0 7h16v1h-16zM0 8h16v1h-16zM0 9h16v1h-16zM0 10h16v1h-16zM0 11h16v1h-16zM0 12h16v1h-16zM0 13h16v1h-16zM1 14h14v1h-14zM2 15h12v1h-12z"/><path fill="#FFF" fill-opacity=".1" d="M2 0h12v1h-12zM1 1h1v1h-1zM14 1h1v1h-1zM0 2h1v1h-1zM15 2h1v1h-1z"/><path fill="#000" fill-opacity=".22" d="M0 13h1v1h-1zM15 13h1v1h-1zM1 14h1v1h-1zM14 14h1v1h-1zM2 15h12v1h-12z"/><path fill="#000" fill-opacity=".45" d="M13 8h1v1h-1zM13 9h1v1h-1zM13 10h1v1h-1zM13 11h1v1h-1zM4 12h10v1h-10z"/><path class="logo-cloud" fill="#F5F4EF" d="M6 5h4v1h-4zM5 6h7v1h-7zM4 7h9v1h-9zM3 8h10v1h-10zM3 9h10v1h-10zM3 10h10v1h-10zM3 11h10v1h-10z"/><path fill="#000" fill-opacity=".12" d="M3 11h10v1h-10z"/></svg>
+      <span>CloudLauncher</span>
+    </a>
+    <nav aria-label="Footer">
+      <a href="/">What it does</a>
+      <a href="/download">Download</a>
+      <a href="/privacy">Privacy</a>
+      <a href="/terms">Terms</a>
+      <a href="/fonts/PixelifySans-OFL.txt">Font licences</a>
+    </nav>
+    <p class="fine">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft.</p>
+  </div>
+</footer>
+</body>
+</html>

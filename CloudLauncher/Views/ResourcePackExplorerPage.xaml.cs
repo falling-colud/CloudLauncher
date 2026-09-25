@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.IO;
-using System.Diagnostics;
 using System.Net;
 using System.Text.RegularExpressions;
 using System.Windows;
@@ -23,6 +22,8 @@ public partial class ResourcePackExplorerPage : Page
     private List<ModVersion> _allVersions = new();
     private ModSummary? _currentMod;
     private CancellationTokenSource _cts = new();
+    /// <summary>The page load in flight, so a reset can wait for it instead of racing it.</summary>
+    private Task? _inFlight;
 
     private string _searchText = "";
     private string? _filterMcOverride;
@@ -35,8 +36,9 @@ public partial class ResourcePackExplorerPage : Page
     private bool _isLoading;
     private bool _hasMore;
     private int _offset;
-    private const int PageSize = 25;
-    private const int MaxResults = 200;
+    private const int PageSize = 50;   // both stores cap a page at 50
+    /// <summary>Safety cap so a runaway pager can't fill memory. High enough not to limit browsing.</summary>
+    private const int MaxResults = 2000;
 
     public ResourcePackExplorerPage(MainWindow shell, PackDetail pack)
     {
@@ -57,7 +59,7 @@ public partial class ResourcePackExplorerPage : Page
     }
 
     // Render rich HTML/markdown descriptions in an embedded WebView2. Its HWND draws over
-    // WPF (airspace), so hide it off-tab. Scrolling is native — no manual wheel routing.
+    // WPF (airspace), so hide it off-tab. Scrolling is native, so no manual wheel routing.
     private void OnModTabsChanged(object sender, SelectionChangedEventArgs e)
     {
         if (e.Source != ModTabs) return;
@@ -86,7 +88,7 @@ public partial class ResourcePackExplorerPage : Page
             foreach (var t in teams)
                 _chips.Add(NewChip("\uE716", t.Name, RpBrowseSourceKind.CloudLauncherTeam, t.Id));
         }
-        catch { /* teams unavailable — proceed without */ }
+        catch { /* teams unavailable: proceed without */ }
 
         ApplyChipStyles();
     }
@@ -146,9 +148,8 @@ public partial class ResourcePackExplorerPage : Page
     /// <summary>
     /// Loads the category list of whichever store the active chip points at.
     /// </summary>
-    /// <remarks>CurseForge and Modrinth do not share a category vocabulary, so there is nothing to
-    /// merge; the panel is simply hidden for the hosted chips, which have no categories, and for a
-    /// store that answered with nothing because it is unreachable.</remarks>
+    /// <remarks>CurseForge and Modrinth have different categories, so nothing is merged. The panel is
+    /// hidden for the hosted chips, which have no categories, and when the store returns nothing.</remarks>
     private async Task RefreshCategoryFilterAsync()
     {
         var generation = ++_categoryGeneration;
@@ -275,22 +276,31 @@ public partial class ResourcePackExplorerPage : Page
     private async Task ResetAndLoadAsync()
     {
         _cts.Cancel(); _cts = new CancellationTokenSource();
+        // Wait for the cancelled load before clearing anything. Its finally resets the in-progress
+        // flag, and until that runs the new load below returns at the guard and leaves the list empty.
+        // It also stops a late page from appending to the list we are about to clear.
+        if (_inFlight is { } pending) { try { await pending; } catch { /* it was cancelled */ } }
         _offset = 0;
         _rows.Clear();
         _hasMore = true;
         SearchStatus.Text = "";
         ClearSelectedMod();
-        await LoadMoreAsync(_cts.Token);
+        await (_inFlight = LoadMoreAsync(_cts.Token));
     }
 
     private async void OnResultsScroll(object sender, ScrollChangedEventArgs e)
     {
-        if (_isLoading || !_hasMore || _activeChip is null) return;
-        if (e.OriginalSource is ScrollViewer sv &&
-            sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 80)
+        if (e.OriginalSource is not ScrollViewer sv) return;
+        try
         {
-            await LoadMoreAsync(_cts.Token);
+            await InfiniteScroll.FillAheadAsync(
+                sv,
+                () => !_isLoading && _hasMore && _activeChip is not null && _rows.Count < MaxResults,
+                () => _rows.Count,
+                () => _inFlight = LoadMoreAsync(_cts.Token));
         }
+        catch (OperationCanceledException) { }
+        catch (Exception) { /* LoadMoreAsync reports its own failures */ }
     }
 
     private async Task LoadMoreAsync(CancellationToken ct)
@@ -299,7 +309,7 @@ public partial class ResourcePackExplorerPage : Page
         if (_rows.Count >= MaxResults) { _hasMore = false; return; }
 
         _isLoading = true;
-        SearchStatus.Text = _rows.Count == 0 ? "Searching…" : $"Loading more… ({_rows.Count})";
+        SearchStatus.Text = _rows.Count == 0 ? "Searching..." : $"Loading more... ({_rows.Count})";
         try
         {
             int added;
@@ -330,7 +340,7 @@ public partial class ResourcePackExplorerPage : Page
             if (added == 0) _hasMore = false;
             SearchStatus.Text = _rows.Count == 0 && !_hasMore
                 ? "No results. Try a different search or filter."
-                : $"{_rows.Count} result{(_rows.Count == 1 ? "" : "s")}{(_hasMore ? " — scroll for more" : "")}";
+                : $"{_rows.Count} result{(_rows.Count == 1 ? "" : "s")}{(_hasMore ? " - scroll for more" : "")}";
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -432,12 +442,20 @@ public partial class ResourcePackExplorerPage : Page
 
     private Guid? _currentHostedResourcePackId;
 
+    /// <summary>Why the selected hosted pack may not be downloaded, or null when it may.</summary>
+    /// <remarks>A pack shared as "can view" is listed like any other, but the server refuses its
+    /// downloads.</remarks>
+    private string? _currentHostedDownloadRefusal;
+
     private async Task LoadHostedResourcePackDetailAsync(HostedResourcePackSummary mod)
     {
         _cts.Cancel(); _cts = new CancellationTokenSource();
         var ct = _cts.Token;
         _currentMod = null;
         _currentHostedResourcePackId = mod.Id;
+        _currentHostedDownloadRefusal = mod.EffectivePermissions.HasFlag(PackPermissions.Download)
+            ? null
+            : $"You can see {mod.Name} but not download it. Ask {mod.OwnerUsername} for download access.";
         DetailHeader.Visibility = Visibility.Visible;
         ModNameLabel.Text = mod.Name;
         ModMetaLabel.Text = $"by {mod.OwnerUsername} · CloudLauncher · {mod.Visibility}";
@@ -478,6 +496,7 @@ public partial class ResourcePackExplorerPage : Page
         var ct = _cts.Token;
         _currentMod = mod;
         _currentHostedResourcePackId = null;
+        _currentHostedDownloadRefusal = null;
         DetailHeader.Visibility = Visibility.Visible;
         ModNameLabel.Text = mod.Name;
         ModMetaLabel.Text = $"by {mod.Author ?? "unknown"} · {FormatNumber(mod.DownloadCount)} downloads · {mod.Source}";
@@ -486,7 +505,7 @@ public partial class ResourcePackExplorerPage : Page
         DetailPlaceholder.Visibility = Visibility.Collapsed;
         ModTabs.Visibility = Visibility.Visible;
         ModTabs.SelectedIndex = 0;
-        ShowOverview("Loading…");
+        ShowOverview("Loading...");
         ScreenshotsEmptyText.Text = "Loading screenshots...";
         ScreenshotsEmptyText.Visibility = Visibility.Visible;
         ScreenshotList.ItemsSource = null;
@@ -531,15 +550,72 @@ public partial class ResourcePackExplorerPage : Page
     private async void OnDownloadVersion(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement el || el.DataContext is not VersionRow row) return;
+        await DownloadVersionRowAsync(row);
+    }
 
-        if (_currentHostedResourcePackId is Guid hostedId)
+    /// <summary>Downloads this version into the instance, for the row's Download button and its
+    /// menu item.</summary>
+    /// <remarks>Also caught here because the store's download-URL lookup runs before the downloads' own
+    /// try, and a menu item's task has no caller to report to.</remarks>
+    private async Task DownloadVersionRowAsync(VersionRow row)
+    {
+        try
         {
-            await DownloadHostedVersionAsync(hostedId, row.Source);
-            return;
-        }
+            if (_currentHostedResourcePackId is Guid hostedId)
+            {
+                await DownloadHostedVersionAsync(hostedId, row.Source);
+                return;
+            }
 
-        if (_currentMod is null) return;
-        await DownloadVersionAsync(_currentMod, row.Source);
+            if (_currentMod is null) return;
+            await DownloadVersionAsync(_currentMod, row.Source);
+        }
+        catch (Exception ex) { DownloadStatus.Text = "Download failed: " + ex.Message; }
+    }
+
+    // ── versions tab: row menu and changelog ─────────────────────────────────
+
+    private void OnVersionsGridPreviewRightDown(object sender, MouseButtonEventArgs e) =>
+        VersionRowMenu.SelectRowUnder(VersionsGrid, e);
+
+    /// <summary>Right-click on a version: its changelog, a download of that version, and copy its
+    /// number. Same menu as the mod browser's versions.</summary>
+    private void OnVersionsGridRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (VersionRowMenu.RowAt<VersionRow>(e) is not { } row) return;
+        e.Handled = true;
+        VersionRowMenu.Open(BuildVersionMenu(row));
+    }
+
+    private ContextMenu BuildVersionMenu(VersionRow row)
+    {
+        var menu = VersionRowMenu.Create(VersionsGrid);
+        VersionRowMenu.AddChangelog(menu, () => _ = ShowChangelogAsync(row));
+        VersionRowMenu.Add(menu, "Download this version", VersionRowMenu.DownloadGlyph,
+            () => _ = DownloadVersionRowAsync(row));
+        menu.Items.Add(new Separator());
+        VersionRowMenu.AddCopyVersion(menu, row.VersionNumber, copied => DownloadStatus.Text = copied
+            ? $"Copied {row.VersionNumber}."
+            : "The clipboard is in use by another program.");
+        return menu;
+    }
+
+    /// <summary>Opens the changelog card on one version, able to step through the rest of the list
+    /// in the order it is on screen. A hosted pack's notes come with its versions; a store pack's
+    /// are fetched the same way a mod's are.</summary>
+    private async Task ShowChangelogAsync(VersionRow row)
+    {
+        try
+        {
+            var (versions, index) = VersionChangelogCard.FromList(VersionsGrid.Items, row, r => r.Source);
+            var name = _currentMod?.Name ?? ModNameLabel.Text;
+            await VersionChangelogCard.ShowAsync(this, name, versions, index, _currentMod, _shell);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ResourcePackExplorerPage), ex);
+            DownloadStatus.Text = "Could not open the changelog.";
+        }
     }
 
     private async Task QuickDownloadAsync(ModSummary mod)
@@ -606,11 +682,15 @@ public partial class ResourcePackExplorerPage : Page
         try
         {
             var dest = UniqueZipPath(folder, file.Filename);
+            if (dest is null)
+            {
+                DownloadStatus.Text = "Download failed: the store gave a file name that cannot be used.";
+                return;
+            }
             await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, dest);
 
-            // Which listing this file came from, recorded now: a resource pack carries no id of its
-            // own once it is on disk, so without this it can never be matched back to the store and
-            // offered an update.
+            // Record which listing this file came from: a resource pack on disk has no id of its own, so
+            // otherwise it can't be matched back to the store and offered an update.
             var key = ResourcePackService.Key(_pack.Id, Path.GetFileName(dest), OriginOfTarget());
             App.State.ResourcePacks.SetProvenance(key, mod.Source, mod.Id, version.Id, version.VersionNumber);
             App.State.ResourcePacks.Rename(key, mod.Name);
@@ -632,6 +712,11 @@ public partial class ResourcePackExplorerPage : Page
             DownloadStatus.Text = "Invalid hosted version id.";
             return;
         }
+        if (_currentHostedDownloadRefusal is { } refusal)
+        {
+            DownloadStatus.Text = refusal;
+            return;
+        }
 
         var folder = TargetFolder();
         Directory.CreateDirectory(folder);
@@ -643,12 +728,16 @@ public partial class ResourcePackExplorerPage : Page
         try
         {
             var dest = UniqueZipPath(folder, fileName);
+            if (dest is null)
+            {
+                DownloadStatus.Text = "Download failed: the upload has a file name that cannot be used.";
+                return;
+            }
             await using (var stream = await App.State.Api.DownloadResourcePackVersionAsync(hostedId, versionId))
             await using (var fs = File.Create(dest))
                 await stream.CopyToAsync(fs);
 
-            // The hosting link is this pack's provenance: it is what lets the launcher recognise the
-            // zip on disk as a copy of that hosted pack later.
+            // The hosting link lets the launcher recognise the zip on disk as a copy of this hosted pack.
             App.State.ResourcePacks.LinkHostedResourcePack(
                 ResourcePackService.Key(_pack.Id, Path.GetFileName(dest), OriginOfTarget()), hostedId);
 
@@ -662,9 +751,9 @@ public partial class ResourcePackExplorerPage : Page
         }
     }
 
-    /// <summary>Which of the instance's two resourcepacks/ folders the download target combo points
-    /// at — the settings key differs between them, so a pack in local/ is not confused with a
-    /// same-named one in game/.</summary>
+    /// <summary>Which of the instance's two resourcepacks/ folders the download target points at.
+    /// The settings key differs between them, so a pack in local/ isn't confused with a same-named
+    /// one in game/.</summary>
     private ResourcePackOrigin OriginOfTarget() =>
         (DownloadTargetBox.SelectedItem as ComboBoxItem)?.Content as string == "local/resourcepacks/"
             ? ResourcePackOrigin.Local
@@ -680,11 +769,18 @@ public partial class ResourcePackExplorerPage : Page
         };
     }
 
-    private static string UniqueZipPath(string folder, string fileName)
+    /// <summary>A free path in <paramref name="folder"/> for the listing's file name, or null when
+    /// that name is not a plain file name.</summary>
+    private static string? UniqueZipPath(string folder, string fileName)
     {
         var clean = string.IsNullOrWhiteSpace(fileName) ? "resourcepack.zip" : fileName;
         if (!clean.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) clean += ".zip";
-        var candidate = Path.Combine(folder, clean);
+        var candidate = PathSafety.ResolveFileName(folder, clean);
+        if (candidate is null)
+        {
+            AppLog.Log(nameof(ResourcePackExplorerPage), $"Skipped a download whose file name is not a plain name: {fileName}");
+            return null;
+        }
         var stem = Path.GetFileNameWithoutExtension(clean);
         var n = 2;
         while (File.Exists(candidate))
@@ -796,23 +892,15 @@ public partial class ResourcePackExplorerPage : Page
     {
         if (string.IsNullOrWhiteSpace(url)) return;
 
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { DownloadStatus.Text = ex.Message; }
+        if (!SafeLaunch.OpenUrl(url)) DownloadStatus.Text = "That link could not be opened.";
     }
 
     private void SetSelectedIcon(string? iconUrl)
     {
-        SelectedIconImage.Source = null;
-        if (string.IsNullOrWhiteSpace(iconUrl)) return;
-
-        try
-        {
-            SelectedIconImage.Source = new BitmapImage(new Uri(iconUrl, UriKind.Absolute));
-        }
-        catch
-        {
-            SelectedIconImage.Source = null;
-        }
+        // Through the icon cache instead of a bare BitmapImage: the URL is store metadata, and the
+        // cache caps the download, bounds the decode and never reads from another computer.
+        IconLoader.SetDecodeWidth(SelectedIconImage, 128);
+        IconLoader.SetUrl(SelectedIconImage, string.IsNullOrWhiteSpace(iconUrl) ? null : iconUrl);
     }
 
     private void ClearSelectedMod()
@@ -826,7 +914,7 @@ public partial class ResourcePackExplorerPage : Page
         ModNameLabel.Text = "";
         ModMetaLabel.Text = "";
         SelectedIconFallback.Text = "";
-        SelectedIconImage.Source = null;
+        SetSelectedIcon(null);
         VersionsGrid.ItemsSource = null;
         VersionFilterNote.Text = "";
     }

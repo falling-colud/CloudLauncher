@@ -20,7 +20,7 @@ public sealed class ModpackImportService(
     PackFolderService packs,
     ModFingerprintCache fingerprints)
 {
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
+    private static readonly HttpClient Http = ApiClient.WithUserAgent(new() { Timeout = TimeSpan.FromMinutes(10) });
     private static readonly JsonSerializerOptions CfManifestJson = new()
     {
         PropertyNameCaseInsensitive = true
@@ -29,12 +29,11 @@ public sealed class ModpackImportService(
     private ModMetadataService? _metadata;
 
     /// <summary>
-    /// How many files an import downloads at once - the user's download concurrency
-    /// (Settings -> Downloads), which also governs "Update all" and the mod browser.
+    /// How many files an import downloads at once: the user's download concurrency (Settings ->
+    /// Downloads), which also governs "Update all" and the mod browser.
     /// </summary>
-    /// <remarks>Installing a 400-mod pack one file at a time is almost all waiting: each file is a
-    /// round trip to a CDN for something usually under a megabyte. The per-file progress bar only
-    /// means anything when one file is in flight, so with several it reports the batch instead.</remarks>
+    /// <remarks>Most files are small CDN round trips, so one at a time is mostly waiting. With several in
+    /// flight the progress bar reports the batch instead of one file.</remarks>
     private int DownloadConcurrency => _settings?.EffectiveModDownloadConcurrency ?? 3;
 
     private AppSettings? _settings;
@@ -56,25 +55,9 @@ public sealed class ModpackImportService(
             if (advanced.PreferredSource is not null) return;
             advanced.PreferredSource = source;
             _metadata.SaveAdvanced(packId);
-            log?.Report($"Mods in this pack follow {source} by default (Modpack Management → Advanced).");
+            log?.Report($"Mods in this pack follow {source} by default (Modpack Management > Advanced).");
         }
         catch { /* metadata is a convenience; the import itself is what matters */ }
-    }
-
-    /// <summary>Resolves <paramref name="relative"/> under <paramref name="root"/>, returning
-    /// the absolute path only when it stays inside the root. Imported modpacks are untrusted
-    /// archives (downloaded from CurseForge/Modrinth or local files), so a crafted entry such
-    /// as <c>..\..\Startup\evil.bat</c> or an absolute path would otherwise escape the pack
-    /// folder — a zip-slip arbitrary-file-write. Returns null when the entry escapes so the
-    /// caller can skip that one entry rather than aborting the whole import.</summary>
-    private static string? SafeResolveUnderRoot(string root, string relative)
-    {
-        var rootFull = Path.GetFullPath(root);
-        var full = Path.GetFullPath(Path.Combine(rootFull, relative));
-        var prefix = rootFull.EndsWith(Path.DirectorySeparatorChar) ? rootFull : rootFull + Path.DirectorySeparatorChar;
-        return full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
-               string.Equals(full, rootFull, StringComparison.OrdinalIgnoreCase)
-            ? full : null;
     }
 
     // ── Modrinth .mrpack ──────────────────────────────────────────────────────
@@ -84,8 +67,9 @@ public sealed class ModpackImportService(
         string packName,
         IProgress<string>? log,
         IProgress<ImportProgress>? progress = null,
-        CancellationToken ct = default) =>
-        ImportMrpackCoreAsync(mrpackPath, packName, null, log, progress, null, ct);
+        CancellationToken ct = default,
+        PackJob? job = null) =>
+        ImportMrpackCoreAsync(mrpackPath, packName, null, log, progress, null, ct, job);
 
     public Task<PackSummary> ImportMrpackIntoPackAsync(
         string mrpackPath,
@@ -93,8 +77,9 @@ public sealed class ModpackImportService(
         IProgress<string>? log,
         IProgress<ImportProgress>? progress = null,
         PackImportMetadata? metadata = null,
-        CancellationToken ct = default) =>
-        ImportMrpackCoreAsync(mrpackPath, null, packId, log, progress, metadata, ct);
+        CancellationToken ct = default,
+        PackJob? job = null) =>
+        ImportMrpackCoreAsync(mrpackPath, null, packId, log, progress, metadata, ct, job);
 
     private async Task<PackSummary> ImportMrpackCoreAsync(
         string mrpackPath,
@@ -103,19 +88,28 @@ public sealed class ModpackImportService(
         IProgress<string>? log,
         IProgress<ImportProgress>? progress,
         PackImportMetadata? metadata,
-        CancellationToken ct)
+        CancellationToken ct,
+        PackJob? job)
     {
         log?.Report($"Opening {Path.GetFileName(mrpackPath)}...");
         progress?.Report(new ImportProgress(-1, $"Opening {Path.GetFileName(mrpackPath)}..."));
         using var zip = ZipFile.OpenRead(mrpackPath);
 
         var indexEntry = zip.GetEntry("modrinth.index.json")
-            ?? throw new InvalidOperationException("Not a valid .mrpack — missing modrinth.index.json");
+            ?? throw new InvalidOperationException("Not a valid .mrpack - missing modrinth.index.json");
 
         MrIndex index;
         await using (var stream = indexEntry.Open())
             index = await JsonSerializer.DeserializeAsync<MrIndex>(stream, cancellationToken: ct)
                     ?? throw new InvalidOperationException("Failed to parse modrinth.index.json");
+
+        // Collected now so an archive past the unpacking limits is refused before an instance is
+        // created or anything is downloaded.
+        var overridesEntry = zip.Entries
+            .Where(e => e.FullName.StartsWith("overrides/", StringComparison.Ordinal) && !e.FullName.EndsWith('/'))
+            .ToList();
+        if (SafeZip.CheckLimits(overridesEntry) is { } tooBig)
+            throw new InvalidDataException($"Refused to import this modpack: {tooBig}.");
 
         var mcVersion = index.Dependencies?.TryGetValue("minecraft", out var mc) == true ? mc : null;
         var loaderKind = LoaderKind.None;
@@ -170,8 +164,11 @@ public sealed class ModpackImportService(
             var fileCount = files.Count;
             var solo = DownloadConcurrency == 1 || fileCount == 1;
             ct.ThrowIfCancellationRequested();
-            var dest = SafeResolveUnderRoot(gameDir, f.Path.Replace('/', Path.DirectorySeparatorChar));
-            if (dest is null) { log?.Report($"  WARNING: skipping file outside pack folder: {f.Path}"); return; }
+            // Wait out a pause before taking a slot, so a paused import doesn't hold the download slots
+            // it needs to resume.
+            if (job is not null) await job.Gate.WaitAsync(ct);
+            var dest = PathSafety.ResolveInside(gameDir, WithoutDotPrefix(f.Path));
+            if (dest is null) { log?.Report($"  WARNING: skipping file with an unsafe path: {f.Path}"); return; }
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
             var fileName = Path.GetFileName(f.Path);
             if (File.Exists(dest))
@@ -189,10 +186,15 @@ public sealed class ModpackImportService(
                 var downloaded = false;
                 foreach (var url in f.Downloads ?? Enumerable.Empty<string>())
                 {
+                    if (!SafeLaunch.IsWebUrl(url, out _))
+                    {
+                        log?.Report($"  WARNING: skipping a download link for {f.Path} that is not http or https");
+                        continue;
+                    }
                     try
                     {
-                        // A single-file import still gets a real per-file bar; a parallel batch
-                        // reports the batch, because there is no one "current" file to show.
+                        // A single-file import gets a real per-file bar; a parallel batch reports the
+                        // batch, as there's no single current file.
                         var fileProgress = solo
                             ? new Progress<(long done, long total)>(p =>
                             {
@@ -202,10 +204,14 @@ public sealed class ModpackImportService(
                                     fileCount == 0 ? 1 : (mrCompleted + current) / fileCount, label, current, fileName));
                             })
                             : null;
-                        await modrinth.DownloadFileAsync(url, dest, fileProgress, ct);
+                        await modrinth.DownloadFileAsync(url, dest, fileProgress, ct, job?.Gate);
+                        job?.TrackCreatedFile(dest);   // nothing was at this path before (see the skip above)
                         downloaded = true;
                         break;
                     }
+                    // Rethrow so Stop isn't mistaken for a dead mirror and the import doesn't carry on
+                    // with the next URL.
+                    catch (OperationCanceledException) { throw; }
                     catch { /* try next URL */ }
                 }
                 if (!downloaded) log?.Report($"  WARNING: could not download {f.Path}");
@@ -217,23 +223,7 @@ public sealed class ModpackImportService(
             }
         }));
 
-        // Copy overrides/ folder
-        var overridesEntry = zip.Entries
-            .Where(e => e.FullName.StartsWith("overrides/") && !e.FullName.EndsWith("/"))
-            .ToList();
-        if (overridesEntry.Count > 0)
-        {
-            log?.Report($"Copying {overridesEntry.Count} override files...");
-            progress?.Report(new ImportProgress(1, $"Copying {overridesEntry.Count} override files...", -1, "Overrides"));
-        }
-        foreach (var entry in overridesEntry)
-        {
-            var rel = entry.FullName["overrides/".Length..].Replace('/', Path.DirectorySeparatorChar);
-            var dest = SafeResolveUnderRoot(gameDir, rel);
-            if (dest is null) { log?.Report($"  WARNING: skipping override outside pack folder: {entry.FullName}"); continue; }
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            entry.ExtractToFile(dest, overwrite: true);
-        }
+        await CopyOverridesAsync(overridesEntry, "overrides/", gameDir, log, progress, ct, job);
 
         RecordPackSource(pack.Id, ModSource.Modrinth, log);
         log?.Report($"Import complete: {pack.Name}");
@@ -249,8 +239,9 @@ public sealed class ModpackImportService(
         string packName,
         IProgress<string>? log,
         IProgress<ImportProgress>? progress = null,
-        CancellationToken ct = default) =>
-        ImportCurseForgeZipCoreAsync(zipPath, packName, null, log, progress, null, ct);
+        CancellationToken ct = default,
+        PackJob? job = null) =>
+        ImportCurseForgeZipCoreAsync(zipPath, packName, null, log, progress, null, ct, job);
 
     public Task<PackSummary> ImportCurseForgeZipIntoPackAsync(
         string zipPath,
@@ -258,8 +249,9 @@ public sealed class ModpackImportService(
         IProgress<string>? log,
         IProgress<ImportProgress>? progress = null,
         PackImportMetadata? metadata = null,
-        CancellationToken ct = default) =>
-        ImportCurseForgeZipCoreAsync(zipPath, null, packId, log, progress, metadata, ct);
+        CancellationToken ct = default,
+        PackJob? job = null) =>
+        ImportCurseForgeZipCoreAsync(zipPath, null, packId, log, progress, metadata, ct, job);
 
     private async Task<PackSummary> ImportCurseForgeZipCoreAsync(
         string zipPath,
@@ -268,19 +260,40 @@ public sealed class ModpackImportService(
         IProgress<string>? log,
         IProgress<ImportProgress>? progress,
         PackImportMetadata? metadata,
-        CancellationToken ct)
+        CancellationToken ct,
+        PackJob? job)
     {
         log?.Report($"Opening {Path.GetFileName(zipPath)}...");
         progress?.Report(new ImportProgress(-1, $"Opening {Path.GetFileName(zipPath)}..."));
         using var zip = ZipFile.OpenRead(zipPath);
 
         var manifestEntry = zip.GetEntry("manifest.json")
-            ?? throw new InvalidOperationException("Not a valid CurseForge pack — missing manifest.json");
+            ?? throw new InvalidOperationException("Not a valid CurseForge pack - missing manifest.json");
 
         CfManifest manifest;
         await using (var stream = manifestEntry.Open())
             manifest = await JsonSerializer.DeserializeAsync<CfManifest>(stream, CfManifestJson, ct)
                        ?? throw new InvalidOperationException("Failed to parse manifest.json");
+
+        // The overrides folder name comes from the manifest, so it gets the same path checks as the
+        // entries in it. Collected now so an archive over the unpacking limits is refused before an
+        // instance is created or anything is downloaded.
+        var overridesFolder = manifest.Overrides ?? "overrides";
+        var prefix = overridesFolder + "/";
+        List<ZipArchiveEntry> overrides;
+        if (PathSafety.IsSafeRelativePath(overridesFolder))
+        {
+            overrides = zip.Entries
+                .Where(e => e.FullName.StartsWith(prefix, StringComparison.Ordinal) && !e.FullName.EndsWith('/'))
+                .ToList();
+        }
+        else
+        {
+            log?.Report($"  WARNING: skipping the overrides, their folder name is not a plain path: {overridesFolder}");
+            overrides = [];
+        }
+        if (SafeZip.CheckLimits(overrides) is { } tooBig)
+            throw new InvalidDataException($"Refused to import this modpack: {tooBig}.");
 
         var mcVersion = manifest.Minecraft?.Version;
         var loaderKind = LoaderKind.None;
@@ -327,17 +340,22 @@ public sealed class ModpackImportService(
         var modsDir = Path.Combine(gameDir, "mods");
         Directory.CreateDirectory(modsDir);
 
-        // Resolve and download mods via CurseForge API. The manifest's files and mods are looked up in
-        // batches first (two calls per fifty mods) — one call per mod, three times over, is what used
-        // to get the launcher server rate-limited halfway through a big pack.
+        // Resolve and download mods via the CurseForge API. Files and projects are looked up in batches
+        // (two calls per fifty mods); per-mod calls get the launcher server rate-limited on big packs.
         var files = manifest.Files ?? new();
-        progress?.Report(new ImportProgress(-1, $"Resolving {files.Count} mods on CurseForge…"));
+        progress?.Report(new ImportProgress(-1, $"Resolving {files.Count} mods on CurseForge..."));
         Dictionary<int, ModVersion> knownFiles;
         Dictionary<int, ModSummary> knownMods;
         try { knownFiles = await curseforge.GetFilesAsync(files.Select(f => f.FileId), ct); }
         catch (Exception ex) { log?.Report($"  WARNING: batch file lookup failed ({ex.Message}); resolving one by one."); knownFiles = new(); }
         try { knownMods = await curseforge.GetModsAsync(files.Select(f => f.ProjectId), ct); }
         catch (Exception ex) { log?.Report($"  WARNING: batch mod lookup failed ({ex.Message}); resolving one by one."); knownMods = new(); }
+        // Each file goes to the folder its project class says, as the CurseForge app and Prism do.
+        // CurseForge packs list resource packs and shaders alongside mods, and a shader in mods/ is never
+        // loaded.
+        Dictionary<int, CurseForgeProjectFacts> projects;
+        try { projects = await curseforge.GetProjectFactsAsync(files.Select(f => f.ProjectId), ct); }
+        catch (Exception ex) { log?.Report($"  WARNING: could not ask what each file is ({ex.Message}); everything goes into mods."); projects = new(); }
 
         var cfCompleted = 0;
         using var cfGate = new SemaphoreSlim(DownloadConcurrency, DownloadConcurrency);
@@ -347,6 +365,9 @@ public sealed class ModpackImportService(
             var fileIndex = i;
             var fileCount = files.Count;
             var solo = DownloadConcurrency == 1 || fileCount == 1;
+            // Wait out a pause before taking a slot, so a paused import doesn't hold the download slots
+            // it needs to resume.
+            if (job is not null) await job.Gate.WaitAsync(ct);
             await cfGate.WaitAsync(ct);
             try
             {
@@ -356,8 +377,35 @@ public sealed class ModpackImportService(
                 if (string.IsNullOrWhiteSpace(url))
                     url = await curseforge.GetDownloadUrlAsync(f.ProjectId, f.FileId, ct);
                 if (url is null) { log?.Report($"  WARNING: no download URL for {f.ProjectId}:{f.FileId}"); return; }
-                var filename = Path.GetFileName(new Uri(url).LocalPath);
-                var dest = Path.Combine(modsDir, filename);
+                if (!SafeLaunch.IsWebUrl(url, out var uri))
+                {
+                    log?.Report($"  WARNING: skipping {f.ProjectId}:{f.FileId}, its download link is not http or https");
+                    return;
+                }
+                // Saved under the link's last segment, so that must be one plain name.
+                var filename = Path.GetFileName(uri!.LocalPath);
+                if (!PathSafety.IsSafeFileName(filename))
+                {
+                    log?.Report($"  WARNING: skipping {f.ProjectId}:{f.FileId}, its file name is not usable: {filename}");
+                    return;
+                }
+                var folder = projects.GetValueOrDefault(f.ProjectId).ClassId switch
+                {
+                    CurseForgeService.ClassIdResourcePacks => "resourcepacks",
+                    CurseForgeService.ClassIdShaders => "shaderpacks",
+                    _ => "mods"
+                };
+                // Optional means "installed disabled", which only applies to mods. Resource packs and
+                // shaders do nothing until picked in game anyway.
+                if (!f.Required && folder == "mods") filename += ".disabled";
+                var targetDir = Path.Combine(gameDir, folder);
+                var dest = PathSafety.ResolveFileName(targetDir, filename);
+                if (dest is null)
+                {
+                    log?.Report($"  WARNING: skipping {f.ProjectId}:{f.FileId}, its file name is not usable: {filename}");
+                    return;
+                }
+                Directory.CreateDirectory(targetDir);
                 log?.Report($"  Downloading {filename}...");
                 var label = $"Downloading {filename}";
                 var fileProgress = solo
@@ -369,10 +417,15 @@ public sealed class ModpackImportService(
                             fileCount == 0 ? 1 : (cfCompleted + current) / fileCount, label, current, filename));
                     })
                     : null;
-                await modrinth.DownloadFileAsync(url, dest, fileProgress, ct);
+                var isNewFile = !File.Exists(dest);
+                await modrinth.DownloadFileAsync(url, dest, fileProgress, ct, job?.Gate);
+                if (isNewFile) job?.TrackCreatedFile(dest);
                 knownMods.TryGetValue(f.ProjectId, out var knownMod);
                 await RememberCurseForgeMatchAsync(dest, f.ProjectId, f.FileId, knownMod, knownVersion, ct);
             }
+            // Rethrow: swallowing the cancellation would leave a stopped import looking finished, with an
+            // empty instance.
+            catch (OperationCanceledException) { throw; }
             catch (Exception ex) { log?.Report($"  WARNING: {ex.Message}"); }
             finally
             {
@@ -381,22 +434,7 @@ public sealed class ModpackImportService(
             }
         }));
 
-        // Copy overrides
-        var prefix = (manifest.Overrides ?? "overrides") + "/";
-        var overrides = zip.Entries.Where(e => e.FullName.StartsWith(prefix) && !e.FullName.EndsWith("/")).ToList();
-        if (overrides.Count > 0)
-        {
-            log?.Report($"Copying {overrides.Count} override files...");
-            progress?.Report(new ImportProgress(1, $"Copying {overrides.Count} override files...", -1, "Overrides"));
-        }
-        foreach (var entry in overrides)
-        {
-            var rel = entry.FullName[prefix.Length..].Replace('/', Path.DirectorySeparatorChar);
-            var dest = SafeResolveUnderRoot(gameDir, rel);
-            if (dest is null) { log?.Report($"  WARNING: skipping override outside pack folder: {entry.FullName}"); continue; }
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            entry.ExtractToFile(dest, overwrite: true);
-        }
+        await CopyOverridesAsync(overrides, prefix, gameDir, log, progress, ct, job);
 
         RecordPackSource(pack.Id, ModSource.CurseForge, log);
         log?.Report($"Import complete: {pack.Name}");
@@ -405,8 +443,59 @@ public sealed class ModpackImportService(
         return pack;
     }
 
-    /// <summary>Progress for a batch of downloads running together: the count is the honest number,
-    /// and the per-file bar is left indeterminate because several files are moving at once.</summary>
+    /// <summary>Unpacks a modpack's override files into the game folder. An entry whose path is not a
+    /// plain path inside the game folder, or whose sizes are not believable, is skipped with a warning
+    /// instead of written.</summary>
+    /// <param name="entries">The files under the overrides folder, already held to
+    /// <see cref="SafeZip.CheckLimits"/>.</param>
+    /// <param name="prefix">The overrides folder inside the archive, with its trailing slash.</param>
+    private static async Task CopyOverridesAsync(
+        IReadOnlyList<ZipArchiveEntry> entries, string prefix, string gameDir,
+        IProgress<string>? log, IProgress<ImportProgress>? progress, CancellationToken ct, PackJob? job)
+    {
+        if (entries.Count > 0)
+        {
+            log?.Report($"Copying {entries.Count} override files...");
+            progress?.Report(new ImportProgress(1, $"Copying {entries.Count} override files...", -1, "Overrides"));
+        }
+        foreach (var entry in entries)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (job is not null) await job.Gate.WaitAsync(ct);
+            var dest = PathSafety.ResolveInside(gameDir, WithoutDotPrefix(entry.FullName[prefix.Length..]));
+            if (dest is null) { log?.Report($"  WARNING: skipping override with an unsafe path: {entry.FullName}"); continue; }
+            if (SafeZip.CheckEntry(entry) is { } implausible)
+            {
+                log?.Report($"  WARNING: skipping override {entry.FullName}: {implausible}");
+                continue;
+            }
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            // Only files we create get removed again if the import is stopped.
+            var isNew = !File.Exists(dest);
+            try
+            {
+                SafeZip.ExtractToFile(entry, dest, overwrite: true);
+            }
+            catch (InvalidDataException ex)
+            {
+                log?.Report($"  WARNING: skipping override {entry.FullName}: {ex.Message}");
+                continue;
+            }
+            if (isNew) job?.TrackCreatedFile(dest);
+        }
+    }
+
+    /// <summary>A path from a modpack without the leading "./" some tools write, which
+    /// <see cref="PathSafety"/> would otherwise refuse as a "." segment.</summary>
+    private static string? WithoutDotPrefix(string? path)
+    {
+        while (path is not null && (path.StartsWith("./", StringComparison.Ordinal) || path.StartsWith(".\\", StringComparison.Ordinal)))
+            path = path[2..];
+        return path;
+    }
+
+    /// <summary>Progress for a batch of parallel downloads: the count is exact, and the per-file bar
+    /// is indeterminate because several files are moving at once.</summary>
     private static void ReportBatch(IProgress<ImportProgress>? progress, int completed, int total, string current, bool solo)
     {
         if (progress is null) return;
@@ -519,5 +608,7 @@ public sealed class ModpackImportService(
     {
         [JsonPropertyName("projectID")] public int ProjectId { get; set; }
         [JsonPropertyName("fileID")] public int FileId { get; set; }
+        /// <summary>False = the pack ships this mod switched off (exporters write disabled mods so).</summary>
+        [JsonPropertyName("required")] public bool Required { get; set; } = true;
     }
 }

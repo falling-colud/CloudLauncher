@@ -8,22 +8,16 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
 
-/// <summary>
-/// "Low mode": turns a pack's heavy visual settings down before launch, and puts them back when switched off.
-///
-/// <para>Most of what it does is rewrite <b>settings</b> — render distances, cloud layers, effect quality. It also
-/// switches off a short list of purely decorative client mods (see <see cref="DisabledModPrefixes"/>) by renaming
-/// their jars, but never one that the pack's server also runs and never one that registers a network payload, so a
-/// player with low mode on can always join a server alongside one who has it off.</para>
-///
-/// <para>The values a player had before are recorded in <c>.lowmode-backup.json</c> beside the pack, and restored
-/// verbatim when low mode is turned off. Anything the player changes <i>while</i> low mode is on is left alone on the
-/// way out: only keys this service actually wrote are rolled back, so hand-tuning is never silently reverted.</para>
-///
-/// <para>Every edit is a targeted key rewrite rather than a whole-file rewrite, because these files belong to other
-/// mods: a config we reserialise is a config we can corrupt. Missing files and missing keys are skipped quietly — a
-/// pack that does not have Voxy simply has nothing to turn down.</para>
-/// </summary>
+/// <summary>"Low mode": turns a pack's heavy visual settings down before launch, and puts them back
+/// when switched off.</summary>
+/// <remarks>
+/// <para>Mostly it rewrites settings. It also disables a few purely decorative client-only mods
+/// (<see cref="DisabledModPrefixes"/>) that the server doesn't run and that register no network
+/// payloads, so players with and without low mode can share a server.</para>
+/// <para>Previous values are kept in <c>.lowmode-backup.json</c> and restored when it is switched off,
+/// but only for keys still at the value low mode wrote. Edits touch single keys, never whole files,
+/// because these files belong to other mods; missing files and keys are skipped.</para>
+/// </remarks>
 public static class LowModeService
 {
     private const string BackupFileName = ".lowmode-backup.json";
@@ -36,70 +30,54 @@ public static class LowModeService
     private sealed record Tweak(string RelativePath, string Key, string LowValue, string? Section = null);
 
     /// <summary>
-    /// The profile. Chosen to cut the things that actually cost frames in this kind of pack — draw distance, the
-    /// number of cloud decks, and per-pixel effects — while leaving anything that changes gameplay or would desync a
-    /// multiplayer session untouched.
+    /// The profile: cuts what costs frames in this kind of pack (draw distance, cloud decks, per-pixel
+    /// effects) and leaves alone anything that changes gameplay or could desync a multiplayer session.
     /// </summary>
     private static readonly Tweak[] Profile =
     [
-        // Low mode is a VOXY profile. Voxy's LOD is the single most expensive thing on screen - it renders
-        // terrain far past the vanilla horizon - so that is where the frames are, and turning it down costs
-        // almost nothing visually: the world still extends to the horizon, just in slightly coarser steps.
+        // Mostly Voxy: its LOD is the most expensive thing on screen, and turning it down costs little
+        // visually (the world still reaches the horizon, in coarser steps).
         //
-        // Deliberately NOT here (Leon, 2026-08-31): graphicsMode, renderClouds, mipmapLevels, entityShadows,
-        // particles, entityDistanceScaling, cloud layer count and LOD fog. Those are the knobs that make the
-        // game look cheap - flat clouds, shimmering distant textures, shadowless mobs, fogless LOD seams -
-        // while returning far less than the Voxy ones. Low mode should look like the game, only faster.
-        // RestoreOrphans() puts each of them back on machines that applied an older profile.
+        // Not changed here: graphicsMode, renderClouds, mipmapLevels, entityShadows, particles,
+        // entityDistanceScaling, cloud layer count and LOD fog. They make the game look cheap for far less
+        // gain. RestoreOrphans() puts them back on machines that applied an older profile.
         new("config/voxy-config.json", "section_render_distance", "2"),
         new("config/voxy-config.json", "service_threads", "4"),
 
-        // Client-side distant generation is pure CPU spent inventing terrain the server already knows about;
-        // with it off, the two throttles below only matter for anything still queued when low mode flips on.
+        // Client-side distant generation is CPU spent generating terrain the server already has. With it
+        // off, the two throttles below only matter for work still queued when low mode turns on.
         new("config/voxy-config.json", "distant_gen_enabled", "false"),
         new("config/voxy-config.json", "distant_gen_max_in_flight", "2"),
         new("config/voxy-config.json", "distant_gen_max_mspt", "5"),
 
-        // Cloud DRAW DISTANCE, not cloud quality: clouds still render, with the same layers and shading, they
-        // just stop following the LOD out to 16k blocks. 4096 is past anywhere the eye reads them as missing.
+        // Cloud draw distance only, not quality: clouds keep their layers and shading but stop following
+        // the LOD out to 16k blocks. Beyond 4096 nobody notices them missing.
         new("config/micvoxy-client.toml", "cloudRenderDistanceMaxBlocks", "4096", "voxy_betterclouds"),
 
-        // The one vanilla knob worth keeping. This used to be nearly free because Voxy drew everything past it;
-        // now that low mode switches Voxy off outright, 10 chunks really is where the world ends, so this is the
-        // setting to raise first if a machine turns out to have the headroom after all.
+        // The only vanilla settings changed. Low mode also disables Voxy, so 10 chunks is where the world
+        // ends; raise this first if a machine has the headroom.
         new("options.txt", "renderDistance", "10"),
         new("options.txt", "simulationDistance", "10"),
     ];
 
-    /// <summary>
-    /// Client-only visual mods that low mode turns off entirely, matched by filename prefix so version bumps
-    /// keep matching. These have no master switch in any config (Better Foliage and Grassier Grass expose only
-    /// granular options; Atmospherics ships no config at all), so the jar is renamed to <c>.jar.disabled</c> -
-    /// NeoForge's and the launcher's shared convention for "installed but off".
-    ///
-    /// Every entry here MUST be a client-only mod with no network payloads: a low-mode player and a
-    /// full-settings player must always be able to play together. The share stays clean because the upload
-    /// path reports low-mode-disabled jars under their ENABLED names (see <see cref="UploadNameFor"/>), so
-    /// other players always receive current, enabled jars regardless of this machine's low mode.
-    /// </summary>
-    /// <para>Every entry below was checked against the pack's dedicated server before being added: a mod that
-    /// is <i>also installed server-side</i> is never listed, because disabling it here risks a registry or
-    /// channel mismatch on join. That check is what rules out Xaero's maps, AmbientSounds, Waves, Particular,
-    /// Falling Leaves, Not Enough Animations, 3D Skin Layers, Big Water and Where Winds Blow, all of which are
-    /// otherwise decorative. Each entry is additionally verified to register no network payloads.</para>
-    ///
-    /// <para>Percentages are measured shares of render-thread and client-tick samples from this pack's own
-    /// profile, so the list is ordered by what it actually buys rather than by reputation.</para>
+    /// <summary>Client-only visual mods that low mode switches off by renaming the jar to
+    /// <c>.jar.disabled</c>, matched by filename prefix so new versions still match.</summary>
+    /// <remarks>Every entry must be client-only, register no network payloads and not be installed on the
+    /// pack's server, so players with and without low mode can play together. That rules out Xaero's
+    /// maps, AmbientSounds, Waves, Particular, Falling Leaves, Not Enough Animations, 3D Skin Layers, Big
+    /// Water and Where Winds Blow. Uploads report these jars under their enabled names
+    /// (<see cref="UploadNameFor"/>). Percentages are measured render-thread and client-tick shares from
+    /// this pack's profile.</remarks>
     private static readonly string[] DisabledModPrefixes =
     [
-        // ---- originally profiled as the heavy decorative mods -------------------------------------------
+        // ---- heavy decorative mods ---------------------------------------------------------------------
         "atmospherics-",            // 6.3% render + 18.8% client tick - the single biggest decorative cost
         "grassiergrass-",           // 7.8% render (64 blades/block out to 160 blocks at stock)
         "better-clouds-",
         "betterfog-",
         "BetterFoliageRenewed-",
 
-        // ---- added after the overnight profiling run ----------------------------------------------------
+        // ---- more decorative mods ----------------------------------------------------------------------
         "softimprints-",            // 5.2% render + 16.2% tick; footprints, and its model-contact path
                                     // throws a NoSuchMethodException per entity per tick
         "entity_model_features-",   // FreshAnimations' model half
@@ -110,37 +88,23 @@ public static class LowModeService
         "punchy-",                  // hit effects / screen shake
         "ItemPhysicLite_",          // dropped-item physics
 
-        // wakes and its Sable compat layer MUST move together: WakesSableCompat hard-requires wakes, so
-        // disabling wakes alone would fail mod loading. Both are client-only and payload-free.
+        // wakes and WakesSableCompat go together: the compat mod hard-requires wakes, so disabling wakes
+        // alone would fail mod loading. Both are client-only and payload-free.
         "wakes-",
         "WakesSableCompat",
 
-        // ---- Voxy (2026-09-04, at Leon's request) ------------------------------------------------------
-        // The LOD renderer itself. Unlike everything above this is not a decorative mod - it is what draws
-        // terrain past the vanilla horizon - so low mode now genuinely ends the world at renderDistance
-        // instead of fading into LOD. It is here because it is also the one mod in the pack that will not
-        // start at all on some Intel iGPUs: its shaders use `uint64_t` and `readonly`, which the Iris Xe
-        // driver (32.0.101.7088) rejects outright, and the game dies during pipeline creation. Turning the
-        // settings down cannot help that - the shaders are compiled either way - so the jar has to go.
-        //
-        // Safe by this list's own rules, each point checked against the pack on 2026-09-04:
-        //   - client-only: the server runs "Voxy World Gen V2" but NOT voxy itself, so nothing desyncs;
-        //   - no network payloads: its only packet-listener classes are mixins into vanilla listeners;
-        //   - nothing breaks without it: voxyworldgenv2, micvoxy and betterfog all declare voxy as an
-        //     OPTIONAL dependency. voxyworldgenv2 mixes only into vanilla server classes ("client": []),
-        //     and micvoxy gates every mixin config behind a RequiredModsMixinPlugin, so its Voxy modules
-        //     switch themselves off while its BetterClouds, BetterFog and Sable modules keep working.
-        //
-        // The pattern is "voxy-" with the hyphen: it matches voxy-1.0.0.jar and deliberately does not match
-        // "Voxy World Gen V2-...", which is the server-side one and must stay enabled.
-        //
-        // The voxy-config.json tweaks above are left in place on purpose. They are dead while the jar is
-        // renamed, and they are what still turns Voxy down if the rename ever fails (a locked file is
-        // swallowed by SetModsDisabled).
+        // ---- Voxy --------------------------------------------------------------------------------------
+        // The LOD renderer rather than a decorative mod, so with it off the world ends at renderDistance.
+        // It is listed because it won't start on some Intel iGPUs: the Iris Xe driver (32.0.101.7088)
+        // rejects its shaders (`uint64_t`, `readonly`) and no setting avoids that. It is client-only (the
+        // server runs "Voxy World Gen V2", not voxy), registers no payloads, and every mod that uses it
+        // treats it as optional. "voxy-" with the hyphen doesn't match "Voxy World Gen V2-...", which
+        // must stay enabled. The voxy-config.json tweaks above stay as a fallback if the rename fails.
         "voxy-",
     ];
 
-    /// <summary>Applies or reverts low mode for a pack. Safe to call on every launch; it is idempotent.</summary>
+    /// <summary>Applies or reverts low mode for a pack. Idempotent, so safe to call on every
+    /// launch.</summary>
     /// <param name="gameDir">The pack's <c>game/</c> directory.</param>
     /// <param name="enabled">Desired state.</param>
     /// <returns>A short human-readable summary for the launch log.</returns>
@@ -154,13 +118,13 @@ public static class LowModeService
     }
 
     /// <summary>A plain-language account of what low mode changes, for the "?" next to the checkbox.
-    /// Lists the exact settings and mods, and — when a game directory is given — which of them this
-    /// pack actually has, so the answer is about the player's pack rather than the profile in general.</summary>
+    /// Lists the exact settings and mods and, given a game directory, which of them this pack actually
+    /// has.</summary>
     public static string Describe(string? gameDir)
     {
         var haveDir = !string.IsNullOrWhiteSpace(gameDir) && Directory.Exists(gameDir);
         var sb = new StringBuilder();
-        sb.AppendLine("Low mode makes the pack run on a modest machine. Before every launch it turns the settings that cost the most frames down, and switches a few purely decorative client-side mods off. Your own values are saved first and put back the moment you turn low mode off — anything you change by hand while it is on is left alone.");
+        sb.AppendLine("Low mode makes the pack run on a modest machine. Before every launch it turns the settings that cost the most frames down, and switches a few purely decorative client-side mods off. Your own values are saved first and put back the moment you turn low mode off - anything you change by hand while it is on is left alone.");
         sb.AppendLine();
 
         sb.AppendLine("Settings it lowers:");
@@ -169,7 +133,7 @@ public static class LowModeService
             var file = haveDir ? Path.Combine(gameDir!, t.RelativePath.Replace('/', Path.DirectorySeparatorChar)) : null;
             var present = file is not null && File.Exists(file);
             var note = !haveDir ? "" : present ? "" : "   (not in this pack)";
-            sb.AppendLine($"  • {t.RelativePath}: {t.Key} → {t.LowValue}{note}");
+            sb.AppendLine($"  • {t.RelativePath}: {t.Key} > {t.LowValue}{note}");
         }
         sb.AppendLine();
 
@@ -189,7 +153,7 @@ public static class LowModeService
         }
         sb.AppendLine();
 
-        sb.AppendLine("Left alone on purpose: graphics mode, clouds, mipmaps, entity shadows, particles and fog — those make the game look cheap for little gain.");
+        sb.AppendLine("Left alone on purpose: graphics mode, clouds, mipmaps, entity shadows, particles and fog - those make the game look cheap for little gain.");
         sb.AppendLine("Every mod on the list is client-only and sends nothing over the network, and none of them is installed on the pack's server, so you can always join a server with low mode on alongside players who have it off.");
         return sb.ToString().TrimEnd();
     }
@@ -201,10 +165,9 @@ public static class LowModeService
         var alreadyOn = File.Exists(backupPath);
         var backup = alreadyOn ? ReadBackup(backupPath) : new Dictionary<string, string>();
 
-        // A profile that has shrunk leaves "orphaned" backup entries - settings an older build lowered
-        // that this one no longer touches (e.g. graphicsMode). Heal them on every apply, not just on
-        // disable, so an already-on machine returns to the player's value on its first launch after
-        // updating instead of staying stuck at the old low setting forever.
+        // Backup entries for settings an older build lowered but this one doesn't touch (e.g.
+        // graphicsMode) are restored on every apply, not just on disable, so they don't stay low after an
+        // update.
         var healed = RestoreOrphans(gameDir, backup);
 
         var changed = 0;
@@ -246,8 +209,8 @@ public static class LowModeService
             if (!File.Exists(file) || !backup.TryGetValue(BackupKey(tweak), out var original))
                 continue;
 
-            // Only roll back keys still sitting at the value we wrote. If the player has since tuned one by hand,
-            // theirs wins - silently reverting someone's deliberate change is worse than leaving it low.
+            // Only roll back keys still at the value we wrote. If the player has since changed one by hand,
+            // theirs wins.
             var current = ReadValue(file, tweak);
             if (current is not null
                 && string.Equals(current, tweak.LowValue, StringComparison.Ordinal)
@@ -261,17 +224,11 @@ public static class LowModeService
         return $"low mode OFF ({restored} setting(s) restored, {reenabled} visual mod(s) back on)";
     }
 
-    /// <summary>
-    /// Restores backup entries whose tweak no longer exists in <see cref="Profile"/> - settings an older
-    /// build of low mode lowered that the current one no longer touches (graphicsMode was removed
-    /// 2026-08-31: fancy stays on in low mode). Without this, such a value would stay stuck at the old
-    /// low setting forever, because rollback is Profile-driven.
-    ///
-    /// Orphans are restored unconditionally: their old low value is unknown here, so the hand-tune check
-    /// the Profile loop uses is not possible, and the player's pre-low-mode original is the least
-    /// surprising outcome. Each handled orphan is removed from the backup map (callers persist or delete
-    /// the file afterwards).
-    /// </summary>
+    /// <summary>Restores backup entries whose tweak is no longer in <see cref="Profile"/> (settings an
+    /// older build lowered, such as graphicsMode). Rollback is Profile-driven, so they would otherwise
+    /// stay low.</summary>
+    /// <remarks>Restored unconditionally, since their low value is unknown. Handled entries are removed
+    /// from the map; callers save or delete the file.</remarks>
     private static int RestoreOrphans(string gameDir, Dictionary<string, string> backup)
     {
         if (backup.Count == 0)
@@ -308,15 +265,10 @@ public static class LowModeService
         return restored;
     }
 
-    /// <summary>
-    /// Renames the low-mode visual mods between <c>X.jar</c> and <c>X.jar.disabled</c>.
-    ///
-    /// Runs at every launch, which is also what makes it survive syncing: an update always delivers the jar
-    /// under its enabled name, so after a sync both the fresh <c>X.jar</c> and a stale <c>X.jar.disabled</c>
-    /// (possibly an older version) can coexist - NeoForge would crash on the duplicate mod id. The rule is
-    /// therefore: within one prefix, the plain <c>.jar</c> is the truth, and every <c>.disabled</c> twin is a
-    /// leftover to delete before renaming the truth to the desired state.
-    /// </summary>
+    /// <summary>Renames the low-mode visual mods between <c>X.jar</c> and <c>X.jar.disabled</c>.</summary>
+    /// <remarks>Runs at every launch. A sync always delivers the enabled <c>X.jar</c>, so a stale
+    /// <c>X.jar.disabled</c> can end up beside it and NeoForge would crash on the duplicate mod id. The
+    /// plain jar wins and disabled twins are deleted before renaming.</remarks>
     /// <returns>How many mods ended up switched to the requested state.</returns>
     private static int SetModsDisabled(string gameDir, bool disabled)
     {
@@ -368,10 +320,10 @@ public static class LowModeService
     }
 
     /// <summary>
-    /// The name a mod file should be shared under: a low-mode-managed <c>.jar.disabled</c> is reported as its
-    /// plain <c>.jar</c>, so this machine's low mode never uploads its disabled state as everyone's baseline.
-    /// Files disabled by hand (not in the managed prefix list) keep their name - disabling a mod for the whole
-    /// pack by renaming it IS a deliberate share action, and only low mode's own renames are transparent.
+    /// The name a mod file should be shared under: a <c>.jar.disabled</c> managed by low mode is reported
+    /// as its plain <c>.jar</c>, so this machine's low mode is never uploaded as everyone's baseline.
+    /// Files disabled by hand keep their name, since renaming a mod to disable it for the whole pack is a
+    /// real change to share.
     /// </summary>
     public static string UploadNameFor(string relativePath)
     {
@@ -387,25 +339,15 @@ public static class LowModeService
         return relativePath;
     }
 
-    /// <summary>
-    /// The bytes a file should be <b>shared</b> as: this machine's low-mode edits reverted to the values the
-    /// player had before low mode was switched on. Returns <c>null</c> when there is nothing to mask, and the
-    /// caller should then upload the file as it is on disk.
-    ///
-    /// <para>This is the config-file counterpart of <see cref="UploadNameFor"/>, and together they are what let
-    /// low mode edit <b>any</b> config, shared or not. Before this existed the profile had to be confined to
-    /// Local-ruled files, because a shared file low mode had turned down would upload one machine's low
-    /// settings as everyone's baseline — and worse, switching low mode off on one machine would then push the
-    /// restored "high" values over the other player's. Low mode is per-machine state; it must never travel.</para>
-    ///
-    /// <para>Only keys low mode itself wrote are reverted. If the player changed one of them by hand while low
-    /// mode was on, that value is theirs and is shared as-is — pushing our value over it would be the same
-    /// mistake in the other direction.</para>
-    /// </summary>
+    /// <summary>The bytes a file should be shared as: this machine's low-mode edits reverted to the
+    /// player's own values, or <c>null</c> when there is nothing to mask (upload the file as is).</summary>
+    /// <remarks>The config counterpart of <see cref="UploadNameFor"/>: low mode is per-machine state and
+    /// must never reach other players. Only keys still at low mode's value are reverted; a value the
+    /// player changed by hand is shared as is.</remarks>
     public static byte[]? SharedContentFor(string gameDir, string relativePath)
     {
-        // Cheapest possible rejection first: an upload asks this about every shared file in the pack - well over
-        // a thousand of them - and all but a handful can never match a profile entry.
+        // Cheapest rejection first: an upload asks this about every shared file in the pack (often over a
+        // thousand), and almost none of them can match a profile entry.
         var rel = relativePath.Replace('\\', '/');
         var touched = false;
         foreach (var t in Profile)
@@ -455,9 +397,8 @@ public static class LowModeService
         if (!reverted)
             return null;
 
-        // Matches what WriteValue would have left on disk with low mode off: platform newlines, trailing
-        // newline, no BOM. If the file originally used different line endings the bytes can still differ from
-        // the pristine original, which costs one redundant re-upload of that file and nothing else.
+        // Matches what WriteValue leaves on disk: platform newlines, trailing newline, no BOM. A file that
+        // used other line endings may still differ, which only costs one redundant re-upload.
         var text = string.Join(Environment.NewLine, lines) + Environment.NewLine;
         return new UTF8Encoding(false).GetBytes(text);
     }
@@ -504,9 +445,9 @@ public static class LowModeService
 
     // ---- file editing -------------------------------------------------------------------------------------------
     //
-    // options.txt is "key:value" per line; TOML and JSON are both "key = value" / "key": value. Rather than pull in
-    // three parsers for what is a single scalar each, match the key in place and swap only what is to its right,
-    // which also preserves comments, ordering and formatting exactly.
+    // options.txt is "key:value" per line; TOML and JSON are "key = value" / "key": value. Instead of three
+    // parsers for one scalar each, match the key in place and replace only what is to its right, which also keeps
+    // comments, ordering and formatting.
 
     private static bool IsOptionsTxt(Tweak t) =>
         t.RelativePath.EndsWith("options.txt", StringComparison.OrdinalIgnoreCase);
@@ -543,7 +484,7 @@ public static class LowModeService
             var g = m.Groups["v"];
             lines[idx] = lines[idx][..g.Index] + value + lines[idx][(g.Index + g.Length)..];
 
-            // No BOM: NeoForge's TOML parser rejects one outright, and Minecraft's options reader is no happier.
+            // No BOM: NeoForge's TOML parser rejects one, and Minecraft's options reader doesn't expect one.
             File.WriteAllLines(file, lines, new UTF8Encoding(false));
             return true;
         }
@@ -611,16 +552,15 @@ public static class LowModeService
         catch (IOException) { } catch (UnauthorizedAccessException) { }
     }
 
-    /// <summary>Reads the effective preference for a pack. Missing entry means ON.</summary>
-    /// <remarks>Only meaningful for a pack <see cref="AppliesTo(PackDetail, AppSettings)"/> accepts —
-    /// callers must ask that first, because this answers ON for a pack the profile was never written
-    /// for.</remarks>
+    /// <summary>Reads the effective preference for a pack. A missing entry means on.</summary>
+    /// <remarks>Only meaningful for a pack <see cref="AppliesTo(PackDetail, AppSettings)"/> accepts, so
+    /// ask that first: this answers on for a pack the profile was never written for.</remarks>
     public static bool IsEnabled(AppSettings settings, Guid packId) =>
         !settings.PackLowMode.TryGetValue(packId, out var on) || on;
 
     /// <summary>
-    /// The one pack this profile was measured against: Create Ultimate Selection 2. Its id is stable
-    /// across everyone who subscribes to it, so a friend's copy is the same pack and gets the option too.
+    /// Ids of the pack this profile was measured against (Create Ultimate Selection 2). Everyone
+    /// subscribed to it shares the id, so they all get the option.
     /// </summary>
     private static readonly Guid[] ProfiledPackIds =
     [
@@ -628,28 +568,16 @@ public static class LowModeService
         Guid.Parse("c2ca1e34-31e6-41be-aeb5-067913e3f602"),
     ];
 
-    /// <summary>
-    /// Whether low mode is offered for a pack at all.
-    /// </summary>
-    /// <remarks>
-    /// <para>Low mode is not a generic "make it faster" switch — it is a hand-tuned profile for one
-    /// modpack. Its numbers were measured against Create Ultimate Selection 2's Voxy setup and its
-    /// mod list names that pack's decorative client mods by filename. Offered on an unrelated pack it
-    /// would still rewrite that pack's options.txt to CUS2's numbers while finding none of the mods it
-    /// expects — a slower, uglier game and no explanation why.</para>
-    /// <para>Matched by id first, so everyone subscribed to the real pack — including a friend's
-    /// copy — gets the option. The name is only a fallback, and only for a pack the signed-in user
-    /// OWNS: that covers their own re-import or renamed-on-disk copy without handing the checkbox to
-    /// an unrelated pack that someone else happened to call "Ultimate Selection 2". A name is not
-    /// identity, and this profile edits config files.</para>
-    /// <para>Anything else gets no checkbox, and <see cref="Apply"/> is called with <c>false</c> for it
-    /// at launch so a pack an older build had quietly lowered is put back.</para>
-    /// </remarks>
+    /// <summary>Whether low mode is offered for a pack at all.</summary>
+    /// <remarks>Low mode is a profile tuned for one modpack (Create Ultimate Selection 2), so it is
+    /// offered by pack id, or by name only for a pack the signed-in user owns (a re-import or renamed
+    /// copy). Other packs get no checkbox, and <see cref="Apply"/> is called with <c>false</c> for them
+    /// at launch so a pack an older build lowered is put back.</remarks>
     /// <param name="packId">The pack being launched or shown.</param>
-    /// <param name="packName">Its display name, used only for the owner-gated fallback above.</param>
+    /// <param name="packName">Its display name, used only for the owner-gated fallback.</param>
     /// <param name="ownerId">Who owns the pack (<see cref="PackDetail.OwnerId"/>).</param>
-    /// <param name="currentUserId">The signed-in user, or null when signed out — in which case the
-    /// fallback never fires and only the profiled ids qualify.</param>
+    /// <param name="currentUserId">The signed-in user, or null when signed out (then only the profiled
+    /// ids qualify).</param>
     public static bool AppliesTo(Guid packId, string? packName, Guid ownerId, Guid? currentUserId)
     {
         if (Array.IndexOf(ProfiledPackIds, packId) >= 0) return true;
@@ -659,7 +587,7 @@ public static class LowModeService
     }
 
     /// <summary>Whether low mode is offered for this pack, for callers that already hold the pack and
-    /// the settings — which is all of them.</summary>
+    /// the settings.</summary>
     public static bool AppliesTo(PackDetail pack, AppSettings settings) =>
         AppliesTo(pack.Id, pack.Name, pack.OwnerId, settings.UserId);
 }

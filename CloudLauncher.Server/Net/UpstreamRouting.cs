@@ -1,13 +1,13 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Reflection;
 
 namespace CloudLauncher.Server.Net;
 
 /// <summary>
-/// One way to reach an upstream mod-platform API. Either a different address to send *to*
-/// (<see cref="BaseUrl"/> — a relay you control that forwards to the real API) or a different
-/// address to send *from* (<see cref="HttpProxy"/> — an outbound proxy), or both.
-/// Configured under "Upstream:{platform}"; see deploy/UPSTREAM-ROUTING.md.
+/// One way to reach an upstream mod-platform API: a relay that forwards to the real API
+/// (<see cref="BaseUrl"/>), an outbound proxy (<see cref="HttpProxy"/>), or both. Configured under
+/// "Upstream:{platform}"; see deploy/UPSTREAM-ROUTING.md.
 /// </summary>
 public sealed class UpstreamRoute
 {
@@ -15,12 +15,12 @@ public sealed class UpstreamRoute
     public string? Name { get; set; }
 
     /// <summary>Relay base URL replacing the platform's own, e.g. "https://cf-relay.example.net/v1".
-    /// A relay terminates TLS, so it sees the API key — only point this at a host you control.</summary>
+    /// A relay terminates TLS and sees the API key, so only point this at a host you control.</summary>
     public string? BaseUrl { get; set; }
 
-    /// <summary>Outbound HTTP proxy, e.g. "http://10.0.0.5:3128". TLS stays end-to-end to the real
-    /// API through CONNECT, so the proxy never sees the API key — prefer this over a relay.
-    /// Credentials may be embedded ("http://user:pass@host:3128") or given separately below.</summary>
+    /// <summary>Outbound HTTP proxy, e.g. "http://10.0.0.5:3128". TLS stays end-to-end through
+    /// CONNECT, so the proxy never sees the API key; prefer this over a relay. Credentials may be
+    /// embedded ("http://user:pass@host:3128") or given separately below.</summary>
     public string? HttpProxy { get; set; }
 
     public string? ProxyUser { get; set; }
@@ -30,21 +30,17 @@ public sealed class UpstreamRoute
     public Dictionary<string, string> Headers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
-/// <summary>Bound from the "Upstream" configuration section. Empty by default, which reproduces
-/// the original behaviour exactly: one direct route per platform.</summary>
+/// <summary>Bound from the "Upstream" configuration section. Empty by default, which means one
+/// direct route per platform.</summary>
 public sealed class UpstreamRoutingOptions
 {
-    /// <summary>Try the platform's own API directly first. Leave this on unless this server's
-    /// address is permanently blocked — a working direct route is faster and keeps the API key
-    /// off any relay. Turning it off means "skip the platform's own API when I have given you
-    /// somewhere else to go": a platform with no alternate route configured keeps its direct route
-    /// either way, so switching this off for a blocked CurseForge cannot quietly take Modrinth
-    /// offline with it.</summary>
+    /// <summary>Try the platform's own API directly first. Leave on unless this server's address is
+    /// permanently blocked: a direct route is faster and keeps the API key off any relay. When off, a
+    /// platform with no alternate route still keeps its direct route.</summary>
     public bool UseDirect { get; set; } = true;
 
-    /// <summary>How long a route stays out of rotation after being blocked before it is tried
-    /// again. Keeps a dead route from costing every request a wasted round trip, without making
-    /// the block permanent — CurseForge unblocking the address heals itself within one window.</summary>
+    /// <summary>How long a blocked route stays out of rotation before it is tried again. A dead route
+    /// doesn't cost every request a round trip, and an unblock is picked up within one window.</summary>
     public int BlockCooldownMinutes { get; set; } = 10;
 
     public List<UpstreamRoute> CurseForge { get; set; } = new();
@@ -158,8 +154,8 @@ public sealed class UpstreamRoutingPlan
         if (!string.IsNullOrWhiteSpace(route.HttpProxy))
         {
             var proxyUri = ParseHttpUri($"{where}:HttpProxy", route.HttpProxy);
-            // Credentials embedded in the URL ("http://user:pass@host:3128") are the form every
-            // proxy vendor hands out, but WebProxy ignores that part — lift it out here instead.
+            // Proxy vendors hand out URLs with embedded credentials ("http://user:pass@host:3128"), but
+            // WebProxy ignores that part, so pull it out here.
             if (!string.IsNullOrEmpty(proxyUri.UserInfo))
             {
                 var parts = proxyUri.UserInfo.Split(':', 2);
@@ -211,13 +207,13 @@ public sealed class UpstreamRoutingPlan
 }
 
 /// <summary>
-/// Picks which route to use for an upstream call and remembers which ones are refusing traffic.
-///
-/// The point is failover: when CurseForge's CDN blocks this server's address, the proxy retries the
-/// same call through a configured relay or outbound proxy instead of surfacing the block to users.
-/// A blocked route is parked for a cooldown so it costs at most one wasted round trip per window,
-/// and is retried afterwards so the address being unblocked heals without a redeploy.
+/// Picks the route for an upstream call and tracks which routes are being refused.
 /// </summary>
+/// <remarks>
+/// Used for failover: when CurseForge's CDN blocks this server's address, the call is retried
+/// through a configured relay or proxy. A blocked route is parked for a cooldown and then tried
+/// again, so an unblock needs no redeploy.
+/// </remarks>
 public sealed class UpstreamRouter(
     UpstreamRoutingPlan plan,
     IHttpClientFactory factory,
@@ -225,9 +221,8 @@ public sealed class UpstreamRouter(
 {
     private readonly ConcurrentDictionary<string, DateTimeOffset> _blockedUntil = new();
 
-    /// <summary>Routes to try, best first: healthy ones in configured order, then any in cooldown.
-    /// Cooling routes are kept as last resorts rather than dropped, so a dead relay can still fall
-    /// back to a route that is merely suspect.</summary>
+    /// <summary>Routes to try, best first: healthy ones in configured order, then any in cooldown as
+    /// a last resort, so a dead relay can still fall back to a route that is only suspect.</summary>
     public IReadOnlyList<ResolvedRoute> RoutesFor(string platform)
     {
         var all = plan.For(platform);
@@ -255,8 +250,8 @@ public sealed class UpstreamRouter(
             route.Name, route.Platform, reason, until);
     }
 
-    /// <summary>Called when a route returns something the API itself produced — including a 404 or a
-    /// rejected key, which still prove the request got through.</summary>
+    /// <summary>Called when a route returns a response from the API itself. A 404 or a rejected key
+    /// counts too, since the request got through.</summary>
     public void MarkHealthy(ResolvedRoute route)
     {
         if (_blockedUntil.TryRemove(route.ClientName, out _))
@@ -270,9 +265,8 @@ public sealed class UpstreamRouter(
 
 public static class UpstreamRoutingServiceCollectionExtensions
 {
-    /// <summary>Binds "Upstream", validates it, and registers one named HttpClient per route.
-    /// Bad routing config throws here, at startup, rather than surfacing as a confusing runtime
-    /// failure once someone actually browses mods.</summary>
+    /// <summary>Binds "Upstream", validates it, and registers one named HttpClient per route. Bad
+    /// config throws here at startup instead of failing later when someone browses mods.</summary>
     public static IServiceCollection AddUpstreamRouting(this IServiceCollection services, IConfiguration config)
     {
         var options = config.GetSection("Upstream").Get<UpstreamRoutingOptions>() ?? new UpstreamRoutingOptions();
@@ -283,19 +277,43 @@ public static class UpstreamRoutingServiceCollectionExtensions
 
         foreach (var route in plan.All)
         {
-            var builder = services.AddHttpClient(route.ClientName, c => c.Timeout = TimeSpan.FromMinutes(2));
-            if (route.HttpProxy is null) continue;
-
-            // The proxy lives on the handler, which is why each egress needs its own named client.
-            // Handler lifetime is left to IHttpClientFactory so DNS changes are still picked up.
-            builder.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            var builder = services.AddHttpClient(route.ClientName, c =>
             {
-                Proxy = BuildWebProxy(route),
-                UseProxy = true
+                c.Timeout = TimeSpan.FromMinutes(2);
+                c.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", UserAgent);
             });
+
+            // Redirects are not followed, so the API key is never sent wherever a store response points;
+            // the client gets the redirect as is. The proxy lives on the handler, hence one named client per
+            // route. IHttpClientFactory manages handler lifetime so DNS changes are still picked up.
+            builder.ConfigurePrimaryHttpMessageHandler(() => route.HttpProxy is null
+                ? new SocketsHttpHandler { AllowAutoRedirect = false }
+                : new SocketsHttpHandler
+                {
+                    AllowAutoRedirect = false,
+                    Proxy = BuildWebProxy(route),
+                    UseProxy = true
+                });
         }
 
         return services;
+    }
+
+    /// <summary>
+    /// User-Agent for every store call from this server: project, build and contact, in the form
+    /// Modrinth asks API clients to use.
+    /// </summary>
+    public static string UserAgent { get; } = BuildUserAgent();
+
+    private static string BuildUserAgent()
+    {
+        var assembly = typeof(UpstreamRouter).Assembly;
+        var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                      ?? assembly.GetName().Version?.ToString(3)
+                      ?? "0.0.0";
+        var plus = version.IndexOf('+');
+        if (plus >= 0) version = version[..plus];
+        return $"falling-colud/CloudLauncher-Server/{version} ({CloudLauncher.Shared.Legal.ContactEmail})";
     }
 
     private static WebProxy BuildWebProxy(ResolvedRoute route)

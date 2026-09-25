@@ -1,5 +1,4 @@
-using System.Collections.ObjectModel;
-using System.Diagnostics;
+﻿using System.Collections.ObjectModel;
 using System.IO;
 using System.Net;
 using System.Text.RegularExpressions;
@@ -22,7 +21,8 @@ public partial class PackDetailView : Page
     private readonly Guid _packId;
     private readonly bool _hostedInMinecraftWindow;
 
-    /// <summary>The instance this page is showing. Used by the shell to close the page if the instance is deleted.</summary>
+    /// <summary>The instance this page is showing. Used by the shell to close the page if the
+    /// instance is deleted.</summary>
     public Guid PackId => _packId;
 
     private PackDetail? _pack;
@@ -30,14 +30,16 @@ public partial class PackDetailView : Page
     private bool _suppressEvents;
     private bool _fileTransferInProgress;
 
-    /// <summary>Live while an upload or a download is running, so the same button can cancel it.
-    /// Both service calls already take a token and already check it inside their copy loops — the
-    /// only thing missing was something to hold the source.</summary>
+    /// <summary>Set while an upload or download is running, so the same button can cancel it.</summary>
     private CancellationTokenSource? _syncCts;
 
-    /// <summary>Cancels the background thumbnail pass when the tab is refreshed or the page closes,
-    /// so a folder of three hundred captures does not keep decoding into a view that is gone.</summary>
+    /// <summary>Cancels the background thumbnail pass when the tab is refreshed or the
+    /// page closes.</summary>
     private CancellationTokenSource? _screenshotCts;
+
+    /// <summary>Cancels the Files tab's summary walk, so a refresh during a long walk does not leave
+    /// two walks racing to write the same label.</summary>
+    private CancellationTokenSource? _fileSummaryCts;
 
     private readonly DispatcherTimer _autoApplyTimer = new() { Interval = TimeSpan.FromSeconds(30) };
     private readonly DispatcherTimer _overviewSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(1200) };
@@ -62,7 +64,58 @@ public partial class PackDetailView : Page
     private DetailTabKind _currentTab = DetailTabKind.Overview;
     private readonly HashSet<DetailTabKind> _tabsLoaded = new();
 
+    /// <summary>The record the page last drew, as JSON, so a refresh that brings back the same answer
+    /// draws nothing again. Null until something has been drawn.</summary>
+    private string? _appliedSnapshot;
+
     public event EventHandler<double>? HostPanelWidthRequested;
+
+    private bool _heroNarrow;
+    private readonly List<Button> _fileActionButtons = new();
+
+    /// <summary>
+    /// Puts the file actions (Export, Open folder, Manage files) in a column beside Play when there is
+    /// room, otherwise into Play's wrapping row with the column hidden.
+    /// </summary>
+    /// <remarks>Measured from the buttons' desired sizes rather than a fixed width, so a wider font or
+    /// an extra chip in the Play row moves the breakpoint too.</remarks>
+    private void LayoutHeroActions()
+    {
+        if (_fileActionButtons.Count == 0)
+            _fileActionButtons.AddRange(FileActionsStack.Children.OfType<Button>());
+
+        var width = HeroActionsGrid.ActualWidth;
+        if (width <= 0) return;
+        var playRow = HeroPlayRow.Children.OfType<FrameworkElement>()
+            .Where(c => c.Visibility == Visibility.Visible && !(c is Button b && _fileActionButtons.Contains(b)))
+            .Sum(c => c.DesiredSize.Width);
+        var column = _fileActionButtons.Max(b => b.DesiredSize.Width) + 16;
+        var narrow = width < playRow + column;
+        if (narrow == _heroNarrow) return;
+        _heroNarrow = narrow;
+
+        foreach (var b in _fileActionButtons)
+            (b.Parent as Panel)?.Children.Remove(b);
+
+        if (narrow)
+        {
+            foreach (var b in _fileActionButtons)
+            {
+                b.Margin = new Thickness(0, 0, 10, 10);
+                HeroPlayRow.Children.Add(b);
+            }
+            FileActionsStack.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            for (var i = 0; i < _fileActionButtons.Count; i++)
+            {
+                _fileActionButtons[i].Margin = new Thickness(0, 0, 0, i == _fileActionButtons.Count - 1 ? 10 : 6);
+                FileActionsStack.Children.Add(_fileActionButtons[i]);
+            }
+            FileActionsStack.Visibility = Visibility.Visible;
+        }
+    }
 
     public PackDetailView(MainWindow shell, Guid packId, bool hostedInMinecraftWindow = false)
     {
@@ -72,16 +125,15 @@ public partial class PackDetailView : Page
         _hostedInMinecraftWindow = hostedInMinecraftWindow;
         _autoApplyTimer.Tick += OnAutoApplyTick;
         _overviewSaveTimer.Tick += OnOverviewSaveTimerTick;
+        HeroActionsGrid.SizeChanged += (_, _) => LayoutHeroActions();
         WireOverviewTextBox(OverviewSummaryBox);
-        RichDescriptionHelper.AttachHost(OverviewDescriptionHost, OverviewDescriptionBrowser);
         WorldsList.ItemsSource = _worldRows;
         PackScreenshotList.ItemsSource = _packScreenshotRows;
         GameView.FilesDropped   += OnFilesDropped;
         GameView.FileActivated  += OpenInEditor;   // double-click a file -> built-in editor
         SharedView.FilesDropped += OnFilesDropped;
         SharedView.FileActivated += OpenInEditor;
-        // Dropping a jar or a config in from Explorer is the same gesture the Mods screen accepts;
-        // both columns take it, and both land it in whichever folder is open.
+        // Files dropped in from Explorer land in whichever folder is open, like on the Mods screen.
         GameView.ExternalFilesDropped   += (root, dir, files) => OnExternalFilesDropped(GameView, root, dir, files);
         SharedView.ExternalFilesDropped += (root, dir, files) => OnExternalFilesDropped(SharedView, root, dir, files);
         GameView.DeleteRequested   += () => _ = DeleteSelectedAsync(GameView);
@@ -91,7 +143,9 @@ public partial class PackDetailView : Page
         LogContent.StatsChanged += UpdateLogLinesLabel;
         ProgressHub.ProgressChanged += OnHeroProgressChanged;
         ProgressHub.ProgressCleared += OnHeroProgressCleared;
+        PackJobs.Changed += OnPackJobsChanged;
         App.State.Instances.StateChanged += OnInstanceStateChanged;
+        ServerHostingPanel.Host.StateChanged += OnServerHostStateChanged;
         App.State.ModpackDownload.PackAdded += OnPackDownloadUpdated;
         AddHandler(UIElement.PreviewMouseWheelEvent, new MouseWheelEventHandler(OnPagePreviewMouseWheel), true);
         AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler(OnPagePreviewKeyDown), true);
@@ -101,29 +155,65 @@ public partial class PackDetailView : Page
             DetailTabs.HorizontalAlignment = HorizontalAlignment.Left;
             DetailTabs.ItemContainerStyle = CreateHostedTabItemStyle();
             DetailTabs.SizeChanged += (_, _) => NotifyHostPanelWidth();
+            // Hidden from the first frame, not only once the record arrives (see ApplyHostedTabChrome).
+            ExportPackButton.Visibility = Visibility.Collapsed;
         }
         Unloaded += async (_, _) =>
         {
             _autoApplyTimer.Stop();
             _overviewSaveTimer.Stop();
-            // A half-finished transfer or thumbnail pass has no view left to report into. Guarded:
-            // this handler is async void, so an exception here would reach the dispatcher.
+            // Stop uploads and thumbnail passes that would report into a closed view. Guarded
+            // because this handler is async void. PackJobs keep running: a download belongs to the
+            // instance, not the page.
             try { _syncCts?.Cancel(); } catch (ObjectDisposedException) { }
             try { _screenshotCts?.Cancel(); } catch (ObjectDisposedException) { }
-            // Unsubscribe FIRST, before any awaitable/throwable work. Otherwise a throw in the
-            // save below would skip unsubscription and leak this whole view (its visual tree,
-            // WebView2/WebBrowser hosts, and the static AppLog handler) for the process lifetime.
+            try { _fileSummaryCts?.Cancel(); } catch (ObjectDisposedException) { }
+            // Unsubscribe before anything that can throw or await, or a failed save below would
+            // leak the whole view through these static events.
             ProgressHub.ProgressChanged -= OnHeroProgressChanged;
             ProgressHub.ProgressCleared -= OnHeroProgressCleared;
+            PackJobs.Changed -= OnPackJobsChanged;
             App.State.Instances.StateChanged -= OnInstanceStateChanged;
+            ServerHostingPanel.Host.StateChanged -= OnServerHostStateChanged;
             App.State.ModpackDownload.PackAdded -= OnPackDownloadUpdated;
-            // The Logs tab wires this static event when "Launcher log" is selected; if the panel
-            // closes on that row it was never removed, rooting the view forever.
+            // The Logs tab subscribes this when "Launcher log" is selected; remove it in case the page
+            // closes on that row.
             AppLog.MessageAppended -= OnLauncherLogAppended;
             if (_pack is not null && _isOwner)
                 await SaveOverviewDescriptionAsync();
         };
+
+        PaintRemembered();
     }
+
+    /// <summary>Draws what this PC last knew about the instance before the page is shown, so it
+    /// does not slide in empty and then jump when the server answers.</summary>
+    /// <remarks>The record comes from <see cref="ApiClient.PeekPackDetail"/>: the last server
+    /// answer, else one built from the instance list. <see cref="ReloadAsync"/> still asks the
+    /// server and redraws only if the answer differs.</remarks>
+    private void PaintRemembered()
+    {
+        if (App.State.Api.PeekPackDetail(_packId) is not { } remembered) return;
+        try
+        {
+            _pack = remembered;
+            _isOwner = remembered.OwnerId == App.State.Settings.UserId;
+            // The server path does this first too: opening the instance page creates its folder.
+            App.State.Packs.EnsurePackFolder(_packId, remembered.Name, remembered.IsShared);
+            ApplyPack(remembered);
+            ResetTabLoadState();
+            _appliedSnapshot = Snapshot(remembered);
+        }
+        catch (Exception ex)
+        {
+            // Only the head start is lost; the server's answer still follows.
+            AppLog.LogError("packs.remembered-detail", ex);
+            _pack = null;
+            _appliedSnapshot = null;
+        }
+    }
+
+    private static string Snapshot(PackDetail pack) => System.Text.Json.JsonSerializer.Serialize(pack);
 
     private void OnHeroProgressChanged(ProgressInfo info)
     {
@@ -192,8 +282,8 @@ public partial class PackDetailView : Page
         }
     }
 
-    /// <summary>F5 reloads whichever tab is showing and Ctrl+F lands in its search box, the same two
-    /// keys the Instances, Worlds, Mods and Resource pack screens already answer to.</summary>
+    /// <summary>F5 reloads the current tab and Ctrl+F focuses its search box, as on the other list
+    /// screens.</summary>
     private void OnPagePreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.F5)
@@ -225,6 +315,66 @@ public partial class PackDetailView : Page
         UpdateLaunchButtonState();
     }
 
+    // ── the header's server chip ─────────────────────────────────────────────
+
+    private void OnServerHostStateChanged(Guid packId)
+    {
+        if (packId != _packId) return;
+        if (Dispatcher.CheckAccess()) UpdateServerChip();
+        else Dispatcher.BeginInvoke(UpdateServerChip);
+    }
+
+    /// <summary>Shows whether this instance has a server running. The chip opens the Hosting tab and is
+    /// collapsed when nothing is running.</summary>
+    private void UpdateServerChip()
+    {
+        // Must watch the same tracker the Hosting tab starts servers on, which lives on
+        // ServerHostingPanel.Host for now.
+        var state = ServerHostingPanel.Host.GetStatus(_packId);
+        if (!state.IsLive && state.Status != ServerStatus.Crashed)
+        {
+            ServerStatusChip.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        ServerStatusChip.Visibility = Visibility.Visible;
+        var (text, brushKey, tip) = state.Status switch
+        {
+            ServerStatus.Installing => ("Server installing...", "WarningBrush",
+                "This instance's server is being prepared. Open the Hosting tab for the log."),
+            ServerStatus.Starting => ("Server starting...", "WarningBrush",
+                "This instance's server is loading. Open the Hosting tab for its console."),
+            ServerStatus.Stopping => ("Server stopping...", "WarningBrush",
+                "This instance's server is saving and shutting down. Open the Hosting tab to watch."),
+            ServerStatus.Crashed => ("Server crashed", "DangerBrush",
+                "This instance's server exited on its own. Open the Hosting tab for the last lines."),
+            _ => ($"Server running · port {state.Port}", "SuccessBrush",
+                "This instance's server is accepting players. Open the Hosting tab for its console."),
+        };
+
+        ServerStatusChipText.Text = text;
+        ServerStatusChipGlyph.SetResourceReference(TextBlock.ForegroundProperty, brushKey);
+
+        // The Hosting tab is on the file-management page, which needs the record and the launcher
+        // window. Otherwise the chip still shows the state, and the tooltip says why it cannot open it.
+        var canOpen = _pack is not null && !_hostedInMinecraftWindow;
+        ServerStatusChip.IsEnabled = canOpen;
+        ToolTipService.SetShowOnDisabled(ServerStatusChip, true);
+        ServerStatusChip.ToolTip = canOpen
+            ? tip
+            : _hostedInMinecraftWindow
+                ? text + ". The Hosting tab is on the launcher window, behind the game."
+                : tip + " This instance's details have not been downloaded yet, so the page cannot "
+                      + "be opened until the server answers.";
+    }
+
+    /// <summary>The chip's click, and the only route from this page to the Hosting tab.</summary>
+    private void OnOpenServerHosting(object sender, RoutedEventArgs e)
+    {
+        if (_pack is null) return;
+        FileManagementView.OpenOn(_shell, _pack, FileManagementTab.Hosting);
+    }
+
     private void OnPackDownloadUpdated(PackSummary pack)
     {
         if (pack.Id != _packId) return;
@@ -233,6 +383,8 @@ public partial class PackDetailView : Page
 
     private void UpdateLaunchButtonState()
     {
+        // Play is hidden while a transfer holds its slot, so refresh the transfer controls too.
+        UpdateTransferControls();
         var playable = _pack is { IsEmpty: false } && !string.IsNullOrEmpty(_pack.MinecraftVersion);
         var status = App.State.Instances.GetStatus(_packId);
         if (status != MinecraftInstanceStatus.Idle)
@@ -254,15 +406,106 @@ public partial class PackDetailView : Page
         LaunchButton.IsEnabled = playable;
     }
 
+    // ── transfer controls (pause / stop) ─────────────────────────────────────
+
+    private void OnPackJobsChanged(Guid packId)
+    {
+        if (packId != _packId) return;
+        if (Dispatcher.CheckAccess()) UpdateTransferControls();
+        else Dispatcher.BeginInvoke(UpdateTransferControls);
+    }
+
+    /// <summary>While a transfer is running for this instance, Pause and Stop replace Play.</summary>
+    private void UpdateTransferControls()
+    {
+        // An export only reads the instance, so it leaves Play alone (the game can run meanwhile
+        // and the export card has its own Cancel). It still blocks Update, which would rewrite
+        // the files being packed.
+        var found = PackJobs.For(_packId);
+        if (found is { Kind: PackJobKind.Export })
+        {
+            PauseJobButton.Visibility = Visibility.Collapsed;
+            StopJobButton.Visibility = Visibility.Collapsed;
+            LaunchButton.Visibility = Visibility.Visible;
+            if (_pack is not null)
+            {
+                UpdateButtonText.Text = "Update available";
+                UpdateButton.IsEnabled = false;
+                UpdateButton.ToolTip = "An export is reading this instance. Update it once that has finished.";
+            }
+            return;
+        }
+
+        var job = found;
+        var running = job is not null;
+
+        PauseJobButton.Visibility = running && !job!.IsStopping ? Visibility.Visible : Visibility.Collapsed;
+        StopJobButton.Visibility = running ? Visibility.Visible : Visibility.Collapsed;
+        LaunchButton.Visibility = running ? Visibility.Collapsed : Visibility.Visible;
+
+        if (job is null)
+        {
+            // Offer the update again, unless an upload is running (tracked by _syncCts, not a job).
+            if (_pack is not null)
+            {
+                UpdateButtonText.Text = "Update available";
+                UpdateButton.IsEnabled = _syncCts is null;
+                UpdateButton.ToolTip = "Download the latest version from the server";
+            }
+            return;
+        }
+
+        var paused = job.IsPaused;
+        PauseJobIcon.Text = paused ? "\uE768" : "\uE769";      // play / pause
+        PauseJobText.Text = paused ? "Resume" : "Pause";
+        PauseJobButton.ToolTip = paused
+            ? $"Carry on with the {job.KindLabel}"
+            : $"Hold the {job.KindLabel} where it is - nothing already downloaded is lost";
+        StopJobText.Text = job.IsStopping ? "Stopping..." : "Stop";
+        StopJobButton.IsEnabled = !job.IsStopping;
+
+        // The transfer may have been started from the instance list, where SetSyncUiRunning never ran
+        // for this page, so lock the Update button here.
+        UpdateButtonText.Text = "Updating...";
+        UpdateButton.IsEnabled = false;
+        UpdateButton.ToolTip = $"Already {job.KindLabel}ing - use Pause or Stop to interrupt it";
+        StopJobButton.ToolTip =
+            $"Stop the {job.KindLabel} and delete the files it downloaded. Files that were already here stay.";
+    }
+
+    private void OnPauseJob(object sender, RoutedEventArgs e)
+    {
+        var job = PackJobs.For(_packId);
+        if (job is null) return;
+
+        if (job.IsPaused)
+        {
+            job.Resume();
+            StatusLabel.Text = $"Resumed the {job.KindLabel}.";
+        }
+        else
+        {
+            job.Pause();
+            // Say it is paused, or a still bar looks like a stuck transfer.
+            StatusLabel.Text = $"Paused - the {job.KindLabel} is holding where it is. Press Resume to carry on.";
+        }
+    }
+
+    private void OnStopJob(object sender, RoutedEventArgs e)
+    {
+        var job = PackJobs.For(_packId);
+        if (job is null) return;
+        StatusLabel.Text = $"Stopping the {job.KindLabel}...";
+        job.Stop();
+    }
+
     /// <summary>
-    /// Drop handler for FolderViews. When dropping onto the SharedView (same Root as GameView,
-    /// ShowOnlyShared mode), adds a "shared" rule for the dropped files instead of moving them —
-    /// because the files are already in game/ and just need to be marked for sync.
-    /// All other drops move/copy between folders as normal.
+    /// Drop handler for the FolderViews. A drop onto SharedView marks the files as shared with a rule
+    /// instead of moving them, since they are already in game/. Other drops move or copy as normal.
     /// </summary>
     private async void OnFilesDropped(string sourceRoot, string destRoot, IReadOnlyList<string> relativePaths)
     {
-        if (_pack is null || _fileTransferInProgress) return;
+        if (_fileTransferInProgress) return;
 
         var gameDir = App.State.Packs.GameDir(_packId);
         var droppingOntoSyncView =
@@ -271,6 +514,13 @@ public partial class PackDetailView : Page
 
         if (droppingOntoSyncView)
         {
+            if (!CanEditSharing)
+            {
+                StatusLabel.Text = "Only the instance owner and collaborators with upload rights "
+                                 + "can change what this instance shares.";
+                return;
+            }
+
             // Mark the dropped files as shared by adding rules.
             var packRoot = App.State.Packs.PackRoot(_packId);
             var rules = App.State.Rules.Load(packRoot);
@@ -299,15 +549,27 @@ public partial class PackDetailView : Page
         if (!_hostedInMinecraftWindow)
             return;
 
+        // The host window's side strip has no room for the file browser, and File Management would open
+        // behind the game. The header's Edit files button still opens the standalone editor.
         FilesTab.Visibility = Visibility.Collapsed;
         OptionsTab.Visibility = Visibility.Collapsed;
 
-        // Inside the Minecraft host window the Overview tab is read-only:
-        // force the summary box to read-only and hide editing-only chrome.
+        // The Overview tab is read-only inside the Minecraft host window.
         OverviewSummaryBox.IsReadOnly = true;
         OverviewSaveStatusLabel.Visibility = Visibility.Collapsed;
         OverviewSummaryCountLabel.Visibility = Visibility.Collapsed;
         OverviewCharacterCountLabel.Visibility = Visibility.Collapsed;
+
+        // Keep the mods button, but the hub would open behind the game, so relabel it to match what
+        // OnOpenModHub does here.
+        OverviewModHubGlyph.Text = "\uE721";
+        OverviewModHubText.Text = "Browse mods";
+        OverviewModHubButton.ToolTip =
+            "Find and install mods for this instance without leaving the game. The full Modpack "
+            + "Management page is on the launcher window, behind the game.";
+
+        // The export card opens on the launcher window, which is behind the game here.
+        ExportPackButton.Visibility = Visibility.Collapsed;
 
         if (_currentTab is DetailTabKind.Files or DetailTabKind.Options)
             SelectOverviewTab();
@@ -413,22 +675,29 @@ public partial class PackDetailView : Page
 
     private void EnsureTabLoaded(DetailTabKind tab, bool force = false)
     {
-        if (_pack is null) return;
+        // The Files tab only needs the local folder; every other tab needs the instance record.
+        if (_pack is null && tab != DetailTabKind.Files) return;
         if (force)
             _tabsLoaded.Remove(tab);
         else if (!_tabsLoaded.Add(tab))
             return;
 
+        if (tab == DetailTabKind.Files)
+        {
+            _ = RefreshFileListsAsync();
+            return;
+        }
+
+        // Anything past here was gated on the record above.
+        var pack = _pack!;
+
         switch (tab)
         {
             case DetailTabKind.Mods:
-                ModListCtrl.Load(_pack, ListOwnerWindow);
+                ModListCtrl.Load(pack, ListOwnerWindow);
                 break;
             case DetailTabKind.ResourcePacks:
-                ResourcePackListCtrl.Load(_pack, ListOwnerWindow);
-                break;
-            case DetailTabKind.Files:
-                _ = RefreshFileListsAsync();
+                ResourcePackListCtrl.Load(pack, ListOwnerWindow);
                 break;
             case DetailTabKind.Screenshots:
                 RefreshPackScreenshots();
@@ -456,7 +725,14 @@ public partial class PackDetailView : Page
             if (_pack.IsShared && _pack.Rules.Count > 0)
                 App.State.Rules.SyncFromServer(App.State.Packs.PackRoot(_packId), _pack.Rules);
 
-            ApplyPack(_pack);
+            // Redraw only when the answer differs from what is already on screen (the remembered record
+            // or an earlier answer), since reapplying reloads the description and re-lays the header.
+            var snapshot = Snapshot(_pack);
+            if (snapshot != _appliedSnapshot)
+            {
+                ApplyPack(_pack);
+                _appliedSnapshot = snapshot;
+            }
             ResetTabLoadState();
             if (_currentTab != DetailTabKind.Overview)
                 EnsureTabLoaded(_currentTab, force: true);
@@ -469,7 +745,58 @@ public partial class PackDetailView : Page
             StatusLabel.Text = ex is ApiException { Status: HttpStatusCode.NotFound }
                 ? "This instance was removed or is no longer available."
                 : ex.Message;
+            // GetPackAsync already falls back to the offline cache, so there is no record at all.
+            // The folder is still here though, and the Files tab only needs the id.
+            ApplyRecordlessFileAccess();
         }
+    }
+
+    /// <summary>
+    /// Leaves only local file access (browse, edit, rename, delete) for an instance with no record.
+    /// Everything that needs the server is disabled with a reason in its tooltip.
+    /// </summary>
+    private void ApplyRecordlessFileAccess()
+    {
+        // PackRoot throws when there is no folder and no name to create one, and then there is nothing
+        // to offer. This runs inside ReloadAsync's catch, so swallow rather than escape an async void.
+        string? root;
+        try { root = App.State.Packs.PackRoot(_packId); }
+        catch (Exception ex)
+        {
+            AppLog.LogError("packs.recordless", ex);
+            return;
+        }
+
+        PackRootHint.Text = "Instance root: " + root;
+        FilesTab.Visibility = Visibility.Visible;
+        SharingOptionsPanel.Visibility = Visibility.Collapsed;
+        ApplyHostedTabChrome();
+        UpdateServerChip();
+
+        // The file-management page needs the record, so without one this falls back to the editor
+        // window, like the header's Edit files button.
+        OpenFileManagementButton.IsEnabled = true;
+        OpenFileManagementButton.ToolTip =
+            "Opens the file editor. The full page needs this instance's details from CloudLauncher, "
+            + "which have not been downloaded yet.";
+
+        // Everything that needs the server is disabled, with the reason in the tooltip.
+        DisableWithReason(UploadButton, "Uploading needs this instance's details from CloudLauncher.");
+        DisableWithReason(ApplyRulesButton, "Rules need this instance's details from CloudLauncher.");
+        DisableWithReason(ExportPackButton,
+            "Exporting needs this instance's Minecraft version and loader, which come with its details "
+            + "from CloudLauncher.");
+        ApplySharingPermissionsToFilesTab();
+
+        if (_currentTab == DetailTabKind.Files)
+            EnsureTabLoaded(DetailTabKind.Files, force: true);
+    }
+
+    private static void DisableWithReason(FrameworkElement element, string why)
+    {
+        element.IsEnabled = false;
+        ToolTipService.SetShowOnDisabled(element, true);
+        element.ToolTip = why;
     }
 
     private async Task TrySyncSharedContentAsync()
@@ -485,8 +812,8 @@ public partial class PackDetailView : Page
             var locallySynced = App.State.Settings.PackSyncedVersion.TryGetValue(_pack.Id, out var v) ? v : 0;
             if (manifest.Version <= locallySynced) return;
 
-            StatusLabel.Text = "Syncing shared files…";
-            await App.State.Packs.DownloadSharedAsync(_pack.Id, null);
+            StatusLabel.Text = "Syncing shared files...";
+            if (!await RunSharedDownloadAsync(null)) return;
             ApplyHeroIcon(_pack);
             ApplyDescriptionDisplay(_pack.Id, _pack.Description ?? "");
             UpdateStatsLabel(_pack.Id);
@@ -503,8 +830,8 @@ public partial class PackDetailView : Page
     }
 
     /// <summary>
-    /// If the pack has team associations, ensure it's linked into each "team:&lt;id&gt;" folder
-    /// — the user sees team-shared packs in their team folder automatically.
+    /// Links a pack with team associations into each "team:&lt;id&gt;" folder, so team-shared packs
+    /// show up in the team folder.
     /// </summary>
     private void AutoLinkToTeamFolders(PackDetail pack)
     {
@@ -530,9 +857,8 @@ public partial class PackDetailView : Page
     /// Rebuilds the log list: the two live pseudo-logs, then every file in game/logs and every
     /// crash report in game/crash-reports, newest first.
     /// </summary>
-    /// <remarks>Crash reports belong here even though they are not logs. When a modded instance dies,
-    /// <c>crash-reports/crash-*.txt</c> is the file that says why — and it was the one file this tab
-    /// never showed, so the answer to "it crashed, what happened" lived in Explorer.</remarks>
+    /// <remarks>Crash reports are listed too, since <c>crash-reports/crash-*.txt</c> is what explains a
+    /// crash.</remarks>
     private void RefreshLogsList()
     {
         if (_pack is null) return;
@@ -586,6 +912,67 @@ public partial class PackDetailView : Page
 
     // ── Logs tab: find, level filter, copy, save ─────────────────────────────
 
+    /// <summary>The find box's comfortable width. The header only uses one row when the box can get
+    /// this much; narrower still works but truncates the placeholder.</summary>
+    private const double LogFindComfortPx = 220;
+
+    /// <summary>What the "N of M lines" caption is allowed on one row. It trims past this, so a long
+    /// count never decides the layout.</summary>
+    private const double LogLinesBudgetPx = 110;
+
+    private void OnLogHeaderSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (e.WidthChanged) LayoutLogHeader();
+    }
+
+    /// <summary>
+    /// Puts find and level beside the title when everything fits on one row, otherwise on their own row
+    /// under the title.
+    /// </summary>
+    /// <remarks>
+    /// Measured rather than a fixed breakpoint, because button widths depend on the font and UI scale.
+    /// Uses the DesiredSize from the last layout pass: re-measuring a docked child at infinity by hand
+    /// would stick, and it would then be arranged by that size.
+    /// </remarks>
+    private void LayoutLogHeader()
+    {
+        // The labelled width can only be measured while the labels show; when folded to icons, use the
+        // last labelled measurement.
+        if (CopyLogLabel.Visibility == Visibility.Visible)
+            _logActionsLabelledPx = LogActions.Children.OfType<UIElement>().Sum(c => c.DesiredSize.Width);
+
+        var title = LogTitleBlock.DesiredSize.Width;
+        var width = LogHeaderGrid.ActualWidth;
+        var filters = LogFindComfortPx + LogLevelBox.Width + LogLevelBox.Margin.Left
+                      + LogLinesLabel.Margin.Left + LogLinesBudgetPx + LogFilterWideSlot.Margin.Right;
+        var wide = width >= title + filters + _logActionsLabelledPx;
+
+        // If the labelled buttons still do not fit beside the title, fold them to icons (they have
+        // tooltips) instead of wrapping one onto its own line.
+        SetLogActionLabels(wide || width >= title + _logActionsLabelledPx);
+
+        var target = wide ? LogFilterWideSlot : LogFilterNarrowSlot;
+        LogFilterNarrowSlot.Visibility = wide ? Visibility.Collapsed : Visibility.Visible;
+        if (ReferenceEquals(LogFilterRow.Parent, target)) return;
+        if (LogFilterRow.Parent is Border from) from.Child = null;
+        target.Child = LogFilterRow;
+    }
+
+    /// <summary>The actions' one-row width with their labels, from the last pass that
+    /// showed them.</summary>
+    private double _logActionsLabelledPx;
+
+    private void SetLogActionLabels(bool shown)
+    {
+        foreach (var label in new[] { CopyLogLabel, SaveLogLabel, OpenLogsFolderLabel })
+        {
+            label.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+            // The glyph's gap belongs to the label; an icon-only button is centred without it.
+            if (label.Parent is Panel { Children.Count: > 1 } row && row.Children[0] is FrameworkElement glyph)
+                glyph.Margin = shown ? new Thickness(0, 0, 6, 0) : new Thickness(0);
+        }
+    }
+
     private void OnLogFilterChanged(object sender, TextChangedEventArgs e)
     {
         LogContent.FilterText = LogFilterBox.Text.Trim();
@@ -609,9 +996,8 @@ public partial class PackDetailView : Page
         };
     }
 
-    /// <summary>Keeps the "N of M lines" caption honest, and says so when the buffer cap has eaten
-    /// the start of a long session — losing the first ten thousand lines silently is how someone
-    /// concludes a mod never loaded.</summary>
+    /// <summary>Updates the "N of M lines" caption and notes when the buffer cap has dropped the start
+    /// of the log, so missing early lines are not mistaken for a mod that never loaded.</summary>
     private void UpdateLogLinesLabel()
     {
         if (LogLinesLabel is null) return;
@@ -634,7 +1020,7 @@ public partial class PackDetailView : Page
             ? LogContent.IsFiltered
                 ? $"Copied {LogContent.VisibleLineCount:N0} matching line(s)."
                 : "Log copied to the clipboard."
-            : "Could not reach the clipboard — another program is holding it.";
+            : "Could not reach the clipboard - another program is holding it.";
     }
 
     private async void OnSaveLogAs(object sender, RoutedEventArgs e)
@@ -725,15 +1111,15 @@ public partial class PackDetailView : Page
         }
     }
 
-    /// <summary>The selected row when it is a real file, otherwise null with the reason on screen —
-    /// the launcher and sync rows are live buffers, not files, so reveal/delete mean nothing for them.</summary>
+    /// <summary>The selected row if it is a real file, otherwise null with the reason on screen. The
+    /// launcher and sync rows are live buffers, so reveal and delete do not apply.</summary>
     private LogRow? RequireLogFile()
     {
         var row = SelectedLogRow;
         if (row is null) { StatusLabel.Text = "Select a log first."; return null; }
         if (!row.HasFile)
         {
-            StatusLabel.Text = $"“{row.DisplayName}” is a live view, not a file on disk — use Copy or Save as… instead.";
+            StatusLabel.Text = $"'{row.DisplayName}' is a live view, not a file on disk - use Copy or Save as... instead.";
             return null;
         }
         return row;
@@ -742,39 +1128,106 @@ public partial class PackDetailView : Page
     /// <summary>Opens Explorer with the file selected, rather than just opening its folder.</summary>
     private void RevealInExplorer(string path)
     {
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = File.Exists(path) ? $"/select,\"{path}\"" : $"\"{path}\"",
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex) { StatusLabel.Text = "Could not open Explorer: " + ex.Message; }
+        if (!SafeLaunch.RevealFile(path)) StatusLabel.Text = "Could not open Explorer.";
     }
 
-    /// <summary>Opens the instance's game folder — the one that holds mods/, config/, saves/ and
-    /// kubejs/ — in Explorer.</summary>
+    /// <summary>Opens the instance's game folder (mods/, config/, saves/...) in Explorer.</summary>
     private void OnOpenPackFolder(object sender, RoutedEventArgs e)
     {
         try
         {
             var dir = App.State.Packs.GameDir(_packId);
             Directory.CreateDirectory(dir);
-            Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
+            if (!SafeLaunch.OpenFolder(dir)) StatusLabel.Text = "Could not open the folder.";
         }
         catch (Exception ex) { StatusLabel.Text = "Could not open the folder: " + ex.Message; }
     }
 
-    /// <summary>Opens the built-in editor on this instance's files (configs, scripts, server lists).</summary>
-    private void OnEditPackFiles(object sender, RoutedEventArgs e)
+    /// <summary>Exports this instance as a CurseForge .zip or a Modrinth .mrpack through
+    /// <see cref="ExportPackDialog"/>.</summary>
+    /// <remarks>Needs the instance record for the Minecraft version and loader. Hidden in the game
+    /// overlay, where the card would open behind the game.</remarks>
+    private async void OnExportPack(object sender, RoutedEventArgs e)
     {
-        try { FileEditorWindow.Open(Window.GetWindow(this), _packId, _pack?.Name ?? "Instance"); }
-        catch (Exception ex) { StatusLabel.Text = "Could not open the editor: " + ex.Message; }
+        if (_pack is null)
+        {
+            StatusLabel.Text = "This instance is still loading. Try again in a moment.";
+            return;
+        }
+        try
+        {
+            await ExportPackDialog.ShowAsync(_shell, _pack);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("packs.export", ex);
+            StatusLabel.Text = "The export could not be opened. The details are in the launcher log.";
+        }
     }
 
-    /// <summary>Files tab: "Edit" on the selected file, and double-clicking one, both land here.</summary>
+    /// <summary>
+    /// "Edit files" in the header and "File Management" on the Files tab both open the
+    /// file-management page.
+    /// </summary>
+    /// <remarks>
+    /// Falls back to the standalone editor window in the Minecraft host overlay, which has no side
+    /// panel, and when there is no instance record, since the editor only needs the id.
+    /// </remarks>
+    private void OnEditPackFiles(object sender, RoutedEventArgs e) => OpenFileManagement();
+
+    private void OnOpenFileManagement(object sender, RoutedEventArgs e) => OpenFileManagement();
+
+    private void OpenFileManagement()
+    {
+        try
+        {
+            if (_hostedInMinecraftWindow || _pack is null)
+            {
+                FileEditorWindow.Open(Window.GetWindow(this), _packId, _pack?.Name ?? "Instance");
+                return;
+            }
+            _shell.OpenFileManagementForPack(_pack);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("packs.file-management", ex);
+            StatusLabel.Text = "Could not open file management. The details are in the launcher log.";
+        }
+    }
+
+    /// <summary>
+    /// The Overview tab's primary button: opens this instance's Modpack Management hub.
+    /// </summary>
+    /// <remarks>
+    /// In the Minecraft host window the hub would open on the launcher window behind the game, so the
+    /// lightweight mod explorer is pushed into the overlay's own strip instead
+    /// (<see cref="ApplyHostedTabChrome"/> relabels the button to match).
+    /// </remarks>
+    private void OnOpenModHub(object sender, RoutedEventArgs e)
+    {
+        if (_pack is null) return;
+        try
+        {
+            if (_hostedInMinecraftWindow)
+            {
+                // Push into the host window's strip. ModExplorerWindow is the fallback when the
+                // page has already been detached from its host and GetWindow returns nothing.
+                if (Window.GetWindow(this) is MinecraftHostWindow host)
+                    host.OpenModExplorerForPack(_pack);
+                else
+                    new ModExplorerWindow(_pack) { Owner = Window.GetWindow(this) }.Show();
+                return;
+            }
+            _shell.OpenModManagementForPack(_pack);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("packs.mod-hub", ex);
+            StatusLabel.Text = "Modpack management could not be opened. The details are in the launcher log.";
+        }
+    }
+
+    /// <summary>Files tab: "Edit" on the selected file, or double-clicking one.</summary>
     private void OnEditSelectedGameFile(object sender, RoutedEventArgs e)
     {
         var selected = GameView.GetSelectedFiles().FirstOrDefault();
@@ -791,8 +1244,9 @@ public partial class PackDetailView : Page
             if (!File.Exists(full)) { StatusLabel.Text = "That file is no longer there."; return; }
             if (TextFileService.IsKnownBinary(full))
             {
-                // A jar or an image is not something this editor can help with; hand it to Windows.
-                Process.Start(new ProcessStartInfo { FileName = full, UseShellExecute = true });
+                // The editor cannot help with jars or images. Images open in their viewer; anything
+                // else is shown in Explorer rather than run.
+                if (!SafeLaunch.OpenFile(full)) StatusLabel.Text = "Could not open that file.";
                 return;
             }
             FileEditorWindow.OpenFileFor(Window.GetWindow(this), _packId, _pack?.Name ?? "Instance", full);
@@ -804,11 +1258,11 @@ public partial class PackDetailView : Page
     {
         var dir = Path.Combine(App.State.Packs.GameDir(_packId), "logs");
         Directory.CreateDirectory(dir);
-        Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
+        if (!SafeLaunch.OpenFolder(dir)) StatusLabel.Text = "Could not open the folder.";
     }
 
-    /// <summary>WPF does not select a row on right-click, so the context menu would otherwise act on
-    /// whichever log happened to be selected rather than the one under the cursor.</summary>
+    /// <summary>Selects the row under the cursor on right-click, which WPF does not do, so the
+    /// context menu acts on that log.</summary>
     private void OnLogsListRightButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.OriginalSource is not DependencyObject src) return;
@@ -831,8 +1285,7 @@ public partial class PackDetailView : Page
         if (row.IsSyncLog) { LogContent.SetText(LogBox.Text); return; }
         try
         {
-            // A modded latest.log runs to tens of megabytes; reading and decompressing it on the UI
-            // thread froze the window for as long as the disk took.
+            // A modded latest.log can be tens of megabytes, so read it off the UI thread.
             var path = row.Path;
             var text = await Task.Run(() => ReadLogText(path));
             // The user may have clicked another log while this one was being read.
@@ -842,8 +1295,8 @@ public partial class PackDetailView : Page
         catch (Exception ex) { LogContent.SetText("Could not read log: " + ex.Message); }
     }
 
-    /// <summary>Reads a log file, transparently un-gzipping a rolled one, keeping only the tail of a
-    /// very long file — the end is where the failure is.</summary>
+    /// <summary>Reads a log file, un-gzipping a rolled one, and keeps only the tail of a very long
+    /// file, since the end is where the failure is.</summary>
     private static string ReadLogText(string path)
     {
         string text;
@@ -862,18 +1315,18 @@ public partial class PackDetailView : Page
         }
 
         const int maxChars = 200_000;
-        if (text.Length > maxChars) text = "[…older lines trimmed…]\n" + text[^maxChars..];
+        if (text.Length > maxChars) text = "[...older lines trimmed...]\n" + text[^maxChars..];
         return text;
     }
 
-    /// <summary>Mirror the hidden LogBox into the Logs tab if the user is viewing the sync log.</summary>
+    /// <summary>Mirrors the hidden LogBox into the Logs tab while the sync log is shown.</summary>
     private void OnLogBoxTextChanged(object sender, TextChangedEventArgs e)
     {
         if (LogsList.SelectedItem is LogRow row && row.IsSyncLog)
             LogContent.SetText(LogBox.Text);
     }
 
-    /// <summary>Live-append a launcher-log line to the content view (only when that entry is selected).</summary>
+    /// <summary>Appends a launcher-log line to the content view while that entry is selected.</summary>
     private void OnLauncherLogAppended(string line)
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(() => OnLauncherLogAppended(line)); return; }
@@ -881,9 +1334,9 @@ public partial class PackDetailView : Page
         LogContent.ScrollToEnd();
     }
 
-    /// <summary>Max chars kept in the in-memory log TextBoxes. WPF TextBox layout/append cost grows
-    /// with content and Minecraft streams its whole session through these, so cap the retained text
-    /// to keep appends bounded and stop the progressive lag. Matches the on-disk log-viewer cap.</summary>
+    /// <summary>Max chars kept in the in-memory log TextBoxes. TextBox append cost grows with its
+    /// content, so capping it stops lag building up over a long session. Matches the on-disk
+    /// log-viewer cap.</summary>
     private const int MaxLogChars = 200_000;
 
     /// <summary>Append text to a log TextBox, trimming the oldest content once it exceeds the cap.
@@ -893,7 +1346,7 @@ public partial class PackDetailView : Page
         box.AppendText(text);
         if (box.Text.Length <= MaxLogChars) return;
         var kept = box.Text[^(MaxLogChars * 9 / 10)..];
-        box.Text = "[…older lines trimmed…]" + Environment.NewLine + kept;
+        box.Text = "[...older lines trimmed...]" + Environment.NewLine + kept;
         box.CaretIndex = box.Text.Length;
     }
 
@@ -901,7 +1354,7 @@ public partial class PackDetailView : Page
     {
         if (_pack is null) return;
         _worldRows.Clear();
-        WorldCountLabel.Text = "Scanning saves…";
+        WorldCountLabel.Text = "Scanning saves...";
         try
         {
             var packId = _pack.Id;
@@ -912,17 +1365,15 @@ public partial class PackDetailView : Page
             WorldCountLabel.Text = $"{_worldRows.Count} save{(_worldRows.Count == 1 ? "" : "s")}";
             WorldsEmptyLabel.Visibility = _worldRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
-        catch { /* offline or no api — skip */ }
+        catch { /* offline or no api, skip */ }
     }
 
     /// <summary>
     /// Rebuilds the Screenshots tab: the folder scan runs off the UI thread, the cards appear
     /// immediately, and the pictures are decoded afterwards in small batches.
     /// </summary>
-    /// <remarks>Both halves matter on a real instance. Enumerating and stat-ing a few hundred files
-    /// on the UI thread froze the window on the way in; decoding every one of those 4K captures at
-    /// native resolution for a 230px card then held gigabytes of bitmap for the rest of the session.
-    /// Cards first, pictures after, is also what it feels like it should do.</remarks>
+    /// <remarks>Thumbnails are decoded at card size, since full-size 4K captures would hold gigabytes
+    /// of bitmaps.</remarks>
     private async void RefreshPackScreenshots()
     {
         _screenshotCts?.Cancel();
@@ -931,7 +1382,7 @@ public partial class PackDetailView : Page
         var ct = cts.Token;
 
         _packScreenshotRows.Clear();
-        PackScreenshotCountLabel.Text = "Looking for screenshots…";
+        PackScreenshotCountLabel.Text = "Looking for screenshots...";
 
         try
         {
@@ -1066,8 +1517,8 @@ public partial class PackDetailView : Page
         if (ScreenshotRowOf(sender) is not { } row) return;
         try
         {
-            // The picture, not the path: this is the one that pastes into Discord or an issue. Decoded
-            // fresh at full size rather than reusing the card's 230px thumbnail.
+            // Copy the image itself so it can be pasted into a chat or an issue, decoded at full
+            // size rather than reusing the card's thumbnail.
             var image = new BitmapImage();
             image.BeginInit();
             image.UriSource = new Uri(row.Source.FullName);
@@ -1106,7 +1557,7 @@ public partial class PackDetailView : Page
             ApplyHeroIcon(_pack);
             UpdateImageEditUi();
             _shell.RefreshPackCover(_pack.Id);
-            StatusLabel.Text = $"“{row.Title}” is now this instance's image.";
+            StatusLabel.Text = $"'{row.Title}' is now this instance's image.";
         }
         catch (Exception ex)
         {
@@ -1131,9 +1582,13 @@ public partial class PackDetailView : Page
                 return;
             }
 
-            // Keep the extension: renaming a .png to "cool shot" would leave Windows with nothing to
-            // open it with, and the tab's own scanner goes by extension too.
+            // Keep the extension: Windows and the tab's own scanner both go by it.
             if (!name.EndsWith(extension, StringComparison.OrdinalIgnoreCase)) name += extension;
+            if (!PathSafety.IsSafeFileName(name))
+            {
+                StatusLabel.Text = "Windows will not allow that as a file name.";
+                return;
+            }
             var target = Path.Combine(row.Source.DirectoryName ?? "", name);
             if (File.Exists(target)) { StatusLabel.Text = "There is already a screenshot with that name."; return; }
 
@@ -1169,8 +1624,8 @@ public partial class PackDetailView : Page
 
     private void OnWorldOpenFolder(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement el && el.Tag is string path)
-            Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+        if (sender is FrameworkElement el && el.Tag is string path && !SafeLaunch.OpenFolder(path))
+            StatusLabel.Text = "Could not open that folder.";
     }
 
     private void OnWorldEditCompatibility(object sender, RoutedEventArgs e)
@@ -1225,8 +1680,9 @@ public partial class PackDetailView : Page
 
             ApplyLoaderCard(pack);
 
-            // File routing is only useful once the pack is hosted on the server.
-            FilesTab.Visibility   = _isOwner && pack.IsShared ? Visibility.Visible : Visibility.Collapsed;
+            // Always shown: most of this tab is the local instance folder, which every collaborator and
+            // purely local instance has, and which works with the server down.
+            FilesTab.Visibility   = Visibility.Visible;
             SharingOptionsPanel.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
             ApplyHostedTabChrome();
 
@@ -1237,10 +1693,8 @@ public partial class PackDetailView : Page
             JvmArgsBox.Text = App.State.Settings.GetJvmArgsFor(pack.Id);
             _ = LoadJavaChoicesAsync(pack);
             AutoUpdateBox.IsChecked = App.State.Settings.GetAutoUpdateFor(pack.Id, pack.IsShared, pack.OwnerId);
-            // Auto-update only makes sense for a copy you consume rather than maintain. For the owner
-            // (or anyone granted upload rights) pulling the server copy before every launch would
-            // overwrite the local work they are about to upload, so the option is not offered at all
-            // rather than offered-and-dangerous.
+            // Auto-update is only for copies you consume: for the owner or uploaders, pulling the
+            // server copy before each launch would overwrite local work.
             var canEditPack = pack.OwnerId == App.State.Settings.UserId
                               || pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
             AutoUpdateCard.Visibility = canEditPack ? Visibility.Collapsed : Visibility.Visible;
@@ -1259,23 +1713,39 @@ public partial class PackDetailView : Page
                     true => 2
                 };
 
-            // Folder buttons availability
+            // Folder buttons. "Open game folder" is always available, since the folder is local.
             var hasShared = pack.IsShared;
-            OpenLocalButton.IsEnabled = hasShared;
+            OpenLocalButton.IsEnabled = true;
             OpenSharedButton.IsEnabled = hasShared;
             UploadButton.IsEnabled = hasShared && pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
+            UploadButton.ToolTip = UploadButton.IsEnabled
+                ? "Upload the files marked shared to CloudLauncher"
+                : hasShared
+                    ? "You do not have permission to upload files to this instance."
+                    : "Turn on Cloud sync in Options before uploading anything.";
+            ToolTipService.SetShowOnDisabled(UploadButton, true);
+            OpenFileManagementButton.IsEnabled = true;
+            OpenFileManagementButton.ToolTip =
+                "Browse, edit, share, host, clean up and compare this instance's files";
+            ApplySharingPermissionsToFilesTab();
 
             // Launch buttons
             var playable = !pack.IsEmpty && !string.IsNullOrEmpty(pack.MinecraftVersion);
             UpdateLaunchButtonState();
-            StartServerButton.IsEnabled = playable;
+
+            // Both export formats need the Minecraft version; without one there is nothing to export.
+            ExportPackButton.IsEnabled = playable;
+            ExportPackButton.ToolTip = playable
+                ? "Save this instance as a CurseForge .zip or Modrinth .mrpack that other launchers can install"
+                : "This instance has no Minecraft version yet, so there is nothing to export.";
+            UpdateServerChip();
             OpenServerButton.IsEnabled = playable;
 
             // Update button is hidden until CheckForUpdateAsync confirms one is available
             UpdateButton.Visibility = Visibility.Collapsed;
 
-            // Auto-apply rules — default ON, persisted per pack.
-            // Only relevant when the pack is shared (so local/shared destinations exist) and the user can edit.
+            // Auto-apply rules: on by default, persisted per pack. Only relevant when the pack is
+            // shared (so local and shared destinations exist) and the user can edit.
             AutoApplyRow.Visibility = hasShared && _isOwner ? Visibility.Visible : Visibility.Collapsed;
             AutoApplyBox.IsEnabled = pack.IsShared;
             AutoApplyBox.IsChecked = pack.IsShared && App.State.Settings.GetAutoApplyRulesFor(pack.Id);
@@ -1313,7 +1783,7 @@ public partial class PackDetailView : Page
         }
     }
 
-    /// <summary>Show the cover-edit affordance for owners and gate "Remove image" on there being one.</summary>
+    /// <summary>Shows cover editing to owners, and "Remove image" only when there is one.</summary>
     private void UpdateImageEditUi()
     {
         HeroIconEditButton.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
@@ -1358,7 +1828,7 @@ public partial class PackDetailView : Page
         StatusLabel.Text = "Image removed.";
     }
 
-    /// <summary>Re-read the cover from disk after it was changed elsewhere (e.g. the pack list).</summary>
+    /// <summary>Re-reads the cover from disk after it changed elsewhere (e.g. the pack list).</summary>
     public void RefreshHeroIcon()
     {
         if (_pack is null) return;
@@ -1390,7 +1860,7 @@ public partial class PackDetailView : Page
 
     private void RefreshCurrentDescriptionHtml()
     {
-        if (DescriptionEditorHelper.TryGetEditorHtml(OverviewDescriptionBrowser, out var html))
+        if (OverviewDescriptionEditor.TryGetHtml(out var html))
             _currentDescriptionHtml = html;
     }
 
@@ -1456,6 +1926,9 @@ public partial class PackDetailView : Page
             _pack = _pack with { Summary = summary, Description = description, UpdatedAt = updated.UpdatedAt };
             PackMetaLabel.Text = $"by {_pack.OwnerUsername} · updated {_pack.UpdatedAt.LocalDateTime:g}";
             SetPackSummary(summary);
+            // The editor already shows this record's saved text, so a reload with the same
+            // answer leaves it alone.
+            _appliedSnapshot = Snapshot(_pack);
             OverviewSaveStatusLabel.Text = "Saved";
         }
         catch (Exception ex)
@@ -1712,11 +2185,7 @@ public partial class PackDetailView : Page
     {
         _lastSavedDescriptionHtml = NormalizeDescriptionSource(content, isMarkdown);
         _currentDescriptionHtml = _lastSavedDescriptionHtml;
-        DescriptionEditorHelper.ShowEditor(
-            OverviewDescriptionBrowser,
-            content,
-            isMarkdown,
-            OnDescriptionEditorChanged);
+        OverviewDescriptionEditor.ShowEditor(content, isMarkdown, OnDescriptionEditorChanged);
     }
 
     private static string NormalizeDescriptionSource(string? content, bool isMarkdown)
@@ -1731,11 +2200,7 @@ public partial class PackDetailView : Page
 
     private void LoadDescriptionViewer(string? content, bool isMarkdown)
     {
-        DescriptionEditorHelper.ShowViewer(
-            OverviewDescriptionBrowser,
-            content,
-            isMarkdown,
-            CreateDescriptionOptions());
+        OverviewDescriptionEditor.ShowViewer(content, isMarkdown, CreateDescriptionOptions());
         _currentDescriptionHtml = PackText.NormalizeEditorHtmlForSave(
             PackText.PrepareDescriptionHtml(content, isMarkdown, runnableCommands: _hostedInMinecraftWindow));
     }
@@ -1761,15 +2226,19 @@ public partial class PackDetailView : Page
         if (!_showRichDescription)
         {
             OverviewDescriptionHost.Visibility = Visibility.Collapsed;
-            OverviewDescriptionBrowser.Visibility = Visibility.Collapsed;
+            OverviewDescriptionEditor.Visibility = Visibility.Collapsed;
             return;
         }
 
         var onOverview = _currentTab == DetailTabKind.Overview;
         OverviewDescriptionHost.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
-        OverviewDescriptionBrowser.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
+        OverviewDescriptionEditor.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// Keeps a wheel over the description from also scrolling the page behind it. WebView2 scrolls
+    /// itself, so this only marks the event handled.
+    /// </summary>
     private void OnPagePreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (!_showRichDescription || _currentTab != DetailTabKind.Overview) return;
@@ -1780,8 +2249,7 @@ public partial class PackDetailView : Page
         if (pos.X < 0 || pos.Y < 0 || pos.X > OverviewDescriptionHost.ActualWidth || pos.Y > OverviewDescriptionHost.ActualHeight)
             return;
 
-        if (RichDescriptionHelper.TryScroll(OverviewDescriptionBrowser, e.Delta))
-            e.Handled = true;
+        e.Handled = true;
     }
 
     private void WireOverviewTextBox(TextBox box)
@@ -1879,29 +2347,49 @@ public partial class PackDetailView : Page
         return link.TrimEnd('.', ',', ';', ':', '!', '?', ')', ']', '}');
     }
 
+    /// <summary>Follows a link in the overview text. The overview is written by whoever owns the
+    /// instance, so only web and mail links are followed.</summary>
     private void OpenOverviewLink(string link)
     {
-        try
-        {
-            var target = link;
-            if (target.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
-                target = "https://" + target;
-            else if (!target.Contains(":", StringComparison.Ordinal)
-                     && target.Contains('@', StringComparison.Ordinal))
-                target = "mailto:" + target;
+        bool opened;
+        if (link.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
+            opened = SafeLaunch.OpenUrl("https://" + link);
+        else if (link.StartsWith("mailto:", StringComparison.OrdinalIgnoreCase))
+            opened = OpenMailLink(link["mailto:".Length..]);
+        else if (!link.Contains(':', StringComparison.Ordinal) && link.Contains('@', StringComparison.Ordinal))
+            opened = SafeLaunch.OpenMail(link);
+        else
+            opened = SafeLaunch.OpenUrl(link);
 
-            Process.Start(new ProcessStartInfo { FileName = target, UseShellExecute = true });
-        }
-        catch (Exception ex)
+        if (!opened) StatusLabel.Text = "Could not open that link.";
+    }
+
+    /// <summary>Opens the part of a mailto: link after the scheme, keeping its subject and body and
+    /// dropping any other field, such as a mail app's attachment parameter.</summary>
+    private static bool OpenMailLink(string mailto)
+    {
+        var query = mailto.IndexOf('?');
+        var address = Uri.UnescapeDataString(query < 0 ? mailto : mailto[..query]);
+        if (address.Length == 0) return false;
+
+        string? subject = null, body = null;
+        if (query >= 0)
         {
-            StatusLabel.Text = "Could not open link: " + ex.Message;
+            foreach (var pair in mailto[(query + 1)..].Split('&'))
+            {
+                var eq = pair.IndexOf('=');
+                if (eq <= 0) continue;
+                var value = Uri.UnescapeDataString(pair[(eq + 1)..]);
+                if (pair[..eq].Equals("subject", StringComparison.OrdinalIgnoreCase)) subject = value;
+                else if (pair[..eq].Equals("body", StringComparison.OrdinalIgnoreCase)) body = value;
+            }
         }
+        return SafeLaunch.OpenMail(address, subject, body);
     }
 
     /// <summary>
-    /// Reflect the auto-apply state into the timer and the manual Apply rules button.
-    /// — When on: hide the manual button (it's redundant) and start the safety-net timer.
-    /// — When off: stop the timer and show the manual button.
+    /// Syncs the timer and the manual Apply rules button with the auto-apply state: when on, the
+    /// button is hidden and the safety-net timer runs; when off, the reverse.
     /// </summary>
     private void UpdateAutoApplyUi()
     {
@@ -1909,7 +2397,7 @@ public partial class PackDetailView : Page
         ApplyRulesButton.Visibility = auto ? Visibility.Collapsed : Visibility.Visible;
         if (auto && !_autoApplyTimer.IsEnabled) _autoApplyTimer.Start();
         else if (!auto && _autoApplyTimer.IsEnabled) _autoApplyTimer.Stop();
-        AutoApplyLabel.Text = auto ? "On — rules apply automatically." : "";
+        AutoApplyLabel.Text = auto ? "On - rules apply automatically." : "";
     }
 
     /// <summary>Apply rules immediately if auto-apply is enabled for this pack.</summary>
@@ -1942,9 +2430,8 @@ public partial class PackDetailView : Page
     // ── update detection ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Check whether the server has a newer shared-instance version than what's locally synced.
-    /// Reveal the Update button only if so. If the pack has never been downloaded (locallySynced == 0),
-    /// trigger the initial download automatically so the user doesn't have to click it.
+    /// Shows the Update button if the server has a newer shared-instance version than the local one.
+    /// A pack that was never downloaded (locallySynced == 0) starts its first download automatically.
     /// </summary>
     private async Task CheckForUpdateAsync()
     {
@@ -1966,8 +2453,8 @@ public partial class PackDetailView : Page
             // First-ever download: pull server content automatically instead of surfacing the button.
             if (locallySynced == 0 && manifest.Entries.Count > 0)
             {
-                StatusLabel.Text = "Downloading server content…";
-                await App.State.Packs.DownloadSharedAsync(_pack.Id, null);
+                StatusLabel.Text = "Downloading server content...";
+                if (!await RunSharedDownloadAsync(null)) return;
                 ApplyHeroIcon(_pack);
                 ApplyDescriptionDisplay(_pack.Id, _pack.Description ?? "");
                 UpdateStatsLabel(_pack.Id);
@@ -1979,43 +2466,241 @@ public partial class PackDetailView : Page
 
             UpdateButton.Visibility = Visibility.Visible;
         }
-        catch { /* offline or auth issues — don't show anything */ }
+        catch { /* offline or auth issues, show nothing */ }
     }
 
     // ── file lists ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// True when this user may change what the instance shares: the owner, or a collaborator with
+    /// upload rights.
+    /// </summary>
+    /// <remarks>
+    /// Only gates the sharing rules, which the next upload pushes to everyone. Rename, delete and new
+    /// folder act on the user's own local files and are never gated.
+    /// </remarks>
+    private bool CanEditSharing =>
+        _pack is not null &&
+        (_isOwner || _pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared));
+
+    /// <summary>
+    /// The context-menu entries that write sharing rules, found by their <c>Tag</c>.
+    /// </summary>
+    /// <remarks>A ContextMenu on a UserControl belongs to that control's name scope, so <c>x:Name</c>
+    /// inside these menus is an MC3093 build error. The tag is used instead.</remarks>
+    private IEnumerable<MenuItem> SharingMenuItems()
+    {
+        foreach (var view in new[] { GameView, SharedView })
+        {
+            if (view.ContextMenu is not { } menu) continue;
+            foreach (var entry in menu.Items)
+                if (entry is MenuItem { Tag: "sharing" } item)
+                    yield return item;
+        }
+    }
+
+    private void ApplySharingPermissionsToFilesTab()
+    {
+        var may = CanEditSharing;
+        const string why = "Only the instance owner and collaborators with upload rights can change "
+                         + "what this instance shares.";
+
+        foreach (var item in SharingMenuItems())
+        {
+            item.IsEnabled = may;
+            ToolTipService.SetShowOnDisabled(item, true);
+            if (!may) item.ToolTip = why;
+        }
+
+        EditRulesButton.IsEnabled = true; // read-only users may still look at the rules
+        EditRulesButton.ToolTip = may
+            ? "Configure auto-routing rules"
+            : "See which files this instance shares. Editing the rules needs upload rights.";
+
+        if (_pack is null) return;   // the recordless path already disabled it, with its own reason
+
+        if (!may)
+            DisableWithReason(ApplyRulesButton, why);
+        else if (!_pack.IsShared)
+            // Applying rules re-counts what would be uploaded, which is nothing until the instance is
+            // published.
+            DisableWithReason(ApplyRulesButton,
+                "Rules decide what gets uploaded. Turn on Cloud sync in Options first.");
+        else
+        {
+            ApplyRulesButton.IsEnabled = true;
+            ApplyRulesButton.ToolTip = "Re-check every file against the rules";
+        }
+    }
 
     private void RefreshFileLists() => _ = RefreshFileListsAsync();
 
     private async Task RefreshFileListsAsync(bool runAutoApply = true)
     {
-        if (_pack is null) return;
-
+        // Keyed on the instance id alone, so the tab still works without a pack record (server down).
         var p = App.State.Packs;
-        var packRoot = p.PackRoot(_pack.Id);
+        string packRoot, gameDir;
+        try
+        {
+            // PackRoot throws if there is no folder and no name to make one. Nothing to list then,
+            // and the exception must not go unobserved in the fire-and-forget wrapper.
+            packRoot = p.PackRoot(_packId);
+            gameDir = p.GameDir(_packId);
+            Directory.CreateDirectory(gameDir);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("packs.file-list", ex);
+            StatusLabel.Text = "This instance's folder could not be opened. "
+                             + "The details are in the launcher log.";
+            return;
+        }
         var rules = App.State.Rules.Load(packRoot);
-        var gameDir = p.GameDir(_pack.Id);
-        Directory.CreateDirectory(gameDir);
 
-        // Left: game/ view with rule badges. Shared files live in game/ on disk (the live instance
-        // needs them at launch) but are hidden here — they're surfaced in the Shared column instead.
+        _ = RefreshFileSummaryAsync(gameDir, rules);
+
+        // Left: game/ view with rule badges. Shared files live in game/ on disk (the instance needs
+        // them at launch) but are shown in the Shared column instead of here.
         GameView.Root  = gameDir;
         GameView.Rules = rules;
         GameView.MirrorLocalRoot  = null;
         GameView.MirrorSharedRoot = null;
-        GameView.HideShared = _pack.IsShared;
+        GameView.HideShared = _pack?.IsShared == true;
 
-        // Right: same game/ directory but filtered to only "shared"-rule files — the sync preview
-        // (what will be uploaded). Always populated, even before sharing is enabled, so marking a
-        // file shared has an immediate, visible effect; the upload itself still requires sharing.
+        // Right: the same game/ directory filtered to "shared"-rule files (what will be uploaded).
+        // Always populated so marking a file shared shows at once; uploading still needs sharing on.
         SharedView.Root           = gameDir;
         SharedView.Rules          = rules;
         SharedView.ShowOnlyShared = true;
         SharedView.MirrorLocalRoot  = null;
         SharedView.MirrorSharedRoot = null;
 
-        // Both views scan the same game/ tree independently — run them concurrently so the Files
-        // tab doesn't wait for one full scan before starting the other.
+        // Both views scan the same game/ tree, so run them concurrently.
         await Task.WhenAll(GameView.RefreshAsync(), SharedView.RefreshAsync());
+    }
+
+    // ── the Files tab's summary card ─────────────────────────────────────────
+
+    /// <summary>
+    /// Walks the instance folder once for the card above the file lists: how many files, how much
+    /// disk, and how many of them sync.
+    /// </summary>
+    /// <remarks>
+    /// Runs off the UI thread and is cancellable, since a modded instance with worlds can have six
+    /// figures of files. A newer walk discards the older one's result. No placeholder count is shown.
+    /// </remarks>
+    private async Task RefreshFileSummaryAsync(string gameDir, List<PackRule> rules)
+    {
+        try { _fileSummaryCts?.Cancel(); } catch (ObjectDisposedException) { }
+        var cts = new CancellationTokenSource();
+        _fileSummaryCts = cts;
+        var ct = cts.Token;
+
+        // Keep the last measurement on screen next to the verb; a tab that never measured shows
+        // only the verb, not a placeholder zero.
+        FileSummaryLabel.Text = _lastFileSummary.Length == 0
+            ? "Measuring this instance..."
+            : _lastFileSummary + " · updating";
+
+        try
+        {
+            var ruleService = App.State.Rules;
+            var result = await Task.Run(() => MeasureInstance(gameDir, ruleService, rules, ct), ct);
+            if (ct.IsCancellationRequested || !ReferenceEquals(_fileSummaryCts, cts)) return;
+
+            if (result.Files == 0)
+            {
+                // The walk completed and found nothing.
+                _lastFileSummary = "Nothing on disk yet - this instance has not been downloaded "
+                                 + "or launched.";
+            }
+            else
+            {
+                var parts = new List<string>
+                {
+                    $"{result.Files:N0} file(s)",
+                    FormatInstanceSize(result.Bytes)
+                };
+                if (result.Shared > 0) parts.Add($"{result.Shared:N0} marked shared");
+                if (result.Unreadable > 0) parts.Add($"{result.Unreadable:N0} file(s) could not be read");
+                _lastFileSummary = string.Join(" · ", parts);
+            }
+            FileSummaryLabel.Text = _lastFileSummary;
+        }
+        catch (OperationCanceledException) { /* a newer walk owns the label now */ }
+        catch (Exception ex)
+        {
+            if (!ReferenceEquals(_fileSummaryCts, cts)) return;
+            AppLog.LogError("packs.file-summary", ex);
+            _lastFileSummary = "";
+            FileSummaryLabel.Text = "This instance's folder could not be measured. "
+                                  + "The details are in the launcher log.";
+        }
+        finally
+        {
+            if (ReferenceEquals(_fileSummaryCts, cts)) _fileSummaryCts = null;
+            cts.Dispose();
+        }
+    }
+
+    private sealed record InstanceMeasurement(int Files, long Bytes, int Shared, int Unreadable);
+
+    /// <summary>The last completed measurement's sentence, so a refresh keeps a number that is still
+    /// true on screen instead of blanking it.</summary>
+    private string _lastFileSummary = "";
+
+    /// <summary>Formats a whole instance's size, up to GB. <see cref="ConfigHubService.FormatSize"/>
+    /// stops at MB.</summary>
+    private static string FormatInstanceSize(long bytes) => bytes switch
+    {
+        < 1024L * 1024 => ConfigHubService.FormatSize(bytes),
+        < 1024L * 1024 * 1024 => $"{bytes / 1024.0 / 1024.0:0.#} MB",
+        _ => $"{bytes / 1024.0 / 1024.0 / 1024.0:0.##} GB"
+    };
+
+    /// <summary>The off-thread half of <see cref="RefreshFileSummaryAsync"/>.</summary>
+    private static InstanceMeasurement MeasureInstance(
+        string gameDir, PackRuleService ruleService, List<PackRule> rules, CancellationToken ct)
+    {
+        var files = 0;
+        long bytes = 0;
+        var shared = 0;
+        var unreadable = 0;
+
+        var root = new DirectoryInfo(gameDir);
+        if (!root.Exists) return new InstanceMeasurement(0, 0, 0, 0);
+
+        var prefix = root.FullName.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            // Skip junctions: one into another instance would be counted as part of this one, and a
+            // cycle would never end.
+            AttributesToSkip = FileAttributes.ReparsePoint,
+            IgnoreInaccessible = true
+        };
+
+        foreach (var file in root.EnumerateFiles("*", options))
+        {
+            ct.ThrowIfCancellationRequested();
+            long length;
+            try { length = file.Length; }
+            catch (IOException) { unreadable++; continue; }
+            catch (UnauthorizedAccessException) { unreadable++; continue; }
+
+            files++;
+            bytes += length;
+
+            var rel = file.FullName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? file.FullName[prefix.Length..].Replace(Path.DirectorySeparatorChar, '/')
+                : file.Name;
+
+            var match = ruleService.Match(rel, rules);
+            if (match.IsIgnored) continue;          // ignored files are not counted
+            if (match.IsAutoShared) shared++;
+        }
+
+        return new InstanceMeasurement(files, bytes, shared, unreadable);
     }
 
     // ── options tab ──────────────────────────────────────────────────────────
@@ -2161,11 +2846,12 @@ public partial class PackDetailView : Page
 
     private void OnEditRules(object sender, RoutedEventArgs e)
     {
-        if (_pack is null) return;
+        // The rules live in the instance folder, so they open without a server record too. Offline,
+        // the dialog just never pushes them back up.
         var dlg = new PackRulesDialog(
             App.State.Packs.PackRoot(_packId),
-            _pack.Name,
-            packId: _pack.IsShared ? _packId : null,
+            _pack?.Name ?? PackNameLabel.Text,
+            packId: _pack?.IsShared == true ? _packId : null,
             isOwner: _isOwner) { Owner = _shell };
         dlg.ShowDialog();
         _ = RefreshFileListsAsync();
@@ -2177,7 +2863,7 @@ public partial class PackDetailView : Page
         if (AutoApplyBox.IsChecked == true && !_pack.IsShared)
         {
             AutoApplyBox.IsChecked = false;
-            StatusLabel.Text = "Enable server hosting first.";
+            StatusLabel.Text = "Turn on Cloud sync in Options first.";
             return;
         }
         App.State.Settings.SetAutoApplyRulesFor(_pack.Id, AutoApplyBox.IsChecked == true);
@@ -2191,7 +2877,7 @@ public partial class PackDetailView : Page
     {
         if (_pack is null || !_pack.IsShared)
         {
-            StatusLabel.Text = "Enable server hosting first.";
+            StatusLabel.Text = "Turn on Cloud sync in Options first.";
             return;
         }
         var (_, message) = await ApplyRulesCoreAsync(silent: false);
@@ -2200,7 +2886,7 @@ public partial class PackDetailView : Page
 
     /// <summary>
     /// Scans game/ against the current rules and refreshes the sync-preview pane (SharedView).
-    /// Files are not moved — rules determine which game/ files get uploaded on the next sync.
+    /// Files are not moved; the rules only decide which game/ files the next sync uploads.
     /// </summary>
     private async Task<(int matched, string message)> ApplyRulesCoreAsync(bool silent, bool refreshAfter = true)
     {
@@ -2240,9 +2926,8 @@ public partial class PackDetailView : Page
         var rules = App.State.Rules.Load(packRoot);
         foreach (var rel in relativePaths)
         {
-            // A folder needs a trailing-slash pattern so the Local rule covers its CONTENTS.
-            // Inserting it at the front (highest precedence, first-match-wins) makes it override a
-            // broader parent rule like "mods/" → shared, so only this sub-folder becomes local.
+            // A folder needs a trailing-slash pattern so the Local rule covers its contents. Inserted
+            // first (first match wins) so it overrides a broader parent rule like "mods/" -> shared.
             var isDir = Directory.Exists(Path.Combine(gameDir, rel.Replace('/', Path.DirectorySeparatorChar)));
             var pattern = isDir ? rel.TrimEnd('/') + "/" : rel;
             rules.RemoveAll(r => string.Equals(r.Pattern.TrimEnd('/'), pattern.TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
@@ -2271,9 +2956,8 @@ public partial class PackDetailView : Page
                 var parts = path.Split('/');
                 pattern = parts.Length > 1 ? parts[0] + "/" : path;
             }
-            // A folder's rule must end in '/' so the matcher expands it to '/**' and covers the
-            // folder's CONTENTS. Without the slash it's an exact match on the folder name only, so
-            // nothing inside it is shared — which looks like "marking a folder shared does nothing".
+            // A folder's rule must end in '/' so the matcher expands it to '/**' and covers its
+            // contents; without the slash it only matches the folder name itself.
             else pattern = entry.IsFolder ? path.TrimEnd('/') + "/" : path;
 
             // Match ignoring a trailing slash so re-marking a folder also clears any stale
@@ -2327,7 +3011,8 @@ public partial class PackDetailView : Page
             ? kind
             : LoaderKind.None;
 
-    /// <summary>Fills the version list for the selected loader, preselecting <paramref name="preferred"/> when it's still offered.</summary>
+    /// <summary>Fills the version list for the selected loader, preselecting
+    /// <paramref name="preferred"/> when it's still offered.</summary>
     private async Task RefreshPackLoaderVersionsAsync(string? preferred)
     {
         if (_pack is null || string.IsNullOrEmpty(_pack.MinecraftVersion)) return;
@@ -2344,7 +3029,7 @@ public partial class PackDetailView : Page
             return;
         }
 
-        LoaderStatusLabel.Text = "Loading builds…";
+        LoaderStatusLabel.Text = "Loading builds...";
         try
         {
             var versions = await App.State.Versions.ListLoaderVersionsAsync(loader, _pack.MinecraftVersion, cts.Token);
@@ -2367,8 +3052,13 @@ public partial class PackDetailView : Page
         catch (OperationCanceledException) { /* superseded by a newer selection */ }
         catch (Exception ex)
         {
+            // Show a plain message instead of the socket error; the details go to the log.
             if (!cts.IsCancellationRequested)
-                LoaderStatusLabel.Text = "Couldn't load builds: " + ex.Message;
+            {
+                AppLog.Log("loader", "Loader builds could not be listed: " + ex.Message);
+                LoaderStatusLabel.Text = "Couldn't list the builds: "
+                    + (Connectivity.DescribeTransportFailure(ex, cts.Token) ?? "the list could not be read") + ".";
+            }
         }
         finally
         {
@@ -2376,7 +3066,8 @@ public partial class PackDetailView : Page
         }
     }
 
-    /// <summary>Apply is offered only when the pending choice is complete and differs from what's saved.</summary>
+    /// <summary>Apply is offered only when the pending choice is complete and differs from
+    /// what's saved.</summary>
     private void UpdateApplyLoaderState()
     {
         if (_pack is null) { ApplyLoaderButton.IsEnabled = false; return; }
@@ -2415,7 +3106,7 @@ public partial class PackDetailView : Page
         }
 
         ApplyLoaderButton.IsEnabled = false;
-        LoaderStatusLabel.Text = "Saving…";
+        LoaderStatusLabel.Text = "Saving...";
         try
         {
             // The server leaves a field alone when it arrives null, so clearing the build for a
@@ -2425,12 +3116,11 @@ public partial class PackDetailView : Page
                 new UpdatePackRequest(null, null, null, null, null, null, loader, version ?? ""));
             _shell.AddOrUpdatePackList(updated); // keep the instance card's subtitle in step
             await ReloadAsync();
-            // The reload repopulates the build list and clears this status line when it lands,
-            // so wait it out before confirming or the confirmation gets wiped a moment later.
+            // The reload clears this status line when it lands, so wait for it before confirming.
             if (_loaderVersionRefresh is { } refresh) await refresh;
             LoaderStatusLabel.Text = loader == LoaderKind.None
-                ? "Now vanilla — takes effect next launch."
-                : $"Now {loader} {version} — installs on next launch.";
+                ? "Now vanilla - takes effect next launch."
+                : $"Now {loader} {version} - installs on next launch.";
         }
         catch (Exception ex)
         {
@@ -2481,7 +3171,7 @@ public partial class PackDetailView : Page
     private void OnOpenGame(object sender, RoutedEventArgs e) =>
         OpenInExplorer(App.State.Packs.GameDir(_packId));
     private void OnOpenShared(object sender, RoutedEventArgs e) =>
-        OpenInExplorer(App.State.Packs.GameDir(_packId)); // shared/ removed; game/ is the sync source
+        OpenInExplorer(App.State.Packs.GameDir(_packId)); // game/ is the sync source
     private void OnOpenServerOverride(object sender, RoutedEventArgs e) =>
         OpenInExplorer(Path.Combine(App.State.Packs.PackRoot(_packId), "server"));
 
@@ -2495,18 +3185,18 @@ public partial class PackDetailView : Page
             ? Path.GetDirectoryName(Path.Combine(root, sel[0].Replace('/', Path.DirectorySeparatorChar))) ?? root
             : root;
         Directory.CreateDirectory(dir);
-        Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
+        SafeLaunch.OpenFolder(dir);
     }
 
     private static void OpenInExplorer(string path)
     {
         Directory.CreateDirectory(path);
-        Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+        SafeLaunch.OpenFolder(path);
     }
 
     // ── Files tab: rename, delete, new folder, copy path ─────────────────────
 
-    /// <summary>Shared column "Edit file" — the same editor the Game column opens.</summary>
+    /// <summary>Shared column "Edit file": the same editor the Game column opens.</summary>
     private void OnEditSelectedSharedFile(object sender, RoutedEventArgs e)
     {
         var selected = SharedView.GetSelectedFiles().FirstOrDefault();
@@ -2536,9 +3226,8 @@ public partial class PackDetailView : Page
     private string AbsolutePathFor(string relativePath) =>
         Path.Combine(App.State.Packs.GameDir(_packId), relativePath.Replace('/', Path.DirectorySeparatorChar));
 
-    /// <summary>Renames one file or folder in place. Deliberately single-selection: a bulk rename is
-    /// a different feature with different rules, and offering it here would only ever rename the
-    /// first of the five things the user had highlighted.</summary>
+    /// <summary>Renames one file or folder in place. Single selection only; bulk rename would be a
+    /// different feature.</summary>
     private async Task RenameSelectedAsync(FolderView view)
     {
         try
@@ -2563,23 +3252,28 @@ public partial class PackDetailView : Page
                 StatusLabel.Text = "That name has characters Windows will not allow in a file name.";
                 return;
             }
+            if (!PathSafety.IsSafeFileName(name))
+            {
+                StatusLabel.Text = "Windows will not allow that as a file name.";
+                return;
+            }
 
             var target = Path.Combine(Path.GetDirectoryName(source) ?? "", name);
             if (File.Exists(target) || Directory.Exists(target))
             {
-                StatusLabel.Text = $"“{name}” already exists in that folder.";
+                StatusLabel.Text = $"'{name}' already exists in that folder.";
                 return;
             }
 
-            // A rule matches on the path, so renaming a shared file quietly unshares it. Say so
-            // rather than letting the next upload drop it from the server without a word.
+            // Rules match on the path, so renaming a shared file unshares it. Warn, or the next
+            // upload will drop it from the server without notice.
             var wasShared = entry.IsAutoShared;
 
             if (entry.IsFolder) Directory.Move(source, target);
             else File.Move(source, target);
 
             StatusLabel.Text = wasShared
-                ? $"Renamed to {name}. It no longer matches its shared rule — re-mark it if it should still sync."
+                ? $"Renamed to {name}. It no longer matches its shared rule - re-mark it if it should still sync."
                 : $"Renamed to {name}.";
             await RefreshFileListsAsync(runAutoApply: false);
         }
@@ -2590,9 +3284,8 @@ public partial class PackDetailView : Page
     }
 
     /// <summary>Deletes the selected files and folders from the instance on disk.</summary>
-    /// <remarks>Both columns show game/, so this is the same delete either way — which is exactly why
-    /// the confirmation calls out shared files: removing one here also removes it from the server for
-    /// every collaborator at the next upload.</remarks>
+    /// <remarks>Both columns show game/, so this is the same delete either way. The confirmation calls
+    /// out shared files, since the next upload also removes them for every collaborator.</remarks>
     private async Task DeleteSelectedAsync(FolderView view)
     {
         if (_fileTransferInProgress) return;
@@ -2603,20 +3296,20 @@ public partial class PackDetailView : Page
 
             var sharedCount = entries.Count(en => en.IsAutoShared);
             var what = entries.Count == 1
-                ? $"“{entries[0].DisplayName.TrimEnd('/')}”"
+                ? $"'{entries[0].DisplayName.TrimEnd('/')}'"
                 : $"{entries.Count} items";
             var message = $"Delete {what} from this instance's game folder? This cannot be undone.";
             if (entries.Any(en => en.IsFolder))
                 message += "\n\nFolders are deleted with everything inside them.";
             if (sharedCount > 0)
-                message += $"\n\n{(sharedCount == entries.Count ? "They are" : $"{sharedCount} of them are")} marked shared — the next upload removes them from the server for everyone.";
+                message += $"\n\n{(sharedCount == entries.Count ? "They are" : $"{sharedCount} of them are")} marked shared - the next upload removes them from the server for everyone.";
 
             var ok = await AppDialog.ConfirmAsync(ListOwnerWindow, "Delete from instance", message,
                 "Delete", "Cancel", danger: true);
             if (!ok) return;
 
             _fileTransferInProgress = true;
-            StatusLabel.Text = "Deleting…";
+            StatusLabel.Text = "Deleting...";
             var paths = entries.Select(en => en.RelativePath).ToList();
             var root = App.State.Packs.GameDir(_packId);
             var (removed, error) = await Task.Run(() => DeleteEntriesFromRoot(root, paths));
@@ -2648,6 +3341,11 @@ public partial class PackDetailView : Page
                 StatusLabel.Text = "That name has characters Windows will not allow in a folder name.";
                 return;
             }
+            if (!PathSafety.IsSafeFileName(name))
+            {
+                StatusLabel.Text = "Windows will not allow that as a folder name.";
+                return;
+            }
 
             var parentRel = view.CurrentRelativeDir;
             var parent = parentRel.Length == 0
@@ -2667,13 +3365,14 @@ public partial class PackDetailView : Page
     }
 
     /// <summary>
-    /// Files dragged in from Explorer (or the desktop, or a browser's download bar) land in whichever
-    /// folder the column is showing. Dropping onto the Shared column also marks them shared, because
-    /// that is plainly what dropping something there was meant to say.
+    /// Copies files dragged in from Explorer into whichever folder the column is showing. Dropping onto
+    /// the Shared column also marks them shared.
     /// </summary>
     private async void OnExternalFilesDropped(FolderView view, string destRoot, string destRelativeDir, IReadOnlyList<string> sources)
     {
-        if (_pack is null || _fileTransferInProgress) return;
+        // Copying local files needs nothing from the server, so this does not wait for an instance
+        // record. Only the mark-as-shared part below does.
+        if (_fileTransferInProgress) return;
 
         _fileTransferInProgress = true;
         try
@@ -2682,7 +3381,7 @@ public partial class PackDetailView : Page
                 ? destRoot
                 : Path.Combine(destRoot, destRelativeDir.Replace('/', Path.DirectorySeparatorChar));
 
-            StatusLabel.Text = $"Copying {sources.Count} item(s) in…";
+            StatusLabel.Text = $"Copying {sources.Count} item(s) in...";
             var paths = sources.ToList();
             var (copied, relatives, error) = await Task.Run(() => CopyExternalEntries(destRoot, destDir, paths));
 
@@ -2695,8 +3394,8 @@ public partial class PackDetailView : Page
                 StatusLabel.Text = $"Copied {copied} item(s) into {(destRelativeDir.Length == 0 ? "game/" : destRelativeDir + "/")}.";
             }
 
-            // Only the sync-preview column means "share this"; a drop on the Game column is just a copy.
-            var markShared = view.ShowOnlyShared && relatives.Count > 0;
+            // Only the sync-preview column means "share this"; a drop on the Game column just copies.
+            var markShared = view.ShowOnlyShared && relatives.Count > 0 && CanEditSharing;
             if (markShared)
             {
                 MarkPathsShared(relatives);
@@ -2765,11 +3464,11 @@ public partial class PackDetailView : Page
 
     // ── moves ────────────────────────────────────────────────────────────────
 
-    // "Copy to shared" → adds a "shared" rule so the file is included in the next upload.
+    // "Copy to shared" adds a "shared" rule so the file is included in the next upload.
     private void OnMoveGameToShared(object sender, RoutedEventArgs e) =>
         AddQuickRule(RuleAction.Shared, folderMode: false);
 
-    // "Remove from shared" → marks the file ignored/local so it is excluded from uploads.
+    // "Remove from shared" marks the file ignored/local so it is excluded from uploads.
     private void OnMoveSharedToGame(object sender, RoutedEventArgs e) =>
         RemoveFromShared(SharedView.GetSelectedEntries().Select(e => e.RelativePath).ToList());
 
@@ -2778,7 +3477,7 @@ public partial class PackDetailView : Page
         if (_pack is null || _fileTransferInProgress) return;
 
         _fileTransferInProgress = true;
-        StatusLabel.Text = "Moving files…";
+        StatusLabel.Text = "Moving files...";
         try
         {
             var paths = relativePaths.ToList();
@@ -2804,7 +3503,11 @@ public partial class PackDetailView : Page
         {
             foreach (var rel in relativePaths)
             {
-                var srcAbs = Path.Combine(sourceRoot, rel.Replace('/', Path.DirectorySeparatorChar));
+                if (PathSafety.ResolveInside(sourceRoot, rel) is not { } srcAbs)
+                {
+                    AppLog.Log(nameof(PackDetailView), $"Skipped moving an entry that is not a path inside the instance: {rel}");
+                    continue;
+                }
                 if (Directory.Exists(srcAbs))
                 {
                     foreach (var file in Directory.EnumerateFiles(srcAbs, "*", SearchOption.AllDirectories))
@@ -2844,7 +3547,11 @@ public partial class PackDetailView : Page
         {
             foreach (var rel in relativePaths)
             {
-                var abs = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
+                if (PathSafety.ResolveInside(root, rel) is not { } abs)
+                {
+                    AppLog.Log(nameof(PackDetailView), $"Skipped deleting an entry that is not a path inside the instance: {rel}");
+                    continue;
+                }
                 if (Directory.Exists(abs))
                 {
                     Directory.Delete(abs, recursive: true);
@@ -2872,18 +3579,13 @@ public partial class PackDetailView : Page
     /// <summary>
     /// While a transfer is running the button that started it becomes its cancel button.
     /// </summary>
-    /// <remarks>Uploading a multi-GB instance over a slow line is the longest thing this app does,
-    /// and both service calls have taken a <see cref="CancellationToken"/> and checked it inside
-    /// their copy loops all along — there was simply nothing on screen holding one.</remarks>
     private void SetSyncUiRunning(bool running, bool downloading)
     {
         if (downloading)
         {
             UpdateButtonGlyph.Text = running ? "" : "";
-            UpdateButtonText.Text = running ? "Cancel update" : "Update available";
-            UpdateButton.ToolTip = running
-                ? "Stop downloading. Files already written stay where they are."
-                : "Download the latest version from the server";
+            // Only the Update button's glyph is set here. Its label, enabled state and tooltip come
+            // from UpdateTransferControls on PackJobs.Changed, which also covers other transfers.
             UploadButton.IsEnabled = !running && _pack is { IsShared: true }
                                      && _pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
             return;
@@ -2900,7 +3602,7 @@ public partial class PackDetailView : Page
         if (_pack is null) return;
 
         // Second click on a running upload means stop.
-        if (_syncCts is not null) { CancelSync("Cancelling upload…"); return; }
+        if (_syncCts is not null) { CancelSync("Cancelling upload..."); return; }
 
         LogBox.Text = "";
         var progress = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
@@ -2922,12 +3624,9 @@ public partial class PackDetailView : Page
             var gameDir = App.State.Packs.GameDir(_pack.Id);
             var sharedPaths = await Task.Run(() => CollectSharedPaths(gameDir, rules), cts.Token);
 
-            // Base the upload on the version THIS client last synced — NOT the server's current
-            // version. Fetching the current version and using it as the base defeated the server's
-            // optimistic-concurrency check: a client that hadn't pulled a collaborator's newer
-            // changes still passed the check, and its stale file set replaced the whole manifest,
-            // deleting the collaborator's files from every subscriber on their next sync. With the
-            // synced version, the server returns 409 when we're behind, forcing a download first.
+            // Base the upload on the version this client last synced, not the server's current one,
+            // so the server answers 409 when we are behind and forces a download first, instead of a
+            // stale file set replacing the manifest and deleting collaborators' files.
             var baseVersion = App.State.Settings.PackSyncedVersion.TryGetValue(_pack.Id, out var v) ? v : 0;
             var newVersion = await App.State.Packs.UploadSharedAsync(_pack.Id, baseVersion, sharedPaths, progress, cts.Token);
 
@@ -2944,9 +3643,9 @@ public partial class PackDetailView : Page
         }
         catch (OperationCanceledException)
         {
-            // Nothing is committed until the server gets the whole file set, so a cancelled upload
-            // leaves the server exactly as it was.
-            StatusLabel.Text = "Upload cancelled — nothing on the server changed.";
+            // Nothing is committed until the server has the whole file set, so a cancelled upload
+            // leaves the server unchanged.
+            StatusLabel.Text = "Upload cancelled - nothing on the server changed.";
             ProgressHub.Clear(_packId);
         }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
@@ -2956,6 +3655,33 @@ public partial class PackDetailView : Page
             cts.Dispose();
             SetSyncUiRunning(false, downloading: false);
         }
+    }
+
+    /// <summary>
+    /// Runs a shared-pack download as a registered job, so its progress bar has working Pause and
+    /// Stop controls and PackJobs.IsRunning sees it. Returns false when it was stopped, after rolling
+    /// the files back and reporting it.
+    /// </summary>
+    private async Task<bool> RunSharedDownloadAsync(IProgress<string>? log)
+    {
+        if (_pack is null) return false;
+
+        var job = PackJobs.Start(_packId, PackJobKind.Sync, _pack.Name);
+        try
+        {
+            await App.State.Packs.DownloadSharedAsync(_pack.Id, log, job.Token, job);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            var removed = job.RollbackCreatedFiles();
+            StatusLabel.Text = removed > 0
+                ? $"Update stopped - the {removed} file(s) it had downloaded were removed."
+                : "Update stopped.";
+            ProgressHub.Clear(_packId);
+            return false;
+        }
+        finally { PackJobs.Finish(job); }
     }
 
     /// <summary>Stops whichever transfer is running. Safe to call when none is.</summary>
@@ -2996,17 +3722,25 @@ public partial class PackDetailView : Page
     {
         if (_pack is null) return;
 
-        // Second click on a running download means stop.
-        if (_syncCts is not null) { CancelSync("Cancelling download…"); return; }
+        // A running transfer is controlled by Pause and Stop; a second press here would only start
+        // another download on top of the first.
+        if (PackJobs.IsRunning(_packId) || _syncCts is not null)
+        {
+            StatusLabel.Text = PackJobs.For(_packId) is { } running
+                ? running.Kind == PackJobKind.Export
+                    ? "An export is reading this instance. Update it once that has finished."
+                    : $"Already {running.KindLabel}ing - use Pause or Stop to interrupt it."
+                : "A transfer is already running for this instance.";
+            return;
+        }
 
         LogBox.Text = "";
         var progress = new Progress<string>(line => AppendCapped(LogBox, line + Environment.NewLine));
-        var cts = new CancellationTokenSource();
-        _syncCts = cts;
+        var job = PackJobs.Start(_packId, PackJobKind.Sync, _pack.Name);
         SetSyncUiRunning(true, downloading: true);
         try
         {
-            await App.State.Packs.DownloadSharedAsync(_pack.Id, progress, cts.Token);
+            await App.State.Packs.DownloadSharedAsync(_pack.Id, progress, job.Token, job);
             // PackSyncedVersion is updated inside DownloadSharedAsync
             ApplyHeroIcon(_pack);
             ApplyDescriptionDisplay(_pack.Id, _pack.Description ?? "");
@@ -3017,15 +3751,18 @@ public partial class PackDetailView : Page
         }
         catch (OperationCanceledException)
         {
-            // Files already written stay: a partial pull is still closer to the server than before it.
-            StatusLabel.Text = "Download cancelled. Files already downloaded were kept — run the update again to finish.";
+            // Stopping removes the files this run created. Files it replaced keep their new copy,
+            // since each one is complete and hash-verified.
+            var removed = job.RollbackCreatedFiles();
+            StatusLabel.Text = removed > 0
+                ? $"Update stopped - the {removed} file(s) it had downloaded were removed."
+                : "Update stopped.";
             ProgressHub.Clear(_packId);
         }
         catch (Exception ex) { StatusLabel.Text = ex.Message; }
         finally
         {
-            _syncCts = null;
-            cts.Dispose();
+            PackJobs.Finish(job);
             SetSyncUiRunning(false, downloading: true);
         }
     }
@@ -3043,7 +3780,7 @@ public partial class PackDetailView : Page
 
         if (App.State.MinecraftAccounts.Current is null)
         {
-            StatusLabel.Text = "Set up a Minecraft account first — click the account chip in the title bar.";
+            StatusLabel.Text = "Set up a Minecraft account first - click the account chip in the title bar.";
             _shell.OpenMcAccount();
             return;
         }
@@ -3070,7 +3807,7 @@ public partial class PackDetailView : Page
             if (_pack.IsShared && AutoUpdateBox.IsChecked == true
                 && _pack.EffectivePermissions.HasFlag(PackPermissions.Download))
             {
-                log.Report("Auto-update: pulling latest from server…");
+                log.Report("Auto-update: pulling latest from server...");
                 try
                 {
                     await App.State.Packs.DownloadSharedAsync(_pack.Id, log, launch.Token);
@@ -3088,7 +3825,7 @@ public partial class PackDetailView : Page
                 return;
             }
 
-            LogBox.AppendText($"PID {proc.Id} — running.{Environment.NewLine}");
+            LogBox.AppendText($"PID {proc.Id} - running.{Environment.NewLine}");
             _shell.OpenMinecraftHost(_pack, proc);
             UpdateStatsLabel(_pack.Id);
         }
@@ -3127,43 +3864,6 @@ public partial class PackDetailView : Page
         }
     }
 
-    private async void OnStartServer(object sender, RoutedEventArgs e)
-    {
-        if (_pack is null) return;
-        LogBox.Text = "";
-        var log = new Progress<string>(line =>
-        {
-            AppendCapped(LogBox, line + Environment.NewLine);
-            StatusLabel.Text = line.Length > 120 ? line[..120] + "…" : line;
-        });
-        StartServerButton.IsEnabled = false;
-        StatusLabel.Text = "Preparing server…";
-        try
-        {
-            // Mods marked "Client only" in Modpack Management stay off the server. The inventory's
-            // fast pass reads identities from cache and runs off the UI thread.
-            IReadOnlyCollection<string>? clientOnly = null;
-            try
-            {
-                var mods = await App.State.ModInventory.LoadAsync(_pack.Id, _pack.IsShared);
-                clientOnly = mods.Where(m => m.Side == ModSide.Client).Select(m => m.FileName).ToList();
-            }
-            catch { /* no flags readable: mirror every enabled mod, as before */ }
-
-            // All the slow work (mirroring the pack, installers, Java) runs off the UI thread inside
-            // StartLocalServerAsync; this handler only feeds the log and flips the button.
-            var proc = await App.State.Launcher.StartLocalServerAsync(_pack, log, clientOnly);
-            LogBox.AppendText($"Server started, PID {proc.Id}. A console window should appear.{Environment.NewLine}");
-            LogBox.AppendText("Players connect on port 25565." + Environment.NewLine);
-            StatusLabel.Text = $"Server started (PID {proc.Id}) — see its console window. Logs tab has the setup log.";
-        }
-        catch (Exception ex)
-        {
-            StatusLabel.Text = "Server start failed: " + ex.Message;
-            LogBox.AppendText(ex + Environment.NewLine);
-        }
-        finally { StartServerButton.IsEnabled = !_pack.IsEmpty; }
-    }
 
     private void UpdateStatsLabel(Guid packId)
     {
@@ -3188,13 +3888,12 @@ public partial class PackDetailView : Page
 public sealed record TagVm(string Text, Brush Background, Brush Foreground);
 
 /// <summary>One screenshot card on the instance's Screenshots tab.</summary>
-/// <remarks>The thumbnail is a separate, down-sampled bitmap from the file the preview window opens.
-/// Binding the file itself to the card's <c>Image</c> made WPF decode every capture at native
-/// resolution — a few hundred 4K PNGs shown at 230px is gigabytes of bitmap for nothing — so the card
-/// gets a 230px decode and <see cref="FullImageUrl"/> keeps the original for full-size viewing.</remarks>
+/// <remarks>The card shows a down-sampled thumbnail rather than the file itself, which WPF would
+/// decode at full resolution. <see cref="FullImageUrl"/> keeps the original for full-size
+/// viewing.</remarks>
 public sealed class PackScreenshotRow : System.ComponentModel.INotifyPropertyChanged
 {
-    /// <summary>Width the card decodes at. Matches the card, so the decode is the display size.</summary>
+    /// <summary>Width the card decodes at, equal to the card's display width.</summary>
     public const int ThumbnailWidth = 230;
 
     public PackScreenshotRow(FileInfo file, string sourceLabel, bool canSetAsIcon)
@@ -3217,13 +3916,12 @@ public sealed class PackScreenshotRow : System.ComponentModel.INotifyPropertyCha
     public string ToolTipText { get; }
     public DateTime LastWriteTime => Source.LastWriteTime;
 
-    /// <summary>False on an instance someone else owns — its cover art is not ours to change.</summary>
+    /// <summary>False on an instance someone else owns, whose cover art we cannot change.</summary>
     public bool CanSetAsIcon { get; }
 
     private BitmapSource? _thumbnail;
 
-    /// <summary>The card's picture. Null until the background pass has decoded it, which is why the
-    /// card sits on a surface-coloured panel rather than a blank white rectangle.</summary>
+    /// <summary>The card's picture. Null until the background pass has decoded it.</summary>
     public BitmapSource? Thumbnail
     {
         get => _thumbnail;
@@ -3248,8 +3946,8 @@ public sealed class PackScreenshotRow : System.ComponentModel.INotifyPropertyCha
             image.BeginInit();
             image.UriSource = new Uri(path);
             image.DecodePixelWidth = ThumbnailWidth;
-            // OnLoad, so the file handle is closed by the time this returns — otherwise deleting or
-            // renaming the screenshot from the card's own menu fails with a sharing violation.
+            // OnLoad closes the file handle before returning; otherwise deleting or renaming the
+            // screenshot from the card's menu fails with a sharing violation.
             image.CacheOption = BitmapCacheOption.OnLoad;
             image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
             image.EndInit();
@@ -3268,15 +3966,14 @@ public sealed class PackScreenshotRow : System.ComponentModel.INotifyPropertyCha
 }
 
 /// <summary>What a row in the Logs list stands for.</summary>
-/// <remarks>Drives the row's icon colours through template triggers. The colours are deliberately
-/// <em>not</em> stored on the row: a brush read out of the resource dictionary here would be a
-/// snapshot of the palette at scan time and would survive every later theme change.</remarks>
+/// <remarks>Drives the row's icon colours through template triggers. Brushes are not stored on the
+/// row, since they would not follow later theme changes.</remarks>
 public enum LogRowKind
 {
     /// <summary>A Minecraft log file from game/logs.</summary>
     GameLog,
 
-    /// <summary>A crash report from game/crash-reports — the file that says why the game died.</summary>
+    /// <summary>A crash report from game/crash-reports.</summary>
     CrashReport,
 
     /// <summary>The in-memory upload/download log for this session.</summary>
@@ -3307,8 +4004,8 @@ public sealed class LogRow
     /// pseudo-rows, which are pinned to the top of the list anyway.</summary>
     public DateTime SortTime { get; private set; } = DateTime.MinValue;
 
-    /// <summary>Segoe MDL2 glyphs are private-use code points, so they are written as numbers here
-    /// rather than pasted in as characters that no editor or diff will show.</summary>
+    /// <summary>Segoe MDL2 glyphs are private-use code points, so they are written as numbers rather
+    /// than as characters editors and diffs cannot show.</summary>
     private static string Glyph(int codePoint) => ((char)codePoint).ToString();
 
     /// <summary>Parameterless ctor used by the pseudo-row factories.</summary>
@@ -3341,7 +4038,7 @@ public sealed class LogRow
         MetaLabel = "What the launcher is doing right now",
         Kind = LogRowKind.Launcher,
         IconGlyph = Glyph(0xE9D9), // Diagnostic / activity glyph
-        ToolTipText = "The launcher's own log for this session — not a file on disk."
+        ToolTipText = "The launcher's own log for this session - not a file on disk."
     };
 
     /// <summary>Returns the pseudo-entry that shows the in-memory sync log content.</summary>
@@ -3353,6 +4050,6 @@ public sealed class LogRow
         MetaLabel = "Upload / download activity from this session",
         Kind = LogRowKind.Sync,
         IconGlyph = Glyph(0xE753),   // Cloud glyph
-        ToolTipText = "Upload and download output from this session — not a file on disk."
+        ToolTipText = "Upload and download output from this session - not a file on disk."
     };
 }

@@ -1,0 +1,53 @@
+<UserControl x:Class="CloudLauncher.Views.VersionChangelogCard"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:views="clr-namespace:CloudLauncher.Views">
+    <slate:SlateBorder x:Name="Chrome" Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="22">
+        <slate:SlateBorder.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </slate:SlateBorder.Effect>
+        <DockPanel>
+            <!--  Title and meta on the left, previous/next buttons on the right (same pair as the
+            screenshot viewer).  -->
+            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top"
+                            Margin="12,0,0,0">
+                    <Button x:Name="PreviousButton" Style="{StaticResource IconButton}"
+                            Content="&#xE76B;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                            Click="OnPrevious" ToolTipService.ShowOnDisabled="True"/>
+                    <Button x:Name="NextButton" Style="{StaticResource IconButton}"
+                            Content="&#xE76C;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                            Margin="4,0,0,0" Click="OnNext" ToolTipService.ShowOnDisabled="True"/>
+                </StackPanel>
+                <StackPanel>
+                    <TextBlock x:Name="TitleLabel" Style="{StaticResource H2}"
+                               TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="MetaLabel" Style="{StaticResource Muted}" Margin="0,2,0,0"
+                               TextWrapping="Wrap"/>
+                </StackPanel>
+            </DockPanel>
+
+            <Grid DockPanel.Dock="Bottom" Margin="0,14,0,0">
+                <TextBlock x:Name="FooterNote" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                           Foreground="{DynamicResource TextTertiaryBrush}"
+                           TextTrimming="CharacterEllipsis" Margin="0,0,120,0"/>
+                <Button Content="Close" Style="{StaticResource AccentButton}" HorizontalAlignment="Right"
+                        Click="OnClose" Padding="16,5"/>
+            </Grid>
+
+            <!--  StateHost comes after the viewer so it draws on top. PageState also collapses the viewer
+            while a panel is up: WebView2 is a native window and would paint over it. The padding keeps
+            the viewer's square corners inside the rounded outline.  -->
+            <slate:SlateBorder CornerRadius="8" ClipToBounds="True" Padding="2"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                    Background="{DynamicResource Surface0Brush}">
+                <Grid>
+                    <views:RichDescriptionView x:Name="ChangelogView"/>
+                    <views:PageStateView x:Name="StateHost"/>
+                </Grid>
+            </slate:SlateBorder>
+        </DockPanel>
+    </slate:SlateBorder>
+</UserControl>

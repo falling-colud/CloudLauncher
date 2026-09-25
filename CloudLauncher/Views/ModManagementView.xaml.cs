@@ -1,5 +1,4 @@
-﻿using System.Diagnostics;
-using System.IO;
+﻿using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -14,13 +13,12 @@ using CloudLauncher.Shared;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The unified mod management page (List / Graph / Mod browsing sub-tabs). Opened from the Mod
-/// view's "Mods Management" button. All three sub-tabs read the same <see cref="PackModInventory"/>.
+/// The mod management page (List, Browse, Graph, Categories and Planning sub-tabs). Opened from the
+/// Mod view's "Mods Management" button. All sub-tabs read the same <see cref="PackModInventory"/>.
 /// </summary>
 public partial class ModManagementView : Page, ISidePanelBackHandler
 {
-    // Sub-tab indices — named so adding a tab can't silently shift the lazy-load / back-navigation
-    // logic underneath them.
+    // Sub-tab indices, named so adding a tab can't shift the lazy-load and back-navigation logic.
     private const int TabList = 0, TabBrowse = 1, TabGraph = 2, TabCategories = 3, TabPlan = 4;
 
     private readonly MainWindow _shell;
@@ -84,8 +82,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             UiScale.Changed -= ApplyModScale;   // re-apply the mod-list zoom live when the slider moves
             UiScale.Changed += ApplyModScale;
             ApplyModScale();
-            // Same hook the Instances screen uses: the shortcuts have to work wherever focus is on
-            // the page, including on a card, so they are taken from the window rather than the page.
+            // Hooked on the window, as on the Instances screen, so the shortcuts work wherever focus is.
             if (Window.GetWindow(this) is { } w) { w.PreviewKeyDown -= OnShellKeyDown; w.PreviewKeyDown += OnShellKeyDown; }
         };
         Unloaded += (_, _) =>
@@ -98,19 +95,19 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     // ── keyboard shortcuts ────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The shortcuts the Instances screen has, on the hub: Ctrl+F to search, F5 to refresh, Esc to
-    /// back out of a search or a selection, Delete to remove the selected jars, Ctrl+A to select
-    /// everything the current filters show.
+    /// Same shortcuts as the Instances screen: Ctrl+F search, F5 refresh, Esc backs out of a search or
+    /// selection, Delete removes the selected jars, Ctrl+A selects everything the filters show.
     /// </summary>
     /// <remarks>
-    /// Guarded on <see cref="UIElement.IsVisible"/> because the handler is on the window, and the hub
-    /// can be open in the side panel while another page has focus in the main one. The
-    /// selection-shaped keys additionally only fire on the List tab: the Graph, Categories and
-    /// planning tabs own Delete and Ctrl+A for their own canvases and lists.
+    /// Checks <see cref="UIElement.IsVisible"/> because the handler is on the window and the hub may be
+    /// in the side panel while another page has focus. Delete and Ctrl+A only apply on the List tab;
+    /// the other tabs handle them themselves.
     /// </remarks>
     private void OnShellKeyDown(object sender, KeyEventArgs e)
     {
         if (!IsVisible) return;
+        // A card (version picker, changelog) is open over the page and handles its own keys.
+        if (Window.GetWindow(this) is MainWindow { DialogLayer.Visibility: Visibility.Visible }) return;
         var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
         var onList = Tabs.SelectedIndex == TabList;
         var typing = SearchBox.IsKeyboardFocusWithin;
@@ -128,8 +125,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         }
         else if (e.Key == Key.Escape && onList)
         {
-            // One step back per press: the search first (it is what is hiding rows), then the
-            // selection. Neither is destructive, so neither asks.
+            // One step back per press: clear the search first, then the selection.
             if (!string.IsNullOrEmpty(SearchBox.Text)) { SearchBox.Text = ""; e.Handled = true; }
             else if (_all.Any(m => m.IsSelected)) { OnClearSelection(this, e); e.Handled = true; }
         }
@@ -157,25 +153,24 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private void RestoreListPreferences()
     {
         var s = App.State.Settings;
-        // Clamped: Selector throws on an out-of-range index, and a settings.json written by a newer
-        // build (or by hand) must not take the whole page down on open.
+        // Clamped: Selector throws on an out-of-range index, and settings.json may come from a newer
+        // build or be hand-edited.
         SortBox.SelectedIndex = Math.Clamp((int)s.ModListSortMode, 0, SortBox.Items.Count - 1);
         _reverseSort = s.ModListSortReversed;
         SortDirButton.Content = _reverseSort ? "" : "";
         HideDisabled.IsChecked = s.ModListHideDisabled;
         SourceFilterBox.SelectedIndex = Math.Clamp((int)s.ModListSourceFilter, 0, SourceFilterBox.Items.Count - 1);
-        // "Only updates" is deliberately not restored: it is a triage filter, and opening the
-        // launcher to a pack that looks empty is alarming rather than helpful.
+        // "Only updates" isn't restored: it's a triage filter, and a pack that opens looking empty is
+        // alarming.
         Resources["ModRowContentWidth"] = s.EffectiveModRowContentWidth;
         Resources["ModRowActionsAlign"] = s.ModRowActionsAtRight
             ? HorizontalAlignment.Right
             : HorizontalAlignment.Left;
     }
 
-    /// <summary>Re-reads the launcher-wide mod preferences (Settings → Mods) every time this page is
-    /// shown, so changing them and coming back takes effect without reopening the pack. Deliberately
-    /// does not touch the channel ComboBox selection: that is the pack's own setting, and writing it
-    /// here would fire its handler and save the pack a channel nobody chose.</summary>
+    /// <summary>Re-reads the launcher-wide mod preferences (Settings -> Mods) whenever this page is
+    /// shown. Leaves the channel ComboBox alone: that is the pack's own setting, and setting it here
+    /// would fire its handler and save a channel nobody chose.</summary>
     private void SyncLauncherDefaults()
     {
         Resources["ModRowContentWidth"] = App.State.Settings.EffectiveModRowContentWidth;
@@ -185,9 +180,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         AdvChannelDefaultItem.Content = $"Launcher default ({ModUpdateChannel.Label(App.State.ModMetadata.LauncherUpdateChannel)})";
         if (_all.Count == 0) return;
 
-        // The channel decides what counts as an update, so a pack that follows the launcher has to
-        // re-check when the launcher moved — otherwise "Update all" would still be answering the
-        // question the old channel asked.
+        // The channel decides what counts as an update, so a pack that follows the launcher default
+        // re-checks when that default changes.
         var before = _all[0].DefaultUpdateChannel;
         App.State.ModInventory.ApplyPackDefaults(_pack.Id, _all);
         if (!string.Equals(before, _all[0].DefaultUpdateChannel, StringComparison.OrdinalIgnoreCase))
@@ -224,7 +218,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         LaunchButton.Content = status switch
         {
             MinecraftInstanceStatus.Running => "Stop",
-            MinecraftInstanceStatus.Launching => "Launching…",
+            MinecraftInstanceStatus.Launching => "Launching...",
             _ => "Launch"
         };
     }
@@ -236,13 +230,13 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (App.State.MinecraftAccounts.Current is null)
         {
             await AppDialog.MessageAsync(_shell, "Launch",
-                "Set up a Minecraft account first — click the account chip in the title bar.");
+                "Set up a Minecraft account first - click the account chip in the title bar.");
             _shell.OpenMcAccount();
             return;
         }
 
         LaunchButton.IsEnabled = false;
-        ListStatus.Text = "Checking Java…";
+        ListStatus.Text = "Checking Java...";
         var (javaOk, javaMsg) = await LaunchService.CheckJavaAsync(_pack.MinecraftVersion, App.State.Settings.GetJavaPathFor(_pack.Id));
         if (!javaOk)
         {
@@ -278,14 +272,14 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         ListStatus.Text = string.Join(Environment.NewLine, _statusTail);
     }
 
-    /// <summary>The mods currently loaded (used by the Graph view in a later phase).</summary>
+    /// <summary>The mods currently loaded.</summary>
     internal IReadOnlyList<PackMod> Mods => _all;
 
     // ── load ───────────────────────────────────────────────────────────────────
 
-    /// <summary>The background enrich pass started by the most recent <see cref="ReloadAsync"/>.
-    /// <see cref="OnRefresh"/> awaits it so the button stays busy for the whole cycle — the scan is
-    /// the fast part, and the store round-trips behind it are what actually takes the time.</summary>
+    /// <summary>The background enrich pass started by the latest <see cref="ReloadAsync"/>.
+    /// <see cref="OnRefresh"/> awaits it so the button stays busy until the store lookups, the slow
+    /// part, have finished.</summary>
     private Task _enrichTask = Task.CompletedTask;
 
     private async Task ReloadAsync(bool forceUpdateCheck = false)
@@ -296,15 +290,16 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (App.State.Instances.GetStatus(_pack.Id) == MinecraftInstanceStatus.Idle)
             App.State.TestScope.RestoreIfPending(_pack.Id);
 
-        ListStatus.Text = "Scanning mods…";
+        ListStatus.Text = "Scanning mods...";
         try
         {
-            var mods = await App.State.ModInventory.LoadAsync(_pack.Id, _pack.IsShared);
+            // Always include local/: library defaults land in local/mods for every instance and only reach
+            // game/ through the launch overlay, so without it they wouldn't show until the next launch.
+            var mods = await App.State.ModInventory.LoadAsync(_pack.Id, includeLocal: true);
             if (gen != _gen) return;
             _all = mods;
-            App.State.ModMetadata.SyncManagedCategories(_pack.Id); // library mods → managed "Library" category
-            PackModInventory.ResolveConflicts(_all);               // recorded clashes → the CONFLICT pill
-            RefreshCategoryFilter();
+            App.State.ModMetadata.SyncManagedCategories(_pack.Id); // library mods -> managed "Library" category
+            PackModInventory.ResolveConflicts(_all);               // recorded clashes -> the CONFLICT pill
             _identifying = true;
             ApplyFilterSort();                       // instant: file names + saved flags
             InvalidateSecondaryViews();              // graph/plan/categories refresh lazily on view
@@ -321,18 +316,18 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private async Task EnrichAsync(int gen, bool forceUpdateCheck = false)
     {
         try { await App.State.ModInventory.ResolveIdentitiesAsync(_pack.Id, _all); }
-        catch { /* offline — keep the file-name view */ }
+        catch { /* offline: keep the file-name view */ }
         if (gen != _gen) return;
         _identifying = false;
         UpdateStoreAutoLabel();
         ApplyFilterSort();
-        InvalidateSecondaryViews(); // identities/icons resolved — refresh graph/plan/categories when shown
+        InvalidateSecondaryViews(); // identities and icons resolved: refresh graph/plan/categories when shown
         await CheckUpdatesAsync(gen, forceUpdateCheck);
     }
 
-    /// <summary>Marks the graph / planning / categories views stale so each rebuilds the next time
-    /// it's shown, and refreshes whichever one is on screen right now. This is what keeps switching
-    /// between tabs cheap — only the visible heavy view is built, and only when its data changed.</summary>
+    /// <summary>Marks the graph, planning and categories views stale so each rebuilds the next time it
+    /// is shown, and refreshes whichever one is on screen. Only the visible view is rebuilt, and only
+    /// when its data changed.</summary>
     private void InvalidateSecondaryViews()
     {
         _graphDirty = _planDirty = _categoriesDirty = true;
@@ -350,13 +345,9 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     /// Runs a heavy view build on a later turn of the dispatcher instead of inline.
     /// </summary>
     /// <remarks>
-    /// Building the graph, the categories panes or the planning board out of a 1900-mod pack is tens
-    /// of thousands of visuals. Doing it inside the tab's SelectionChanged holds the UI thread from
-    /// before the tab has even repainted, so the whole launcher looks frozen and the click appears to
-    /// have done nothing. At <see cref="DispatcherPriority.Background"/> the tab switch, its
-    /// transition and the view's own "building…" label all render first, and the build starts after
-    /// them — and the views themselves then build in chunks, so the thread keeps coming back.
-    /// Exceptions are caught here because nothing is awaiting this.
+    /// A large pack means tens of thousands of visuals. At <see cref="DispatcherPriority.Background"/>
+    /// the tab switch and its "building..." label render first, so the click visibly does something.
+    /// Exceptions are caught here because nothing awaits this.
     /// </remarks>
     private void Defer(Action build) =>
         Dispatcher.InvokeAsync(() =>
@@ -365,10 +356,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             catch (Exception ex) { ListStatus.Text = "Could not build that view: " + ex.Message; }
         }, DispatcherPriority.Background);
 
-    // The secondary views all get the same set of callbacks, so the same right-click menu appears on
-    // a mod whichever tab it is clicked in — including "Update to newest", which used to be missing
-    // everywhere but the List tab. UpdateManyAsync / RecheckUpdatesAsync are the List view's own
-    // implementations, so the lock rules and the re-check behaviour cannot drift apart per tab.
+    // All secondary views get the same callbacks, so a mod's right-click menu is the same on every
+    // tab. They reuse the List view's UpdateManyAsync / RecheckUpdatesAsync, so update rules match.
     private void LoadGraph() => _graph?.Load(_pack.Id, _all, _shell, OpenModPage, RequestReload,
         NoteSecondaryViewEdit, UpdateMany, RecheckUpdates);
 
@@ -381,9 +370,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private void UpdateMany(IReadOnlyList<PackMod> mods) => _ = UpdateManyAsync(mods);
     private void RecheckUpdates(IReadOnlyList<PackMod> mods) => _ = RecheckUpdatesAsync(mods);
 
-    /// <summary>An edit made from *within* the graph / planning / categories view: that view has
-    /// already re-rendered itself, so this just marks the other two stale (and refreshes the list
-    /// model). Keeps cross-view edits consistent without the eager all-views rebuild.</summary>
+    /// <summary>An edit made inside the graph, planning or categories view. That view has already
+    /// re-rendered, so this marks the other two stale and refreshes the list model.</summary>
     private void NoteSecondaryViewEdit()
     {
         _graphDirty = _planDirty = _categoriesDirty = true;
@@ -396,7 +384,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         ApplyFilterSort(); // keep the (hidden) list model in sync for when it's next shown
     }
 
-    /// <summary>Keeps the viewport still across a rebuild — see <see cref="ListScrollAnchor"/>.</summary>
+    /// <summary>Keeps the viewport still across a rebuild (see <see cref="ListScrollAnchor"/>).</summary>
     private ListScrollAnchor? _scrollAnchor;
 
     /// <summary>The order currently on screen, so the anchor can fall forward to the next surviving
@@ -418,9 +406,9 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
                 || m.CategoriesLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
                 // so typing "large" narrows to the pack-defining mods
                 || (m.ContentSize > 0 && m.ContentSizeLabel.Contains(query, StringComparison.OrdinalIgnoreCase))
-                // Notes are a headline feature of this page, so a word out of one has to find its mod.
+                // Match words in the mod's note too.
                 || (m.Note is { } note && note.Contains(query, StringComparison.OrdinalIgnoreCase))
-                // …and the jar's name, which is often all you have when a crash log names a file.
+                // ...and the jar's name, which is often all a crash log gives you.
                 || m.FileName.Contains(query, StringComparison.OrdinalIgnoreCase));
 
         if (HideDisabled.IsChecked == true) q = q.Where(m => m.Enabled);
@@ -432,7 +420,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             3 => q.Where(m => m.IsExternal),
             _ => q
         };
-        // The flags the planning board can already query, on the list people actually work in.
+        // The same flags the planning board can query.
         q = FlagFilterBox.SelectedIndex switch
         {
             1 => q.Where(m => m.IsLibrary),
@@ -445,16 +433,12 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             8 => q.Where(m => m.Side == ModSide.Server),
             _ => q
         };
-        if (SelectedCategoryFilter() is { } category)
-            q = q.Where(m => m.Meta.Categories.Contains(category, StringComparer.OrdinalIgnoreCase));
 
         var cmp = StringComparer.OrdinalIgnoreCase;
         var rev = _reverseSort;
-        // Primary key by sort mode (with its natural direction, flipped when reversed).
-        // Priority is always the secondary tiebreaker so e.g. within each Status group the
-        // highest-priority mods float to the top; name is the final tiebreaker.
-        // Sorting by category groups the list instead: the order below puts the categories in the
-        // order the Categories page lists them, and the group headers are drawn from that.
+        // Primary key by sort mode (natural direction, flipped when reversed), then priority, then
+        // name. Sorting by category groups the list instead, in the Categories page's order, with the
+        // group headers drawn from that.
         if (SortBox.SelectedIndex == (int)ModListSortMode.Category)
         {
             ApplyCategoryGrouping(q, rev);
@@ -463,7 +447,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
 
         IOrderedEnumerable<PackMod> ordered = SortBox.SelectedIndex switch
         {
-            // Name: A→Z by default
+            // Name: A-Z by default
             1 => rev ? q.OrderByDescending(m => m.DisplayName, cmp) : q.OrderBy(m => m.DisplayName, cmp),
             // Add date: newest first by default
             2 => rev ? q.OrderBy(m => m.AddedAt) : q.OrderByDescending(m => m.AddedAt),
@@ -482,9 +466,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
                    .ThenBy(m => m.DisplayName, cmp);
 
         var list = q.ToList();
-        // Every rebuild replaces the source, which leaves the scroll viewer holding a pixel offset
-        // that no longer points at the same row — the list appears to jump somewhere else. Note
-        // where it was sitting, then put it back.
+        // Each rebuild replaces the source, so remember which row was at the top and scroll back to
+        // it afterwards.
         var capture = Anchor.Take(_rendered);
         var previous = _rendered;
 
@@ -507,20 +490,18 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (disabled > 0) status += $"  ·  {disabled} disabled";
         if (updates > 0) status += $"  ·  {updates} update(s)";
         if (list.Count != _all.Count) status += $"  ·  showing {list.Count}";
-        if (_identifying) status += "  ·  identifying…";
+        if (_identifying) status += "  ·  identifying...";
         ListStatus.Text = status;
     }
 
     /// <summary>
-    /// The category sort: one heading per category, in the order the Categories page lists them,
-    /// with "Uncategorized" last.
+    /// The category sort: one heading per category, in the Categories page's order, with
+    /// "Uncategorized" last.
     /// </summary>
     /// <remarks>
-    /// This is a grouped <see cref="ListCollectionView"/> rather than a sorted list with fake header
-    /// rows: WPF then owns the headers (and keeps virtualisation working through
-    /// IsVirtualizingWhenGrouping), and every other part of the view still sees plain PackMod items.
-    /// Groups appear in the order their first item does, so ordering the items by category rank is
-    /// what orders the headings.
+    /// A grouped <see cref="ListCollectionView"/>, so WPF draws the headers and keeps virtualizing
+    /// (IsVirtualizingWhenGrouping) while the items stay plain PackMods. Groups appear in the order of
+    /// their first item, so sorting items by category rank orders the headings.
     /// </remarks>
     private void ApplyCategoryGrouping(IEnumerable<PackMod> filtered, bool reverse)
     {
@@ -535,8 +516,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             string.Equals(name, PackMod.UncategorizedName, StringComparison.OrdinalIgnoreCase);
 
         var cmp = StringComparer.OrdinalIgnoreCase;
-        // "Uncategorized" is the leftovers bin, not a category: it is pinned to the end in both
-        // directions, so reversing re-orders the real categories rather than burying them under it.
+        // "Uncategorized" stays last in both directions; reversing only re-orders the real categories.
         var byCategory = filtered.OrderBy(m => IsUncategorized(m.PrimaryCategory) ? 1 : 0);
         byCategory = reverse
             ? byCategory.ThenByDescending(m => Rank(m.PrimaryCategory)).ThenByDescending(m => m.PrimaryCategory, cmp)
@@ -575,50 +555,16 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         var status = $"{_all.Count} mod(s)  ·  {groups} categor{(groups == 1 ? "y" : "ies")}";
         if (list.Count != _all.Count) status += $"  ·  showing {list.Count}";
         if (updates > 0) status += $"  ·  {updates} update(s)";
-        if (_identifying) status += "  ·  identifying…";
+        if (_identifying) status += "  ·  identifying...";
         ListStatus.Text = status;
-    }
-
-    // ── category filter ──────────────────────────────────────────────────────────
-
-    /// <summary>The category the filter box is on, or null for "All categories".</summary>
-    private string? SelectedCategoryFilter() =>
-        CategoryFilterBox.SelectedIndex > 0 && CategoryFilterBox.SelectedItem is ComboBoxItem { Content: string name }
-            ? name
-            : null;
-
-    /// <summary>
-    /// Rebuilds the category filter's options from the pack's categories, keeping the current
-    /// selection when it survives.
-    /// </summary>
-    /// <remarks>The list is the pack's own, so it changes whenever a category is added, renamed or
-    /// deleted from any tab — which is why this runs on every reload rather than once at open.
-    /// Rebuilding fires SelectionChanged, so it is done behind <c>_rebuildingFilters</c> to keep
-    /// that from re-entering the sort it is being called from.</remarks>
-    private void RefreshCategoryFilter()
-    {
-        if (CategoryFilterBox is null) return;
-        var keep = SelectedCategoryFilter();
-        var names = App.State.ModMetadata.Categories(_pack.Id).Select(c => c.Name).ToList();
-
-        _rebuildingFilters = true;
-        try
-        {
-            CategoryFilterBox.Items.Clear();
-            CategoryFilterBox.Items.Add(new ComboBoxItem { Content = "All categories" });
-            foreach (var name in names) CategoryFilterBox.Items.Add(new ComboBoxItem { Content = name });
-            var index = keep is null ? 0 : names.FindIndex(n => string.Equals(n, keep, StringComparison.OrdinalIgnoreCase)) + 1;
-            CategoryFilterBox.SelectedIndex = Math.Max(0, index);
-        }
-        finally { _rebuildingFilters = false; }
     }
 
     private bool _rebuildingFilters;
 
     // ── empty states ─────────────────────────────────────────────────────────────
 
-    /// <summary>Shows whichever of the two empty states applies — an empty pack, or filters that
-    /// hide everything — and names the filters that are doing the hiding so the way out is obvious.</summary>
+    /// <summary>Shows whichever empty state applies (an empty pack, or filters hiding everything) and
+    /// names the filters doing the hiding.</summary>
     private void UpdateEmptyStates(int shown)
     {
         if (EmptyState is null || EmptyFilterState is null) return;
@@ -630,14 +576,13 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (!filteredOut) return;
 
         var active = new List<string>();
-        if (!string.IsNullOrWhiteSpace(SearchBox.Text)) active.Add($"the search “{SearchBox.Text!.Trim()}”");
-        if (HideDisabled.IsChecked == true) active.Add("“Hide disabled”");
-        if (OnlyUpdates.IsChecked == true) active.Add("“Only updates”");
+        if (!string.IsNullOrWhiteSpace(SearchBox.Text)) active.Add($"the search '{SearchBox.Text!.Trim()}'");
+        if (HideDisabled.IsChecked == true) active.Add("'Hide disabled'");
+        if (OnlyUpdates.IsChecked == true) active.Add("'Only updates'");
         if (SourceFilterBox.SelectedIndex > 0)
             active.Add($"the {(SourceFilterBox.SelectedItem as ComboBoxItem)?.Content} filter");
         if (FlagFilterBox.SelectedIndex > 0)
             active.Add($"the {(FlagFilterBox.SelectedItem as ComboBoxItem)?.Content} filter");
-        if (SelectedCategoryFilter() is { } cat) active.Add($"the “{cat}” category filter");
 
         EmptyFilterDetail.Text = active.Count == 0
             ? $"None of this pack's {_all.Count} mods are showing."
@@ -651,8 +596,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         };
     }
 
-    /// <summary>"Clear filters" on the filtered-out empty state: puts the toolbar back to showing
-    /// everything in one press rather than four.</summary>
+    /// <summary>"Clear filters" on the filtered-out empty state: resets every toolbar filter at once.</summary>
     private void OnClearFilters(object sender, RoutedEventArgs e)
     {
         _rebuildingFilters = true;   // one re-sort at the end, not one per control
@@ -663,78 +607,82 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             OnlyUpdates.IsChecked = false;
             SourceFilterBox.SelectedIndex = 0;
             FlagFilterBox.SelectedIndex = 0;
-            CategoryFilterBox.SelectedIndex = 0;
         }
         finally { _rebuildingFilters = false; }
         SaveListPreferences();
         ApplyFilterSort();
     }
 
-    /// <summary>"Browse for mods" on the empty-pack state — the Mod browsing sub-tab is where a mod
-    /// comes from, so the state routes there instead of only describing it.</summary>
+    /// <summary>"Browse for mods" on the empty-pack state: switches to the Mod browsing sub-tab.</summary>
     private void OnEmptyBrowse(object sender, RoutedEventArgs e) => Tabs.SelectedIndex = TabBrowse;
 
     private static Brush? AccentPaletteBrushFor(string? hex) =>
         hex is null ? null : AccentPalette.Brush(hex, (Brush)Application.Current.Resources["TextSecondaryBrush"]);
 
+    /// <summary>The token of the update check the latest reload started. A newer reload cancels the
+    /// older check, whose answers would be discarded anyway and which could still have minutes of
+    /// paced store requests queued.</summary>
+    private CancellationTokenSource? _checkCts;
+
     private async Task CheckUpdatesAsync(int gen, bool forceRefresh = false)
     {
-        if (forceRefresh) ListStatus.Text = $"Re-checking {_all.Count} mod(s) with the stores…";
-        await RunUpdateCheckAsync(_all.ToList(), () => gen != _gen, forceRefresh, report: forceRefresh);
-        // Updates landed — the "has update" group cards and list should reflect them.
-        if (gen == _gen) ListEdited();
+        if (forceRefresh) ListStatus.Text = $"Re-checking {_all.Count} mod(s) with the stores...";
+        _checkCts?.Cancel();
+        var cts = _checkCts = new CancellationTokenSource();
+        var summary = await RunUpdateCheckAsync(_all.ToList(), () => gen != _gen, forceRefresh, report: forceRefresh, cts.Token);
+        if (gen != _gen) return;
+        // Update results are in; refresh the "has update" group cards and the list.
+        ListEdited();
+        AppendCheckNote(summary, withTiming: forceRefresh);
     }
 
-    /// <summary>Re-checks just the given mods — after their update channel or followed store changed,
-    /// which changes what counts as an update for them.</summary>
+    /// <summary>Re-checks just the given mods, after their update channel or followed store changed.</summary>
     private async Task RecheckUpdatesAsync(IReadOnlyList<PackMod> mods)
     {
         var gen = _gen;
-        ListStatus.Text = mods.Count == 1 ? $"Re-checking {mods[0].DisplayName}…" : $"Re-checking {mods.Count} mod(s)…";
-        await RunUpdateCheckAsync(mods.ToList(), () => gen != _gen, forceRefresh: true);
-        if (gen == _gen) ListEdited();
+        ListStatus.Text = mods.Count == 1 ? $"Re-checking {mods[0].DisplayName}..." : $"Re-checking {mods.Count} mod(s)...";
+        var summary = await RunUpdateCheckAsync(mods.ToList(), () => gen != _gen, forceRefresh: true);
+        if (gen != _gen) return;
+        ListEdited();
+        AppendCheckNote(summary, withTiming: false);
     }
 
-    /// <summary>The update check, a few mods at a time. One rule for every surface lives in
-    /// <see cref="ModUpdater.FindUpdateAsync"/>; version lists come from the shared catalog, so the
-    /// Mods tab and this page never fetch the same list twice, and the ApiClient paces what does go
-    /// out so a big pack cannot trip the stores' rate limits.</summary>
-    /// <param name="report">Write a running "checked n of N" count into the status strip. On for a
-    /// user-triggered refresh — on a 1900-mod pack the check is minutes of store round-trips, and a
-    /// static label is indistinguishable from a launcher that has stopped responding.</param>
-    private async Task RunUpdateCheckAsync(List<PackMod> mods, Func<bool> stale, bool forceRefresh = false,
-        bool report = false)
+    /// <summary>The update check. <see cref="ModUpdater.CheckManyAsync"/> answers most mods with a few
+    /// bulk requests, then goes through the rest one at a time at the pace set in Settings. The update
+    /// rule is <see cref="ModUpdater.PickUpdate"/> and answers come from the shared catalog, so the
+    /// Mods tab and this page never fetch the same thing twice.</summary>
+    /// <param name="report">Write a running "n of N" count into the status strip, for user-triggered
+    /// refreshes where the one-at-a-time part can take a while.</param>
+    /// <returns>What the check found, or null when it was cancelled or could not run at all.</returns>
+    private async Task<ModUpdateCheckSummary?> RunUpdateCheckAsync(List<PackMod> mods, Func<bool> stale,
+        bool forceRefresh = false, bool report = false, CancellationToken ct = default)
     {
         var mc = _pack.MinecraftVersion;
         var loader = ModUpdater.LoaderTag(_pack);
-        var gate = new SemaphoreSlim(3, 3);
-        var total = mods.Count;
-        var done = 0;
+        var pump = new ModUpdateCheckPump(Dispatcher, stale, report ? p => ListStatus.Text = p.Describe() : null);
         try
         {
-            await Task.WhenAll(mods.Select(async mod =>
-            {
-                if (mod.PrimaryMod is null || mod.PrimaryVersion is null) { Interlocked.Increment(ref done); return; }
-                await gate.WaitAsync();
-                try
-                {
-                    var latest = await ModUpdater.FindUpdateAsync(mod, mc, loader, forceRefresh);
-                    if (stale()) return;
-                    await Dispatcher.InvokeAsync(() => { mod.LatestVersion = latest; });
-                }
-                finally
-                {
-                    gate.Release();
-                    var n = Interlocked.Increment(ref done);
-                    // Every tenth (and the last) — a status write per mod would be 1900 dispatcher
-                    // callbacks doing nothing the eye can follow.
-                    if (report && (n % 10 == 0 || n == total) && !stale())
-                        await Dispatcher.InvokeAsync(() =>
-                            ListStatus.Text = $"Checking for updates… {n} of {total}");
-                }
-            }));
+            return await ModUpdater.CheckManyAsync(mods, mc, loader, forceRefresh, pump.Progress, pump.Post, ct);
         }
-        catch { /* per-mod failures are swallowed inside FindUpdateAsync */ }
+        catch (OperationCanceledException) { return null; }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ModManagementView), ex);
+            return null;
+        }
+        finally { pump.Stop(); }
+    }
+
+    /// <summary>Appends the check's results to the summary line <see cref="ListEdited"/> just wrote:
+    /// how long a refresh took, and how many mods couldn't be checked, so a throttled check doesn't
+    /// look like an up-to-date pack.</summary>
+    private void AppendCheckNote(ModUpdateCheckSummary? summary, bool withTiming)
+    {
+        if (summary is null || _all.Count == 0) return;
+        var parts = new List<string>();
+        if (withTiming) parts.Add($"checked in {ModUpdater.Duration(summary.Elapsed)}");
+        if (summary.CouldNotCheck is { } failed) parts.Add(failed + " - try again later");
+        if (parts.Count > 0) ListStatus.Text += "  ·  " + string.Join("  ·  ", parts);
     }
 
     private async void OnUpdateAll(object sender, RoutedEventArgs e)
@@ -762,10 +710,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         var to = Tabs.SelectedIndex;
         _lastTab = to;
 
-        // Graph / Planning / Categories are heavy to build (a whole canvas of nodes) and only need
-        // rebuilding when the mod data actually changed. They're rebuilt on their first view and
-        // whenever InvalidateSecondaryViews() has marked them dirty — not on every tab switch, which
-        // was the source of the switch-back lag.
+        // Graph, Planning and Categories are heavy to build, so they are built on first view and
+        // rebuilt only after InvalidateSecondaryViews() marks them dirty, not on every tab switch.
         if (to == TabGraph)
         {
             if (!_graphLoaded)
@@ -826,7 +772,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             EnsureBrowse();
         }
 
-        // Coming back from the browser to List/Graph: mods may have been downloaded — re-scan.
+        // Coming back from the browser: mods may have been downloaded, so re-scan.
         if (from == TabBrowse && to != TabBrowse)
             _ = ReloadAsync();
     }
@@ -859,8 +805,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         return _browse;
     }
 
-    /// <summary>Opens a mod's page inside the launcher — switches to the Mod browsing sub-tab and
-    /// shows the mod in its detail panel (not the external website).</summary>
+    /// <summary>Opens a mod's page inside the launcher: switches to the Mod browsing sub-tab and shows
+    /// the mod in its detail panel.</summary>
     private void OpenModPage(PackMod mod) => _ = OpenModPageAsync(mod);
 
     private async Task OpenModPageAsync(PackMod mod)
@@ -868,7 +814,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         var summary = mod.PrimaryMod;
         if (summary is null)
         {
-            ListStatus.Text = $"{mod.DisplayName} isn't identified yet — try again in a moment.";
+            ListStatus.Text = $"{mod.DisplayName} isn't identified yet - try again in a moment.";
             return;
         }
         var browse = EnsureBrowse();
@@ -889,8 +835,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private void OnSearchFocusChanged(object sender, KeyboardFocusChangedEventArgs e) => UpdateSearchPlaceholder();
 
     // ── one-time entrance animation ────────────────────────────────────────────────
-    // Stagger the cards in only on the first build of the list. Later edits (enable/disable,
-    // flag changes) and filter/sort changes just update in place — they never re-animate.
+    // Stagger the cards in only on the first build. Later edits and filter/sort changes update in
+    // place without re-animating.
 
     private bool _entrancePlayed;
 
@@ -973,17 +919,14 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private int _refreshing;
 
     /// <summary>
-    /// Refresh: re-scan the mods folder AND ask the stores again instead of reusing this session's
-    /// cached version lists — see <see cref="ModVersionCatalog"/> for why they are cached at all.
-    /// Leaving this page and coming back re-uses them (cheap, and easy to mistake for "it did not
-    /// check"); this button is what forces a real re-check, so "Update all (n)" is right afterwards.
+    /// Refresh: re-scan the mods folder and ask the stores again instead of reusing this session's
+    /// cached version lists (see <see cref="ModVersionCatalog"/>). Reopening the page reuses the
+    /// cache; this button forces a real re-check.
     /// </summary>
     /// <remarks>
-    /// The whole cycle — scan, identify, update check — is held under one busy flag. The scan alone
-    /// returns almost immediately, so without this the button would go live again while the slow part
-    /// was still running, and a second press would start a competing pass over the same 1900 mods.
-    /// The generation counter would discard the older pass's results, but both would still have hit
-    /// the stores, which is exactly the traffic the version catalog exists to avoid.
+    /// The whole cycle (scan, identify, update check) runs under one busy flag. The scan returns
+    /// almost at once, and a second press during the slow part would send the same store traffic
+    /// again.
     /// </remarks>
     private async void OnRefresh(object s, RoutedEventArgs e)
     {
@@ -1005,8 +948,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         }
     }
 
-    /// <summary>Disables the refresh button and spins its glyph for as long as the refresh runs.
-    /// A disabled button alone reads as "broken"; the rotation is what says "working".</summary>
+    /// <summary>Disables the refresh button and spins its glyph while the refresh runs, so it reads
+    /// as working rather than broken.</summary>
     private void BeginRefreshFeedback()
     {
         RefreshButton.IsEnabled = false;
@@ -1029,9 +972,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
 
     // ── adding a jar by hand ──────────────────────────────────────────────────────
 
-    /// <summary>"Add file": copies mod jars the user picked on this PC into the pack's mods folder.
-    /// The counterpart to the browse tab for a jar that is not on either store — a private build, a
-    /// friend's mod, something pulled from a GitHub release.</summary>
+    /// <summary>"Add file": copies mod jars picked on this PC into the pack's mods folder, for jars
+    /// that aren't on either store (private builds, GitHub releases).</summary>
     private async void OnAddFile(object sender, RoutedEventArgs e)
     {
         var dlg = new Microsoft.Win32.OpenFileDialog
@@ -1057,8 +999,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (files.Count > 0) await AddFilesAsync(files);
     }
 
-    /// <summary>The jars in a drag payload — dropping anything else (a folder, a screenshot) is
-    /// ignored rather than copied into mods/.</summary>
+    /// <summary>The jars in a drag payload; anything else (a folder, a screenshot) is ignored.</summary>
     private static List<string> DroppedJars(DragEventArgs e)
     {
         if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return new List<string>();
@@ -1071,9 +1012,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         path.EndsWith(".jar", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".jar.disabled", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Copies the given jars into <c>game/mods</c> and re-scans. A file that is already
-    /// there is replaced only when the user says so, so "add" can never silently overwrite a mod
-    /// they are running.</summary>
+    /// <summary>Copies the given jars into <c>game/mods</c> and re-scans. Existing files are only
+    /// replaced if the user confirms.</summary>
     private async Task AddFilesAsync(IReadOnlyList<string> files)
     {
         var jars = files.Where(IsJar).ToList();
@@ -1097,9 +1037,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
                 var name = Path.GetFileName(source);
                 var dest = Path.Combine(folder, name);
 
-                // Picked the pack's own jar: nothing to do. Checked before the replace prompt,
-                // because answering "Replace" there would delete the file we are about to copy
-                // from and leave the pack without the mod.
+                // Picked the pack's own jar: nothing to do. Checked before the replace prompt, since
+                // replacing would delete the source file.
                 if (string.Equals(Path.GetFullPath(source), Path.GetFullPath(dest), StringComparison.OrdinalIgnoreCase))
                 {
                     skipped++;
@@ -1135,8 +1074,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             return;
         }
 
-        // Re-scan first: ReloadAsync writes its own summary to the status strip, so reporting
-        // before it would flash the result and lose it.
+        // Re-scan first: ReloadAsync writes its own summary to the status strip and would overwrite
+        // ours.
         if (added > 0) await ReloadAsync();
 
         var parts = new List<string>();
@@ -1146,16 +1085,15 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (failed.Count > 0) parts.Add("failed: " + string.Join(", ", failed));
         ListStatus.Text = parts.Count == 0 ? "Nothing to add." : string.Join(" · ", parts) + ".";
 
-        // A successful add shows itself — the mod is in the list. Anything the user did not ask for
-        // (a copy that failed, a file that was not a jar) gets a dialog, because the status strip is
-        // rewritten a moment later when the background identify pass finishes.
+        // Failures get a dialog, because the status strip is overwritten when the background identify
+        // pass finishes. A successful add shows up in the list.
         if (failed.Count > 0)
             await AppDialog.MessageAsync(_shell, "Add file",
                 "These files could not be added:" + Environment.NewLine + Environment.NewLine +
                 string.Join(Environment.NewLine, failed));
         else if (ignored > 0 && added == 0)
             await AppDialog.MessageAsync(_shell, "Add file",
-                "Nothing was added — only .jar files belong in a pack's mods folder.");
+                "Nothing was added - only .jar files belong in a pack's mods folder.");
     }
 
     private async void OnRunTest(object s, RoutedEventArgs e)
@@ -1190,14 +1128,14 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         {
             App.State.TestScope.Apply(_pack.Id, testNames);
             _statusTail.Clear();
-            ReportLaunchStatus("Launching test set…");
+            ReportLaunchStatus("Launching test set...");
             var proc = await App.State.Launcher.LaunchTrackedAsync(_pack, new Progress<string>(ReportLaunchStatus));
 
             void RestoreAfterTest()
             {
                 App.State.TestScope.Restore(_pack.Id);
                 RunTestButton.IsEnabled = true;
-                ListStatus.Text = "Test run finished — full mod set restored.";
+                ListStatus.Text = "Test run finished - full mod set restored.";
                 _ = ReloadAsync();
             }
 
@@ -1213,7 +1151,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         }
     }
 
-    // ── advanced settings (§7) ────────────────────────────────────────────────────
+    // ── advanced settings ─────────────────────────────────────────────────────────
 
     private void LoadAdvancedSettings()
     {
@@ -1304,7 +1242,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         App.State.ModMetadata.SaveAdvanced(_pack.Id);
     }
 
-    // ── Files-tab mod tools (§6) ──────────────────────────────────────────────────
+    // ── Files-tab mod tools ───────────────────────────────────────────────────────
 
     private void OnSideTools(object s, RoutedEventArgs e)
     {
@@ -1331,28 +1269,28 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             "Move jars in local/mods back into the synced game/mods folder.");
 
         menu.Items.Add(new Separator());
-        Add("Enable all “extra” mods", () => SetExtras(true));
-        Add("Disable all “extra” mods", () => SetExtras(false));
+        Add("Enable all 'extra' mods", () => SetExtras(true));
+        Add("Disable all 'extra' mods", () => SetExtras(false));
 
         menu.Items.Add(new Separator());
-        Add("Import mod settings from another instance…", () => _ = ImportModSettingsAsync(), _all.Count > 0,
+        Add("Import mod settings from another instance...", () => _ = ImportModSettingsAsync(), _all.Count > 0,
             "Copy categories, priorities, sizes, sides, notes and locks from another instance onto the mods this pack shares with it.");
 
         menu.Items.Add(new Separator());
         Add("Copy mod list", CopyModList, _all.Count > 0);
-        Add("Export mod list…", () => _ = ExportModListAsync(), _all.Count > 0);
+        Add("Export mod list...", () => _ = ExportModListAsync(), _all.Count > 0);
+        Add("Export as a modpack...", () => _ = ExportPackDialog.ShowAsync(_shell, _pack));
 
         menu.Items.Add(new Separator());
         Add("Export server + client mod folder", ExportSideFolder, _pack.IsShared,
-            _pack.IsShared ? null : "Needs “Host this instance on the server” — the split only means something for a pack collaborators download.");
+            _pack.IsShared ? null : "Needs 'Host this instance on the server' - the split only means something for a pack collaborators download.");
         menu.IsOpen = true;
     }
 
-    /// <summary>Move server-only mods out of the synced game/ folder into per-user local/ so they
-    /// don't ship to clients. (§6: server-marked mods can be set to local.)</summary>
-    /// <remarks>Asks first and names the count: this moves files out of the folder collaborators
-    /// sync, so the mods silently stop reaching them. Failures are collected and reported rather
-    /// than swallowed — a jar the running game has open is exactly the one that will not move.</remarks>
+    /// <summary>Moves server-only mods out of the synced game/ folder into per-user local/ so they
+    /// don't ship to clients.</summary>
+    /// <remarks>Asks first with the count, since collaborators stop receiving these mods. Failures
+    /// (often a jar the running game has open) are collected and reported.</remarks>
     private async Task RouteServerToLocalAsync()
     {
         var targets = _all.Where(m => m.Side == ModSide.Server && !m.IsLocal).ToList();
@@ -1413,19 +1351,17 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
                           (failed.Count > 0 ? $" · {failed.Count} could not be moved." : ".");
         if (failed.Count > 0)
             await AppDialog.MessageAsync(_shell, "Move mods",
-                "These files could not be moved — they may be open in a running game:" +
+                "These files could not be moved - they may be open in a running game:" +
                 Environment.NewLine + Environment.NewLine + string.Join(Environment.NewLine, failed));
     }
 
     /// <summary>
-    /// Copies another instance's categories AND per-mod settings onto the mods this pack shares
-    /// with it.
+    /// Copies another instance's categories and per-mod settings onto the mods this pack shares with
+    /// it.
     /// </summary>
     /// <remarks>
-    /// The same flow the Categories tab offers, reachable from the hub's Tools menu: people run the
-    /// same mods across several instances, and the import is a pack-level action rather than
-    /// something that belongs only inside the category workbench. Mods match by their store id, so
-    /// the same mod at a different version still lines up, and the import only ever adds.
+    /// Same flow as on the Categories tab. Mods match by store id, so different versions still line
+    /// up, and the import only ever adds.
     /// </remarks>
     private async Task ImportModSettingsAsync()
     {
@@ -1440,7 +1376,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
                 return;
             }
 
-            var picker = new PackPickerDialog(packs, "Import mod settings from…",
+            var picker = new PackPickerDialog(packs, "Import mod settings from...",
                 "Pick the instance to copy categories and per-mod settings from. Mods are matched across instances by their store id, so the same mod at a different version still lines up.",
                 "Preview") { Owner = _shell };
             if (picker.ShowDialog() != true || picker.SelectedPackId is not { } sourceId) return;
@@ -1449,7 +1385,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             var plan = App.State.ModMetadata.PlanCategoryImport(sourceId, _pack.Id, _all);
             if (plan.IsEmpty)
             {
-                ListStatus.Text = $"Nothing to import from {source.Name} — this pack already has its categories and settings.";
+                ListStatus.Text = $"Nothing to import from {source.Name} - this pack already has its categories and settings.";
                 return;
             }
 
@@ -1462,7 +1398,6 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
                               $"tagged {plan.TaggedMods} mod(s)" +
                               (plan.FlaggedMods > 0 ? $" and copied settings onto {plan.FlaggedMods}" : "") +
                               $" from {source.Name}.";
-            RefreshCategoryFilter();
             ListEdited();
         }
         catch (Exception ex) { ListStatus.Text = "Import failed: " + ex.Message; }
@@ -1471,12 +1406,11 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     // ── exporting the mod set ────────────────────────────────────────────────────
 
     /// <summary>
-    /// The pack's mod set as text — one line per mod with its version, store, state and page link.
+    /// The pack's mod set as text: one line per mod with its version, store, state and page link.
     /// </summary>
     /// <remarks>
-    /// Written as Markdown because that is what it gets pasted into: a Discord message, a forum post,
-    /// a GitHub issue asking "what are you running". Grouped by category when the List view is sorted
-    /// that way, so the export is the list the user is looking at rather than a different one.
+    /// Markdown, since it usually gets pasted into Discord, a forum or a GitHub issue. Grouped by
+    /// category when the List view is sorted that way, to match what is on screen.
     /// </remarks>
     private string BuildModListText()
     {
@@ -1495,7 +1429,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             if (m.IsExtra) bits.Add("extra");
             if (m.IsSideRestricted) bits.Add(m.Side == ModSide.Client ? "client-only" : "server-only");
             var line = $"- {m.DisplayName} ({string.Join(", ", bits)})";
-            if (m.PageUrl is { } url) line += $" — {url}";
+            if (m.PageUrl is { } url) line += $" - {url}";
             sb.AppendLine(line);
         }
 
@@ -1522,7 +1456,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (_all.Count == 0) { ListStatus.Text = "Nothing to copy."; return; }
         ListStatus.Text = ClipboardHelper.TrySetText(BuildModListText())
             ? $"Copied {_all.Count} mod(s) to the clipboard."
-            : "Could not reach the clipboard — try again.";
+            : "Could not reach the clipboard - try again.";
     }
 
     private async Task ExportModListAsync()
@@ -1576,12 +1510,12 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             App.State.ModInventory.SetEnabled(m, enabled);
             n++;
         }
-        ListStatus.Text = n == 0 ? "No “extra” mods to change." : $"{(enabled ? "Enabled" : "Disabled")} {n} extra mod(s).";
+        ListStatus.Text = n == 0 ? "No 'extra' mods to change." : $"{(enabled ? "Enabled" : "Disabled")} {n} extra mod(s).";
         await ReloadAsync();
     }
 
-    /// <summary>Copy every side-marked (client/server) mod into a side-mods/ folder split by side —
-    /// only when sharing is enabled (§6).</summary>
+    /// <summary>Copies every side-marked (client/server) mod into a side-mods/ folder split by side.
+    /// Only when sharing is enabled.</summary>
     private void ExportSideFolder()
     {
         if (!_pack.IsShared)
@@ -1607,7 +1541,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             catch { /* skip locked */ }
         }
         ListStatus.Text = $"Exported {n} side-marked mod(s) to side-mods/.";
-        try { Process.Start(new ProcessStartInfo(root) { UseShellExecute = true }); } catch { }
+        SafeLaunch.OpenFolder(root);
     }
 
     // ── card / row handlers ─────────────────────────────────────────────────────
@@ -1615,15 +1549,9 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private static PackMod? ModOf(object sender) => (sender as FrameworkElement)?.DataContext as PackMod;
 
     /// <summary>
-    /// Double-clicking a card opens the mod's page; a single click still only ticks the checkbox.
+    /// Double-clicking a card opens the mod's page; a single click only ticks the checkbox.
     /// </summary>
-    /// <remarks>
-    /// Every other mod list in the app already answers a double-click — a row in the pack's Mod tab
-    /// opens the mod, a card on the planning board opens its note, a row in the Categories panes
-    /// moves the mod — so the list people spend the most time in was the one ignoring the gesture.
-    /// The click count is what separates the two, and the row's own buttons handle their clicks
-    /// before this sees them.
-    /// </remarks>
+    /// <remarks>The row's own buttons handle their clicks before this sees them.</remarks>
     private void OnCardLeftClick(object sender, MouseButtonEventArgs e)
     {
         if (e.ClickCount < 2 || ModOf(sender) is not { } mod) return;
@@ -1638,14 +1566,42 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         e.Handled = true;
     }
 
-    private void OnOptions(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Clicking a mod's name opens its store page in the browser.
+    /// </summary>
+    /// <remarks>
+    /// Marked handled so <see cref="OnCardLeftClick"/> doesn't also open the detail page. A mod with no
+    /// store page (an external jar) falls through to the normal row click.
+    /// </remarks>
+    private void OnModNameClick(object sender, MouseButtonEventArgs e)
     {
-        if (ModOf(sender) is { } mod) ShowOptions(mod, sender as FrameworkElement);
+        if (e.ClickCount != 1 || ModOf(sender) is not { PageUrl: { } url }) return;
+        ModOptionsMenu.OpenUrl(url);
+        e.Handled = true;
     }
 
-    /// <summary>Right-click on the empty part of the list (below or between cards) — the same
-    /// pack-level actions the planning board offers on empty canvas. A right-click that lands on a
-    /// card is handled there, so it never reaches this.</summary>
+    /// <summary>Left-click on the "...": the short menu of common actions.</summary>
+    private void OnOptions(object sender, RoutedEventArgs e)
+    {
+        if (ModOf(sender) is not { } mod) return;
+        var menu = ModOptionsMenu.BuildQuick(TargetsFor(mod), BuildCtx());
+        menu.PlacementTarget = sender as UIElement;
+        menu.Placement = PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    /// <summary>Right-click on the "...": every option, the same menu a right-click on the row gives.</summary>
+    /// <remarks>Must set <c>e.Handled</c>, or the event bubbles to the row's
+    /// <see cref="OnCardRightClick"/> and opens a second menu.</remarks>
+    private void OnOptionsRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (ModOf(sender) is not { } mod) return;
+        ShowOptions(mod, sender as FrameworkElement);
+        e.Handled = true;
+    }
+
+    /// <summary>Right-click on the empty part of the list: the same pack-level actions the planning
+    /// board offers on empty canvas. Right-clicks on cards are handled there.</summary>
     private void OnListBackgroundRightClick(object sender, MouseButtonEventArgs e)
     {
         var menu = new ContextMenu { PlacementTarget = sender as UIElement };
@@ -1730,16 +1686,15 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         return selected.Count > 0 && mod.IsSelected ? selected : new List<PackMod> { mod };
     }
 
-    /// <summary>The last checkbox clicked without Shift — the anchor a Shift-click extends from.</summary>
+    /// <summary>The last checkbox clicked without Shift: the anchor a Shift-click extends from.</summary>
     private PackMod? _selectionAnchor;
 
     /// <summary>
-    /// Ticking a row's checkbox. Shift-click extends from the last plain click to this row and gives
-    /// every row between them this checkbox's new state — the range select every file list has.
+    /// Ticking a row's checkbox. Shift-click gives every row from the last plain click to this one
+    /// this checkbox's new state.
     /// </summary>
-    /// <remarks>Ctrl is not handled because a checkbox list is already additive: each click toggles
-    /// one row and leaves the rest alone. The anchor deliberately stays put on a Shift-click, so
-    /// shift-clicking again re-draws the range from the same start rather than walking away.</remarks>
+    /// <remarks>No Ctrl handling: checkbox clicks are already additive. The anchor stays put on a
+    /// Shift-click, so the next Shift-click redraws the range from the same start.</remarks>
     private void OnSelectToggle(object sender, RoutedEventArgs e) =>
         ApplySelectionClick((sender as FrameworkElement)?.DataContext as PackMod,
             Keyboard.Modifiers.HasFlag(ModifierKeys.Shift));
@@ -1790,10 +1745,10 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         SelectionBar.Visibility = n == 0 ? Visibility.Collapsed : Visibility.Visible;
         if (n == 0) return;
 
-        SelectionLabel.Text = $"{n} selected — Shift-click to select a range · Ctrl+A all · Esc clear · Del delete";
+        SelectionLabel.Text = $"{n} selected - Shift-click to select a range · Ctrl+A all · Esc clear · Del delete";
 
-        // "Update" carries its count the way the toolbar's Update all does, and goes flat when the
-        // selection has nothing to update — so the button answers the question before it is pressed.
+        // "Update" shows its count like the toolbar's Update all, and goes flat when nothing selected
+        // has an update.
         var updatable = selected.Count(m => m.HasUpdate);
         BulkUpdateButton.Content = updatable > 0 ? $"Update ({updatable})" : "Update";
         BulkUpdateButton.IsEnabled = updatable > 0;
@@ -1802,8 +1757,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     }
 
     // ── selection-bar bulk actions ───────────────────────────────────────────────
-    // Each one is the same call the right-click menu makes, so there is exactly one implementation
-    // of "enable these mods" and it is the one with the dependency and conflict rules in it.
+    // Each makes the same call as the right-click menu, so the dependency and conflict rules live
+    // in one place.
 
     private IReadOnlyList<PackMod> Selected() => _all.Where(m => m.IsSelected).ToList();
 
@@ -1844,7 +1799,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private async Task SetEnabledManyAsync(IReadOnlyList<PackMod> mods, bool enabled)
     {
         var list = mods.ToList();
-        // Ask once, before anything moves, rather than once per mod part-way through the run.
+        // Ask once up front, not once per mod part-way through the run.
         if (enabled)
         {
             var clashing = list.Where(m => EnabledConflictsFor(m).Count > 0).ToList();
@@ -1864,15 +1819,14 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         var updatable = mods.Where(m => m.HasUpdate && m.LatestVersion is not null).ToList();
         if (updatable.Count == 0) { ListStatus.Text = "No updates available for the selection."; return; }
 
-        // Update-locked mods sit out a bulk run — that's what the lock is for. Aiming at a single
-        // locked mod is a deliberate act though, so that one offers the override instead.
+        // Update-locked mods sit out a bulk run. Updating a single locked mod offers the override.
         var held = updatable.Where(m => m.Meta.UpdateLocked).ToList();
         var run  = updatable.Where(m => !m.Meta.UpdateLocked).ToList();
         if (run.Count == 0)
         {
             if (held.Count > 1)
             {
-                ListStatus.Text = $"All {held.Count} mods with updates are locked — unlock them to update.";
+                ListStatus.Text = $"All {held.Count} mods with updates are locked - unlock them to update.";
                 return;
             }
             if (!await ConfirmLockedUpdateAsync(held[0])) { ListStatus.Text = ""; return; }
@@ -1883,7 +1837,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         var done = 0;
         foreach (var m in run)
         {
-            ListStatus.Text = $"Updating {m.DisplayName}…";
+            ListStatus.Text = $"Updating {m.DisplayName}...";
             try { if (await ModUpdater.InstallVersionAsync(m, m.LatestVersion!)) done++; }
             catch (Exception ex) { ListStatus.Text = "Update failed: " + ex.Message; }
         }
@@ -1891,8 +1845,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         await ReloadAsync();
     }
 
-    /// <summary>Asks before pushing an update past a lock the user set. Returns true to go ahead.
-    /// The lock stays on — overriding it once isn't the same as wanting it gone.</summary>
+    /// <summary>Asks before updating past a lock the user set. Returns true to go ahead. The lock
+    /// stays on afterwards.</summary>
     private Task<bool> ConfirmLockedUpdateAsync(PackMod mod) =>
         AppDialog.ConfirmAsync(_shell, "Mod is locked",
             $"{mod.DisplayName} is locked to its current version, so bulk updates skip it.\n\n" +
@@ -1924,13 +1878,11 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     {
         var dir = Path.GetDirectoryName(mod.FilePath);
         if (dir is null) return;
-        try { Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true }); }
-        catch (Exception ex) { ListStatus.Text = ex.Message; }
+        if (!SafeLaunch.OpenFolder(dir)) ListStatus.Text = "Could not open the folder.";
     }
 
-    /// <param name="confirmConflicts">Ask before enabling a mod that is recorded as incompatible with
-    /// something already on. Off for a bulk run, where a dialog per mod would be unusable — the bulk
-    /// caller reports the count in the status strip instead.</param>
+    /// <param name="confirmConflicts">Ask before enabling a mod recorded as incompatible with something
+    /// already on. Off for bulk runs, which report the count in the status strip instead.</param>
     private async Task SetEnabledAsync(PackMod mod, bool enabled, bool confirmConflicts = true)
     {
         var adv = App.State.ModMetadata.Advanced(_pack.Id);
@@ -1966,9 +1918,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         }
         else
         {
-            // Enabling a mod pulls its required dependencies back on so it never runs half-installed —
-            // unless the Advanced tab's "Auto-download and enable required dependencies" is off, which
-            // is the whole point of that checkbox.
+            // Enabling a mod also enables its required dependencies, unless the Advanced tab's
+            // "Auto-download and enable required dependencies" is off.
             var deps = adv.AutoDownloadDependencies
                 ? ModGraphService.PlanEnable(_all, mod)
                 : Array.Empty<PackMod>();
@@ -1987,8 +1938,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         ListEdited();
     }
 
-    /// <summary>The enabled mods that <paramref name="mod"/> is recorded as incompatible with — in
-    /// either direction, since metadata written by an older build may only carry one of them.</summary>
+    /// <summary>The enabled mods that <paramref name="mod"/> is recorded as incompatible with, in
+    /// either direction, since metadata from older builds may only record one side.</summary>
     private List<PackMod> EnabledConflictsFor(PackMod mod)
     {
         var keys = new HashSet<string>(mod.CandidateKeys, StringComparer.OrdinalIgnoreCase);
@@ -1999,8 +1950,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             .ToList();
     }
 
-    /// <summary>"A", "A and B", "A, B and C" — and "A, B and 4 more" past three, so a warning about a
-    /// wide conflict stays a sentence.</summary>
+    /// <summary>"A", "A and B", "A, B and C", and "A, B and 4 more" past three.</summary>
     private static string NameList(IReadOnlyList<PackMod> mods)
     {
         var names = mods.Select(m => m.DisplayName).ToList();
@@ -2014,8 +1964,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         };
     }
 
-    /// <summary>Re-render the list and mark the heavy secondary views stale — used wherever a List-view
-    /// action actually changes mod data (flags, categories, enable/disable, notes, updates).</summary>
+    /// <summary>Re-renders the list and marks the heavy secondary views stale. Used wherever a
+    /// List-view action changes mod data (flags, categories, enable/disable, notes, updates).</summary>
     private void ListEdited()
     {
         // A flag edit can be the one that creates (or clears) a conflict, and the pill has to follow.
@@ -2030,16 +1980,16 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
 
         if (mod.Meta.UpdateLocked && !await ConfirmLockedUpdateAsync(mod)) { ListStatus.Text = ""; return; }
 
-        // Warn before updating a mod the user flagged as update-incompatible (§7).
+        // Warn before updating a mod the user flagged as update-incompatible.
         if (mod.Meta.UpdateIncompatible && App.State.ModMetadata.Advanced(_pack.Id).WarnOnUpdateIncompatible)
         {
             var go = await AppDialog.ConfirmAsync(_shell, "Update warning",
-                $"{mod.DisplayName} is marked as update-incompatible — updating it may break your setup.\n\nUpdate anyway?",
+                $"{mod.DisplayName} is marked as update-incompatible - updating it may break your setup.\n\nUpdate anyway?",
                 "Update", "Cancel", danger: true);
             if (!go) return;
         }
 
-        ListStatus.Text = $"Updating {mod.DisplayName}…";
+        ListStatus.Text = $"Updating {mod.DisplayName}...";
         try
         {
             var file = mod.LatestVersion.Files.FirstOrDefault(f => f.IsPrimary) ?? mod.LatestVersion.Files.FirstOrDefault();
@@ -2047,11 +1997,16 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             file = await EnsureDownloadableAsync(mod.LatestVersion, file);
             if (string.IsNullOrWhiteSpace(file.DownloadUrl)) { ListStatus.Text = "No downloadable file."; return; }
 
-            // Keep a disabled mod disabled after update, and strip any path components from the
-            // store-supplied filename (see ModUpdater.InstallVersionAsync).
-            var safeName = Path.GetFileName(file.Filename);
-            var fileName = mod.Enabled ? safeName : safeName + ".disabled";
-            var dest = Path.Combine(Path.GetDirectoryName(mod.FilePath)!, fileName);
+            // Keep a disabled mod disabled after update. The file name comes from the store, so only
+            // a plain name is written (see ModUpdater.InstallVersionAsync).
+            var fileName = mod.Enabled ? file.Filename : file.Filename + ".disabled";
+            if (!PathSafety.IsSafeFileName(file.Filename)
+                || PathSafety.ResolveFileName(Path.GetDirectoryName(mod.FilePath)!, fileName) is not { } dest)
+            {
+                AppLog.Log(nameof(ModManagementView), $"Did not update {mod.DisplayName}: the store's file name is not a plain file name: {file.Filename}");
+                ListStatus.Text = "Update failed: the store gave a file name that cannot be used.";
+                return;
+            }
             await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, dest);
             if (!string.Equals(mod.FilePath, dest, StringComparison.OrdinalIgnoreCase) && File.Exists(mod.FilePath))
                 File.Delete(mod.FilePath);
@@ -2075,7 +2030,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     {
         if (mod.PrimaryMod is null) { ListStatus.Text = $"{mod.DisplayName} isn't identified yet."; return; }
 
-        ListStatus.Text = $"Loading versions for {mod.DisplayName}…";
+        ListStatus.Text = $"Loading versions for {mod.DisplayName}...";
         var versions = await ModUpdater.FetchVersionsAsync(mod.PrimaryMod);
         if (versions.Count == 0) { ListStatus.Text = $"No versions found for {mod.DisplayName}."; return; }
 
@@ -2084,9 +2039,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             mod.PrimaryVersion?.Id, mod.PrimaryVersion?.VersionNumber, mod.Meta.UpdateLocked);
         if (chosen is null) { ListStatus.Text = ""; return; }
 
-        // A lock holds the mod at its version whichever direction the change comes from — unless the
-        // picker's own "Keep this version" box is ticked, which is the user saying where the lock
-        // should land, so asking them to confirm moving it would be asking the same question twice.
+        // A lock holds the mod at its version in either direction, unless the picker's "Keep this
+        // version" box is ticked, which already says where the lock should go.
         if (mod.Meta.UpdateLocked && !chosen.KeepVersion && !await ConfirmLockedUpdateAsync(mod))
         { ListStatus.Text = ""; return; }
 
@@ -2094,12 +2048,12 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         if (mod.Meta.UpdateIncompatible && App.State.ModMetadata.Advanced(_pack.Id).WarnOnUpdateIncompatible)
         {
             var go = await AppDialog.ConfirmAsync(_shell, "Update warning",
-                $"{mod.DisplayName} is marked as update-incompatible — changing its version may break your setup.\n\nContinue?",
+                $"{mod.DisplayName} is marked as update-incompatible - changing its version may break your setup.\n\nContinue?",
                 "Install", "Cancel", danger: true);
             if (!go) return;
         }
 
-        ListStatus.Text = $"Installing {mod.DisplayName} {chosen.Version.VersionNumber}…";
+        ListStatus.Text = $"Installing {mod.DisplayName} {chosen.Version.VersionNumber}...";
         try
         {
             if (await ModUpdater.InstallVersionAsync(mod, chosen.Version))

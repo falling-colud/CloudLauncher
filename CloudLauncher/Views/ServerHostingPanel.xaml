@@ -1,0 +1,374 @@
+<UserControl x:Class="CloudLauncher.Views.ServerHostingPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:v="clr-namespace:CloudLauncher.Views">
+    <UserControl.Resources>
+        <Style x:Key="MiniCommandButton" TargetType="Button" BasedOn="{StaticResource SubtleButton}">
+            <Setter Property="Padding" Value="9,4"/>
+            <Setter Property="Margin" Value="0,0,5,0"/>
+            <Setter Property="MinHeight" Value="28"/>
+        </Style>
+        <Style x:Key="CountValue" TargetType="TextBlock" BasedOn="{StaticResource H3}">
+            <Setter Property="FontSize" Value="18"/>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- ══ status header ═══════════════════════════════════════════════ -->
+        <slate:SlateBorder Grid.Row="0" Style="{StaticResource Card}" Padding="16" Margin="0,10,0,0">
+            <StackPanel>
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                        <Button x:Name="InstallButton" Style="{StaticResource HeaderActionButton}"
+                                Click="OnInstall" ToolTip="Mirror the pack into server-run/ and install the loader's server, without starting it">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE896;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                           Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                <TextBlock Text="Install" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="StartButton" Style="{StaticResource AccentButton}" Padding="14,6"
+                                Margin="0,0,8,0" Click="OnStart" ToolTip="Start this instance as a dedicated server on this PC">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE768;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                           Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                <TextBlock Text="Start" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="StopButton" Style="{StaticResource HeaderActionButton}"
+                                Click="OnStop" ToolTip="Save the world and shut the server down">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="StopGlyph" Text="&#xE71A;" FontFamily="{DynamicResource IconFont}"
+                                           FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="StopLabel" Text="Stop" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="RestartButton" Style="{StaticResource HeaderActionButton}"
+                                Click="OnRestart" ToolTip="Stop it, then start it again">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE895;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                           Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                <TextBlock Text="Restart" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="OpenFolderButton" Style="{StaticResource HeaderIconButton}"
+                                Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}"
+                                Click="OnOpenServerFolder" ToolTip="Open the server-run folder"/>
+                        <Button x:Name="RefreshButton" Style="{StaticResource HeaderIconButton}"
+                                Content="&#xE72C;" FontFamily="{DynamicResource IconFont}"
+                                Click="OnRefresh" ToolTip="Re-read the server folder (F5)"/>
+                    </StackPanel>
+
+                    <StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <slate:SlateBorder x:Name="StatusBadge" Style="{StaticResource Pill}" VerticalAlignment="Center">
+                                <TextBlock x:Name="StatusBadgeText" Style="{StaticResource PillText}" Text="-"/>
+                            </slate:SlateBorder>
+                            <TextBlock x:Name="StatusTitle" Style="{StaticResource H3}" Margin="10,0,0,0"
+                                       VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                        <TextBlock x:Name="StatusDetail" Style="{StaticResource Caption}" Margin="0,7,0,0"
+                                   TextWrapping="Wrap"/>
+                        <StackPanel x:Name="ConnectRow" Orientation="Horizontal" Margin="0,5,0,0"
+                                    Visibility="Collapsed">
+                            <TextBlock x:Name="ConnectLabel" Style="{StaticResource Caption}"
+                                       VerticalAlignment="Center" TextWrapping="Wrap"/>
+                            <Button x:Name="CopyAddressButton" Style="{StaticResource IconButton}"
+                                    Content="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                    Margin="6,0,0,0" Click="OnCopyAddress"
+                                    ToolTip="Copy the address players on your network type"/>
+                        </StackPanel>
+                    </StackPanel>
+                </DockPanel>
+
+                <!-- The EULA gate: the server won't start until the user ticks this. -->
+                <slate:SlateBorder x:Name="EulaPanel" Background="{DynamicResource Surface1Brush}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="8" Padding="12,9" Margin="0,14,0,0">
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" Style="{StaticResource LinkButton}"
+                                Content="Read the EULA" Click="OnOpenEula" VerticalAlignment="Center"/>
+                        <CheckBox x:Name="EulaCheck" Click="OnEulaToggled" VerticalAlignment="Center"
+                                  Content="I accept the Minecraft EULA"/>
+                    </DockPanel>
+                </slate:SlateBorder>
+                <TextBlock x:Name="EulaNote" Style="{StaticResource Caption}" Margin="0,6,0,0"
+                           TextWrapping="Wrap"/>
+
+                <!-- After a crash, its last log lines stay on screen here. -->
+                <slate:SlateBorder x:Name="CrashPanel" Background="{DynamicResource Surface2Brush}"
+                        BorderBrush="{DynamicResource DangerBrush}" BorderThickness="1"
+                        CornerRadius="8" Padding="12,9" Margin="0,12,0,0" Visibility="Collapsed">
+                    <DockPanel>
+                        <TextBlock Text="&#xE7BA;" FontFamily="{DynamicResource IconFont}" FontSize="14"
+                                   Foreground="{DynamicResource DangerBrush}" Margin="0,0,10,0"
+                                   VerticalAlignment="Top" DockPanel.Dock="Left"/>
+                        <StackPanel>
+                            <TextBlock x:Name="CrashTitle" FontWeight="SemiBold" FontSize="12"
+                                       Foreground="{DynamicResource TextPrimaryBrush}"/>
+                            <TextBlock x:Name="CrashLines" FontFamily="{DynamicResource MonoFont}" FontSize="11"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,6,0,0"
+                                       TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                    </DockPanel>
+                </slate:SlateBorder>
+            </StackPanel>
+        </slate:SlateBorder>
+
+        <!-- ══ the four things you do to a server ══════════════════════════ -->
+        <TabControl x:Name="InnerTabs" Grid.Row="1" Margin="0,12,0,0" SelectionChanged="OnInnerTabChanged">
+
+            <!-- ── console ─────────────────────────────────────────────── -->
+            <TabItem Header="Console">
+                <DockPanel Margin="0,10,0,0">
+                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <ToggleButton x:Name="FollowToggle" Style="{StaticResource ToolbarToggleButton}"
+                                          Content="&#xE70D;" IsChecked="True" Click="OnFollowToggled"
+                                          ToolTip="Follow the newest line. Scrolling up turns this off by itself."/>
+                            <Button Style="{StaticResource ToolbarIconButton}" Content="&#xE8C8;"
+                                    FontFamily="{DynamicResource IconFont}" Click="OnCopyConsole"
+                                    ToolTip="Copy the whole scrollback"/>
+                            <Button Style="{StaticResource MiniCommandButton}" Content="Clear"
+                                    Margin="0" Click="OnClearConsole"
+                                    ToolTip="Empty this view. The server's own log file is untouched."/>
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal">
+                            <Button Style="{StaticResource MiniCommandButton}" Content="list" Tag="list"
+                                    Click="OnQuickCommand" ToolTip="Who is online right now"/>
+                            <Button Style="{StaticResource MiniCommandButton}" Content="save-all" Tag="save-all"
+                                    Click="OnQuickCommand" ToolTip="Flush the world to disk"/>
+                            <Button Style="{StaticResource MiniCommandButton}" Content="tps" Tag="tps"
+                                    Click="OnQuickCommand"
+                                    ToolTip="Server tick rate - only on Paper/Spigot and some modded servers"/>
+                            <Button Style="{StaticResource MiniCommandButton}" Content="whitelist"
+                                    Tag="whitelist list" Click="OnQuickCommand" ToolTip="Who is on the whitelist"/>
+                        </StackPanel>
+                    </DockPanel>
+
+                    <DockPanel DockPanel.Dock="Bottom" Margin="0,8,0,0">
+                        <Button x:Name="SendButton" DockPanel.Dock="Right" Content="Send" Padding="12,4"
+                                Margin="8,0,0,0" Click="OnSendCommand" ToolTip="Run this command (Enter)"/>
+                        <TextBox x:Name="CommandBox" Padding="8,6" FontFamily="{DynamicResource MonoFont}"
+                                 PreviewKeyDown="OnCommandKeyDown"
+                                 ToolTip="Type a server command. Up and down walk back through what you have run here."/>
+                    </DockPanel>
+
+                    <slate:SlateBorder Background="{DynamicResource LogBackgroundBrush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6">
+                        <Grid>
+                            <v:LogTextView x:Name="ConsoleLog"/>
+                            <!-- Says the console is empty, so a blank log doesn't look
+                            broken. -->
+                            <TextBlock x:Name="ConsoleEmptyHint" Style="{StaticResource Muted}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       TextAlignment="Center" MaxWidth="420" TextWrapping="Wrap"
+                                       IsHitTestVisible="False"
+                                       Text="Nothing here yet. Install or Start the server and its whole output - the mirror, the loader installer and the server itself - arrives here."/>
+                        </Grid>
+                    </slate:SlateBorder>
+                </DockPanel>
+            </TabItem>
+
+            <!-- ── server settings ─────────────────────────────────────── -->
+            <TabItem Header="Server settings">
+                <Grid Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <!-- Memory and JVM arguments are the server's own settings, separate from the
+                    client's. -->
+                    <slate:SlateBorder Grid.Row="0" Style="{StaticResource Card}" Margin="0,0,0,12">
+                        <StackPanel>
+                            <TextBlock Text="Memory, Java and restarts" Style="{StaticResource H3}"
+                                       Margin="0,0,0,12"/>
+                            <DockPanel Margin="0,0,0,10">
+                                <TextBlock x:Name="RamValueLabel" DockPanel.Dock="Right" Style="{StaticResource Caption}"
+                                           VerticalAlignment="Center" MinWidth="190" TextAlignment="Right"/>
+                                <TextBlock Text="Server memory" Style="{StaticResource Caption}"
+                                           VerticalAlignment="Center" Width="120"/>
+                                <Slider x:Name="RamSlider" Minimum="1024" Maximum="32768" TickFrequency="512"
+                                        IsSnapToTickEnabled="True" Margin="10,0,14,0" VerticalAlignment="Center"
+                                        ValueChanged="OnRamChanged"/>
+                            </DockPanel>
+                            <StackPanel Orientation="Horizontal" Margin="120,0,0,10">
+                                <Button x:Name="RamInheritButton" Style="{StaticResource MiniCommandButton}"
+                                        Content="Use the client's value" Click="OnRamInherit"
+                                        ToolTip="Forget the server's own figure and follow the instance's memory slider again"/>
+                            </StackPanel>
+                            <DockPanel Margin="0,0,0,10">
+                                <TextBlock Text="Server JVM arguments" Style="{StaticResource Caption}"
+                                           VerticalAlignment="Center" Width="120"/>
+                                <TextBox x:Name="JvmArgsBox" Margin="10,0,0,0" FontFamily="{DynamicResource MonoFont}"
+                                         LostFocus="OnJvmArgsCommitted"
+                                         ToolTip="Added to the stock flags, not instead of them. Picking your own -XX:+Use...GC stands the stock G1 tuning aside."/>
+                            </DockPanel>
+                            <CheckBox x:Name="AutoRestartCheck" Click="OnAutoRestartToggled" Margin="120,2,0,0"
+                                      Content="Start it again by itself if it crashes"
+                                      ToolTip="Five tries with a growing delay, then it stays down with the reason on screen"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+
+                    <Border Grid.Row="1" x:Name="PropertiesHost" BorderThickness="0"/>
+                </Grid>
+            </TabItem>
+
+            <!-- ── players ─────────────────────────────────────────────── -->
+            <TabItem Header="Players">
+                <Grid Margin="0,10,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <DockPanel Grid.Row="0" Margin="0,0,0,10">
+                        <CheckBox x:Name="WhitelistOnCheck" DockPanel.Dock="Right" VerticalAlignment="Center"
+                                  Content="Whitelist on" Click="OnWhitelistToggled"
+                                  ToolTip="Turns the whitelist on or off. While the server is up this is sent as a command."/>
+                        <ComboBox x:Name="ListKindBox" Width="190" SelectionChanged="OnListKindChanged">
+                            <ComboBoxItem Content="Operators"/>
+                            <ComboBoxItem Content="Whitelist"/>
+                            <ComboBoxItem Content="Banned players"/>
+                            <ComboBoxItem Content="Banned IPs"/>
+                        </ComboBox>
+                        <TextBlock x:Name="ListCountLabel" Style="{StaticResource Caption}"
+                                   VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    </DockPanel>
+
+                    <DockPanel Grid.Row="1" Margin="0,0,0,10">
+                        <Button x:Name="AddEntryButton" DockPanel.Dock="Right" Padding="12,4" Margin="8,0,0,0"
+                                Click="OnAddEntry">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE710;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                           Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="AddEntryLabel" Text="Add" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <TextBox x:Name="EntryReasonBox" DockPanel.Dock="Right" Width="220" Margin="8,0,0,0"
+                                 Visibility="Collapsed" Padding="8,6"
+                                 ToolTip="Why they are banned. Players see this when they try to join."/>
+                        <TextBox x:Name="EntryNameBox" Padding="8,6" KeyDown="OnEntryBoxKeyDown"
+                                 ToolTip="A player name, or an IP address for the ban-IP list"/>
+                    </DockPanel>
+
+                    <Grid Grid.Row="2">
+                        <slate:SlateBorder x:Name="EntryListCard" Style="{StaticResource Card}" Padding="0">
+                            <ListBox x:Name="EntryList" BorderThickness="0" Background="Transparent">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <DockPanel Margin="10,7">
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                                    Content="&#xE74D;" FontFamily="{DynamicResource IconFont}"
+                                                    FontSize="12" Click="OnRemoveEntry" Tag="{Binding Name}"
+                                                    ToolTip="{Binding RemoveHint}"/>
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                                <TextBlock Text="{Binding Detail}" Style="{StaticResource Caption}"
+                                                           Margin="0,2,0,0" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </DockPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </slate:SlateBorder>
+                        <v:PageStateView x:Name="PlayersStateHost"/>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- ── files and mirror ────────────────────────────────────── -->
+            <TabItem Header="Files &amp; mirror">
+                <Grid Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="360"/>
+                        <ColumnDefinition Width="14"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <slate:SlateBorder Grid.Column="0" Style="{StaticResource Card}">
+                        <DockPanel>
+                            <DockPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                                <Button x:Name="MirrorRecheckButton" DockPanel.Dock="Right"
+                                        Style="{StaticResource IconButton}" Content="&#xE72C;"
+                                        FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                        Click="OnRecheckMirror" ToolTip="Work out again what would go to the server"/>
+                                <StackPanel>
+                                    <TextBlock Text="What goes to the server" Style="{StaticResource H3}"/>
+                                    <TextBlock x:Name="MirrorSubtitle" Style="{StaticResource Caption}"
+                                               Margin="0,2,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </DockPanel>
+
+                            <UniformGrid DockPanel.Dock="Top" Columns="2" Margin="0,0,0,12">
+                                <StackPanel Margin="0,0,10,10">
+                                    <TextBlock x:Name="MirrorLinkedValue" Style="{StaticResource CountValue}" Text="-"/>
+                                    <TextBlock Text="jars linked" Style="{StaticResource Caption}"/>
+                                </StackPanel>
+                                <StackPanel Margin="0,0,0,10">
+                                    <TextBlock x:Name="MirrorCopiedValue" Style="{StaticResource CountValue}" Text="-"/>
+                                    <TextBlock Text="files copied" Style="{StaticResource Caption}"/>
+                                </StackPanel>
+                                <StackPanel Margin="0,0,10,0">
+                                    <TextBlock x:Name="MirrorRemovedValue" Style="{StaticResource CountValue}" Text="-"/>
+                                    <TextBlock Text="stale files removed" Style="{StaticResource Caption}"/>
+                                </StackPanel>
+                                <StackPanel>
+                                    <TextBlock x:Name="MirrorSkippedValue" Style="{StaticResource CountValue}" Text="-"/>
+                                    <TextBlock Text="client-side or private files left out" Style="{StaticResource Caption}"
+                                               TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </UniformGrid>
+
+                            <TextBlock x:Name="ClientOnlyHeading" DockPanel.Dock="Top" Style="{StaticResource Caption}"
+                                       Margin="0,0,0,6" TextWrapping="Wrap"/>
+                            <!-- Collapsed when empty, so it doesn't look like a list that
+                            failed to load. -->
+                            <slate:SlateBorder x:Name="ClientOnlyBox" Visibility="Collapsed"
+                                    Background="{DynamicResource Surface1Brush}" CornerRadius="6"
+                                    BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1">
+                                <ListBox x:Name="ClientOnlyList" BorderThickness="0" Background="Transparent"
+                                         FontFamily="{DynamicResource MonoFont}" FontSize="11"/>
+                            </slate:SlateBorder>
+                        </DockPanel>
+                    </slate:SlateBorder>
+
+                    <slate:SlateBorder Grid.Column="2" Style="{StaticResource Card}" Padding="0">
+                        <DockPanel>
+                            <DockPanel DockPanel.Dock="Top" Margin="14,14,14,10">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                        Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                        Click="OnOpenOverrideFolder" ToolTip="Open this folder in Explorer"/>
+                                <StackPanel>
+                                    <TextBlock Text="Server-only files" Style="{StaticResource H3}"/>
+                                    <TextBlock x:Name="OverrideSubtitle" Style="{StaticResource Caption}"
+                                               Margin="0,2,0,0" TextWrapping="Wrap"
+                                               Text="Anything in this folder is laid over the mirrored pack after it is copied, so a config here wins. Mods in its mods folder are kept even though the pack has no such jar."/>
+                                </StackPanel>
+                            </DockPanel>
+                            <v:FolderView x:Name="OverrideFiles"/>
+                        </DockPanel>
+                    </slate:SlateBorder>
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- ══ status line ═════════════════════════════════════════════════ -->
+        <DockPanel Grid.Row="2" Margin="0,10,0,0">
+            <ProgressBar x:Name="BusyBar" DockPanel.Dock="Right" Width="140" Height="4"
+                         IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center"
+                         Margin="12,0,0,0"/>
+            <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+        </DockPanel>
+    </Grid>
+</UserControl>

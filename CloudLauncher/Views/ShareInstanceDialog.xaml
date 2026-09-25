@@ -1,0 +1,133 @@
+<UserControl x:Class="CloudLauncher.Views.ShareInstanceDialog"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:v="clr-namespace:CloudLauncher.Views">
+    <UserControl.Resources>
+        <v:NotEmptyToVisibilityConverter x:Key="NotEmptyVis"/>
+    </UserControl.Resources>
+
+    <!--  Fixed height so the card doesn't resize between its loading, list and empty states.
+    DockPanel lays out the buttons first, so a long list can't push them off the bottom.  -->
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="22" Width="560" Height="580">
+        <slate:SlateBorder.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </slate:SlateBorder.Effect>
+        <DockPanel>
+            <StackPanel DockPanel.Dock="Top" Margin="0,0,0,12">
+                <TextBlock Text="Share an instance" Style="{StaticResource H2}"/>
+                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0"
+                           Text="Pick the one you want other people to have. The next screen is its Share &amp; sync tab, where you invite them, copy a link and choose what they may do."/>
+            </StackPanel>
+
+            <!--  Only shown once the list reaches SearchFrom rows.  -->
+            <slate:SlateBorder x:Name="SearchBar" DockPanel.Dock="Top" Visibility="Collapsed"
+                    Background="{DynamicResource Surface1Brush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="6" MinHeight="34" Margin="0,0,0,10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="{DynamicResource IconFont}"
+                               FontSize="13" Foreground="{DynamicResource TextSecondaryBrush}"
+                               VerticalAlignment="Center" Margin="11,0,8,0"/>
+                    <Grid Grid.Column="1">
+                        <TextBlock x:Name="SearchPlaceholder" IsHitTestVisible="False"
+                                   Text="Search by name, Minecraft version or loader..."
+                                   Foreground="{DynamicResource TextTertiaryBrush}"
+                                   VerticalAlignment="Center" Margin="0,0,10,0"/>
+                        <TextBox x:Name="Search" Background="Transparent" BorderThickness="0"
+                                 VerticalAlignment="Center" Margin="0,0,10,0" TextChanged="OnSearch"
+                                 GotKeyboardFocus="OnSearchFocus" LostKeyboardFocus="OnSearchFocus">
+                            <TextBox.Template>
+                                <ControlTemplate TargetType="TextBox">
+                                    <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+                                </ControlTemplate>
+                            </TextBox.Template>
+                        </TextBox>
+                    </Grid>
+                </Grid>
+            </slate:SlateBorder>
+
+            <Grid DockPanel.Dock="Bottom" Margin="0,12,0,0">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Content="Cancel" Style="{StaticResource SubtleButton}"
+                            MinWidth="92" Margin="0,0,8,0" Click="OnCancel"/>
+                    <Button x:Name="AcceptButton" Content="Share it"
+                            Style="{StaticResource AccentButton}" MinWidth="150"
+                            IsEnabled="False" Click="OnAccept"/>
+                </StackPanel>
+            </Grid>
+
+            <!--  What the accent button will do for the selected instance. Fixed at three lines (the
+            name is trimmed) so the list doesn't move up and down as the selection changes.  -->
+            <TextBlock x:Name="SelectionNote" DockPanel.Dock="Bottom" Style="{StaticResource Caption}"
+                       TextWrapping="Wrap" Height="48" Margin="0,10,0,0"/>
+
+            <!--  The instances that can't be picked, and why.  -->
+            <TextBlock x:Name="ExcludedNote" DockPanel.Dock="Bottom" Style="{StaticResource Caption}"
+                       Foreground="{DynamicResource TextTertiaryBrush}" TextWrapping="Wrap"
+                       Margin="0,10,0,0" Visibility="Collapsed"/>
+
+            <slate:SlateBorder Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                    BorderThickness="1" CornerRadius="6">
+                <Grid>
+                    <ListBox x:Name="List" Background="Transparent" BorderThickness="0"
+                             SelectionChanged="OnSelectionChanged" MouseDoubleClick="OnListDoubleClick"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="2,3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <slate:SlateBorder Grid.Column="0" Width="28" Height="28" CornerRadius="6"
+                                            Background="{DynamicResource Surface3Brush}"
+                                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                            Margin="0,0,10,0" VerticalAlignment="Center">
+                                        <TextBlock Text="{Binding Initial}" FontWeight="SemiBold" FontSize="12"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </slate:SlateBorder>
+
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,8,0">
+                                        <TextBlock Text="{Binding Name}"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <TextBlock Text="{Binding SubLine}" Style="{StaticResource Caption}"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+
+                                    <slate:SlateBorder Grid.Column="2" Style="{StaticResource Pill}"
+                                            Visibility="{Binding StateTag, Converter={StaticResource NotEmptyVis}}">
+                                        <TextBlock Text="{Binding StateTag}" Style="{StaticResource PillText}"/>
+                                    </slate:SlateBorder>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!--  Loading, no-match and sign-in messages, drawn over the list.  -->
+                    <StackPanel x:Name="NotePanel" VerticalAlignment="Center" Margin="26,0"
+                                Visibility="Collapsed">
+                        <TextBlock x:Name="NoteTitle" Style="{StaticResource Body}"
+                                   TextWrapping="Wrap" TextAlignment="Center"/>
+                        <TextBlock x:Name="NoteBody" Style="{StaticResource Caption}"
+                                   TextWrapping="Wrap" TextAlignment="Center" Margin="0,6,0,0"/>
+                    </StackPanel>
+                </Grid>
+            </slate:SlateBorder>
+        </DockPanel>
+    </slate:SlateBorder>
+</UserControl>

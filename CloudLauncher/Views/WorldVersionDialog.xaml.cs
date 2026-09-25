@@ -2,22 +2,14 @@ using System.Windows;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// Collects the version string and changelog for a hosted world upload.
-/// </summary>
-/// <remarks>
-/// The upload flow used to ask for a version string through <see cref="SimpleInputDialog"/> and pass
-/// <c>null</c> as the changelog, so every published version arrived with an empty one even though the
-/// server stores it and the Versions list shows it. One dialog with both fields is the smallest thing
-/// that fixes that.
-/// </remarks>
+/// <summary>Collects the version string and changelog for a hosted world upload.</summary>
 public partial class WorldVersionDialog : Window
 {
     public string Version { get; private set; } = "";
     public string? Changelog { get; private set; }
 
-    /// <param name="subtitle">One line naming the world and how large the upload will be, so the
-    /// person can back out before a long upload rather than during it.</param>
+    /// <param name="subtitle">Names the world and the upload size, so the person can back out
+    /// before a long upload starts.</param>
     public WorldVersionDialog(string subtitle, string suggestedVersion)
     {
         InitializeComponent();
@@ -32,7 +24,7 @@ public partial class WorldVersionDialog : Window
         if (string.IsNullOrEmpty(version))
         {
             VersionBox.Focus();
-            return; // nothing to publish under — leave the dialog open rather than guessing a name
+            return; // keep the dialog open rather than guess a version
         }
         Version = version;
         Changelog = string.IsNullOrWhiteSpace(ChangelogBox.Text) ? null : ChangelogBox.Text.Trim();

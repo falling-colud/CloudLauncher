@@ -1,560 +1,854 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using CloudLauncher.Services;
 using CloudLauncher.Shared;
-using Microsoft.Win32;
 
 namespace CloudLauncher.Views;
 
-public partial class ResourcePacksView : Page
+/// <summary>Every resource pack on this PC, in a list, grouped into folders you make.</summary>
+/// <remarks>
+/// <para>Each row has one switch, the pack's "on by default" bit: on means every compatible
+/// instance gets it, and the pack's own page (<see cref="LocalResourcePackDetailView"/>) narrows
+/// that down. Folders are named lists in <see cref="AppSettings.ResourcePackFolders"/>, as on the
+/// Instances page; nothing moves on disk when a pack is filed.</para>
+/// <para>Load order is per instance (options.txt), so it is edited on that instance's Resources
+/// tab. #1 is the pack that wins.</para>
+/// <para>Rows are painted from <see cref="ScanCache{T}"/> first, because reading a pack's name and
+/// icon means opening its zip (see <see cref="PageRefresh"/>). The page is reused
+/// (<see cref="IReusablePage"/>): subscriptions are made in Loaded and dropped in Unloaded.</para>
+/// </remarks>
+public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
 {
     private readonly MainWindow _shell;
-    private readonly ObservableCollection<ResourcePackChipVm> _chips = new();
-    private readonly ObservableCollection<RpBrowseRowVm> _browseRows = new();
-    private readonly ObservableCollection<ResourcePackScannerRowVm> _scanRows = new();
-    private readonly ObservableCollection<FolderChipRow> _folderChips = new();
-    private readonly List<ModVersion> _cachedExternalVers = new();
+    private readonly ObservableCollection<RpFolderChipVm> _folderChips = new();
 
-    private ResourcePackChipVm? _activeChipVm;
-    private ResourcePackChipVm? _installedChipVm;
-    private CancellationTokenSource _cts = new();
+    /// <summary>Everything the scan found; <see cref="ApplyFilter"/> narrows it for display.</summary>
+    private readonly ObservableCollection<ContentRow> _all = new();
+
+    /// <summary>Stops the scope ComboBox reacting to its own fill: setting ItemsSource and then
+    /// SelectedItem raises SelectionChanged synchronously.</summary>
+    private readonly Reentrancy _filling = new();
+
+    private readonly PageState _state;
+    private CancellationTokenSource? _scanCts;
 
     private List<PackSummary> _packs = new();
-    private UniformGrid? _rpUniform;
+    private RpModel _model = new();
     private ResourcePackSortMode _sortMode;
     private string? _activeFolder;
+    private Guid? _scopePackId;
 
-    private ResourcePackScannerRowVm? _focusedRow;
-    private HashSet<string> _installedNames = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Why the instance list may be old (offline). The next field holds the
+    /// note <see cref="PageRefresh"/> writes while a remembered scan is shown; the
+    /// filter re-applies both.</summary>
+    private string? _staleNote;
+    private string? _cacheNote;
 
-    private ModSummary? _selExternal;
-    private HostedResourcePackDetail? _selHostedDetail;
-    private string? _projectUrl;
+    /// <summary>What <see cref="ResourcePackConflicts"/> found in the scoped instance, or null. Kept
+    /// because computing it reads every pack's zip.</summary>
+    private string? _conflictNote;
 
-    private string _search = "";
-    private string? _filterMc;
-    private int _off;
-    private bool _busy;
-    private bool _more = true;
+    /// <summary>Id of the trailing "New folder" chip. <see cref="IsReservedFolderName"/> refuses
+    /// folder names starting with a colon, so it can't collide with a user folder.</summary>
+    private const string NewFolderChipId = ":new";
 
-    private const int PageSize = 25;
-    private const int BrowseCap = 200;
-    private const double CardW = 220;
-    private const double SearchTiny = 36;
-    private const double SearchWide = 260;
+    /// <summary>The plus on the "New folder" chip. The shared chip style draws that chip outlined
+    /// (FolderChipBorder in Themes/Controls.xaml).</summary>
+    private const string NewFolderGlyph = "";
+
+    /// <summary>A remembered row, kept across restarts. The icon is left out: a few
+    /// hundred base64 PNGs would blow the cache's size budget, and the in-session meta
+    /// cache makes icons cheap anyway.</summary>
+    /// <remarks>Changing this shape discards every existing cached scan.</remarks>
+    public sealed record CachedRpRow(
+        string FileName,
+        string FilePath,
+        string DisplayName,
+        DateTimeOffset Modified,
+        long SizeBytes,
+        bool CompatibleWithAll,
+        string CompatibleCsv,
+        bool IsLocal,
+        bool IsFolder,
+        int StackIndex,
+        string Description,
+        int PackFormat);
+
+    private static readonly ScanCache<CachedRpRow> Cache =
+        ScanCaches.For<CachedRpRow>(ScanKinds.ResourcePacks);
 
     public ResourcePacksView(MainWindow shell)
     {
         InitializeComponent();
         _shell = shell;
-        _sortMode = App.State.Settings.ResourcePackSortMode;
-        SourceStrip.ItemsSource = _chips;
-        ResultsList.ItemsSource = _browseRows;
-        RpList.ItemsSource = _scanRows;
+        // Manual (the old drag order) has no menu item any more, but older settings files can still
+        // name it. Map it to a mode the sort menu can show.
+        _sortMode = App.State.Settings.ResourcePackSortMode == ResourcePackSortMode.Manual
+            ? ResourcePackSortMode.Modified
+            : App.State.Settings.ResourcePackSortMode;
         FolderStrip.ItemsSource = _folderChips;
-        ModTabs.SelectionChanged += OnModTabsChanged;
 
+        PackList.Configure(new ContentListHost
+        {
+            Open = OpenRow,
+            Toggled = ToggleRowAsync,
+            // A switch, since any number of packs can be on at once. The Shaders page uses Choice.
+            RowControl = ContentRowControl.Toggle,
+            Menu = BuildRowMenu,
+            Status = Okay
+        });
+
+        _state = new PageState(PackList, PageStateHost, nameof(ResourcePacksView))
+            .Copy(PageCopy.ResourcePacks)
+            .Slots(CountLabel, StatusLabel, BusyBar, BusyCancelButton)
+            .DisableWhileBusy(RefreshButton, SortButton, PackScopeBox);
+        _state.EmptyCopy(
+            "No resource packs yet",
+            "Import a pack you already have, or find one in the store. Anything an instance already "
+            + "has shows up here too, and one switch is all it takes to have it handed to every "
+            + "compatible instance.",
+            "Import a pack",
+            () => OnImport(this, new RoutedEventArgs()));
+        _state.RetryRequested += () => _ = LoadAsync(force: true);
+        _state.CancelRequested += () =>
+        {
+            _scanCts?.Cancel();
+            _state.Cancelled("Scan stopped.");
+        };
+
+        SearchBox.TextChangedDebounced += (_, _) => ApplyFilter();
+
+        // Subscribed on Loaded and removed on Unloaded. The page is reused (IReusablePage), so
+        // subscribing in the constructor would leave these dead after the first navigation.
         Loaded += async (_, _) =>
         {
-            await InitializeChipsAsync();
             Window.GetWindow(this)!.PreviewKeyDown += GlobalKeys;
-            // The chips and folder chips are painted in code, so they would keep the old accent after
-            // a theme change until the screen was navigated away from and back.
-            ThemeService.Changed += OnThemeChanged;
+            App.State.ConnectivityChanged += OnConnectivityChanged;
+            await LoadAsync();
         };
         Unloaded += (_, _) =>
         {
-            if (Window.GetWindow(this) is Window w)
-                w.PreviewKeyDown -= GlobalKeys;
-            ThemeService.Changed -= OnThemeChanged;
-            _cts.Cancel();
+            if (Window.GetWindow(this) is Window w) w.PreviewKeyDown -= GlobalKeys;
+            App.State.ConnectivityChanged -= OnConnectivityChanged;
+            _scanCts?.Cancel();
         };
     }
 
-    // Render rich HTML/markdown descriptions in an embedded WebView2. Its HWND draws over
-    // WPF (airspace), so hide it off-tab. Scrolling is native — no manual wheel routing.
-    private void OnModTabsChanged(object sender, SelectionChangedEventArgs e)
+    // ── loading ──────────────────────────────────────────────────────────────
+
+    /// <summary>What one pass of the scan found. Assigned once, at the end of the worker.</summary>
+    private sealed class RpModel
     {
-        if (e.Source != ModTabs) return;
-        var onOverview = ModTabs.SelectedIndex == 0;
-        OverviewHost.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
-        OverviewBrowser.Visibility = onOverview ? Visibility.Visible : Visibility.Collapsed;
+        public List<LibraryItem> Library { get; init; } = [];
+        public List<RpInstalled> Installed { get; init; } = [];
+        public Dictionary<Guid, InstanceContentOverrides> Overrides { get; init; } = new();
+
+        /// <summary>Row key -> the numbers behind that row, so the filter and sort never parse row
+        /// text.</summary>
+        public Dictionary<string, RpRowFacts> Facts { get; } = new(StringComparer.Ordinal);
+
+        public DateTimeOffset? ScannedUtc { get; init; }
+        public int Failed { get; init; }
     }
 
-    private void ShowOverview(string? content, bool isMarkdown = false) => OverviewBrowser.Show(content, isMarkdown);
+    /// <summary>The counts behind one row.</summary>
+    /// <param name="Present">Instances holding this item's bytes (1 for
+    /// an instance's own file).</param>
+    /// <param name="On">Of those, the ones whose options.txt lists it.</param>
+    /// <param name="Reach">Instances this pack's switch currently puts it
+    /// in. Zero when it is off.</param>
+    /// <param name="Format">The pack's own <c>pack_format</c>. Null when the file does not say.</param>
+    private sealed record RpRowFacts(
+        int Present, int On, int Reach, long SizeBytes, DateTimeOffset Modified, int? Format = null);
 
-    private async Task InitializeChipsAsync()
+    /// <summary>One pack found inside one instance.</summary>
+    private sealed record RpInstalled(PackSummary Pack, ResourcePackInfo Info, ResourcePackMeta Meta);
+
+    /// <inheritdoc cref="IRefreshablePage.RefreshAsync"/>
+    /// <remarks>Re-reads the instance list and re-runs the scan, keeping the rows, scroll position and
+    /// selection.</remarks>
+    public Task RefreshAsync() => LoadAsync();
+
+    /// <summary>Paints the remembered scan, then re-reads the library and every instance.</summary>
+    /// <param name="force">Ignore the cache and re-walk the folders (Refresh, F5, and after this page
+    /// writes a file).</param>
+    private async Task LoadAsync(bool force = false)
     {
-        await Task.Yield(); // silence analyzer
-        _chips.Clear();
-        _installedChipVm = Vm("\uEDE3", "Installed", BrowseKind.Installed);
-        _chips.Add(_installedChipVm);
-        _chips.Add(DividerVm());
-        _chips.Add(Vm("\uE753", "CurseForge", BrowseKind.CurseForge));
-        _chips.Add(Vm("\uE753", "Modrinth", BrowseKind.Modrinth));
-        _chips.Add(Vm("\uE7C3", "CloudLauncher", BrowseKind.CloudPublic));
-        _chips.Add(DividerVm());
-        _chips.Add(Vm("\uE77B", "Personal", BrowseKind.CloudPersonal));
-        _chips.Add(Vm("\uE8F2", "Shared", BrowseKind.CloudShared));
-        _chips.Add(Vm("\uE716", "Teams", BrowseKind.CloudTeam));
+        // New token source every pass, so a reused page doesn't come back with a cancelled token.
+        _scanCts?.Cancel();
+        _scanCts = new CancellationTokenSource();
+        var ct = _scanCts.Token;
 
+        var ok = await PageRefresh.RunAsync(
+            _state, _all, PackList.ListControl, r => r.Key,
+            cached: () => force ? CachedRows<ContentRow>.None : Remembered(),
+            rescan: token => Rescan(force, token),
+            ct: ct,
+            filter: () => ApplyFilter(announce: true),
+            note: n => _cacheNote = n,
+            update: (row, scanned) => row.CopyFrom(scanned),
+            prepare: PrepareAsync,
+            failed: "Your resource packs could not be read.",
+            cachedNote: age => age is { Length: > 0 }
+                ? $"Showing the last scan ({age}) - re-reading every instance now."
+                : "Showing the last scan - re-reading every instance now.",
+            quiet: !force);
+
+        if (!ok) return;
+
+        if (_model.Failed > 0)
+            _state.Note($"{_model.Failed} instance(s) could not be read - see the launcher log.");
+        else if (_staleNote is { Length: > 0 } why)
+            _state.Note(why);
+
+        // Icons last: the list is already usable and this is the part that opens files.
+        await LoadIconsAsync(ct);
+    }
+
+    /// <summary>Cheap setup for the remembered paint: the cache file, the instance list and the scope
+    /// box.</summary>
+    private async Task PrepareAsync(CancellationToken ct)
+    {
+        await Cache.EnsureLoadedAsync();
+
+        // ListPacksAsync already falls back to the cached list and a disk scan, so this rarely fails.
+        // If it does, keep scanning against the last list we had.
+        _staleNote = null;
         try
         {
-            foreach (var tm in (await App.State.Api.ListTeamsAsync()).OrderBy(t => t.Name))
-                _chips.Add(Vm("\uE716", tm.Name, BrowseKind.CloudTeam, tm.Id));
+            // Reuse the Instances page's recent list, if any, to skip a round trip.
+            _packs = await App.State.Api.ListPacksQuickAsync(ct);
+            _staleNote = App.State.Api.PackListStale is { Length: > 0 } why
+                ? $"Showing packs for your last known instances - {why}."
+                : null;
         }
-        catch { /* browsing without teams */ }
-
-        ChipPaint();
-        if (_installedChipVm is not null)
-            await ActivateChipAsync(_installedChipVm);
-    }
-
-    private static ResourcePackChipVm Vm(string icon, string label, BrowseKind kind, Guid? team = null) => new()
-    {
-        Icon = icon,
-        Label = label,
-        Kind = kind,
-        TeamId = team,
-        CursorHint = Cursors.Hand,
-        ChipVisibility = Visibility.Visible,
-        IconVisibility = Visibility.Visible
-    };
-
-    private ResourcePackChipVm DividerVm() => new()
-    {
-        Label = "|",
-        IsDivider = true,
-        Kind = BrowseKind.Splitter,
-        IconVisibility = Visibility.Collapsed,
-        CursorHint = Cursors.Arrow
-    };
-
-    private void ChipPaint()
-    {
-        foreach (var c in _chips)
+        catch (OperationCanceledException) { throw; }
+        catch (OfflineException ox)
         {
-            if (c.IsDivider)
-            {
-                c.Background = Brushes.Transparent;
-                c.BorderColor = Brushes.Transparent;
-                c.Foreground = (Brush)FindResource("TextTertiaryBrush");
-                c.FontWeight = FontWeights.Normal;
-                continue;
-            }
-            var on = ReferenceEquals(c, _activeChipVm);
-            c.Background = (Brush)FindResource(on ? "AccentBrush" : "Surface2Brush");
-            c.BorderColor = (Brush)FindResource(on ? "AccentBrush" : "BorderBrush");
-            c.Foreground = (Brush)FindResource(on ? "TextOnAccentBrush" : "TextSecondaryBrush");
-            c.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+            _staleNote = ox.Reason is { Length: > 0 } reason
+                ? $"Showing packs for your last known instances - {reason}."
+                : "Showing packs for your last known instances.";
         }
-        SourceStrip.Items.Refresh();
-    }
-
-    private async void OnSourceChipClick(object sender, MouseButtonEventArgs e)
-    {
-        if (sender is FrameworkElement { DataContext: ResourcePackChipVm r } && !r.IsDivider)
-            await ActivateChipAsync(r);
-    }
-
-    private async Task ActivateChipAsync(ResourcePackChipVm vm)
-    {
-        _activeChipVm = vm;
-        ChipPaint();
-        bool lib = vm.Kind == BrowseKind.Installed;
-
-        InstalledPane.Visibility = lib ? Visibility.Visible : Visibility.Collapsed;
-        BrowsePane.Visibility = lib ? Visibility.Collapsed : Visibility.Visible;
-        BrowseExtrasHost.Visibility = lib ? Visibility.Collapsed : Visibility.Visible;
-
-        if (lib)
+        catch (Exception ex)
         {
-            _cts.Cancel();
-            await RefreshInstalledAsync();
+            AppLog.LogError(nameof(ResourcePacksView), ex);
+            _staleNote = "The instance list could not be refreshed; scanning the instances already known.";
         }
-        else
-            await BrowseRestartAsync();
+
+        RebuildScopeBox();
     }
 
-    // Toolbar -----------------------------------------------------------------
-
-    private async void OnCreateResourcePack(object sender, RoutedEventArgs e)
-    {
-        var dlg = new CreateResourcePackDialog { Owner = _shell };
-        if (dlg.ShowDialog() != true || dlg.Created is null) return;
-        var chip = _chips.FirstOrDefault(z => z.Kind == BrowseKind.CloudPersonal);
-        if (chip != null) await ActivateChipAsync(chip);
-
-        var created = dlg.Created;
-        _shell.OpenResourcePackDetail(created.Id, created.Name);
-    }
-
-    private async void OnImportZip(object sender, RoutedEventArgs e)
+    /// <summary>The remembered list for the first frame, built without opening any pack.</summary>
+    /// <remarks>Library items are matched to instance copies by file name only, since
+    /// checking for the same file needs a handle per candidate. The real scan corrects any
+    /// mismatch a moment later.</remarks>
+    private CachedRows<ContentRow> Remembered()
     {
         try
         {
-            if (!_packs.Any()) _packs = await App.State.Api.ListPacksAsync();
-            if (!_packs.Any())
+            var installed = new List<RpInstalled>();
+            DateTimeOffset? oldest = null;
+
+            foreach (var pack in _packs)
             {
-                Fail("Need an instance first.");
-                return;
+                var hit = Cache.Get(ScanCache<CachedRpRow>.ScopeKey(pack.Id));
+                if (hit.State != ScanState.Cached) continue;
+                if (hit.ScannedUtc is { } at && (oldest is null || at < oldest)) oldest = at;
+                foreach (var row in hit.Rows)
+                    if (IsInstancePackPath(pack, row)) installed.Add(Materialise(pack, row));
             }
-            var ofd = new OpenFileDialog { Filter = "Zip|*.zip|All|*", Title = "Resource pack zip" };
-            if (ofd.ShowDialog(_shell) != true) return;
-            var dlg = new PackPickerDialog(_packs, "Import", "Chooses destination resourcepacks/", "Pick")
-                { Owner = _shell };
-            if (dlg.ShowDialog() != true || dlg.SelectedPackId is not Guid gid) return;
-            var target = _packs.First(z => z.Id == gid);
 
-            Okay($"Copying into {target.Name}…");
-            var source = ofd.FileName;
-            var dest = await Task.Run(() =>
+            var model = new RpModel
             {
-                var dir = RpFolder(target);
-                var path = Bump(dir, Path.GetFileName(source));
-                File.Copy(source, path, overwrite: false);
-                return path;
-            });
-            await RefreshInstalledAsync();
-            Okay($"Copied {Path.GetFileName(dest)} into {target.Name} — turn it on from that instance's Resources tab.");
+                Library = SafeLibraryScan(),
+                Installed = installed,
+                Overrides = LoadOverrides(_packs),
+                ScannedUtc = oldest
+            };
+            if (model.Library.Count == 0 && installed.Count == 0) return CachedRows<ContentRow>.None;
+
+            _model = model;
+            return new CachedRows<ContentRow>(BuildRows(model, cheap: true), oldest);
         }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
-
-    private void OnOpenDownloadBrowser(object sender, RoutedEventArgs e) =>
-        _shell.OpenResourcePackBrowser();
-
-    private void OnCreateFolder(object sender, RoutedEventArgs e)
-    {
-        var dlg = new SimpleInputDialog("Create folder", "Folder name", "") { Owner = _shell };
-        if (dlg.ShowDialog() != true) return;
-        var name = (dlg.Result ?? "").Trim();
-        if (string.IsNullOrEmpty(name)) return;
-        App.State.Settings.CreateResourcePackFolder(name);
-        App.State.Settings.Save();
-        _activeFolder = name;
-        RebuildFolders();
-        FilterInstalledUi();
-    }
-
-    private async void OnRefresh(object sender, RoutedEventArgs e)
-    {
-        if (_activeChipVm?.Kind == BrowseKind.Installed)
-            await RefreshInstalledAsync();
-        else
-            await BrowseRestartAsync();
-    }
-
-    private void OnFiltersClick(object sender, RoutedEventArgs e) => FiltersPopup.IsOpen = true;
-
-    private async void OnApplyFilters(object sender, RoutedEventArgs e)
-    {
-        _filterMc = string.IsNullOrWhiteSpace(FilterMcBox.Text) ? null : FilterMcBox.Text.Trim();
-        FiltersPopup.IsOpen = false;
-        await BrowseRestartAsync();
-    }
-
-    /// <summary>Success/idle text. The brush is a resource REFERENCE, not a copy, so recolouring the
-    /// accent in Settings repaints the line that is already on screen.</summary>
-    private void Okay(string m)
-    {
-        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
-        StatusLabel.Text = m;
-    }
-
-    private void Fail(string m)
-    {
-        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, "DangerBrush");
-        StatusLabel.Text = m;
-    }
-
-    private void OnThemeChanged()
-    {
-        ChipPaint();
-        RebuildFolders();
-    }
-
-    // Compact search ------------------------------------------------------------
-
-    private void OnSearchToggle(object sender, RoutedEventArgs e)
-    {
-        CompactSearchHost.Width = SearchWide;
-        SearchBox.Visibility = Visibility.Visible;
-        SearchBox.Focus();
-    }
-
-    private void CollapseSearch()
-    {
-        CompactSearchHost.Width = SearchTiny;
-        SearchBox.Visibility = Visibility.Collapsed;
-    }
-
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => _search = SearchBox.Text;
-
-    private async void OnSearchPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Enter)
+        catch (Exception ex)
         {
-            await FireSearchAsync();
-            e.Handled = true;
+            // Nothing remembered is fine; the real scan follows.
+            AppLog.LogError(nameof(ResourcePacksView), ex);
+            return CachedRows<ContentRow>.None;
         }
-        else if (e.Key == Key.Escape)
+    }
+
+    /// <summary>The real scan: the library, then every instance whose folders changed.</summary>
+    /// <remarks>Runs on a worker thread. Rows are plain view models and icons are frozen bitmaps (see
+    /// <c>ResourcePackService.LoadIcon</c>), so they are safe to hand to the UI thread.</remarks>
+    private IReadOnlyList<ContentRow> Rescan(bool force, CancellationToken ct)
+    {
+        var library = SafeLibraryScan();
+        var installed = new List<RpInstalled>();
+        DateTimeOffset? oldest = null;
+        var failed = 0;
+
+        foreach (var pack in _packs)
         {
-            SearchBox.Clear(); _search = "";
-            CollapseSearch();
-            await FireSearchAsync();
-            e.Handled = true;
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var scope = ScanCache<CachedRpRow>.ScopeKey(pack.Id);
+                var fingerprint = FingerprintFor(pack, ct);
+                var hit = Cache.Get(scope);
+
+                if (!force && hit.State == ScanState.Cached && hit.Fingerprint == fingerprint
+                    && hit.Rows.All(r => IsInstancePackPath(pack, r)))
+                {
+                    if (hit.ScannedUtc is { } at && (oldest is null || at < oldest)) oldest = at;
+                    foreach (var row in hit.Rows) installed.Add(Materialise(pack, row));
+                    continue;
+                }
+
+                var fresh = new List<CachedRpRow>();
+                foreach (var info in ScanOneInstance(pack))
+                {
+                    var meta = ResourcePackService.ReadMeta(info.FilePath, info.IsFolder);
+                    fresh.Add(ToCached(info, meta));
+                    installed.Add(new RpInstalled(pack, info, meta));
+                }
+                Cache.Put(scope, fresh, fingerprint);
+                oldest ??= DateTimeOffset.Now;
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                failed++;
+                AppLog.LogError(nameof(ResourcePacksView), ex);
+            }
         }
+
+        var model = new RpModel
+        {
+            Library = library,
+            Installed = installed,
+            Overrides = LoadOverrides(_packs),
+            ScannedUtc = oldest,
+            Failed = failed
+        };
+
+        // Check again before publishing, so a superseded pass can't leave its model behind for the
+        // newer pass's rows to read counts from.
+        ct.ThrowIfCancellationRequested();
+        _model = model;
+        _conflictNote = ConflictNote(ct);
+        return BuildRows(model, cheap: false);
     }
 
-    private void OnSearchLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    /// <summary>One instance's packs, including the <c>local/</c> folder, minus the copies the launch
+    /// overlay links into game/.</summary>
+    /// <remarks><c>ScanPack(PackSummary)</c> only includes local/ for shared instances, which
+    /// would hide library items on private ones until the first launch. After a launch the same
+    /// local/ file also appears in game/. An instance's own same-named pack is a different file
+    /// and keeps its own row.</remarks>
+    private static List<ResourcePackInfo> ScanOneInstance(PackSummary pack)
     {
-        if (e.NewFocus is DependencyObject d && CompactSearchHosts(d, CompactSearchHost)) return;
-        CollapseSearch();
+        var all = App.State.ResourcePacks.ScanPack(pack.Id, pack.Name, includeLocal: true);
+        var game = all.Where(r => !r.IsLocal).ToList();
+
+        return all.Where(r =>
+            {
+                if (!r.IsLocal) return true;
+                var twin = game.FirstOrDefault(g =>
+                    string.Equals(g.FileName, r.FileName, StringComparison.OrdinalIgnoreCase));
+                return twin is null || !PackFolderService.EntriesReferToSameContent(r.FilePath, twin.FilePath);
+            })
+            .ToList();
     }
 
-    private static bool CompactSearchHosts(DependencyObject leaf, DependencyObject host)
+    /// <summary>Fingerprint of both resourcepacks folders and options.txt.</summary>
+    /// <remarks>Catches creates, deletes and resizes at any depth, and edits to options.txt. A
+    /// same-size edit inside a pack is missed; Refresh covers that.</remarks>
+    private static string FingerprintFor(PackSummary pack, CancellationToken ct)
     {
-        for (var cur = leaf; cur != null; cur = VisualTreeHelper.GetParent(cur))
-            if (ReferenceEquals(cur, host)) return true;
+        var gameDir = App.State.Packs.GameDir(pack.Id, pack.Name);
+        return new Fingerprint()
+            .Add("game", RootFingerprint.Compute(Path.Combine(gameDir, "resourcepacks"), null, 3, ct))
+            .Add("local", RootFingerprint.Compute(
+                Path.Combine(App.State.Packs.LocalDir(pack.Id), "resourcepacks"), null, 3, ct))
+            .Add("options", RootFingerprint.File(Path.Combine(gameDir, "options.txt")))
+            .ToString();
+    }
+
+    private static CachedRpRow ToCached(ResourcePackInfo info, ResourcePackMeta meta) => new(
+        FileName: info.FileName,
+        FilePath: info.FilePath,
+        DisplayName: info.DisplayName,
+        Modified: info.LastModified,
+        SizeBytes: info.SizeBytes,
+        CompatibleWithAll: info.CompatibleWithAll,
+        CompatibleCsv: string.Join(',', info.CompatiblePackIds.Select(g => g.ToString("N"))),
+        IsLocal: info.IsLocal,
+        IsFolder: info.IsFolder,
+        StackIndex: info.StackIndex,
+        Description: meta.Description ?? "",
+        PackFormat: meta.PackFormat ?? -1);
+
+    /// <summary>True when a remembered row points directly into the instance's resourcepacks folder.
+    /// Delete and rename act on the remembered path, so other rows are dropped and the folder is
+    /// re-read.</summary>
+    private static bool IsInstancePackPath(PackSummary pack, CachedRpRow r)
+    {
+        string dir;
+        try
+        {
+            // The overloads without a name, which never create a missing instance folder.
+            dir = Path.Combine(r.IsLocal ? App.State.Packs.LocalDir(pack.Id) : App.State.Packs.GameDir(pack.Id),
+                               "resourcepacks");
+        }
+        catch { return false; } // the instance has no folder on this PC any more
+
+        try
+        {
+            if (PathSafety.ResolveFileName(dir, r.FileName) is { } expected
+                && string.Equals(expected, Path.GetFullPath(r.FilePath), StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        catch { /* a path that cannot be read is treated like a wrong one */ }
+        AppLog.Log(nameof(ResourcePacksView), $"Ignored a remembered resource pack outside its folder: {r.FilePath}");
         return false;
     }
 
-    private async Task FireSearchAsync()
+    /// <summary>A remembered row, back as the pair the page works in. Opens nothing.</summary>
+    private static RpInstalled Materialise(PackSummary pack, CachedRpRow r)
     {
-        if (_activeChipVm?.Kind == BrowseKind.Installed)
-            FilterInstalledUi();
-        else
-            await BrowseRestartAsync();
+        var origin = r.IsLocal ? ResourcePackOrigin.Local : ResourcePackOrigin.Game;
+        var compat = r.CompatibleCsv
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => Guid.TryParse(s, out var g) ? g : Guid.Empty)
+            .Where(g => g != Guid.Empty)
+            .ToList();
+        if (!compat.Contains(pack.Id)) compat.Insert(0, pack.Id);
+
+        var info = new ResourcePackInfo(
+            Key: ResourcePackService.Key(pack.Id, r.FileName, origin),
+            SourcePackId: pack.Id,
+            SourcePackName: pack.Name,
+            FileName: r.FileName,
+            FilePath: r.FilePath,
+            DisplayName: r.DisplayName,
+            LastModified: r.Modified,
+            SizeBytes: r.SizeBytes,
+            CompatibleWithAll: r.CompatibleWithAll,
+            CompatiblePackIds: compat,
+            Origin: origin,
+            IsFolder: r.IsFolder,
+            StackIndex: r.StackIndex);
+
+        var meta = new ResourcePackMeta(null,
+            string.IsNullOrWhiteSpace(r.Description) ? null : r.Description,
+            r.PackFormat < 0 ? null : r.PackFormat);
+
+        return new RpInstalled(pack, info, meta);
     }
 
-    private async void GlobalKeys(object sender, KeyEventArgs e)
+    private static List<LibraryItem> SafeLibraryScan()
     {
-        if (!IsVisible) return;
+        try { return App.State.Library.Scan(LibraryKind.ResourcePack); }
+        catch (Exception ex) { AppLog.LogError(nameof(ResourcePacksView), ex); return []; }
+    }
 
-        if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
+    /// <summary>Each instance's overrides of the defaults: one small JSON read per instance, and a
+    /// missing file means nothing was decided.</summary>
+    private static Dictionary<Guid, InstanceContentOverrides> LoadOverrides(IReadOnlyList<PackSummary> packs)
+    {
+        var map = new Dictionary<Guid, InstanceContentOverrides>();
+        foreach (var pack in packs)
         {
-            OnSearchToggle(sender, new RoutedEventArgs());
-            SearchBox.Focus();
-            e.Handled = true;
-            return;
+            try { map[pack.Id] = App.State.ContentDefaults.OverridesFor(pack.Id); }
+            catch (Exception ex) { AppLog.LogError(nameof(ResourcePacksView), ex); }
         }
+        return map;
+    }
 
-        if (e.Key == Key.F5)
+    /// <summary>Reads <c>pack.png</c> for rows that have no icon yet.</summary>
+    /// <remarks>Usually only instance rows; the scan already read the library's own files.</remarks>
+    private async Task LoadIconsAsync(CancellationToken ct)
+    {
+        var pending = _all
+            .Where(r => r.Icon is null && r.Path is { Length: > 0 })
+            .Select(r => (Row: r, r.Path))
+            .ToList();
+        if (pending.Count == 0) return;
+
+        foreach (var chunk in pending.Chunk(24))
         {
-            e.Handled = true;
-            if (_activeChipVm?.Kind == BrowseKind.Installed)
-                await RefreshInstalledAsync();
-            else
-                await BrowseRestartAsync();
-            return;
+            if (ct.IsCancellationRequested) return;
+            var work = chunk.ToList();
+            var read = await Task.Run(
+                () => work.Select(w => (w.Row, Meta: ResourcePackService.ReadMeta(
+                    w.Path!, Directory.Exists(w.Path!)))).ToList(), ct);
+            if (ct.IsCancellationRequested) return;
+            foreach (var (row, meta) in read) row.SetIcon(meta.Icon);
         }
+    }
 
-        // The card grid has no keyboard focus of its own, so these act on the last card the user
-        // clicked or right-clicked — which is the card they are looking at.
-        if (_activeChipVm?.Kind != BrowseKind.Installed || _focusedRow is null) return;
-        if (SearchBox.IsKeyboardFocusWithin) return;
+    private void OnConnectivityChanged()
+    {
+        // Only the instance list comes from the server, so offline is just a note; the packs are local.
+        if (App.State.IsOffline && _state.Kind is not (PageStateKind.Loading or PageStateKind.Refreshing))
+            _state.Note("The server is not answering. The packs themselves are on this PC.");
+    }
+
+    // ── which packs override which, in the scoped instance ───────────────────
+
+    /// <summary>One line naming the packs that override each other in the scoped instance.</summary>
+    /// <remarks>Runs on the scan's worker thread because it opens every enabled pack's zip (central
+    /// directory only, and <see cref="ResourcePackConflicts"/> caps packs and entries). Null with no
+    /// instance in scope: overriding only makes sense within one instance's stack.</remarks>
+    private string? ConflictNote(CancellationToken ct)
+    {
+        if (_scopePackId is not Guid id) return null;
+        var scope = _packs.FirstOrDefault(p => p.Id == id);
+        if (scope is null) return null;
 
         try
         {
-            switch (e.Key)
+            var stack = App.State.ResourcePacks.ActiveFor(scope.Id, scope.Name);
+            var files = new List<(string FileName, string Path)>();
+            foreach (var name in stack)
             {
-                case Key.Delete:
-                    e.Handled = true;
-                    await DeleteRowAsync(_focusedRow);
-                    break;
-                case Key.F2:
-                    e.Handled = true;
-                    RenameDisplayName(_focusedRow);
-                    break;
-                case Key.Enter:
-                    e.Handled = true;
-                    _shell.OpenLocalResourcePackDetail(_focusedRow.Key, _focusedRow.DisplayName);
-                    break;
+                var hit = _model.Installed.FirstOrDefault(i =>
+                    i.Pack.Id == scope.Id
+                    && string.Equals(i.Info.FileName, name, StringComparison.OrdinalIgnoreCase));
+                if (hit is not null) files.Add((hit.Info.FileName, hit.Info.FilePath));
             }
+            return ResourcePackConflicts.Describe(files, ct);
         }
-        catch (Exception ex) { Fail(ex.Message); }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) { AppLog.LogError("resourcepacks.conflicts", ex); return null; }
     }
 
-    // Installed library ---------------------------------------------------------
+    // ── building the rows ────────────────────────────────────────────────────
 
-    private async Task RefreshInstalledAsync()
+    /// <summary>One row per library item, plus the scoped instance's own packs.</summary>
+    /// <param name="cheap">True on the remembered paint: match library items to instance copies by file
+    /// name only. See <see cref="Remembered"/>.</param>
+    /// <remarks>A library item and its copies inside instances share one row. An instance's own
+    /// same-named file is a different file, so the library row gets an "OWN COPY" pill to show
+    /// which one the game loads.</remarks>
+    private List<ContentRow> BuildRows(RpModel model, bool cheap)
     {
-        try
+        var rows = new List<ContentRow>();
+        var folded = new HashSet<string>(StringComparer.Ordinal);
+        var scope = ScopedPack();
+
+        foreach (var item in model.Library)
         {
-            _packs = await App.State.Api.ListPacksAsync();
-
-            // Scanning walks every instance's resourcepacks/ folder and opens each zip for its
-            // pack.png — seconds of work on a big library, and none of it belongs on the UI thread.
-            var packs = _packs;
-            var discovered = await Task.Run(() =>
-                App.State.ResourcePacks.ScanAll(packs)
-                    .Select(info => (info, meta: ResourcePackService.ReadMeta(info.FilePath, info.IsFolder)))
-                    .ToList());
-
-            _scanRows.Clear();
-            foreach (var (info, meta) in discovered)
-                _scanRows.Add(new ResourcePackScannerRowVm(info, meta));
-
-            // What the browse side needs to know to say "Installed" instead of offering a duplicate.
-            _installedNames = discovered
-                .SelectMany(d => new[]
+            var present = new List<RpInstalled>();
+            var shadowing = new List<RpInstalled>();
+            foreach (var installed in model.Installed)
+            {
+                if (!string.Equals(installed.Info.FileName, item.FileName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (SameFile(item.Path, installed.Info.FilePath, cheap))
                 {
-                    d.info.DisplayName,
-                    System.IO.Path.GetFileNameWithoutExtension(d.info.FileName)
-                })
-                .Where(n => !string.IsNullOrWhiteSpace(n))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            MarkInstalledBrowseRows();
-
-            if (_focusedRow is not null)
-                _focusedRow = _scanRows.FirstOrDefault(r => r.Key == _focusedRow.Key);
-
-            RebuildFolders();
-            FilterInstalledUi();
-            Okay("");
-            CountLabel.Text = $"{discovered.Count} scanned";
+                    present.Add(installed);
+                    folded.Add(installed.Info.Key);
+                }
+                else shadowing.Add(installed);
+            }
+            rows.Add(new ContentRow(LibraryState(item, present, shadowing, model, scope, cheap)));
         }
-        catch (Exception ex) { Fail(ex.Message); }
+
+        // Every instance's own non-library packs, one row per instance and file. Same-named packs in
+        // two instances are two files, so they aren't merged. A scope narrows this to one instance.
+        foreach (var installed in model.Installed)
+        {
+            if (scope is not null && installed.Pack.Id != scope.Id) continue;
+            if (folded.Contains(installed.Info.Key)) continue;
+            rows.Add(new ContentRow(InstanceState(installed, model, scope)));
+        }
+
+        return rows;
     }
 
-    /// <summary>Re-evaluates the "already installed" flag on whatever browse results are loaded.
-    /// Run after a scan and after every install, so the button on the row the user just used flips
-    /// without a re-search.</summary>
-    private void MarkInstalledBrowseRows()
+    /// <summary>Are these two paths the same bytes? Name-only while painting from memory.</summary>
+    private static bool SameFile(string libraryPath, string instancePath, bool cheap)
     {
-        var changed = false;
-        foreach (var row in _browseRows)
-            changed |= row.ApplyInstalled(_installedNames.Contains(row.Name));
-        if (changed) ResultsList.Items.Refresh();
+        if (cheap) return true;   // the caller has already matched the file name
+        try { return PackFolderService.EntriesReferToSameContent(libraryPath, instancePath); }
+        catch (Exception ex) { AppLog.LogError(nameof(ResourcePacksView), ex); return false; }
     }
 
-    private void RebuildFolders()
+    private ContentRowState LibraryState(
+        LibraryItem item, List<RpInstalled> present, List<RpInstalled> shadowing,
+        RpModel model, PackSummary? scope, bool cheap)
     {
-        _folderChips.Clear();
+        var meta = ResourcePackMetaFor(item, present, cheap);
+        var format = meta.PackFormat;
+        var on = present.Count(p => p.Info.Enabled);
+        var isDefault = item.AutoApply;
 
-        Brush accent = (Brush)FindResource("AccentBrush"),
-            surf = (Brush)FindResource("Surface3Brush"),
-            borderBr = (Brush)FindResource("BorderBrush"),
-            txtPri = (Brush)FindResource("TextPrimaryBrush"),
-            txtSec = (Brush)FindResource("TextSecondaryBrush");
+        // Use ContentPlacement so the count matches what the engine will actually place.
+        var reach = ContentPlacement.Reach(item, _packs, model.Overrides);
 
-        FolderChipRow Mk(string key, string label, int count, string icon)
+        var here = scope is null ? null : present.FirstOrDefault(p => p.Pack.Id == scope.Id);
+        var excludedHere = scope is not null
+                           && !ContentPlacement.GoesInto(item, scope, model.Overrides.GetValueOrDefault(scope.Id))
+                           && isDefault;
+
+        var advisory = scope is not null
+            ? ResourcePackFormats.Advisory(format, scope.MinecraftVersion)
+            : null;
+
+        model.Facts[item.Key] = new RpRowFacts(present.Count, on, reach, item.SizeBytes,
+                                               item.LastModified, format);
+
+        var folder = FolderOf(item.Key);
+
+        var tooltip = new List<string> { item.DisplayName, item.FileName };
+        tooltip.Add(isDefault
+            ? $"On: every compatible instance gets it - {reach} of your {_packs.Count} right now. "
+              + "Open its page to narrow that."
+            : "Off: nothing places it anywhere until you switch it on or put it into an instance "
+              + "yourself.");
+        tooltip.Add(present.Count == 0
+            // Nothing is placed until an instance's next launch, so for an on pack "nowhere" means "not
+            // yet".
+            ? isDefault
+                ? "No instance holds a copy yet - each one takes its own the next time it starts."
+                : "Not in any instance yet."
+            : $"In {present.Count} instance(s), switched on in {on}: "
+              + string.Join(", ", present.Select(p => p.Info.Enabled
+                  ? $"{p.Pack.Name} (on, #{p.Info.Priority})"
+                  : $"{p.Pack.Name} (off)"))
+              // Positions aren't comparable across instances, but what #1 means is the same everywhere.
+              + (on > 0 ? ". #1 is the pack that wins in that instance." : ""));
+        if (shadowing.Count > 0)
+            tooltip.Add($"{string.Join(", ", shadowing.Select(s => s.Pack.Name))} "
+                      + "has its own file of that name, which wins at launch.");
+        if (format is int f) tooltip.Add(ResourcePackFormats.Describe(f));
+        if (advisory is { Length: > 0 }) tooltip.Add(advisory);
+        if (meta.Description is { Length: > 0 } description) tooltip.Add(description.ReplaceLineEndings(" "));
+
+        return new ContentRowState
         {
-            var sel = (_activeFolder ?? "") == key;
-            return new FolderChipRow
-            {
-                Id = key,
-                Label = label,
-                Icon = icon,
-                CountLabel = count > 0 ? $"({count})" : "",
-                Background = surf,
-                BorderColor = sel ? accent : borderBr,
-                Foreground = txtPri,
-                CountForeground = txtSec,
-                FontWeight = sel ? FontWeights.SemiBold : FontWeights.Normal
-            };
-        }
-
-        _folderChips.Add(Mk("", "All", _scanRows.Count, "\uEDE3"));
-
-        foreach (var name in App.State.Settings.ResourcePackFolders.Keys.OrderBy(s => s))
-        {
-            var count =
-                App.State.Settings.ResourcePackFolders[name].Intersect(_scanRows.Select(r => r.Key)).Count();
-            _folderChips.Add(Mk(name, name, count, "\uEDE4"));
-        }
-    }
-
-    private void FilterInstalledUi()
-    {
-        IEnumerable<ResourcePackScannerRowVm> seq = _scanRows;
-
-        if (!string.IsNullOrEmpty(_activeFolder)
-            && App.State.Settings.ResourcePackFolders.TryGetValue(_activeFolder!, out var members))
-            seq = seq.Where(r => members.Contains(r.Key));
-
-        var q = SearchBox.Text.Trim().ToLowerInvariant();
-        if (q.Length > 0)
-        {
-            // "on" / "off" / "local" are the three questions this screen gets asked most: which packs
-            // are actually loading, which are dead weight, and which are not shared with the instance.
-            seq = q switch
-            {
-                "on" => seq.Where(r => r.Enabled),
-                "off" => seq.Where(r => !r.Enabled),
-                "local" => seq.Where(r => r.IsLocal),
-                _ => seq.Where(r =>
-                    r.DisplayName.ToLowerInvariant().Contains(q)
-                    || r.SourcePack.ToLowerInvariant().Contains(q)
-                    || r.FileName.ToLowerInvariant().Contains(q)
-                    || (r.PackDescription?.ToLowerInvariant().Contains(q) ?? false))
-            };
-        }
-
-        seq = Sorted(seq);
-        var list = seq.ToList();
-        RpList.ItemsSource = list;
-        CountLabel.Text = $"{list.Count} shown";
-
-        if (!_scanRows.Any())
-        {
-            RpEmptyState.Visibility = Visibility.Visible;
-            RpEmptyFolderState.Visibility = Visibility.Collapsed;
-        }
-        else if (!list.Any() && !string.IsNullOrEmpty(_activeFolder))
-        {
-            RpEmptyFolderTitle.Text = $"Nothing in {_activeFolder}";
-            RpEmptyState.Visibility = Visibility.Collapsed;
-            RpEmptyFolderState.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            RpEmptyState.Visibility = Visibility.Collapsed;
-            RpEmptyFolderState.Visibility = Visibility.Collapsed;
-        }
-    }
-
-    private IEnumerable<ResourcePackScannerRowVm> Sorted(IEnumerable<ResourcePackScannerRowVm> rows) =>
-        _sortMode switch
-        {
-            ResourcePackSortMode.Name => rows.OrderBy(r => r.DisplayName, StringComparer.CurrentCultureIgnoreCase)
-                .ThenByDescending(r => r.Modified),
-            ResourcePackSortMode.Size => rows.OrderByDescending(r => r.Bytes).ThenBy(r => r.DisplayName),
-            ResourcePackSortMode.Pack => rows.OrderBy(r => r.SourcePack).ThenBy(r => r.DisplayName),
-            _ => rows.OrderByDescending(r => r.Modified).ThenBy(r => r.DisplayName)
+            Key = item.Key,
+            DisplayName = item.DisplayName,
+            Item = item,
+            Path = item.Path,
+            MetaLine = $"{item.FileName}  ·  {item.SizeLabel}  ·  added {TimeFormat.Date(item.AddedAt)}",
+            // No RulesLine: a pack is simply on or off. An on pack with no copies yet is normal
+            // (nothing is placed until each instance's next launch), so "due in N at launch" is kept
+            // separate from "on in X of Y", which counts real copies.
+            CoverageLine =
+                present.Count > 0  ? $"on in {on} of {present.Count}"
+                : !isDefault       ? "in no instance"
+                : _packs.Count == 0 ? "no instances yet"
+                : reach == 0       ? "no instance ticked"
+                :                    $"due in {reach} at launch",
+            CoverageTip = (present.Count == 0
+                              ? "No instance holds a copy of this yet. "
+                              : $"In {present.Count} of your {_packs.Count} instance(s), switched on in {on}. ")
+                        + (isDefault
+                            ? $"It is on, so {reach} instance(s) are due a copy - each one takes its "
+                              + "own the next time it starts, or use \"Place everything that is on\" "
+                              + "on this row's menu to do it now. Open its page to untick any of them."
+                            : "It is off, so nothing places it for you."),
+            Tooltip = string.Join("\n", tooltip),
+            IsDefault = isDefault,
+            HasOwnCopy = shadowing.Count > 0,
+            OwnCopyTip = shadowing.Count == 0
+                ? ""
+                : $"{string.Join(", ", shadowing.Select(s => s.Pack.Name))} has its own copy of "
+                  + $"{item.FileName}; the shared one is not in use there. The launch overlay never "
+                  + "overwrites, so that copy is the one the game loads.",
+            FolderLabel = folder ?? "",
+            FolderTip = folder is null ? "" : $"Filed under {folder}",
+            IsLocalOnly = item.KeepLocal,
+            LocalTip = "Kept on this machine: never uploaded when a shared instance syncs, so nobody "
+                     + "else on that instance gets it.",
+            OffHere = scope is not null && (excludedHere || (here is not null && !here.Info.Enabled)),
+            OffHereTip = scope is null
+                ? ""
+                : excludedHere
+                    ? $"{scope.Name} is unticked on this pack's own page, so it is left alone there."
+                    : $"It is in {scope.Name} but not switched on, so the game is not loading it.",
+            FormatLabel = format is int pf ? $"pack_format {pf}" : "",
+            FormatTip = format is int pf2
+                ? ResourcePackFormats.Describe(pf2)
+                  + (advisory is { Length: > 0 } ? "\n\n" + advisory : "")
+                  + "\n\nAdvisory only - the launcher never refuses a pack over this, because the table "
+                  + "it comes from goes out of date every time Mojang changes the asset layout."
+                : "",
+            // The switch is the pack's "on by default" bit. Turning it on in one instance is done from
+            // the row menu or that instance's Resources tab.
+            ToggleOn = isDefault,
+            CanToggle = true,
+            ToggleTip = isDefault
+                ? $"Stop handing {item.DisplayName} out. Copies already in your instances stay where "
+                  + "they are."
+                : $"Hand {item.DisplayName} to every compatible instance, and switch it on there. "
+                  + "Open its page to untick the instances you do not want it in.",
+            CanOpen = true,
+            Icon = meta.Icon
         };
-
-    private void OnRpGridLoaded(object sender, RoutedEventArgs e)
-    {
-        _rpUniform = (UniformGrid)sender;
-        TuneUniform();
     }
 
-    private void OnRpListContainerSizeChanged(object sender, SizeChangedEventArgs e) => TuneUniform();
-
-    private void TuneUniform()
+    private ContentRowState InstanceState(RpInstalled installed, RpModel model, PackSummary? scope)
     {
-        if (_rpUniform is null) return;
-        var span = Math.Max(200d, _rpUniform.ActualWidth);
-        var cols = Math.Max(1, (int)Math.Floor(span / CardW));
-        if (_rpUniform.Columns != cols) _rpUniform.Columns = cols;
+        var info = installed.Info;
+        var meta = installed.Meta;
+        var folder = FolderOf(info.Key);
+        model.Facts[info.Key] = new RpRowFacts(1, info.Enabled ? 1 : 0, 0, info.SizeBytes,
+                                               info.LastModified, meta.PackFormat);
+        var advisory = ResourcePackFormats.Advisory(meta.PackFormat, installed.Pack.MinecraftVersion);
+
+        var tooltip = new List<string> { info.DisplayName, info.FileName };
+        tooltip.Add(info.Enabled
+            ? $"On in {installed.Pack.Name} · #{info.Priority} in its stack - #1 is the pack that wins"
+            : $"Off in {installed.Pack.Name} - the game is not loading it");
+        tooltip.Add("Only in this instance so far. Switch it on here and every compatible instance "
+                  + "gets it.");
+        if (meta.PackFormat is int f) tooltip.Add(ResourcePackFormats.Describe(f));
+        if (advisory is { Length: > 0 }) tooltip.Add(advisory);
+        if (meta.Description is { Length: > 0 } description) tooltip.Add(description.ReplaceLineEndings(" "));
+
+        return new ContentRowState
+        {
+            Key = info.Key,
+            DisplayName = info.DisplayName,
+            Item = null,
+            PackId = info.SourcePackId,
+            Path = info.FilePath,
+            MetaLine = $"{info.FileName}  ·  {SizeLabel(info.SizeBytes)}  ·  only in {installed.Pack.Name}"
+                     + $"  ·  changed {TimeFormat.Date(info.LastModified)}",
+            CoverageLine = "in 1 instance",
+            CoverageTip = $"Only in {installed.Pack.Name}"
+                        + (info.Enabled ? $", switched on at #{info.Priority} in its stack." : ", switched off."),
+            Tooltip = string.Join("\n", tooltip),
+            IsDefault = false,
+            HasOwnCopy = false,
+            FolderLabel = folder ?? "",
+            FolderTip = folder is null ? "" : $"Filed under {folder}",
+            IsLocalOnly = info.IsLocal,
+            LocalTip = $"In {installed.Pack.Name}'s unsynced local/ folder, so nobody else on that "
+                     + "instance gets it.",
+            OffHere = !info.Enabled,
+            OffHereTip = $"Not switched on in {installed.Pack.Name}.",
+            FormatLabel = meta.PackFormat is int pf ? $"pack_format {pf}" : "",
+            FormatTip = meta.PackFormat is int pf2
+                ? ResourcePackFormats.Describe(pf2) + (advisory is { Length: > 0 } ? "\n\n" + advisory : "")
+                : "",
+            // Same switch on a row with no library copy; turning it on makes one (ToggleRowAsync).
+            ToggleOn = false,
+            CanToggle = true,
+            ToggleTip = $"Hand {info.DisplayName} to every compatible instance. The launcher takes its "
+                      + $"own copy so it has something to place; {installed.Pack.Name} keeps the file "
+                      + "it has.",
+            CanOpen = true,
+            Icon = meta.Icon
+        };
     }
+
+    /// <summary>The library file's own meta, falling back to an installed copy's.</summary>
+    /// <remarks>Reading the library file opens its zip (memo-cached by
+    /// <see cref="ResourcePackService.ReadMeta"/>). The remembered paint runs on the UI thread, so with
+    /// <paramref name="cheap"/> this only uses the cached copy's meta and the real scan fills in the
+    /// icon and format later.</remarks>
+    private static ResourcePackMeta ResourcePackMetaFor(LibraryItem item, List<RpInstalled> present, bool cheap)
+    {
+        if (!cheap)
+        {
+            try
+            {
+                var own = ResourcePackService.ReadMeta(item.Path, item.IsFolder);
+                if (own.HasAnything) return own;
+            }
+            catch (Exception ex) { AppLog.LogError(nameof(ResourcePacksView), ex); }
+        }
+        return present.Count > 0 ? present[0].Meta : ResourcePackMeta.Empty;
+    }
+
+    private static string SizeLabel(long bytes) => bytes >= 1024 * 1024
+        ? $"{bytes / 1024.0 / 1024:0.#} MB"
+        : bytes > 0 ? $"{bytes / 1024} KB" : "-";
+
+    /// <summary>The user folder an item is filed under, or null.</summary>
+    private static string? FolderOf(string key)
+    {
+        foreach (var (name, members) in App.State.Settings.ResourcePackFolders)
+            if (members.Contains(key)) return name;
+        return null;
+    }
+
+    // ── the scope box ────────────────────────────────────────────────────────
+
+    /// <summary>Builds the instance scope selector, catching its own errors.</summary>
+    /// <remarks>Runs inside the page refresh's try, whose catch reports a read failure and blanks the
+    /// page. A UI bug here shouldn't do that.</remarks>
+    private void RebuildScopeBox()
+    {
+        try { RebuildScopeBoxCore(); }
+        catch (Exception ex)
+        {
+            // Leave whatever the box already had: a stale scope list still lets you pick.
+            AppLog.LogError("resourcepacks.scope-box", ex);
+        }
+    }
+
+    private void RebuildScopeBoxCore()
+    {
+        using (_filling.Hold())
+        {
+            var items = new List<RpScopeItem> { new(null, "All instances") };
+            items.AddRange(_packs.OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase)
+                .Select(p => new RpScopeItem(p.Id, p.Name)));
+
+            var keep = items.FirstOrDefault(i => i.Id == _scopePackId) ?? items[0];
+            _scopePackId = keep.Id;
+
+            PackScopeBox.ItemsSource = items;
+            PackScopeBox.DisplayMemberPath = nameof(RpScopeItem.Label);
+            PackScopeBox.SelectedItem = keep;
+        }
+        UpdateScopeDependentTips();
+    }
+
+    private void OnPackScopeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_filling.Busy) return;
+        _scopePackId = (PackScopeBox.SelectedItem as RpScopeItem)?.Id;
+        // The conflict note belongs to the previous scope; clear it before the remembered paint shows
+        // the new one.
+        _conflictNote = null;
+        UpdateScopeDependentTips();
+        // The scope changes which packs are listed, so reload rather than re-filter.
+        _ = LoadAsync();
+    }
+
+    /// <summary>Makes "Open folder" name the instance it will open.</summary>
+    private void UpdateScopeDependentTips()
+    {
+        var pack = ScopedPack() ?? SoleInstance();
+        OpenFolderButton.ToolTip = pack is null
+            ? "Open an instance's resourcepacks folder - pick which one"
+            : $"Open {pack.Name}'s resourcepacks folder";
+    }
+
+    private PackSummary? ScopedPack() =>
+        _scopePackId is Guid id ? _packs.FirstOrDefault(p => p.Id == id) : null;
+
+    private PackSummary? SoleInstance() => _packs.Count == 1 ? _packs[0] : null;
+
+    // ── sort ─────────────────────────────────────────────────────────────────
 
     private void OnSortMenuOpened(object sender, RoutedEventArgs e) => SyncSortChecks();
 
     private void OnSortButtonClick(object sender, RoutedEventArgs e)
     {
-        SortButton.ContextMenu!.PlacementTarget = SortButton;
+        if (SortButton.ContextMenu is null) return;
+        SortButton.ContextMenu.PlacementTarget = SortButton;
         SortButton.ContextMenu.Placement = PlacementMode.Bottom;
         SyncSortChecks();
         SortButton.ContextMenu.IsOpen = true;
@@ -562,13 +856,13 @@ public partial class ResourcePacksView : Page
 
     private void OnSortMenuItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is not MenuItem { Tag: string t }) return;
-        if (!Enum.TryParse<ResourcePackSortMode>(t, out var parsed)) return;
+        if (sender is not MenuItem { Tag: string tag }) return;
+        if (!Enum.TryParse<ResourcePackSortMode>(tag, out var parsed)) return;
         _sortMode = parsed;
         App.State.Settings.ResourcePackSortMode = parsed;
         App.State.Settings.Save();
         SyncSortChecks();
-        FilterInstalledUi();
+        ApplyFilter();
     }
 
     private void SyncSortChecks()
@@ -577,357 +871,1094 @@ public partial class ResourcePacksView : Page
         SortNameMenuItem.IsChecked = _sortMode == ResourcePackSortMode.Name;
         SortSizeMenuItem.IsChecked = _sortMode == ResourcePackSortMode.Size;
         SortPackMenuItem.IsChecked = _sortMode == ResourcePackSortMode.Pack;
+
+        // An icon-only button always announces the mode it is in.
+        SortButton.ToolTip = "Sort resource packs: " + _sortMode switch
+        {
+            ResourcePackSortMode.Name => "Name",
+            ResourcePackSortMode.Size => "Size",
+            ResourcePackSortMode.Pack => "Instances using it",
+            _ => "Last modified"
+        };
+    }
+
+    // ── folders ──────────────────────────────────────────────────────────────
+
+    /// <summary>Builds the folder chip strip, catching its own errors.</summary>
+    /// <remarks>Runs inside the page refresh's try, whose catch reports a read failure and blanks the
+    /// page. A UI bug here shouldn't do that.</remarks>
+    private void RebuildFolders()
+    {
+        try { RebuildFoldersCore(); }
+        catch (Exception ex)
+        {
+            AppLog.LogError("resourcepacks.folder-chips", ex);
+            _folderChips.Clear();   // an empty strip beats a half-built one
+        }
+    }
+
+    /// <summary>Builds the chips: All, every user folder, and the trailing "New folder".</summary>
+    /// <remarks>
+    /// <para>Same strip as the Instances page (<c>PackListView.RefreshFolderChips</c>): the chip
+    /// filters the list, and rename and delete are on its right-click menu.</para>
+    /// <para>An active folder that no longer exists (settings from another machine) is reset here,
+    /// otherwise the list would be filtered by a chip that isn't shown.</para>
+    /// <para><c>AppSettings.ResourcePackFolderRules</c> is no longer used but is kept so
+    /// stored rules aren't lost.</para>
+    /// </remarks>
+    private void RebuildFoldersCore()
+    {
+        // MemberComparer so the chip counts match the rows each chip filters to.
+        var known = _all.Select(r => r.Key).ToHashSet(MemberComparer);
+        var chips = new List<RpFolderChipVm>
+        {
+            new("", "All", "", _all.Count, _activeFolder is null, "Every pack on this page")
+        };
+
+        foreach (var name in App.State.Settings.ResourcePackFolders.Keys
+                     .OrderBy(s => s, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var count = MemberCount(App.State.Settings.ResourcePackFolders[name], known);
+            chips.Add(new RpFolderChipVm(name, name, "", count, _activeFolder == name,
+                $"Packs you filed under {name}. Folders are a saved view - nothing moves on disk."));
+        }
+
+        chips.Add(new RpFolderChipVm(NewFolderChipId, "New folder", NewFolderGlyph, 0, false,
+            "Create a folder to file packs under"));
+
+        // Diffed rather than cleared; a Reset replays the chips' entrance animation on every keystroke.
+        ListDiff.Apply(_folderChips, chips, c => c.Id, (kept, fresh) => kept.CopyFrom(fresh));
+
+        if (_activeFolder is { Length: > 0 } active
+            && !App.State.Settings.ResourcePackFolders.ContainsKey(active))
+        {
+            _activeFolder = null;
+            foreach (var chip in _folderChips) chip.SetActive(chip.Id.Length == 0);
+        }
+    }
+
+    /// <summary>The reserved-name rule, applied on create and on rename.</summary>
+    /// <remarks>A leading colon marks the strip's pseudo-folders and <c>team:</c> marks a
+    /// team folder in <see cref="PackListView"/>; a user folder named like either would
+    /// be mistaken for one.</remarks>
+    private static bool IsReservedFolderName(string name) =>
+        name.StartsWith(':') || name.StartsWith("team:", StringComparison.OrdinalIgnoreCase);
+
+    private async Task CreateFolderAsync(ContentRow? addThis)
+    {
+        var name = (await _shell.PromptAsync("Create folder", "Folder name"))?.Trim();
+        if (string.IsNullOrEmpty(name)) return;
+        if (IsReservedFolderName(name))
+        {
+            Fail("Names starting with ':' or 'team:' are reserved for the launcher's own chips.");
+            return;
+        }
+        if (App.State.Settings.ResourcePackFolders.ContainsKey(name))
+        {
+            Fail("A folder with that name already exists.");
+            return;
+        }
+
+        App.State.Settings.CreateResourcePackFolder(name);
+        if (addThis is not null) App.State.Settings.AddResourcePackToFolder(name, addThis.Key);
+        App.State.Settings.Save();
+
+        _activeFolder = name;
+        RebuildFolders();
+        ApplyFilter();
+        Okay(addThis is null
+            ? $"Created the folder '{name}'."
+            : $"Created the folder '{name}' and filed {addThis.DisplayName} in it.");
     }
 
     private void OnFolderChipClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: FolderChipRow fc }) return;
-        _activeFolder = string.IsNullOrEmpty(fc.Id) ? null : fc.Id;
+        if (sender is not FrameworkElement { DataContext: RpFolderChipVm chip }) return;
+        if (chip.Id == NewFolderChipId) { _ = CreateFolderAsync(null); return; }
+        _activeFolder = string.IsNullOrEmpty(chip.Id) ? null : chip.Id;
         RebuildFolders();
-        FilterInstalledUi();
+        ApplyFilter();
     }
 
+    /// <summary>All and New folder are computed views, not folders anybody can rename.</summary>
     private void OnFolderChipRightClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: FolderChipRow fc } && fc.Id.Length == 0)
+        if (sender is FrameworkElement { DataContext: RpFolderChipVm chip } && !chip.IsUserFolder)
             e.Handled = true;
     }
 
-    private FolderChipRow? FolderCtx(object src)
+    private static RpFolderChipVm? FolderFromMenu(object src)
     {
-        if (src is MenuItem leaf)
-        {
-            DependencyObject? p = leaf;
-            while (p is MenuItem m) p = m.Parent as MenuItem ?? m.Parent;
-            if (p is ContextMenu { PlacementTarget: FrameworkElement fx } &&
-                fx.DataContext is FolderChipRow row)
-                return row;
-        }
-        return null;
+        if (src is not MenuItem leaf) return null;
+        DependencyObject? p = leaf;
+        while (p is MenuItem m) p = m.Parent as MenuItem ?? m.Parent;
+        return p is ContextMenu { PlacementTarget: FrameworkElement fx } && fx.DataContext is RpFolderChipVm row
+            ? row
+            : null;
     }
 
-    private void OnFolderRename(object sender, RoutedEventArgs e)
+    private async void OnFolderRename(object sender, RoutedEventArgs e)
     {
-        var row = FolderCtx(sender); if (row is null || string.IsNullOrEmpty(row.Id)) return;
-        var ask = new SimpleInputDialog("Rename", "Folder", row.Id) { Owner = _shell };
-        if (ask.ShowDialog() != true) return;
-        var fresh = ask.Result!.Trim();
-        if (fresh.Length == 0 || fresh == row.Id) return;
-        var map = App.State.Settings.ResourcePackFolders;
-        if (map.ContainsKey(fresh))
+        try
         {
-            Fail("Duplicate folder name."); return;
+            var chip = FolderFromMenu(sender);
+            if (chip is null || !chip.IsUserFolder) return;
+
+            var fresh = (await _shell.PromptAsync("Rename folder", "New name", chip.Id))?.Trim();
+            if (string.IsNullOrEmpty(fresh) || fresh == chip.Id) return;
+            if (IsReservedFolderName(fresh))
+            {
+                Fail("Names starting with ':' or 'team:' are reserved for the launcher's own chips.");
+                return;
+            }
+
+            // Renames the members and rules maps together, keeping the folder's position in the strip.
+            if (!App.State.Settings.RenameResourcePackFolder(chip.Id, fresh))
+            {
+                Fail("A folder with that name already exists.");
+                return;
+            }
+            if (_activeFolder == chip.Id) _activeFolder = fresh;
+            App.State.Settings.Save();
+
+            RebuildFolders();
+            ApplyFilter();
+            Okay($"Renamed the folder to '{fresh}'.");
         }
-        map[fresh] = map[row.Id];
-        map.Remove(row.Id);
-        if (_activeFolder == row.Id) _activeFolder = fresh;
-        App.State.Settings.Save();
-        RebuildFolders(); FilterInstalledUi();
+        catch (Exception ex) { Fail("That folder could not be renamed.", ex); }
     }
 
     private async void OnFolderDelete(object sender, RoutedEventArgs e)
     {
         try
         {
-            var row = FolderCtx(sender);
-            if (row == null || string.IsNullOrEmpty(row.Id)) return;
+            var chip = FolderFromMenu(sender);
+            if (chip is null || !chip.IsUserFolder) return;
 
-            var count = App.State.Settings.ResourcePackFolders.TryGetValue(row.Id, out var members) ? members.Count : 0;
-            if (!await AppDialog.ConfirmAsync(_shell,
-                    "Delete folder",
-                    $"Delete the folder '{row.Id}'?"
-                    + (count > 0 ? $"\n\nThe {count} pack(s) filed in it stay on disk — only the grouping goes." : ""),
+            var count = App.State.Settings.ResourcePackFolders.TryGetValue(chip.Id, out var members)
+                ? members.Count : 0;
+            if (!await AppDialog.ConfirmAsync(_shell, "Delete folder",
+                    $"Delete the folder '{chip.Id}'?"
+                    + (count > 0
+                        ? $"\n\nThe {count} pack(s) filed in it stay exactly where they are - only the "
+                          + "grouping goes."
+                        : ""),
                     "Delete folder", "Cancel", danger: true))
                 return;
 
-            App.State.Settings.DeleteResourcePackFolder(row.Id);
-            if (_activeFolder == row.Id) _activeFolder = null;
+            App.State.Settings.DeleteResourcePackFolder(chip.Id);
+            if (_activeFolder == chip.Id) _activeFolder = null;
             App.State.Settings.Save();
 
             RebuildFolders();
-            FilterInstalledUi();
-            Okay($"Deleted folder '{row.Id}'.");
+            ApplyFilter();
+            Okay($"Deleted the folder '{chip.Id}'.");
         }
-        catch (Exception ex) { Fail(ex.Message); }
+        catch (Exception ex) { Fail("That folder could not be deleted.", ex); }
     }
 
-    private ResourcePackScannerRowVm? ScannerFromCtx(object sender) =>
-        sender switch
+    /// <summary>Takes a deleted pack's key out of every folder, so a folder cannot keep counting
+    /// something that is gone.</summary>
+    private static void ForgetFolderMembership(string key)
+    {
+        foreach (var members in App.State.Settings.ResourcePackFolders.Values)
+            members.RemoveAll(k => MemberComparer.Equals(k, key));
+    }
+
+    // ── folder membership ────────────────────────────────────────────────────
+
+    /// <summary>The comparer for every "is this key in that folder" question.</summary>
+    /// <remarks>Case-insensitive because the keys contain file names.
+    /// <c>AppSettings.AddResourcePackToFolder</c> de-dups ordinally, so old settings can hold
+    /// case variants: <see cref="SetMember"/> removes every match and
+    /// <see cref="MemberCount"/> counts them once.</remarks>
+    private static readonly StringComparer MemberComparer = StringComparer.OrdinalIgnoreCase;
+
+    /// <summary>The user folder the strip is filtered to, or null for All.</summary>
+    private string? ActiveUserFolder() =>
+        _activeFolder is { Length: > 0 } folder
+        && !IsReservedFolderName(folder)
+        && App.State.Settings.ResourcePackFolders.ContainsKey(folder)
+            ? folder
+            : null;
+
+    /// <summary>One folder's member keys: the stored list itself, not a copy.</summary>
+    private static List<string>? MemberKeys(string? folder) =>
+        folder is { Length: > 0 }
+        && App.State.Settings.ResourcePackFolders.TryGetValue(folder, out var list)
+            ? list
+            : null;
+
+    /// <summary>Is this key filed under that folder?</summary>
+    private static bool IsMember(IReadOnlyList<string>? members, string key) =>
+        members is not null && members.Any(k => MemberComparer.Equals(k, key));
+
+    /// <summary>Files a key under a folder, or takes it out, and saves.</summary>
+    /// <remarks>Unlike the <see cref="AppSettings"/> mutators it calls, this saves right away: filing
+    /// is a single menu click with no dialog to commit it.</remarks>
+    private static void SetMember(string folder, string key, bool wanted)
+    {
+        if (string.IsNullOrEmpty(folder) || string.IsNullOrEmpty(key)) return;
+        if (wanted)
         {
-            MenuItem leaf => WalkMenu(leaf),
-            _ => null
+            if (!IsMember(MemberKeys(folder), key)) App.State.Settings.AddResourcePackToFolder(folder, key);
+        }
+        else if (MemberKeys(folder) is { } list)
+        {
+            // Remove every match; see MemberComparer.
+            list.RemoveAll(k => MemberComparer.Equals(k, key));
+        }
+        App.State.Settings.Save();
+    }
+
+    /// <summary>The count on a folder's chip: its members that have a row on this page.</summary>
+    /// <remarks>Distinct with the filter's comparer, so case variants of one key count once.</remarks>
+    private static int MemberCount(IReadOnlyList<string> members, HashSet<string> known) =>
+        members.Distinct(MemberComparer).Count(known.Contains);
+
+    /// <summary>Files this pack under a folder, or takes it out.</summary>
+    /// <remarks>Only writes the folder list in settings.json: no file moves and no options.txt is
+    /// touched, and the message says so. No reload needed; <see cref="ApplyFilter"/> recounts the
+    /// chips.</remarks>
+    private void FileIntoFolder(ContentRow row, string folder, bool wanted)
+    {
+        try
+        {
+            SetMember(folder, row.Key, wanted);
+            ApplyFilter();
+            Okay(wanted
+                ? $"{row.DisplayName} is filed under {folder}. Nothing moved on disk - a folder is a "
+                  + "saved view."
+                : $"{row.DisplayName} is no longer filed under {folder}.");
+        }
+        catch (Exception ex) { Fail("That folder could not be changed.", ex); }
+    }
+
+    // ── filtering ────────────────────────────────────────────────────────────
+
+    /// <summary>Narrows <see cref="_all"/> into the visible list and writes the page's count.</summary>
+    /// <remarks>Diffed into the bound collection (<see cref="ListDiff"/>). Replacing it would reset the
+    /// scroll position, selection and entrance animation on every keystroke.</remarks>
+    private void ApplyFilter(bool announce = false)
+    {
+        RebuildFolders();
+
+        IEnumerable<ContentRow> seq = _all;
+        var filtered = false;
+
+        // The folder chip just filters to its members, as on the Instances page.
+        var folder = ActiveUserFolder();
+        if (MemberKeys(folder) is { } members)
+        {
+            var set = new HashSet<string>(members, MemberComparer);
+            seq = seq.Where(r => set.Contains(r.Key));
+            filtered = true;
+        }
+
+        var query = SearchBox.Text.Trim();
+        if (query.Length > 0)
+        {
+            filtered = true;
+            seq = seq.Where(r => Matches(r, query));
+        }
+
+        ListDiff.Apply(PackList.Rows, Sorted(seq).ToList(), r => r.Key);
+
+        if (_scopePackId is not null) filtered = true;
+
+        // Only the load path sets the page state. A keystroke mid-scan must not replace "Scanning..."
+        // with a count from a half-filled list.
+        if (!announce && _state.Kind is PageStateKind.Loading or PageStateKind.Refreshing) return;
+
+        if (PackList.Rows.Count == 0 && filtered && _all.Count > 0)
+        {
+            // Tell the empty panel whether the folder is empty or the search matched nothing.
+            if (folder is { Length: > 0 } active && query.Length == 0)
+                _state.EmptyNext($"Nothing in {active} yet",
+                    "Right-click a pack on the All chip and pick 'Add to folder' to file it here. "
+                    + "Nothing moves on disk - a folder is a saved view.",
+                    glyph: "");
+            else
+                _state.EmptyFiltered();
+        }
+
+        // The conflict note is appended to the age note, not swapped for it: they answer different
+        // questions.
+        var lead = _cacheNote ?? _staleNote;
+        var note = string.Join("  ·  ",
+            new[] { lead, _conflictNote }.Where(s => s is { Length: > 0 }));
+        _state.Content(PackList.Rows.Count, note: note.Length == 0 ? null : note);
+    }
+
+    private RpRowFacts FactsFor(ContentRow row) =>
+        _model.Facts.TryGetValue(row.Key, out var facts)
+            ? facts
+            : new RpRowFacts(0, 0, 0, row.Item?.SizeBytes ?? 0,
+                             row.Item?.LastModified ?? DateTimeOffset.MinValue);
+
+    private static bool Matches(ContentRow row, string query)
+    {
+        var q = query.ToLowerInvariant();
+        return row.DisplayName.ToLowerInvariant().Contains(q)
+               || row.MetaLine.ToLowerInvariant().Contains(q)
+               || row.Tooltip.ToLowerInvariant().Contains(q);
+    }
+
+    private IEnumerable<ContentRow> Sorted(IEnumerable<ContentRow> rows) =>
+        _sortMode switch
+        {
+            ResourcePackSortMode.Name =>
+                rows.OrderByDescending(r => r.IsDefault)
+                    .ThenBy(r => r.DisplayName, StringComparer.CurrentCultureIgnoreCase),
+            ResourcePackSortMode.Size =>
+                rows.OrderByDescending(r => r.IsDefault)
+                    .ThenByDescending(r => FactsFor(r).SizeBytes)
+                    .ThenBy(r => r.DisplayName, StringComparer.CurrentCultureIgnoreCase),
+            ResourcePackSortMode.Pack =>
+                rows.OrderByDescending(r => r.IsDefault)
+                    .ThenByDescending(r => FactsFor(r).Present)
+                    .ThenBy(r => r.DisplayName, StringComparer.CurrentCultureIgnoreCase),
+            _ =>
+                rows.OrderByDescending(r => r.IsDefault)
+                    .ThenByDescending(r => FactsFor(r).Modified)
+                    .ThenBy(r => r.DisplayName, StringComparer.CurrentCultureIgnoreCase)
         };
 
-    private static ResourcePackScannerRowVm? WalkMenu(MenuItem leaf)
+    // ── header actions ───────────────────────────────────────────────────────
+
+    private async void OnRefresh(object sender, RoutedEventArgs e)
     {
-        DependencyObject? p = leaf;
-        while (p is MenuItem m) p = m.Parent as MenuItem ?? m.Parent;
-        return p is ContextMenu cm && cm.PlacementTarget is FrameworkElement fx && fx.DataContext is ResourcePackScannerRowVm rr
-            ? rr
-            : null;
+        try { await LoadAsync(force: true); }
+        catch (Exception ex) { Fail("The resourcepacks folders could not be re-read.", ex); }
     }
 
-    private void OnRpCardClick(object sender, MouseButtonEventArgs e)
+    private void OnOpenDownloadBrowser(object sender, RoutedEventArgs e) => _shell.OpenResourcePackBrowser();
+
+    /// <summary>Opens the shared Import flow (<see cref="ImportContentCard"/>): pick the file, pick
+    /// instances or none, optionally publish.</summary>
+    private async void OnImport(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { DataContext: ResourcePackScannerRowVm rr }) return;
-        _focusedRow = rr;
-        _shell.OpenLocalResourcePackDetail(rr.Key, rr.DisplayName);
+        try { await RunImportAsync(null); }
+        catch (Exception ex) { Fail("That import did not finish.", ex); }
     }
 
-    /// <summary>Remembers which card a context menu belongs to, so the Delete and F2 keys act on the
-    /// card the user last touched rather than on nothing.</summary>
-    private void OnCardMenuOpened(object sender, RoutedEventArgs e)
+    private async Task RunImportAsync(string? prePickedPath)
     {
-        if (sender is ContextMenu { PlacementTarget: FrameworkElement { DataContext: ResourcePackScannerRowVm row } })
-            _focusedRow = row;
+        var outcome = await ImportContentCard.ShowAsync(_shell, new ImportRequest(
+            ImportContentKind.ResourcePack, _packs,
+            PreferredPackId: ScopedPack()?.Id ?? SoleInstance()?.Id,
+            PrePickedPath: prePickedPath));
+        if (outcome is null) return;
+
+        foreach (var target in outcome.Targets) Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(target));
+        await LoadAsync(force: true);
+        Okay(outcome.Summary);
     }
 
-    private void OnCtxEdit(object sender, RoutedEventArgs e)
+    /// <summary>Opens the instance whose stack the user wants to reorder.</summary>
+    /// <remarks>Load order is one line in one instance's options.txt, so it is edited on that
+    /// instance's Resources tab.</remarks>
+    private void OpenLoadOrder(Guid packId, string packName)
     {
-        if (ScannerFromCtx(sender) is ResourcePackScannerRowVm r)
-            _shell.OpenLocalResourcePackDetail(r.Key, r.DisplayName);
+        _shell.OpenPackDetail(packId, packName);
+        Okay($"Opened {packName} - the Resources tab holds its load order.");
     }
 
-    private void OnCtxReveal(object sender, RoutedEventArgs e)
+    /// <summary>Opens an instance's <c>resourcepacks</c> folder.</summary>
+    /// <remarks>The scoped instance, or the only instance if there is one; otherwise it asks which.
+    /// Same as the Worlds page's saves button.</remarks>
+    private void OnOpenFolder(object sender, RoutedEventArgs e)
     {
-        if (ScannerFromCtx(sender) is not ResourcePackScannerRowVm row) return;
-        if (!File.Exists(row.Path) && !Directory.Exists(row.Path)) { Fail("That file is no longer there."); return; }
-        try
+        var pack = ScopedPack() ?? SoleInstance();
+        if (pack is not null) { OpenPacksFolder(pack); return; }
+        if (_packs.Count == 0)
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + row.Path + "\"") { UseShellExecute = true });
+            Fail("There is no instance to open yet.");
+            return;
         }
-        catch (Exception ex) { Fail(ex.Message); }
+
+        var menu = new ContextMenu { PlacementTarget = OpenFolderButton, Placement = PlacementMode.Bottom };
+        foreach (var candidate in _packs.OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var target = candidate;
+            menu.Items.Add(ContentMenu.Item($"Resource packs in {target.Name}", () => OpenPacksFolder(target)));
+        }
+        menu.IsOpen = true;
     }
 
-    /// <summary>
-    /// Renames the label the launcher shows for a pack.
-    /// </summary>
-    /// <remarks>This used to open the detail page instead, so nothing in the app could rename a pack
-    /// from the grid at all. The file on disk keeps its name — "Rename file on disk…" is the other,
-    /// riskier half, and it is deliberately a separate command.</remarks>
-    private void OnCtxRename(object sender, RoutedEventArgs e)
-    {
-        var row = ScannerFromCtx(sender) ?? _focusedRow;
-        if (row is not null) RenameDisplayName(row);
-    }
-
-    private void RenameDisplayName(ResourcePackScannerRowVm row)
-    {
-        var dlg = new SimpleInputDialog("Rename resource pack", "Display name", row.DisplayName) { Owner = _shell };
-        if (dlg.ShowDialog() != true) return;
-
-        var name = (dlg.Result ?? "").Trim();
-        if (name.Length == 0) { Fail("Name cannot be empty."); return; }
-
-        App.State.ResourcePacks.Rename(row.Key, name);
-        _ = RefreshInstalledAsync();
-        Okay("Renamed to " + name + ".");
-    }
-
-    /// <summary>
-    /// Renames the zip (or pack folder) itself, carrying the launcher's entry and the instance's
-    /// options.txt line across with it.
-    /// </summary>
-    /// <remarks>The settings key contains the file name, so without the re-key the pack would come
-    /// back as a stranger: no display name, no folder membership, no hosting link. And because
-    /// options.txt lists packs by file name, a pack that was enabled has to be renamed there too or
-    /// it silently switches itself off.</remarks>
-    private async void OnCtxRenameFile(object sender, RoutedEventArgs e)
+    /// <summary>Create-then-open, so it works even if the folder doesn't exist yet.</summary>
+    private void OpenPacksFolder(PackSummary pack)
     {
         try
         {
-            var row = ScannerFromCtx(sender) ?? _focusedRow;
-            if (row is null) return;
-
-            var dlg = new SimpleInputDialog("Rename file on disk", "File name", row.FileName) { Owner = _shell };
-            if (dlg.ShowDialog() != true) return;
-
-            var wanted = ResourcePackService.SanitizeFileName(dlg.Result ?? "", row.IsFolder);
-            if (string.Equals(wanted, row.FileName, StringComparison.Ordinal)) return;
-            if (row.Enabled && !await ConfirmStackWriteAsync(row)) return;
-
-            var info = row.Info;
-            await Task.Run(() => App.State.ResourcePacks.RenameFileOnDisk(info, wanted));
-            await RefreshInstalledAsync();
-            Okay("Renamed to " + wanted + ".");
+            var dir = Path.Combine(App.State.Packs.GameDir(pack.Id, pack.Name), "resourcepacks");
+            Directory.CreateDirectory(dir);
+            if (!SafeLaunch.OpenFolder(dir)) Fail("That folder could not be opened.");
         }
-        catch (Exception ex) { Fail("Rename failed: " + ex.Message); }
+        catch (Exception ex) { Fail("That folder could not be opened.", ex); }
     }
 
-    /// <summary>
-    /// Turns a pack on or off for the instance it is installed in, by rewriting that instance's
-    /// options.txt resource pack stack.
-    /// </summary>
-    /// <remarks>A newly enabled pack goes on top of the stack — the position the game itself gives
-    /// one you select, and the only one where a freshly installed texture pack is actually visible.
-    /// Ordering within the stack is done on the instance's own Resources tab, which has the room for
-    /// it; this is the one-click "is it on" the card grid needs.</remarks>
-    private async void OnCtxToggleEnabled(object sender, RoutedEventArgs e)
+    // ── row callbacks ────────────────────────────────────────────────────────
+
+    /// <summary>Clicking a row opens the pack's own page.</summary>
+    /// <remarks>Works for every row with a library item or an instance copy, since a newly imported
+    /// pack has no copies until the next launch. An instance copy is preferred because it can show the
+    /// pack's place in that instance's load order.</remarks>
+    private void OpenRow(ContentRow row)
+    {
+        if (FirstInstalled(row) is { } installed)
+        {
+            _shell.OpenLocalResourcePackDetail(installed.Info.Key, row.DisplayName);
+            return;
+        }
+        if (row.Item is { } item)
+        {
+            _shell.OpenLibraryResourcePackDetail(item, row.DisplayName);
+            return;
+        }
+        // A stale row whose file the model no longer lists; just reveal it on disk.
+        Reveal(row);
+    }
+
+    private RpInstalled? FirstInstalled(ContentRow row)
+    {
+        if (row.Item is null)
+            return _model.Installed.FirstOrDefault(i => i.Info.Key == row.Key);
+
+        var scope = _scopePackId;
+        return _model.Installed
+            .Where(i => string.Equals(i.Info.FileName, row.Item.FileName, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(i => scope is Guid id && i.Pack.Id == id)
+            .FirstOrDefault(i => SameFile(row.Item.Path, i.Info.FilePath, cheap: false));
+    }
+
+    /// <summary>The row's switch: whether this pack goes to every compatible instance.</summary>
+    /// <remarks>Same meaning as the Worlds and Shaders switches. A row with no library copy is promoted
+    /// first. Turning a pack on in a single instance is on the row menu and that instance's Resources
+    /// tab.</remarks>
+    private async Task ToggleRowAsync(ContentRow row, bool wanted)
     {
         try
         {
-            var row = ScannerFromCtx(sender) ?? _focusedRow;
-            if (row is null) return;
-            if (!await ConfirmStackWriteAsync(row)) return;
+            if (row.RowClass == ContentRowClass.Library) { await SetDefaultAsync(row, wanted); return; }
 
-            var turnOn = !row.Enabled;
-            // The instance's version decides how the entry is spelled when this is the first pack
-            // turned on there — "file/Name.zip" from 1.13 on, the bare name before that. _packs can
-            // still be empty on a page that has not listed instances yet, in which case the modern
-            // form is assumed exactly as before.
-            var mcVersion = _packs.FirstOrDefault(p => p.Id == row.Info.SourcePackId)?.MinecraftVersion;
-            App.State.ResourcePacks.SetEnabled(row.Info.SourcePackId, row.Info.SourcePackName, row.FileName,
-                turnOn, mcVersion);
-            await RefreshInstalledAsync();
-            Okay(turnOn
-                ? row.DisplayName + " is on — top of " + row.SourcePackName + "'s stack."
-                : row.DisplayName + " is off in " + row.SourcePackName + ".");
+            // A row with no library copy is never on, so there is nothing to turn off. Happens if the
+            // row was rebuilt between press and release.
+            if (!wanted) return;
+            if (await PromoteAsync(row) is not { } item) return;
+            // The promote reloaded the page, so look up the new row keyed on the library copy; the old
+            // row's key is gone.
+            if (RowFor(item.Key) is { } promoted) await SetDefaultAsync(promoted, true);
         }
-        catch (Exception ex) { Fail(ex.Message); }
+        catch (Exception ex) { Fail("That pack could not be switched.", ex); }
     }
 
-    /// <summary>Minecraft reads options.txt at startup and rewrites it from memory on exit, so a
-    /// change made under a running instance is thrown away when that instance closes.</summary>
-    private async Task<bool> ConfirmStackWriteAsync(ResourcePackScannerRowVm row)
+    /// <summary>The row now carrying an item's key, after a reload has rebuilt the list.</summary>
+    private ContentRow? RowFor(string key) =>
+        _all.FirstOrDefault(r => string.Equals(r.Key, key, StringComparison.Ordinal));
+
+    /// <summary>Turns a pack on for every compatible instance, or off again.</summary>
+    /// <remarks>
+    /// <para>Instances are unticked on the pack's own page. <see cref="ContentDefaultPolicy.Activate"/>
+    /// is set too, because a pack that is placed but not listed in <c>options.txt</c> is ignored by the
+    /// game.</para>
+    /// <para>Off only stops new placements; copies already placed stay where they are.</para>
+    /// </remarks>
+    private async Task SetDefaultAsync(ContentRow row, bool wanted)
     {
-        if (!App.State.Instances.IsBusy(row.Info.SourcePackId)) return true;
-        return await AppDialog.ConfirmAsync(_shell,
-            "Minecraft is running",
-            row.SourcePackName + " is open. Minecraft rewrites options.txt when it closes, so this "
-            + "change would be lost. Do it anyway?",
+        try
+        {
+            if (row.Item is not { } item) return;
+
+            var policy = App.State.Library.GetDefaults(item.Key);
+            policy.Enabled = wanted;
+            if (wanted) policy.Activate = true;
+
+            // Placed packs stay on this machine unless the user says otherwise. resourcepacks/
+            // is a synced folder, so otherwise one switch would push a personal pack to
+            // everyone on every shared instance.
+            var keepLocal = policy.KeepLocal || wanted;
+            policy.KeepLocal = keepLocal;
+            App.State.Library.SetDefaults(item.Key, policy);
+            if (keepLocal) App.State.Library.SetKeepLocal(item.Key, true);
+
+            await LoadAsync(force: true);
+            // Only suggest opening its page once an instance has a copy; the page is built from one.
+            Okay(wanted
+                ? $"{row.DisplayName} is on: every compatible instance gets it, kept on this machine. "
+                  + (FirstInstalled(row) is null
+                      ? "Each one takes a copy the next time it starts - open its page after that to "
+                        + "untick any of them."
+                      : "Open its page to untick the ones you do not want it in.")
+                : $"{row.DisplayName} is off. Copies already in your instances stay where they are.");
+        }
+        catch (Exception ex) { Fail("That pack could not be switched.", ex); }
+    }
+
+    /// <summary>Turns a pack on or off in one instance.</summary>
+    /// <remarks>A newly enabled pack goes on top, as the game does when you select one.</remarks>
+    private async Task SetEnabledAsync(RpInstalled installed, bool wanted)
+    {
+        if (!await ConfirmStackWriteAsync(installed.Pack)) return;
+
+        var info = installed.Info;
+        App.State.ResourcePacks.SetEnabled(info.SourcePackId, info.SourcePackName, info.FileName,
+            wanted, installed.Pack.MinecraftVersion);
+
+        Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(info.SourcePackId));
+        await LoadAsync(force: true);
+        Okay(wanted
+            ? $"{info.DisplayName} is on - top of {info.SourcePackName}'s stack."
+            : $"{info.DisplayName} is off in {info.SourcePackName}.");
+    }
+
+    /// <summary>Minecraft reads options.txt at startup and rewrites it from memory on exit, so a change
+    /// made under a running instance is thrown away when that instance closes.</summary>
+    private async Task<bool> ConfirmStackWriteAsync(PackSummary pack)
+    {
+        if (!App.State.Instances.IsBusy(pack.Id)) return true;
+        return await AppDialog.ConfirmAsync(_shell, "Minecraft is running",
+            $"{pack.Name} is open. Minecraft rewrites options.txt when it closes, so this change would "
+            + "be lost. Do it anyway?",
             "Do it anyway", "Cancel", danger: true);
     }
 
-    private async void OnCardCopyTo(object sender, RoutedEventArgs e)
+    // ── the row menu ─────────────────────────────────────────────────────────
+
+    private const int IcOpen = 0xE7C3, IcDefault = 0xE73E, IcOn = 0xE768;
+    private const int IcTop = 0xE74A, IcBottom = 0xE74B, IcOrder = 0xE71D, IcRename = 0xE8AC;
+    private const int IcFile = 0xE8E5, IcReveal = 0xE8DA, IcFolder = 0xE8F1, IcShare = 0xE8EC;
+    private const int IcCopy = 0xE8C8, IcLocal = 0xE753, IcDelete = 0xE74D;
+    private const int IcMore = 0xE712, IcApply = 0xE895;
+
+    /// <summary>The row's menu, built when it is opened.</summary>
+    /// <remarks>Left-click on "..." gives the short list, right-click gives everything. Built on demand
+    /// because a big ContextMenu in the item template would be built for every row.</remarks>
+    private ContextMenu? BuildRowMenu(ContentRow row, bool full)
     {
-        try
+        var scope = ScopedPack();
+        var installed = FirstInstalled(row);
+        var menu = ContentMenu.New(row.DisplayName,
+            row.Item is null
+                ? $"only in {installed?.Pack.Name ?? "one instance"}"
+                : row.IsDefault
+                    ? "on - every compatible instance gets it"
+                    : "off - put in by hand");
+
+        // Every row with an instance copy or a library item has a page.
+        if (installed is not null || row.Item is not null)
+            menu.Items.Add(ContentMenu.Item("Open pack page", () => OpenRow(row),
+                ContentMenu.Glyph(IcOpen)));
+
+        // Same as the row's switch, on every row. A row without a library copy is promoted first
+        // (ToggleRowAsync -> PromoteAsync).
+        menu.Items.Add(ContentMenu.Toggle("On everywhere", row.IsDefault, () =>
         {
-            if (sender is FrameworkElement { DataContext: ResourcePackScannerRowVm row })
-                await CopyToInstanceAsync(row);
+            _ = ToggleRowAsync(row, !row.IsDefault);
+            return !row.IsDefault;
+        }, ContentMenu.Glyph(IcDefault)));
+
+        // Per-instance on/off needs a single instance: the scope, or the row's own instance.
+        if (installed is not null && (scope is null || installed.Pack.Id == scope.Id))
+            menu.Items.Add(ContentMenu.Item(
+                installed.Info.Enabled
+                    ? $"Turn off in {installed.Pack.Name}"
+                    : $"Turn on in {installed.Pack.Name}",
+                () => _ = SetEnabledAsync(installed, !installed.Info.Enabled),
+                ContentMenu.Glyph(IcOn)));
+
+        // "Add to folder" is in the short menu too, as on the Instances page.
+        menu.Items.Add(BuildFolderMenu(row));
+
+        if (!full)
+        {
+            // A library row can always reveal its own copy, even before any instance has it.
+            if (row.Path is { Length: > 0 })
+                menu.Items.Add(ContentMenu.Item("Reveal in Explorer", () => Reveal(row), ContentMenu.Glyph(IcReveal)));
+            menu.Items.Add(new Separator());
+            menu.Items.Add(ContentMenu.Item("More options...",
+                () => ContentMenu.ShowInstead(menu, () => BuildRowMenu(row, full: true)!),
+                ContentMenu.Glyph(IcMore)));
+            return menu;
         }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
 
-    private async void OnCtxCopyInstance(object sender, RoutedEventArgs e)
-    {
-        try
+        // ── everything ──────────────────────────────────────────────────────
+        if (installed is { Info.Enabled: true })
         {
-            if (ScannerFromCtx(sender) is ResourcePackScannerRowVm row)
-                await CopyToInstanceAsync(row);
+            menu.Items.Add(ContentMenu.Item("Move to top of stack",
+                () => _ = MoveAsync(installed, toTop: true), ContentMenu.Glyph(IcTop)));
+            menu.Items.Add(ContentMenu.Item("Move to bottom of stack",
+                () => _ = MoveAsync(installed, toTop: false), ContentMenu.Glyph(IcBottom)));
         }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
+        if (installed is not null)
+            menu.Items.Add(ContentMenu.Item($"Load order for {installed.Pack.Name}...",
+                () => OpenLoadOrder(installed.Pack.Id, installed.Pack.Name), ContentMenu.Glyph(IcOrder)));
 
-    private async Task CopyToInstanceAsync(ResourcePackScannerRowVm row)
-    {
-        if (!_packs.Any()) _packs = await App.State.Api.ListPacksAsync();
+        menu.Items.Add(new Separator());
 
-        var allow = App.State.ResourcePacks.CompatiblePacks(row.Info, _packs)
-            .Where(p => p.Id != row.Info.SourcePackId)
-            .ToList();
-        if (!allow.Any())
+        if (row.Item is { } libraryItem)
         {
-            Fail("No other instance is flagged compatible — set that on the pack's Compatibility tab.");
-            return;
-        }
-
-        var pick = new PackPickerDialog(allow, "Copy resource pack", row.DisplayName, "Copy") { Owner = _shell };
-        if (pick.ShowDialog() != true || pick.SelectedPackId is not Guid gid) return;
-
-        var target = allow.First(pk => pk.Id == gid);
-        Okay("Copying to " + target.Name + "…");
-        try
-        {
-            var sourcePath = row.Path;
-            var fileName = row.FileName;
-            var isFolder = row.IsFolder;
-            await Task.Run(() =>
+            // The reconciler has no single-item mode, so this places every pack that is on.
+            menu.Items.Add(ContentMenu.Item("Place everything that is on, including this",
+                () => _ = ApplyOneAsync(row), ContentMenu.Glyph(IcApply),
+                gesture: row.IsDefault ? null : "switched off", enabled: row.IsDefault));
+            menu.Items.Add(BuildInstancesMenu(row, libraryItem));
+            menu.Items.Add(ContentMenu.Toggle("Keep on this machine", libraryItem.KeepLocal, () =>
             {
-                var dir = RpFolder(target);
-                var dest = BumpPath(dir, fileName, isFolder);
-                if (isFolder) CopyDirectory(sourcePath, dest);
-                else File.Copy(sourcePath, dest, overwrite: false);
-            });
-
-            // The copy is a new pack in another instance, and this grid shows every instance — so it
-            // has to be rebuilt. Saying "Copied" and showing nothing new was the old behaviour here.
-            await RefreshInstalledAsync();
-            Okay("Copied to " + target.Name);
+                var wanted = !libraryItem.KeepLocal;
+                App.State.Library.SetKeepLocal(libraryItem.Key, wanted);
+                // Report after the reload, which resets the status line (see ReloadThenSayAsync).
+                _ = ReloadThenSayAsync(wanted
+                    ? $"{row.DisplayName} will never be uploaded from a shared instance."
+                    : $"{row.DisplayName} will be uploaded with any shared instance it is in.");
+                return wanted;
+            }, ContentMenu.Glyph(IcLocal)));
         }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
 
-    private void OnCtxCopyKey(object sender, RoutedEventArgs e)
-    {
-        if (ScannerFromCtx(sender)?.Key is string ky && Services.ClipboardHelper.TrySetText(ky))
-            Okay("Copied key.");
-    }
-
-    private async void OnCtxDelete(object sender, RoutedEventArgs e)
-    {
-        try
+        menu.Items.Add(ContentMenu.Item("Rename...", () => _ = RenameAsync(row), ContentMenu.Glyph(IcRename),
+            gesture: "F2"));
+        if (installed is not null)
+            menu.Items.Add(ContentMenu.Item("Rename file on disk...", () => _ = RenameFileAsync(installed),
+                ContentMenu.Glyph(IcFile)));
+        if (installed is not null)
+            menu.Items.Add(ContentMenu.Item("Copy to another instance...", () => _ = CopyElsewhereAsync(row),
+                ContentMenu.Glyph(IcCopy)));
+        menu.Items.Add(ContentMenu.Item("Reveal in Explorer", () => Reveal(row), ContentMenu.Glyph(IcReveal)));
+        menu.Items.Add(ContentMenu.Item("Copy key", () =>
         {
-            var row = ScannerFromCtx(sender) ?? _focusedRow;
-            if (row is not null) await DeleteRowAsync(row);
-        }
-        catch (Exception ex) { Fail(ex.Message); }
+            if (ClipboardHelper.TrySetText(row.Key)) Okay("Copied key.");
+        }));
+
+        menu.Items.Add(new Separator());
+        if (row.Item is not null)
+            menu.Items.Add(ContentMenu.Item("Stop handing this out...", () => _ = RemoveFromLibraryAsync(row),
+                ContentMenu.Glyph(IcDelete)));
+        if (installed is not null)
+            menu.Items.Add(ContentMenu.Item($"Delete from {installed.Pack.Name}...",
+                () => _ = DeleteFromInstanceAsync(installed), ContentMenu.Glyph(IcDelete)));
+
+        return menu;
     }
 
-    private async Task DeleteRowAsync(ResourcePackScannerRowVm row)
+    /// <summary>The per-instance submenu: who has it, who could, and what is in the way.</summary>
+    /// <remarks>Built on open because every entry checks the disk. Each state is spelled out (using the
+    /// library copy, has its own copy, has an edited copy) since each needs a different fix. This is a
+    /// one-off "put it there now"; which instances the pack is for is set on its own page.</remarks>
+    private MenuItem BuildInstancesMenu(ContentRow row, LibraryItem item)
     {
-        var what = row.IsFolder ? "pack folder" : "zip";
-        if (!await AppDialog.ConfirmAsync(_shell,
-                "Delete resource pack",
-                "Permanently delete the " + what + " '" + row.FileName + "' from " + row.SourcePackName + "?"
-                + (row.Enabled ? "\n\nIt is turned on, so it will be removed from that instance's stack too." : ""),
-                "Delete", "Cancel", danger: true))
-            return;
-
-        try
+        var parent = ContentMenu.Parent("Put it in...", ContentMenu.Glyph(IcShare));
+        parent.SubmenuOpened += (_, _) =>
         {
-            var info = row.Info;
-            await Task.Run(() => App.State.ResourcePacks.DeleteFromDisk(info));
-            App.State.Settings.Save();
-            await RefreshInstalledAsync();
-            Okay("Deleted " + row.FileName + ".");
-        }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
-
-    private void OnCtxAddToFolderOpened(object sender, RoutedEventArgs e)
-    {
-        if (sender is not MenuItem root || ScannerFromCtx(sender) is not ResourcePackScannerRowVm row) return;
-        root.Items.Clear();
-
-        foreach (var folder in App.State.Settings.ResourcePackFolders.Keys.OrderBy(s => s))
-        {
-            var inside = App.State.Settings.ResourcePackFolders[folder].Contains(row.Key);
-            var mi = new MenuItem { Header = folder, IsCheckable = true, IsChecked = inside };
-            var locked = folder;
-            mi.Click += (_, _) =>
+            parent.Items.Clear();
+            if (_packs.Count == 0)
             {
-                if (mi.IsChecked) App.State.Settings.AddResourcePackToFolder(locked, row.Key);
-                else App.State.Settings.RemoveResourcePackFromFolder(locked, row.Key);
-                App.State.Settings.Save();
-                RebuildFolders(); FilterInstalledUi();
-            };
-            root.Items.Add(mi);
-        }
-        root.Items.Add(new Separator());
-        var neu = new MenuItem { Header = "Create folder…" };
-        neu.Click += (_, _) =>
-        {
-            var dlg = new SimpleInputDialog("New folder", "Name", "") { Owner = _shell };
-            if (dlg.ShowDialog() != true) return;
-            var name = dlg.Result!.Trim();
-            if (name.Length == 0) return;
-            App.State.Settings.CreateResourcePackFolder(name);
-            App.State.Settings.AddResourcePackToFolder(name, row.Key);
-            App.State.Settings.Save();
-            _activeFolder = name;
-            RebuildFolders(); FilterInstalledUi();
+                parent.Items.Add(ContentMenu.Item("(no instances)", () => { }, enabled: false));
+                return;
+            }
+
+            List<LibraryTargetState> states;
+            try { states = _packs.Select(p => App.State.Library.Inspect(item, p)).ToList(); }
+            catch (Exception ex)
+            {
+                AppLog.LogError(nameof(ResourcePacksView), ex);
+                parent.Items.Add(ContentMenu.Item("(those instances could not be read)", () => { }, enabled: false));
+                return;
+            }
+
+            foreach (var state in states.OrderBy(s => s.PackName, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var target = _packs.First(p => p.Id == state.PackId);
+                var applied = state.Applied;
+                parent.Items.Add(ContentMenu.Toggle($"{state.PackName} - {state.StateLabel}", applied, () =>
+                {
+                    _ = applied ? UnapplyAsync(item, [target]) : ApplyAsync(item, [target], replaceOwnCopy: false);
+                    return !applied;
+                }));
+            }
+
+            parent.Items.Add(new Separator());
+            parent.Items.Add(ContentMenu.Item("Every instance",
+                () => _ = ApplyAsync(item, _packs, replaceOwnCopy: false)));
+
+            // Only offered when it applies. It deletes the instance's own file, which on a shared
+            // instance removes it for everyone.
+            if (states.Any(s => s.HasOwnCopy))
+                parent.Items.Add(ContentMenu.Item("Replace the instances' own copies...", () => _ = ReplaceOwnAsync(item, states)));
+
+            // Re-linking compares whole files, so it's only offered for zips, not pack folders.
+            if (!item.IsFolder && states.Any(s => s.Diverged))
+                parent.Items.Add(ContentMenu.Item("Re-link the instances that drifted", () => _ = RelinkAsync(item, states)));
         };
-        root.Items.Add(neu);
+        parent.Items.Add(ContentMenu.Item("(reading...)", () => { }, enabled: false));
+        return parent;
+    }
+
+    private MenuItem BuildFolderMenu(ContentRow row)
+    {
+        var parent = ContentMenu.Parent("Add to folder", ContentMenu.Glyph(IcFolder));
+        parent.SubmenuOpened += (_, _) =>
+        {
+            parent.Items.Clear();
+            foreach (var name in App.State.Settings.ResourcePackFolders.Keys
+                         .OrderBy(s => s, StringComparer.CurrentCultureIgnoreCase))
+            {
+                var folder = name;
+                // Same helper as the chip count, so the two agree.
+                var inside = IsMember(MemberKeys(folder), row.Key);
+                parent.Items.Add(ContentMenu.Toggle(folder, inside, () =>
+                {
+                    FileIntoFolder(row, folder, !inside);
+                    return !inside;
+                }));
+            }
+            // Matches the Instances page's "Add to folder" menu (PackListView.OnCtxAddToFolderOpened).
+            if (App.State.Settings.ResourcePackFolders.Count == 0)
+                parent.Items.Add(ContentMenu.Item("(no folders - create one first)", () => { },
+                    enabled: false));
+
+            parent.Items.Add(new Separator());
+            parent.Items.Add(ContentMenu.Item("Create new folder...", () => _ = CreateFolderAsync(row)));
+        };
+        parent.Items.Add(ContentMenu.Item("(reading...)", () => { }, enabled: false));
+        return parent;
+    }
+
+    // ── row actions ──────────────────────────────────────────────────────────
+
+    /// <summary>Gives the launcher its own copy of a pack that only exists in one instance, leaving
+    /// that instance on the same file.</summary>
+    /// <remarks>
+    /// <para>The only promote path on this page. It goes through
+    /// <see cref="ContentDefaultsService.AddFromInstanceAsync"/>, which handles two packs sharing a
+    /// file name. No confirmation: the hard link is free, the source instance is untouched, and
+    /// switching off undoes it.</para>
+    /// <para>Returns the new library item, or null if nothing could be copied. The page has reloaded by
+    /// then, so callers look the new row up by key.</para>
+    /// </remarks>
+    private async Task<LibraryItem?> PromoteAsync(ContentRow row)
+    {
+        try
+        {
+            var installed = FirstInstalled(row);
+            if (installed is null) { Fail("That pack is no longer where it was - try Refresh."); return null; }
+
+            // Only mention a copy where hard links aren't supported and the file really is duplicated.
+            _state.Begin(App.State.Library.SupportsHardLinks
+                ? $"Turning on {installed.Info.DisplayName}..."
+                : $"Turning on {installed.Info.DisplayName} - copying it, because this drive cannot "
+                  + "share one file between instances...",
+                refreshing: true);
+            var result = await App.State.ContentDefaults.AddFromInstanceAsync(
+                installed.Pack,
+                [new ContentAddRequest(installed.Info.FilePath, LibraryKind.ResourcePack,
+                    installed.Info.DisplayName, PackFormat: installed.Meta.PackFormat)],
+                makeDefault: false, policyTemplate: null,
+                new Progress<string>(_state.Progress), _scanCts?.Token ?? default);
+
+            Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(installed.Pack.Id));
+            await LoadAsync(force: true);
+            // Refused because the game is running there. Nothing was attempted, so report a failure.
+            if (result.Refused is { Length: > 0 } refused) { Fail(refused); return null; }
+            Okay(result.Summary());
+            return result.Items.FirstOrDefault()?.Item;
+        }
+        catch (OperationCanceledException) { return null; }
+        catch (Exception ex) { Fail("That pack could not be switched on.", ex); return null; }
+    }
+
+    /// <summary>Runs the reconciler now, placing everything that is on, this row included.</summary>
+    /// <remarks>There is no single-item reconcile: plans are built per instance over the whole library,
+    /// since the pack stack only makes sense with everything that is on considered together.</remarks>
+    private async Task ApplyOneAsync(ContentRow row)
+    {
+        if (row.Item is null) return;
+        try
+        {
+            _state.Begin($"Placing everything that is on, {row.DisplayName} included...", refreshing: true);
+            var result = await App.State.ContentDefaults.ReconcileAllAsync(
+                _packs, activate: true, new Progress<string>(_state.Progress), _scanCts?.Token ?? default);
+            foreach (var pack in _packs) Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(pack.Id));
+            await LoadAsync(force: true);
+            Okay(result.Summary());
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { Fail("Those packs could not be placed.", ex); }
+    }
+
+    private async Task ApplyAsync(LibraryItem item, IReadOnlyList<PackSummary> targets, bool replaceOwnCopy)
+    {
+        try
+        {
+            _state.Begin($"Putting {item.FileName} into {targets.Count} instance(s)...", refreshing: true);
+            var result = await App.State.Library.ApplyAsync([item], targets, replaceOwnCopy);
+            foreach (var target in targets) Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(target.Id));
+            await LoadAsync(force: true);
+            Okay(result.Summary());
+        }
+        catch (Exception ex) { Fail("That pack could not be shared.", ex); }
+    }
+
+    private async Task UnapplyAsync(LibraryItem item, IReadOnlyList<PackSummary> targets)
+    {
+        try
+        {
+            var result = await App.State.Library.UnapplyAsync([item], targets);
+            foreach (var target in targets) Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(target.Id));
+            await LoadAsync(force: true);
+            Okay(result.Summary());
+        }
+        catch (Exception ex) { Fail("That pack could not be taken out of the instance.", ex); }
+    }
+
+    private async Task ReplaceOwnAsync(LibraryItem item, List<LibraryTargetState> states)
+    {
+        var shadowed = states.Where(s => s.HasOwnCopy)
+            .Select(s => _packs.First(p => p.Id == s.PackId)).ToList();
+        if (shadowed.Count == 0) return;
+
+        if (!await AppDialog.ConfirmAsync(_shell, "Use the shared copy",
+                $"{shadowed.Count} instance(s) have their own copy of {item.FileName}, and that copy is the "
+                + "one the game loads.\n\nDelete those copies so the shared one is used instead? If other "
+                + "people are on one of those instances, this removes the file for them too.",
+                "Use the shared copy", "Cancel", danger: true))
+            return;
+        await ApplyAsync(item, shadowed, replaceOwnCopy: true);
+    }
+
+    private async Task RelinkAsync(LibraryItem item, List<LibraryTargetState> states)
+    {
+        var drifted = states.Where(s => s.Diverged).Select(s => _packs.First(p => p.Id == s.PackId)).ToList();
+        if (drifted.Count == 0) return;
+        try
+        {
+            var result = await App.State.Library.RelinkAsync(item, drifted);
+            foreach (var target in drifted) Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(target.Id));
+            await LoadAsync(force: true);
+            Okay(result.Summary());
+        }
+        catch (Exception ex) { Fail("Those copies could not be re-linked.", ex); }
+    }
+
+    private async Task RemoveFromLibraryAsync(ContentRow row)
+    {
+        if (row.Item is not { } item) return;
+        try
+        {
+            if (!await AppDialog.ConfirmAsync(_shell, "Stop handing this out",
+                    $"Stop the launcher handing {item.DisplayName} to your instances?\n\n"
+                    + $"The {item.AppliedTo.Count} instance(s) using it keep working - the file survives as "
+                    + "long as any instance still holds it. Nothing will place it in a new instance again.",
+                    "Stop handing it out", "Cancel", danger: true))
+                return;
+
+            await App.State.Library.RemoveAsync(item.Key);
+            // The folder map is keyed on the item key, so a folder would otherwise keep counting
+            // something that no longer exists.
+            ForgetFolderMembership(item.Key);
+            App.State.Settings.Save();
+            await LoadAsync(force: true);
+            Okay($"{item.DisplayName} is no longer handed to your instances.");
+        }
+        catch (Exception ex) { Fail("That item could not be removed.", ex); }
+    }
+
+    private async Task MoveAsync(RpInstalled installed, bool toTop)
+    {
+        try
+        {
+            if (!installed.Info.Enabled) return;
+            if (!await ConfirmStackWriteAsync(installed.Pack)) return;
+
+            // A delta past either end is clamped by the service, so "very far" is how you say top.
+            App.State.ResourcePacks.MoveInStack(installed.Info.SourcePackId, installed.Info.SourcePackName,
+                installed.Info.FileName, toTop ? -9999 : 9999);
+            Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(installed.Pack.Id));
+            await LoadAsync(force: true);
+            Okay(toTop
+                ? $"{installed.Info.DisplayName} now overrides everything else in {installed.Pack.Name}."
+                : $"{installed.Info.DisplayName} is now the first thing everything else overrides.");
+        }
+        catch (Exception ex) { Fail("That stack could not be rewritten.", ex); }
+    }
+
+    /// <summary>Renames the label the launcher shows. The file keeps its name; "Rename file on
+    /// disk..." is a separate command.</summary>
+    private async Task RenameAsync(ContentRow row)
+    {
+        try
+        {
+            var name = (await _shell.PromptAsync("Rename resource pack", "Display name", row.DisplayName))?.Trim();
+            if (string.IsNullOrEmpty(name)) return;
+
+            if (row.Item is { } item) App.State.Library.Rename(item.Key, name);
+            else
+            {
+                App.State.ResourcePacks.Rename(row.Key, name);
+                if (row.PackId is Guid packId) Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(packId));
+            }
+            await LoadAsync(force: true);
+            Okay($"Renamed to {name}.");
+        }
+        catch (Exception ex) { Fail("That pack could not be renamed.", ex); }
+    }
+
+    /// <summary>Renames the zip (or pack folder), carrying the launcher's entry and the instance's
+    /// options.txt line with it.</summary>
+    /// <remarks>The settings key contains the file name, so without the re-key the pack would lose its
+    /// display name, folder membership and hosting link. options.txt lists packs by file name too, so
+    /// an enabled pack has to be renamed there or it gets switched off.</remarks>
+    private async Task RenameFileAsync(RpInstalled installed)
+    {
+        try
+        {
+            var typed = await _shell.PromptAsync("Rename file on disk", "File name", installed.Info.FileName);
+            if (typed is null) return;
+
+            var wanted = ResourcePackService.SanitizeFileName(typed, installed.Info.IsFolder);
+            if (string.Equals(wanted, installed.Info.FileName, StringComparison.Ordinal)) return;
+            if (!PathSafety.IsSafeFileName(wanted))
+            {
+                Fail($"'{wanted}' cannot be used as a file name.");
+                return;
+            }
+            if (installed.Info.Enabled && !await ConfirmStackWriteAsync(installed.Pack)) return;
+
+            var info = installed.Info;
+            await Task.Run(() => App.State.ResourcePacks.RenameFileOnDisk(info, wanted));
+            Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(installed.Pack.Id));
+            await LoadAsync(force: true);
+            Okay($"Renamed to {wanted}.");
+        }
+        catch (Exception ex) { Fail("That file could not be renamed.", ex); }
+    }
+
+    private void Reveal(ContentRow row)
+    {
+        try
+        {
+            var path = row.Path ?? FirstInstalled(row)?.Info.FilePath;
+            if (path is null || (!File.Exists(path) && !Directory.Exists(path)))
+            {
+                Fail("That file is no longer there.");
+                return;
+            }
+            if (!SafeLaunch.RevealFile(path)) Fail("Explorer could not be opened.");
+        }
+        catch (Exception ex) { Fail("Explorer could not be opened.", ex); }
+    }
+
+    private async Task CopyElsewhereAsync(ContentRow row)
+    {
+        try
+        {
+            var path = row.Path ?? FirstInstalled(row)?.Info.FilePath;
+            if (path is null) { Fail("That file is no longer there."); return; }
+
+            var from = FirstInstalled(row)?.Pack.Id;
+            var targets = _packs.Where(p => p.Id != from).ToList();
+            if (targets.Count == 0) { Fail("There is no other instance to copy it into."); return; }
+
+            var pick = new PackPickerDialog(targets, "Copy resource pack", row.DisplayName, "Copy") { Owner = _shell };
+            if (pick.ShowDialog() != true || pick.SelectedPackId is not Guid gid) return;
+
+            await CopyIntoAsync([path], targets.First(p => p.Id == gid));
+        }
+        catch (Exception ex) { Fail("That pack could not be copied.", ex); }
+    }
+
+    private async Task DeleteFromInstanceAsync(RpInstalled installed)
+    {
+        try
+        {
+            var info = installed.Info;
+            var what = info.IsFolder ? "pack folder" : "zip";
+            var extra = info.Enabled
+                ? "\n\nIt is turned on, so it will be removed from that instance's stack too."
+                : "";
+            var fromLibrary = _model.Library.Any(i =>
+                string.Equals(i.FileName, info.FileName, StringComparison.OrdinalIgnoreCase)
+                && SameFile(i.Path, info.FilePath, cheap: false));
+            if (fromLibrary)
+                extra += "\n\nThis is the shared copy, linked in here - the pack itself stays and every "
+                       + "other instance using it is unaffected.";
+
+            if (!await AppDialog.ConfirmAsync(_shell, "Delete resource pack",
+                    $"Permanently delete the {what} '{info.FileName}' from {info.SourcePackName}?{extra}",
+                    "Delete", "Cancel", danger: true))
+                return;
+
+            await Task.Run(() => App.State.ResourcePacks.DeleteFromDisk(info));
+            ForgetFolderMembership(info.Key);
+            App.State.Settings.Save();
+            Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(info.SourcePackId));
+            await LoadAsync(force: true);
+            Okay($"Deleted {info.FileName} from {info.SourcePackName}.");
+        }
+        catch (Exception ex) { Fail("That pack could not be deleted.", ex); }
+    }
+
+    // ── drag and drop ────────────────────────────────────────────────────────
+
+    private void OnListDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = DroppedPacks(e).Count > 0 ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    /// <summary>Dropping pack files opens the Import flow with the file already chosen
+    /// (<see cref="ImportRequest.PrePickedPath"/>).</summary>
+    /// <remarks>One file at a time, since the card walks one file through picking instances and
+    /// publishing.</remarks>
+    private async void OnListDrop(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        try
+        {
+            var files = DroppedPacks(e);
+            if (files.Count == 0) return;
+            if (files.Count > 1)
+                Okay($"Importing {Path.GetFileName(files[0])} - drop them one at a time to give each its own "
+                   + "instances.");
+            await RunImportAsync(files[0]);
+        }
+        catch (Exception ex) { Fail("Those files could not be imported.", ex); }
+    }
+
+    /// <summary>The resource packs in a drag payload: zips, and folders holding a pack.mcmeta. Anything
+    /// else is ignored rather than copied into resourcepacks/.</summary>
+    private static List<string> DroppedPacks(DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return new();
+        return (e.Data.GetData(DataFormats.FileDrop) as string[] ?? Array.Empty<string>())
+            .Where(f => (File.Exists(f) && f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                        || (Directory.Exists(f) && File.Exists(Path.Combine(f, "pack.mcmeta"))))
+            .ToList();
+    }
+
+    /// <summary>Copies pack files straight into one instance's resourcepacks folder.</summary>
+    /// <remarks>Only used by "copy to another instance"; files from outside go through
+    /// <see cref="ImportContentCard"/>.</remarks>
+    private async Task CopyIntoAsync(IReadOnlyList<string> sources, PackSummary target)
+    {
+        _state.Begin($"Copying into {target.Name}...", refreshing: true);
+        var copied = await Task.Run(() =>
+        {
+            var dir = RpFolder(target);
+            var n = 0;
+            foreach (var source in sources)
+            {
+                var isFolder = Directory.Exists(source);
+                var dest = BumpPath(dir, Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar)), isFolder);
+                if (isFolder) CopyDirectory(source, dest);
+                else File.Copy(source, dest);
+                n++;
+            }
+            return n;
+        });
+
+        Cache.Invalidate(ScanCache<CachedRpRow>.ScopeKey(target.Id));
+        await LoadAsync(force: true);
+        Okay($"Copied {copied} pack(s) into {target.Name} - turn one on from its row.");
     }
 
     private static string RpFolder(PackSummary p)
@@ -938,10 +1969,8 @@ public partial class ResourcePacksView : Page
         return dir;
     }
 
-    private static string Bump(string dir, string name) => BumpPath(dir, name, isFolder: false);
-
-    /// <summary>A destination path in <paramref name="dir"/> that collides with nothing, for a zip or
-    /// for an unpacked pack folder.</summary>
+    /// <summary>A destination path that collides with nothing, for a zip or for an unpacked pack
+    /// folder.</summary>
     private static string BumpPath(string dir, string name, bool isFolder)
     {
         var clean = ResourcePackService.SanitizeFileName(Path.GetFileName(name), isFolder);
@@ -964,964 +1993,146 @@ public partial class ResourcePacksView : Page
             File.Copy(file, file.Replace(source, dest, StringComparison.Ordinal), overwrite: true);
     }
 
-    // ── drag & drop onto the installed grid ──────────────────────────────────
+    // ── keyboard ─────────────────────────────────────────────────────────────
 
-    private void OnInstalledDragOver(object sender, DragEventArgs e)
+    private async void GlobalKeys(object sender, KeyEventArgs e)
     {
-        e.Effects = DroppedPacks(e).Count > 0 ? DragDropEffects.Copy : DragDropEffects.None;
-        e.Handled = true;
-    }
+        // The hub can be open in the side panel while this page still exists behind it.
+        if (!IsVisible) return;
 
-    /// <summary>
-    /// Dropping pack zips here asks which instance they belong to, then copies them in.
-    /// </summary>
-    /// <remarks>This grid spans every instance, so unlike the per-instance Resources tab it cannot
-    /// guess a destination — the picker is the drop target's missing half, not an extra step.</remarks>
-    private async void OnInstalledDrop(object sender, DragEventArgs e)
-    {
-        e.Handled = true;
-        try
+        if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
         {
-            var files = DroppedPacks(e);
-            if (files.Count == 0) return;
-
-            if (!_packs.Any()) _packs = await App.State.Api.ListPacksAsync();
-            if (!_packs.Any()) { Fail("Create an instance first."); return; }
-
-            var dlg = new PackPickerDialog(_packs, "Install resource packs",
-                files.Count == 1 ? Path.GetFileName(files[0]) : $"{files.Count} packs", "Copy")
-            { Owner = _shell };
-            if (dlg.ShowDialog() != true || dlg.SelectedPackId is not Guid gid) return;
-
-            var target = _packs.First(z => z.Id == gid);
-            Okay($"Copying into {target.Name}…");
-            await Task.Run(() =>
-            {
-                var dir = RpFolder(target);
-                foreach (var source in files)
-                {
-                    var isFolder = Directory.Exists(source);
-                    var dest = BumpPath(dir, Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar)), isFolder);
-                    if (isFolder) CopyDirectory(source, dest);
-                    else File.Copy(source, dest);
-                }
-            });
-
-            await RefreshInstalledAsync();
-            Okay($"Copied {files.Count} pack(s) into {target.Name}.");
-        }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
-
-    /// <summary>The resource packs in a drag payload: zips, and folders holding a pack.mcmeta.
-    /// Anything else is ignored rather than copied into resourcepacks/.</summary>
-    private static List<string> DroppedPacks(DragEventArgs e)
-    {
-        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return new();
-        return (e.Data.GetData(DataFormats.FileDrop) as string[] ?? Array.Empty<string>())
-            .Where(f => (File.Exists(f) && f.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                        || (Directory.Exists(f) && File.Exists(Path.Combine(f, "pack.mcmeta"))))
-            .ToList();
-    }
-
-    // ── browse-row context menu ──────────────────────────────────────────────
-
-    private static RpBrowseRowVm? BrowseRowFrom(object sender)
-    {
-        DependencyObject? p = sender as DependencyObject;
-        while (p is MenuItem m) p = m.Parent as MenuItem ?? m.Parent;
-        return p is ContextMenu { PlacementTarget: FrameworkElement fx } && fx.DataContext is RpBrowseRowVm row
-            ? row
-            : null;
-    }
-
-    /// <summary>Shows only what this row can actually do: hosting actions for a hosted pack, and
-    /// delete only for a pack this user owns.</summary>
-    private void OnBrowseMenuOpened(object sender, RoutedEventArgs e)
-    {
-        if (sender is not ContextMenu menu) return;
-        var row = (menu.PlacementTarget as FrameworkElement)?.DataContext as RpBrowseRowVm;
-        if (row is null) { menu.IsOpen = false; return; }
-
-        var hosted = row.Hosted;
-        var isOwner = hosted is not null && hosted.OwnerId == App.State.Settings.UserId;
-
-        foreach (var item in menu.Items.OfType<FrameworkElement>())
-        {
-            var visible = item.Name switch
-            {
-                "BrowseCtxManage" => isOwner,
-                "BrowseCtxOpenPage" => row.External is not null,
-                "BrowseCtxCopyUrl" => row.External is not null,
-                "BrowseCtxDelete" or "BrowseCtxDeleteSeparator" => isOwner,
-                _ => true
-            };
-            item.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        }
-    }
-
-    private async void OnCtxBrowseInstall(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (BrowseRowFrom(sender) is RpBrowseRowVm row) await InstallRowAsync(row);
-        }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
-
-    private void OnCtxBrowseManage(object sender, RoutedEventArgs e)
-    {
-        if (BrowseRowFrom(sender)?.Hosted is HostedResourcePackSummary hs)
-            _shell.OpenResourcePackDetail(hs.Id, hs.Name);
-    }
-
-    private void OnCtxBrowseOpenPage(object sender, RoutedEventArgs e)
-    {
-        if (BrowseRowFrom(sender)?.External is ModSummary m)
-            Process.Start(new ProcessStartInfo(BuildUrl(m)) { UseShellExecute = true });
-    }
-
-    private void OnCtxBrowseCopyUrl(object sender, RoutedEventArgs e)
-    {
-        if (BrowseRowFrom(sender)?.External is ModSummary m && Services.ClipboardHelper.TrySetText(BuildUrl(m)))
-            Okay("Project URL copied.");
-    }
-
-    /// <summary>
-    /// Deletes a hosted resource pack the signed-in user owns.
-    /// </summary>
-    /// <remarks>Also clears the link from any installed zip that pointed at it, so the local pack
-    /// does not keep claiming to be published to something that no longer exists.</remarks>
-    private async void OnCtxBrowseDelete(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (BrowseRowFrom(sender)?.Hosted is not HostedResourcePackSummary hs) return;
-            if (hs.OwnerId != App.State.Settings.UserId) return;
-
-            if (!await AppDialog.ConfirmAsync(_shell,
-                    "Delete hosted resource pack",
-                    $"Delete '{hs.Name}' and all of its uploaded versions from hosting?\n\n"
-                    + "Anyone you shared it with loses access. Copies already installed in an instance are untouched.",
-                    "Delete", "Cancel", danger: true))
-                return;
-
-            await App.State.Api.DeleteResourcePackAsync(hs.Id);
-
-            var relinked = false;
-            foreach (var entry in App.State.Settings.ResourcePacks.Values.Where(v => v.HostedResourcePackId == hs.Id))
-            {
-                entry.HostedResourcePackId = null;
-                relinked = true;
-            }
-            if (relinked) App.State.Settings.Save();
-
-            await BrowseRestartAsync();
-            Okay($"Deleted '{hs.Name}'.");
-        }
-        catch (Exception ex) { Fail("Delete failed: " + ex.Message); }
-    }
-
-    // Browse --------------------------------------------------------------------
-
-    private async Task BrowseRestartAsync()
-    {
-        _cts.Cancel();
-        _cts = new CancellationTokenSource();
-        var tk = _cts.Token;
-        _off = 0;
-        _more = true;
-        _browseRows.Clear();
-        DetailPanel.Visibility = Visibility.Collapsed;
-        DetailPlaceholder.Visibility = Visibility.Visible;
-
-        LoadingBar.Visibility = Visibility.Visible;
-        await DrainAsync(tk);
-        LoadingBar.Visibility = Visibility.Collapsed;
-
-        BrowseEmptyBanner();
-        CountLabel.Text = $"{_browseRows.Count}";
-    }
-
-    private async void OnResultsScroll(object sender, ScrollChangedEventArgs e)
-    {
-        if (_busy || !_more || _activeChipVm?.Kind == BrowseKind.Installed) return;
-        if (e.OriginalSource is ScrollViewer sv
-            && sv.VerticalOffset + sv.ViewportHeight >= sv.ExtentHeight - 200)
-            await DrainAsync(_cts.Token);
-    }
-
-    private async Task DrainAsync(CancellationToken ct)
-    {
-        if (_activeChipVm == null ||
-            _activeChipVm.Kind == BrowseKind.Installed ||
-            !_more ||
-            _browseRows.Count >= BrowseCap)
+            SearchBox.Focus();
+            e.Handled = true;
             return;
+        }
+        if (e.Key == Key.F5)
+        {
+            e.Handled = true;
+            await LoadAsync(force: true);
+            return;
+        }
 
-        LoadingBar.Visibility = Visibility.Visible;
-        _busy = true;
-        var added = 0;
+        // Rows don't take keyboard focus, so these act on the row the user last touched.
+        if (PackList.Focused is not { } row) return;
+        if (SearchBox.IsExpanded && SearchBox.IsKeyboardFocusWithin) return;
+        // Another page's text box (the side panel) can have the keyboard while this page is visible.
+        if (TypingFocus.IsTyping) return;
 
         try
         {
-            added = await (_activeChipVm.Kind switch
+            switch (e.Key)
             {
-                BrowseKind.CurseForge => AppendCf(ct),
-                BrowseKind.Modrinth => AppendMr(ct),
-                BrowseKind.CloudPublic => AppendHosted(ResourcePackBrowseSource.Public, null, ct),
-                BrowseKind.CloudPersonal => AppendHosted(ResourcePackBrowseSource.Personal, null, ct),
-                BrowseKind.CloudShared => AppendHosted(ResourcePackBrowseSource.Shared, null, ct),
-                BrowseKind.CloudTeam => AppendHosted(ResourcePackBrowseSource.Team, _activeChipVm.TeamId, ct),
-                _ => Task.FromResult(0)
-            });
-
-            // Advance the paging offset, or every scroll-to-bottom re-requests page one and the list
-            // fills with duplicates of the first 25 results.
-            _off += added;
-
-            // Newly-arrived rows have to be checked against the installed library too, or only the
-            // first page ever says "Installed".
-            MarkInstalledBrowseRows();
-            BrowseEmptyBanner();
-        }
-        catch (OperationCanceledException)
-        {
-            /* cancelled */
-        }
-        catch (Exception ex)
-        {
-            Fail(ex.Message);
-            added = 0;
-            _more = false;
-        }
-        finally { _busy = false; LoadingBar.Visibility = Visibility.Collapsed; }
-    }
-
-    private async Task<int> AppendCf(CancellationToken ct)
-    {
-        var chunk = await App.State.CurseForge.SearchAsync(_search, _filterMc, null, PageSize, _off,
-            CurseForgeService.ClassIdResourcePacks, ct: ct);
-        foreach (var m in chunk) _browseRows.Add(RpBrowseRowVm.FromExternal(m, CfBrush()));
-        _more = chunk.Count == PageSize;
-        return chunk.Count;
-    }
-
-    private async Task<int> AppendMr(CancellationToken ct)
-    {
-        var chunk = await App.State.Modrinth.SearchAsync(_search, _filterMc, null,
-            limit: PageSize, offset: _off, projectType: "resourcepack", ct: ct);
-        foreach (var m in chunk) _browseRows.Add(RpBrowseRowVm.FromExternal(m, MrBrush()));
-        _more = chunk.Count == PageSize;
-        return chunk.Count;
-    }
-
-    private async Task<int> AppendHosted(ResourcePackBrowseSource src, Guid? team, CancellationToken ct)
-    {
-        var pg = await App.State.Api.BrowseResourcePacksAsync(src, team, _search, _filterMc,
-            offset: _off, limit: PageSize, ct: ct);
-
-        Brush soft = (Brush)FindResource("AccentSoftBrush"), fore = (Brush)FindResource("AccentBrush");
-
-        foreach (var item in pg.Items)
-            _browseRows.Add(RpBrowseRowVm.FromHosted(item, soft, fore));
-
-        var next = pg.Offset + pg.Items.Count;
-        _more = next < pg.Total;
-
-        return pg.Items.Count;
-    }
-
-    private void BrowseEmptyBanner() =>
-        EmptyState.Visibility = !_browseRows.Any() && !_more ? Visibility.Visible : Visibility.Collapsed;
-
-    private static Brush CfBrush() => new SolidColorBrush(Color.FromRgb(0xF1, 0x65, 0x36));
-
-    private static Brush MrBrush() => new SolidColorBrush(Color.FromRgb(0x1B, 0xD9, 0x6A));
-
-    private async void OnResultSelected(object sender, SelectionChangedEventArgs e)
-    {
-        if (ResultsList.SelectedItem is not RpBrowseRowVm row) return;
-
-        DetailPanel.Visibility = Visibility.Visible;
-        DetailPlaceholder.Visibility = Visibility.Collapsed;
-
-        ManageHostedButton.Visibility = Visibility.Collapsed;
-        OpenProjectButton.Visibility = Visibility.Collapsed;
-        ShowOverview("Loading…");
-        ScreenshotsEmptyText.Text = "No previews yet.";
-        ScreenshotList.ItemsSource = null;
-        ScreenshotsEmptyText.Visibility = Visibility.Visible;
-        VersionsGrid.ItemsSource = null;
-
-        ModNameLabel.Text = row.Name;
-        ModMetaLabel.Text = row.MetaLabel;
-        SelectedIconFallback.Text = row.Initial;
-        Thumb(row.IconUrl);
-        ManageHostedButton.IsEnabled = true;
-
-        try
-        {
-            if (row.External is ModSummary ext)
-                await FillExternal(ext);
-            else if (row.Hosted is HostedResourcePackSummary hz)
-                await FillHostedAsync(hz);
-        }
-        catch (Exception ex) { ShowOverview(ex.Message); }
-        ModTabs.SelectedIndex = 0;
-    }
-
-    private async Task FillExternal(ModSummary mod)
-    {
-        _selHostedDetail = null;
-        _selExternal = mod;
-
-        ShowAllVersionsBox.Visibility = Visibility.Visible;
-
-        var detail = mod.Source == ModSource.CurseForge
-            ? await App.State.CurseForge.GetProjectDetailAsync(int.TryParse(mod.Id, out var cid) ? cid : 0)
-            : await App.State.Modrinth.GetProjectDetailAsync(mod.Id);
-
-        ShowOverview(detail.Description ?? mod.Description, detail.IsMarkdown);
-        WireScreens(detail.Screenshots);
-        _projectUrl = BuildUrl(mod);
-
-        ToggleLink(ProjectPageButton, detail.Links.WebsiteUrl ?? _projectUrl);
-        ToggleLink(IssuesButton, detail.Links.IssuesUrl);
-        ToggleLink(SourceButton, detail.Links.SourceUrl);
-        ToggleLink(WikiButton, detail.Links.WikiUrl);
-        ToggleLink(DiscordButton, detail.Links.DiscordUrl);
-
-        ToggleLinksEmpty();
-
-        OpenProjectButton.Visibility = Visibility.Visible;
-
-        IEnumerable<ModVersion> vers =
-            mod.Source == ModSource.CurseForge && int.TryParse(mod.Id, out var cfMod)
-                ? await App.State.CurseForge.GetVersionsAsync(cfMod)
-                : await App.State.Modrinth.GetVersionsAsync(mod.Id, mcVersion: null, loader: null);
-
-        _cachedExternalVers.Clear(); _cachedExternalVers.AddRange(vers);
-        ReloadExternalVersionsGrid();
-        InstallSelectedButton.IsEnabled = VersionsGrid.ItemsSource != null;
-    }
-
-    private async Task FillHostedAsync(HostedResourcePackSummary pack)
-    {
-        _selExternal = null;
-
-        ShowAllVersionsBox.Visibility = Visibility.Collapsed;
-
-        var detail = await App.State.Api.GetResourcePackAsync(pack.Id);
-
-        _selHostedDetail = detail;
-
-        ShowOverview(detail.Description ?? detail.Summary, isMarkdown: true);
-        ScreenshotsEmptyText.Text = "Hosted packs do not expose gallery screenshots here.";
-        ScreenshotList.ItemsSource = Array.Empty<object>();
-        ScreenshotsEmptyText.Visibility = Visibility.Visible;
-
-        foreach (var btn in new[] { ProjectPageButton, IssuesButton, SourceButton, WikiButton, DiscordButton })
-        {
-            btn.Visibility = Visibility.Collapsed; btn.Tag = "";
-        }
-
-        VersionsGrid.ItemsSource = detail.Versions
-            .OrderByDescending(z => z.PublishedAt)
-            .Select(VersionVm.FromHosted)
-            .ToList();
-
-        ManageHostedButton.Visibility =
-            App.State.Settings.UserId == detail.OwnerId ? Visibility.Visible : Visibility.Collapsed;
-
-        InstallSelectedButton.IsEnabled = detail.Versions.Any();
-    }
-
-    private void WireScreens(IReadOnlyList<ModMediaItem> imgs)
-    {
-        ScreenshotList.ItemsSource = imgs.Select(i => new MediaRow(i)).ToList();
-        ScreenshotsEmptyText.Visibility = imgs.Any() ? Visibility.Collapsed : Visibility.Visible;
-    }
-
-    private void ToggleLink(Button btn, string? url)
-    {
-        btn.Tag = url ?? "";
-        btn.Visibility = string.IsNullOrWhiteSpace(url) ? Visibility.Collapsed : Visibility.Visible;
-    }
-
-    private void ToggleLinksEmpty()
-    {
-        LinksEmptyText.Visibility =
-            new[] { ProjectPageButton, IssuesButton, SourceButton, WikiButton, DiscordButton }.Any(z => z.Visibility == Visibility.Visible)
-                ? Visibility.Collapsed
-                : Visibility.Visible;
-    }
-
-    private void Thumb(string? url)
-    {
-        SelectedIconImage.Source = null;
-        if (string.IsNullOrWhiteSpace(url)) return;
-        try { SelectedIconImage.Source = new BitmapImage(new Uri(url)); }
-        catch { /* ignore */ }
-    }
-
-    private void ReloadExternalVersionsGrid()
-    {
-        IEnumerable<ModVersion> filtered = _cachedExternalVers;
-        if (ShowAllVersionsBox.IsChecked != true && !string.IsNullOrWhiteSpace(_filterMc))
-            filtered = filtered.Where(v => v.GameVersions.Any(g =>
-                string.Equals(g, _filterMc, StringComparison.OrdinalIgnoreCase)));
-
-        VersionFilterNote.Text = $"{filtered.Count()} row(s)";
-        VersionsGrid.ItemsSource = filtered.OrderByDescending(v => v.DatePublished).Select(VersionVm.FromExternal).ToList();
-    }
-
-    private void OnShowAllVersionsChanged(object sender, RoutedEventArgs e)
-    {
-        if (_selExternal is null)
-            return;
-        ReloadExternalVersionsGrid();
-    }
-
-    private async void OnQuickInstallRp(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { DataContext: RpBrowseRowVm rr })
-            await InstallRowAsync(rr);
-    }
-
-    private async void OnResultDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (ResultsList.SelectedItem is RpBrowseRowVm row)
-            await InstallRowAsync(row);
-    }
-
-    private async void OnInstallSelectedRp(object sender, RoutedEventArgs e)
-    {
-        if (ResultsList.SelectedItem is RpBrowseRowVm row)
-            await InstallRowAsync(row);
-    }
-
-    private async Task InstallRowAsync(RpBrowseRowVm row)
-    {
-        try
-        {
-            if (row.External is ModSummary mx)
-                await InstallExternal(mx, null);
-            else if (row.Hosted is HostedResourcePackSummary hz)
-                await InstallHosted(hz.Id, null);
-        }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
-
-    private async void OnDownloadVersionClick(object sender, RoutedEventArgs e)
-    {
-        if (sender is not FrameworkElement fx || fx.DataContext is not VersionVm vm)
-            return;
-        try
-        {
-            if (vm.External is ModVersion mv && _selExternal is ModSummary mz)
-                await InstallExternal(mz, mv);
-
-            else if (vm.HostedInfo is HostedResourcePackVersionInfo hv && ResultsList.SelectedItem is RpBrowseRowVm { Hosted: HostedResourcePackSummary hs })
-                await InstallHosted(hs.Id, hv);
-        }
-        catch (Exception ex) { Fail(ex.Message); }
-    }
-
-    private async Task InstallHosted(Guid packId, HostedResourcePackVersionInfo? pinned)
-    {
-        if (!_packs.Any())
-            _packs = await App.State.Api.ListPacksAsync();
-
-        var detail = await App.State.Api.GetResourcePackAsync(packId);
-
-        HostedResourcePackVersionInfo ver = pinned
-            ?? detail.Versions.OrderByDescending(z => z.PublishedAt).FirstOrDefault()
-            ?? throw new InvalidOperationException("No hosted versions.");
-
-        var candidates = HostedMcMatches(_packs, ver.McVersionsCsv ?? detail.McVersionsCsv).ToList();
-        if (!candidates.Any())
-            throw new InvalidOperationException("Profile MC version mismatch.");
-
-        var pick = new PackPickerDialog(candidates, "Pick instance", "Installs zipped pack", "") { Owner = _shell };
-
-        if (pick.ShowDialog() != true || pick.SelectedPackId is not Guid gid) return;
-        var target = candidates.First(p => p.Id == gid);
-
-        DownloadProgress.Value = 0;
-        DownloadProgress.IsIndeterminate = true;
-        DownloadProgress.Visibility = Visibility.Visible;
-
-        var tmp = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.zip");
-        await using (var stm = await App.State.Api.DownloadResourcePackVersionAsync(packId, ver.Id))
-        await using (var fs = File.Create(tmp))
-            await stm.CopyToAsync(fs);
-
-        DownloadProgress.Visibility = Visibility.Collapsed;
-
-        var dest = Bump(RpFolder(target), ver.FileName);
-        File.Copy(tmp, dest, overwrite: false);
-        try { File.Delete(tmp); } catch { /* best effort */ }
-
-        RecordHostedProvenance(target.Id, Path.GetFileName(dest), detail);
-
-        await RefreshInstalledAsync();
-        Okay($"Installed into {target.Name}");
-    }
-
-    /// <summary>
-    /// Remembers that this zip is a copy of a hosted pack, and names it after that pack.
-    /// </summary>
-    /// <remarks>A resource pack carries no identity of its own once it is on disk, so unless this is
-    /// written at install time the launcher can never tell that the file and the hosted pack are the
-    /// same thing — which is what an update check needs.</remarks>
-    private static void RecordHostedProvenance(Guid targetPackId, string fileName, HostedResourcePackDetail detail)
-    {
-        var key = ResourcePackService.Key(targetPackId, fileName);
-        App.State.ResourcePacks.LinkHostedResourcePack(key, detail.Id);
-        App.State.ResourcePacks.Rename(key, detail.Name);
-    }
-
-    private static IEnumerable<PackSummary> HostedMcMatches(List<PackSummary> packs, string? csvOrNull)
-    {
-        foreach (var p in packs)
-        {
-            if (p.IsEmpty || string.IsNullOrWhiteSpace(p.MinecraftVersion)) continue;
-            if (string.IsNullOrWhiteSpace(csvOrNull)) { yield return p; continue; }
-            foreach (var token in csvOrNull.Split(',', StringSplitOptions.TrimEntries))
-                if (string.Equals(token, p.MinecraftVersion, StringComparison.OrdinalIgnoreCase))
-                {
-                    yield return p;
+                case Key.Delete:
+                    e.Handled = true;
+                    if (row.Item is not null) await RemoveFromLibraryAsync(row);
+                    else if (FirstInstalled(row) is { } installed) await DeleteFromInstanceAsync(installed);
                     break;
-                }
-        }
-    }
-
-    private async Task InstallExternal(ModSummary mod, ModVersion? pinned)
-    {
-        if (!_packs.Any())
-            _packs = await App.State.Api.ListPacksAsync();
-
-        List<ModVersion> vers = pinned is ModVersion dv
-            ? new List<ModVersion> { dv }
-            : (mod.Source == ModSource.CurseForge && int.TryParse(mod.Id, out var cfmod)
-                  ? await App.State.CurseForge.GetVersionsAsync(cfmod)
-                  : await App.State.Modrinth.GetVersionsAsync(mod.Id, mcVersion: null, loader: null)).ToList();
-
-        ModVersion choice = pinned
-            ?? vers.OrderByDescending(v => v.DatePublished).FirstOrDefault(v => IsRel(v.ReleaseChannel))
-            ?? vers.OrderByDescending(v => v.DatePublished).First();
-
-        IEnumerable<PackSummary> cand = PickPacksMc(choice.GameVersions.ToArray()).ToList();
-        if (!cand.Any())
-            cand = _packs.Where(z => !z.IsEmpty && !string.IsNullOrWhiteSpace(z.MinecraftVersion));
-        cand = cand.ToList();
-        if (!cand.Any())
-            throw new InvalidOperationException("No instances.");
-
-        var pick = new PackPickerDialog((List<PackSummary>)cand!, "Pick", "resourcepacks/", "") { Owner = _shell };
-
-        if (pick.ShowDialog() != true || pick.SelectedPackId is not Guid gid) return;
-        var target = cand.First(p => p.Id == gid);
-
-        var filePrimary = choice.Files.First(f => f.IsPrimary) ?? choice.Files.First();
-        DownloadProgress.IsIndeterminate = true;
-        DownloadProgress.Visibility = Visibility.Visible;
-
-        var tmpPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.zip");
-
-        if (choice.Source != ModSource.CurseForge || !string.IsNullOrWhiteSpace(filePrimary.DownloadUrl))
-        {
-            await App.State.Modrinth.DownloadFileAsync(filePrimary.DownloadUrl ?? "", tmpPath);
-        }
-        else
-        {
-            var splits = choice.Id.Split(':', StringSplitOptions.RemoveEmptyEntries);
-            var fileId = splits.Length >= 2 && int.TryParse(splits[1], out var fidParsed) ? fidParsed : throw new InvalidOperationException("Malformed file id.");
-
-            var modIdParsed = splits.Length >= 1 && int.TryParse(splits[0], out var cid0) ? cid0 :
-                int.TryParse(mod.Id, out var alt) ? alt : throw new InvalidOperationException("Malformed mod id.");
-
-            var urlMagic = await App.State.CurseForge.GetDownloadUrlAsync(modIdParsed, fileId);
-
-            await App.State.Modrinth.DownloadFileAsync(urlMagic ?? "", tmpPath);
-        }
-
-        DownloadProgress.Visibility = Visibility.Collapsed;
-
-        var dest = Bump(RpFolder(target), filePrimary.Filename ?? "rp.zip");
-        File.Copy(tmpPath, dest, overwrite: false);
-        try { File.Delete(tmpPath); } catch { /* */ }
-
-        // Which listing this file came from, recorded now because nothing inside the zip says so
-        // later. Without it an installed pack can never be offered an update.
-        var key = ResourcePackService.Key(target.Id, Path.GetFileName(dest));
-        App.State.ResourcePacks.SetProvenance(key, mod.Source, mod.Id, choice.Id, choice.VersionNumber);
-        App.State.ResourcePacks.Rename(key, mod.Name);
-
-        await RefreshInstalledAsync();
-        Okay($"Installed {filePrimary.Filename} → {target.Name}");
-    }
-
-    private IEnumerable<PackSummary> PickPacksMc(string[] gvers)
-    {
-        if (gvers.Length == 0) yield break;
-
-        foreach (var p in _packs.Where(z => !z.IsEmpty))
-        {
-            if (string.IsNullOrWhiteSpace(p.MinecraftVersion)) continue;
-            if (gvers.Any(g => string.Equals(g, p.MinecraftVersion!, StringComparison.OrdinalIgnoreCase)))
-                yield return p;
-        }
-    }
-
-    private static bool IsRel(string ch) =>
-        string.Equals(ch, "release", StringComparison.OrdinalIgnoreCase);
-
-    private void OnManageHostedRp(object sender, RoutedEventArgs e)
-    {
-        if (_selHostedDetail != null)
-            _shell.OpenResourcePackDetail(_selHostedDetail.Id, _selHostedDetail.Name);
-        else if (ResultsList.SelectedItem is RpBrowseRowVm { Hosted: HostedResourcePackSummary summary })
-            _shell.OpenResourcePackDetail(summary.Id, summary.Name);
-    }
-
-    private void OnOpenSelectedProject(object sender, RoutedEventArgs e)
-    {
-        if (!string.IsNullOrWhiteSpace(_projectUrl))
-            Process.Start(new ProcessStartInfo(_projectUrl!) { UseShellExecute = true });
-    }
-
-    private void OnOpenLink(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { Tag: string z } btn && Uri.TryCreate(z, UriKind.Absolute, out _))
-            Process.Start(new ProcessStartInfo(z) { UseShellExecute = true });
-    }
-
-    private void OnOpenScreenshot(object sender, MouseButtonEventArgs e)
-    {
-        if (sender is FrameworkElement fx && fx.DataContext is MediaRow row)
-            ScreenshotPreviewWindow.ShowFor(Window.GetWindow(this), row.FullImageUrl, row.Title);
-
-        e.Handled = true;
-    }
-
-    private static string BuildUrl(ModSummary m)
-    {
-        var slug = string.IsNullOrWhiteSpace(m.Slug) ? m.Id : m.Slug!;
-        return m.Source == ModSource.CurseForge
-            ? $"https://www.curseforge.com/minecraft/texture-packs/{slug}"
-            : $"https://modrinth.com/resourcepack/{slug}";
-    }
-
-    private static string Strip(string? html)
-    {
-        if (string.IsNullOrWhiteSpace(html)) return "";
-
-        html = Regex.Replace(html, "(?i)<br\\s*/?>", "\n");
-        html = Regex.Replace(html, "<[^>]*>", "");
-
-        html = WebUtility.HtmlDecode(html);
-        return Regex.Replace(html, "\\s{2,}", " ").Trim();
-    }
-}
-
-// View models ---------------------------------------------------------------
-
-public enum BrowseKind
-{
-    Installed = 0,
-    Splitter,
-    CurseForge,
-    Modrinth,
-    CloudPublic,
-    CloudPersonal,
-    CloudShared,
-    CloudTeam,
-}
-
-public sealed class ResourcePackChipVm
-{
-    public string Icon { get; init; } = "";
-    public string Label { get; init; } = "";
-    public BrowseKind Kind { get; init; }
-    public Guid? TeamId { get; init; }
-    public bool IsDivider { get; init; }
-    public Brush Background { get; set; } = Brushes.DarkSeaGreen;
-    public Brush BorderColor { get; set; } = Brushes.DarkGoldenrod;
-    public Brush Foreground { get; set; } = Brushes.White;
-    public FontWeight FontWeight { get; set; } = FontWeights.Normal;
-    public Visibility ChipVisibility { get; init; } = Visibility.Visible;
-    public Visibility IconVisibility { get; init; } = Visibility.Visible;
-    public Cursor CursorHint { get; init; } = Cursors.Hand;
-}
-
-/// <summary>One installed resource pack on the card grid.</summary>
-/// <remarks>Holds no brushes from the theme dictionary: the only brush here is the cover gradient,
-/// which is generated from the pack's own name and so survives a theme change unchanged.</remarks>
-public sealed class ResourcePackScannerRowVm
-{
-    private readonly string _compatSummary;
-
-    public ResourcePackScannerRowVm(ResourcePackInfo rp, ResourcePackMeta? meta = null)
-    {
-        Info = rp;
-        Displays = rp.DisplayName;
-        SourcePack = rp.SourcePackName;
-        Modified = rp.LastModified;
-        Bytes = rp.SizeBytes;
-
-        meta ??= ResourcePackMeta.Empty;
-        IconSource = meta.Icon;
-        PackDescription = meta.Description;
-        PackFormat = meta.PackFormat;
-
-        _compatSummary = rp.CompatibleWithAll
-            ? "All instances enabled"
-            : $"{Math.Max(1, rp.CompatiblePackIds.Count)} instance(s)";
-    }
-
-    public ResourcePackInfo Info { get; }
-    public string Key => Info.Key;
-    public string Path => Info.FilePath;
-    public string FileName => Info.FileName;
-    public bool IsFolder => Info.IsFolder;
-    public bool IsLocal => Info.IsLocal;
-    public DateTimeOffset Modified { get; }
-    public string DisplayName => Displays;
-
-    readonly string Displays;
-    public readonly string SourcePack;
-
-    public long Bytes { get; }
-
-    /// <summary>pack.png, or null for a pack that ships none — the card falls back to its letter.</summary>
-    public ImageSource? IconSource { get; }
-
-    /// <summary>The description from pack.mcmeta, flattened to plain text.</summary>
-    public string? PackDescription { get; }
-
-    public int? PackFormat { get; }
-
-    /// <summary>True when this pack is listed in its instance's options.txt, i.e. the game loads it.</summary>
-    public bool Enabled => Info.Enabled;
-
-    public string EnabledLabel => Info.Priority > 0 ? $"ON · #{Info.Priority}" : "ON";
-
-    public Visibility EnabledVisibility => Enabled ? Visibility.Visible : Visibility.Collapsed;
-
-    /// <summary>"FOLDER" for an unpacked pack, "LOCAL" for one in the unsynced folder, else the
-    /// plain label — the cover has room for exactly one of these.</summary>
-    public string KindLabel => IsFolder ? "PACK FOLDER" : IsLocal ? "LOCAL" : "RESOURCE PACK";
-
-    public string ToggleMenuHeader => Enabled
-        ? $"Turn off in {SourcePack}"
-        : $"Turn on in {SourcePack}";
-
-    public string MetaLabel =>
-        $"{Modified.LocalDateTime:g} • {PrettySize()}";
-
-    public string CompatibilityLabel => _compatSummary;
-
-    public string SourcePackName => SourcePack;
-
-    public string SizeLabel => PrettySize();
-
-    /// <summary>Everything the card cannot fit: what the pack says about itself, and where it sits.</summary>
-    public string CardTooltip
-    {
-        get
-        {
-            var lines = new List<string> { DisplayName, FileName };
-            lines.Add(Enabled
-                ? $"On in {SourcePack} · priority {Info.Priority} (higher overrides lower)"
-                : $"Off in {SourcePack} — the game is not loading it");
-            if (PackFormat is int pf) lines.Add($"pack_format {pf}");
-            if (!string.IsNullOrWhiteSpace(PackDescription)) lines.Add(PackDescription!);
-            return string.Join("\n", lines);
-        }
-    }
-
-    string PrettySize()
-    {
-        double b = Bytes;
-        string unit = "B";
-
-        if (b > 1024) { b /= 1024; unit = "KB"; }
-
-        if (b > 1024) { b /= 1024; unit = "MB"; }
-
-        return $"{b:0.#} {unit}";
-    }
-
-    public Brush CoverBackground
-    {
-        get
-        {
-            static uint Mix(string txt)
-            {
-                uint hash = 0;
-                foreach (var ch in txt) hash = hash * 31 + char.ToLowerInvariant(ch);
-                return hash;
+                case Key.F2:
+                    e.Handled = true;
+                    await RenameAsync(row);
+                    break;
+                case Key.Enter:
+                    e.Handled = true;
+                    OpenRow(row);
+                    break;
             }
-
-            (Color start, Color end)[] combos =
-            {
-                (Color.FromRgb(0x6C, 0x5C, 0xE7), Color.FromRgb(0x3B, 0x3B, 0x73)),
-                (Color.FromRgb(0x0E, 0xA5, 0xE9), Color.FromRgb(0x06, 0x4F, 0x6D)),
-                (Color.FromRgb(0xF9, 0x73, 0x16), Color.FromRgb(0x93, 0x45, 0x0F)),
-                (Color.FromRgb(0x14, 0xB8, 0xA6), Color.FromRgb(0x0B, 0x6F, 0x65)),
-                (Color.FromRgb(0xEC, 0x48, 0x91), Color.FromRgb(0x8E, 0x29, 0x5A)),
-                (Color.FromRgb(0x8B, 0x5C, 0xF6), Color.FromRgb(0x4F, 0x2C, 0x93)),
-                (Color.FromRgb(0xF5, 0x9E, 0x0B), Color.FromRgb(0xAE, 0x6F, 0x0B)),
-                (Color.FromRgb(0x10, 0xB9, 0x81), Color.FromRgb(0x06, 0x6F, 0x5B)),
-            };
-
-            var pair = combos[Mix(DisplayName) % combos.Length];
-
-            var linear = new LinearGradientBrush(pair.start, pair.end, new Point(0, 0), new Point(1, 1));
-            linear.Freeze();
-            return linear;
         }
+        catch (Exception ex) { Fail("That did not work.", ex); }
     }
 
-    public string Initial
+    // ── status line ──────────────────────────────────────────────────────────
+
+    private void Okay(string message) => _state.Note(message);
+
+    /// <summary>Reloads, then says what the action did.</summary>
+    /// <remarks>A load ends in <c>PageState.Content</c>, which resets the status line, so a message
+    /// written before the reload would never be seen.</remarks>
+    private async Task ReloadThenSayAsync(string message)
     {
-        get
-        {
-            var s = (DisplayName ?? "?").Trim();
-            return string.IsNullOrEmpty(s) ? "?" : char.ToUpperInvariant(s[0]).ToString();
-        }
+        try { await LoadAsync(force: true); }
+        finally { Okay(message); }
     }
+
+    /// <summary>Shows a short error; PageState logs the exception rather than showing it.</summary>
+    private void Fail(string message, Exception? ex = null) => _state.Error(message, ex);
 }
 
-public sealed class RpBrowseRowVm
+// ── view models ──────────────────────────────────────────────────────────────
+
+/// <summary>One chip in the folder strip.</summary>
+/// <remarks>No brushes: the selected look is a trigger on <see cref="IsActive"/>, so an accent change
+/// repaints chips already on screen. Mutable and notifying because the strip is diffed rather than
+/// rebuilt.</remarks>
+public sealed class RpFolderChipVm : System.ComponentModel.INotifyPropertyChanged
 {
-    private RpBrowseRowVm() { }
+    private string _countLabel;
+    private bool _isActive;
 
-    public ModSummary? External { get; private init; }
-    public HostedResourcePackSummary? Hosted { get; private init; }
-
-    public string Name { get; init; } = "";
-    public string Summary { get; init; } = "";
-    public string MetaLabel { get; init; } = "";
-
-    public string Initial { get; init; } = "?";
-    public string? IconUrl { get; init; }
-    public string SourceBadge { get; init; } = "";
-
-    public Brush SourceBadgeBackground { get; init; } = Brushes.Black;
-    public Brush SourceBadgeForeground { get; init; } = Brushes.White;
-
-    /// <summary>True once a pack of this name is already sitting in one of the instances.</summary>
-    /// <remarks>Clicking Install a second time used to write Name-2.zip and leave two copies of the
-    /// same pack fighting in one stack, with nothing on screen to warn anybody.</remarks>
-    public bool IsInstalled { get; private set; }
-
-    /// <summary>Installing again is still allowed — that is how you replace a bad download — so the
-    /// button changes what it says rather than switching itself off.</summary>
-    public bool IsInstallable => true;
-
-    public string InstallLabel => IsInstalled ? "Installed" : "Install";
-
-    public string InstallTooltip => IsInstalled
-        ? "Already installed — click to install another copy"
-        : "Install into one of your instances";
-
-    public string RowTooltip => string.Join("\n", new[] { Name, Summary, MetaLabel }
-        .Where(x => !string.IsNullOrWhiteSpace(x)));
-
-    /// <summary>Returns true when the flag actually changed, so the caller only refreshes the list
-    /// when there is something new to paint.</summary>
-    public bool ApplyInstalled(bool installed)
+    /// <param name="id">The folder name, "" for All, or the page's reserved <c>:new</c> id.</param>
+    /// <param name="label">What the chip says.</param>
+    /// <param name="icon">An MDL2 glyph, or empty.</param>
+    /// <param name="count">How many rows are in it; zero shows no count.</param>
+    /// <param name="isActive">True for the chip the page is currently filtered by.</param>
+    /// <param name="tip">The chip's tooltip.</param>
+    public RpFolderChipVm(string id, string label, string icon, int count, bool isActive, string tip)
     {
-        if (IsInstalled == installed) return false;
-        IsInstalled = installed;
-        return true;
+        Id = id;
+        Label = label;
+        Icon = icon;
+        ToolTipText = tip;
+        _countLabel = count > 0 ? $"({count})" : "";
+        _isActive = isActive;
     }
 
-    public static RpBrowseRowVm FromExternal(ModSummary m, Brush badgeBackground)
-        => new()
-        {
-            External = m,
-            Name = m.Name,
-            Summary = m.Description ?? "",
-            MetaLabel = $"{m.Author} • {m.Source}",
-            IconUrl = m.IconUrl,
+    /// <inheritdoc cref="RpFolderChipVm(string,string,string,int,bool,string)"/>
+    public string Id { get; }
+    public string Label { get; }
+    public string Icon { get; }
 
-            Initial = string.IsNullOrWhiteSpace(m.Name) ? "?" : char.ToUpperInvariant(m.Name[0]).ToString(),
-            SourceBadge = m.Source == ModSource.CurseForge ? "CurseForge" : "Modrinth",
+    /// <summary>The chip's tooltip. Fixed, since only the count can change.</summary>
+    public string ToolTipText { get; }
 
-            SourceBadgeBackground = badgeBackground,
+    /// <summary>"(4)", or empty when there is nothing in it.</summary>
+    public string CountLabel
+    {
+        get => _countLabel;
+        private set { if (_countLabel != value) { _countLabel = value; Raise(nameof(CountLabel)); } }
+    }
 
-            SourceBadgeForeground = Brushes.White
-        };
+    /// <summary>True for the chip the page is filtered by.</summary>
+    public bool IsActive
+    {
+        get => _isActive;
+        private set { if (_isActive != value) { _isActive = value; Raise(nameof(IsActive)); } }
+    }
 
-    public static RpBrowseRowVm FromHosted(HostedResourcePackSummary p, Brush soft, Brush fore)
-        => new()
-        {
-            Hosted = p,
-            Name = p.Name,
+    /// <summary>All and the trailing New folder chip are computed views, not folders anybody can
+    /// rename.</summary>
+    public bool IsUserFolder => Id.Length > 0 && !Id.StartsWith(':');
 
-            Summary = p.Summary ?? "",
-            IconUrl = null,
-            MetaLabel = $"Hosted • {p.OwnerUsername}",
+    /// <summary>True for the trailing "New folder" chip, which makes a folder rather than
+    /// selecting one. The shared chip style triggers on this to draw it as an outline.</summary>
+    public bool IsNewAction => Id == ":new";
 
-            Initial = string.IsNullOrWhiteSpace(p.Name) ? "?" : char.ToUpperInvariant(p.Name[0]).ToString(),
-            SourceBadge = p.Visibility.ToString(),
+    /// <summary>Copies a freshly built chip into this one, for <see cref="ListDiff.Apply"/>.</summary>
+    /// <remarks>Copy everything that can change here, or that value stops updating once the chip is on
+    /// screen.</remarks>
+    public void CopyFrom(RpFolderChipVm fresh)
+    {
+        ArgumentNullException.ThrowIfNull(fresh);
+        CountLabel = fresh.CountLabel;
+        IsActive = fresh.IsActive;
+    }
 
-            SourceBadgeBackground = soft,
-            SourceBadgeForeground = fore
-        };
+    /// <inheritdoc cref="IsActive"/>
+    public void SetActive(bool active) => IsActive = active;
+
+    public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+
+    private void Raise(string name) =>
+        PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));
 }
 
-public sealed class VersionVm
-{
-    public string VersionNumber { get; init; } = "";
-    public string McVersions { get; init; } = "";
-    public string ReleaseChannel { get; init; } = "";
-    public string DateLabel { get; init; } = "";
-    public string SizeLabel { get; init; } = "";
-
-    public ModVersion? External { get; private init; }
-    public HostedResourcePackVersionInfo? HostedInfo { get; private init; }
-
-    private static string PrettyBytes(long bytes)
-    {
-        if (bytes < 1024) return $"{bytes} B";
-        var kb = bytes / 1024.0;
-        if (kb < 1024) return $"{kb:0.#} KB";
-        return $"{kb / 1024.0:0.#} MB";
-    }
-
-    public static VersionVm FromHosted(HostedResourcePackVersionInfo hz) => new()
-    {
-        HostedInfo = hz,
-        VersionNumber = hz.VersionString,
-        McVersions = hz.McVersionsCsv ?? "",
-        ReleaseChannel = hz.ReleaseChannel,
-        DateLabel = hz.PublishedAt.ToString("yyyy-MM-dd"),
-        SizeLabel = PrettyBytes(hz.FileSize)
-    };
-
-    public static VersionVm FromExternal(ModVersion v)
-    {
-        var file = v.Files.FirstOrDefault(f => f.IsPrimary) ?? v.Files.FirstOrDefault();
-        var sizeTxt = file switch
-        {
-            null => "",
-            { Size: > 0 } f => PrettyBytes(f.Size),
-            { } f => f.Filename
-        };
-
-        return new()
-        {
-            External = v,
-            VersionNumber = v.VersionNumber,
-            McVersions = string.Join(", ", v.GameVersions),
-            ReleaseChannel = v.ReleaseChannel,
-            DateLabel = v.DatePublished.LocalDateTime.ToString("yyyy-MM-dd"),
-            SizeLabel = sizeTxt
-        };
-    }
-}
+/// <summary>One entry in the instance scope box.</summary>
+public sealed record RpScopeItem(Guid? Id, string Label);

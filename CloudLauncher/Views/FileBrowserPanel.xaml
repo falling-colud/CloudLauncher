@@ -1,0 +1,564 @@
+<UserControl x:Class="CloudLauncher.Views.FileBrowserPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:local="clr-namespace:CloudLauncher.Views"
+             Background="Transparent">
+    <UserControl.Resources>
+        <!-- Chip styles, same shape as the Config hub. Selection colours live in the style so a theme
+        change repaints them; a Brush stored on the row would keep its old colour. -->
+        <Style x:Key="KindChip" TargetType="Border">
+            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="Padding" Value="11,4"/>
+            <Setter Property="Margin" Value="0,0,6,4"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Background" Value="{DynamicResource Surface1Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="KindChipText" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}"/>
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <DockPanel>
+
+        <!-- ── Row 1: location on disk and the actions that don't need a selection ── -->
+        <DockPanel DockPanel.Dock="Top" Margin="0,8,0,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                <Button x:Name="RulesButton" Style="{StaticResource HeaderActionButton}"
+                        Click="OnEditRules" ToolTip="Which files sync, which stay on this PC">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE8E1;" FontFamily="{DynamicResource IconFont}"
+                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Rules..." VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="ApplyRulesButton" Content="Apply rules" Click="OnApplyRules"
+                        Style="{StaticResource HeaderActionButton}"
+                        ToolTip="Re-check every file against the rules and count what would sync"/>
+                <Button x:Name="NewButton" Style="{StaticResource HeaderActionButton}"
+                        Click="OnNewMenu" ToolTip="Create a file or a folder in the open folder">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE710;" FontFamily="{DynamicResource IconFont}"
+                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="New ▾" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <Button.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem x:Name="NewFileMenuItem" Header="New file..." Click="OnNewFile">
+                                <MenuItem.Icon>
+                                    <TextBlock Text="&#xE8A5;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                </MenuItem.Icon>
+                            </MenuItem>
+                            <MenuItem x:Name="NewFolderMenuItem" Header="New folder..." Click="OnNewFolder">
+                                <MenuItem.Icon>
+                                    <TextBlock Text="&#xE8F4;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                </MenuItem.Icon>
+                            </MenuItem>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
+                <Button x:Name="RefreshButton" Style="{StaticResource HeaderIconButton}"
+                        Content="&#xE72C;" FontFamily="{DynamicResource IconFont}"
+                        Click="OnRefresh" ToolTip="Re-read the instance folder (F5)"/>
+                <Button x:Name="ImportButton" Style="{StaticResource AccentButton}" Click="OnImport"
+                        ToolTip="Copy files from this PC into the open folder">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE898;" FontFamily="{DynamicResource IconFont}"
+                                   FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Import..." VerticalAlignment="Center" FontWeight="SemiBold"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+            <TextBlock x:Name="PackRootHint" Style="{StaticResource Caption}"
+                       FontFamily="{DynamicResource MonoFont}" VerticalAlignment="Center"
+                       TextTrimming="CharacterEllipsis" Margin="2,0,12,0"/>
+        </DockPanel>
+
+        <!-- ── Row 2: shortcuts to the common folders ── -->
+        <ItemsControl x:Name="ShortcutStrip" DockPanel.Dock="Top" Margin="0,0,0,6">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                    <Border Style="{StaticResource KindChip}" Tag="{Binding}"
+                            ToolTip="{Binding Hint}" MouseLeftButtonUp="OnShortcutClick">
+                        <TextBlock Text="{Binding Label}" Style="{StaticResource KindChipText}"/>
+                    </Border>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <!-- ── Row 3: one search field for both panes, then the filters ── -->
+        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+            <slate:SlateBorder DockPanel.Dock="Left" Width="230" Margin="0,0,8,0"
+                    Background="{DynamicResource Surface1Brush}"
+                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                    CornerRadius="6" MinHeight="32" Padding="8,0">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Left" Text="&#xE721;"
+                               FontFamily="{DynamicResource IconFont}" FontSize="12"
+                               Foreground="{DynamicResource TextTertiaryBrush}"
+                               VerticalAlignment="Center" Margin="0,0,7,0"/>
+                    <Grid>
+                        <TextBox x:Name="SearchBox" Background="Transparent" BorderThickness="0"
+                                 Padding="0" MinHeight="24" VerticalContentAlignment="Center"
+                                 TextChanged="OnSearchTextChanged" PreviewKeyDown="OnSearchKeyDown"
+                                 ToolTip="Filter the open folder. Two characters or more searches the whole instance by name. Esc clears.">
+                            <TextBox.Template>
+                                <ControlTemplate TargetType="TextBox">
+                                    <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
+                                </ControlTemplate>
+                            </TextBox.Template>
+                        </TextBox>
+                        <TextBlock Text="Find a file... (Ctrl+F)" FontSize="12" IsHitTestVisible="False"
+                                   Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding Text, ElementName=SearchBox}" Value="">
+                                            <Setter Property="Visibility" Value="Visible"/>
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </Grid>
+                </DockPanel>
+            </slate:SlateBorder>
+
+            <Button DockPanel.Dock="Left" x:Name="ContentSearchToggle" Click="OnToggleContentSearch"
+                    Style="{StaticResource HeaderActionButton}" VerticalAlignment="Center"
+                    ToolTip="Look inside the files, not just at their names (Ctrl+Shift+F)">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="&#xE721;" FontFamily="{DynamicResource IconFont}"
+                               FontSize="12" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                    <TextBlock Text="In files" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+
+            <Button DockPanel.Dock="Right" x:Name="SortButton" Style="{StaticResource ToolbarIconButton}"
+                    Content="&#xE8CB;" FontFamily="{DynamicResource IconFont}"
+                    Click="OnSortMenu" ToolTip="Sort both panes">
+                <Button.ContextMenu>
+                    <ContextMenu Opened="OnSortMenuOpened">
+                        <MenuItem x:Name="SortNameItem" Header="Name" Tag="Name" IsCheckable="True" Click="OnSortPicked"/>
+                        <MenuItem x:Name="SortModifiedItem" Header="Last modified" Tag="Date" IsCheckable="True" Click="OnSortPicked"/>
+                        <MenuItem x:Name="SortSizeItem" Header="Size (folders measured)" Tag="Size" IsCheckable="True" Click="OnSortPicked"/>
+                        <Separator/>
+                        <MenuItem x:Name="SortDescendingItem" Header="Largest / newest first"
+                                  IsCheckable="True" Click="OnSortDirectionPicked"/>
+                    </ContextMenu>
+                </Button.ContextMenu>
+            </Button>
+
+            <ItemsControl x:Name="FilterStrip" VerticalAlignment="Center">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Style="{StaticResource KindChip}" Tag="{Binding}"
+                                ToolTip="{Binding Hint}" MouseLeftButtonUp="OnFilterChipClick">
+                            <TextBlock Text="{Binding Label}" Style="{StaticResource KindChipText}"/>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </DockPanel>
+
+        <!-- Content search bar, only shown while searching inside files. -->
+        <slate:SlateBorder x:Name="ContentSearchBar" DockPanel.Dock="Top" Visibility="Collapsed"
+                Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource AccentBrush}"
+                BorderThickness="1" CornerRadius="8" Padding="12,8" Margin="0,0,0,8">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Text="&#xE721;" FontFamily="{DynamicResource IconFont}"
+                           FontSize="13" VerticalAlignment="Center" Margin="2,0,10,0"
+                           Foreground="{DynamicResource AccentTextBrush}"/>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="ContentSearchGoButton" Content="Search" Click="OnRunContentSearch"
+                            Padding="14,4" Margin="8,0,0,0"/>
+                    <Button x:Name="ContentSearchStopButton" Content="Stop" Click="OnStopWork"
+                            Padding="12,4" Margin="8,0,0,0" Visibility="Collapsed"/>
+                    <Button Style="{StaticResource IconButton}" Content="&#xE711;"
+                            FontFamily="{DynamicResource IconFont}" FontSize="12" Margin="8,0,0,0"
+                            Click="OnToggleContentSearch" ToolTip="Close the content search"/>
+                </StackPanel>
+                <TextBox x:Name="ContentQueryBox" VerticalAlignment="Center" Margin="0,0,8,0"
+                         KeyDown="OnContentQueryKey"
+                         ToolTip="Text to look for inside the instance's files. Case-insensitive."/>
+            </DockPanel>
+        </slate:SlateBorder>
+
+        <!-- Bulk actions for the current selection. -->
+        <slate:SlateBorder x:Name="SelectionBar" DockPanel.Dock="Top" Visibility="Collapsed" Margin="0,0,0,8"
+                Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource AccentBrush}"
+                BorderThickness="1" CornerRadius="6" Padding="12,7">
+            <DockPanel>
+                <Button DockPanel.Dock="Right" Content="Clear" Padding="12,3" MinHeight="0"
+                        Click="OnClearSelection"/>
+                <Button DockPanel.Dock="Right" Content="Select all" Padding="12,3" MinHeight="0"
+                        Margin="0,0,8,0" Click="OnSelectAll"/>
+                <Border DockPanel.Dock="Right" Width="1" Margin="10,2,10,2"
+                        Background="{DynamicResource BorderBrush}"/>
+                <Button DockPanel.Dock="Right" x:Name="BulkDeleteButton" Content="Delete"
+                        Padding="12,3" MinHeight="0" Margin="0,0,8,0" Click="OnBulkDelete"
+                        ToolTip="Move the selection to this instance's .trash folder"/>
+                <Button DockPanel.Dock="Right" x:Name="BulkMoveButton" Content="Move..."
+                        Padding="12,3" MinHeight="0" Margin="0,0,8,0" Click="OnBulkMove"
+                        ToolTip="Move the selection into another folder of this instance"/>
+                <Button DockPanel.Dock="Right" x:Name="BulkCopyButton" Content="Copy to..."
+                        Padding="12,3" MinHeight="0" Margin="0,0,8,0" Click="OnBulkCopyToInstances"
+                        ToolTip="Copy the selected files into other instances"/>
+                <Button DockPanel.Dock="Right" x:Name="BulkZipButton" Content="Zip..."
+                        Padding="12,3" MinHeight="0" Margin="0,0,8,0" Click="OnBulkZip"
+                        ToolTip="Save the selection as a .zip somewhere on this PC"/>
+                <!-- Share is the common action here, so it comes first in the accent style. It becomes
+                Unshare when everything selected is already shared (code-behind swaps the style); the local
+                padding keeps the bar height the same for both styles. -->
+                <Button DockPanel.Dock="Right" x:Name="ShareButton" Content="Share"
+                        Style="{StaticResource AccentButton}" FontSize="12"
+                        Padding="14,3" MinHeight="0" Margin="0,0,12,0" Click="OnShareButton"
+                        ToolTip="Mark the selection shared - it uploads with this instance. Nothing moves."/>
+                <TextBlock x:Name="SelectionLabel" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{DynamicResource TextPrimaryBrush}"/>
+            </DockPanel>
+        </slate:SlateBorder>
+
+        <!-- ── Status strip ── -->
+        <Border DockPanel.Dock="Bottom" Margin="0,10,0,0" Padding="2,6,2,0"
+                BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <ProgressBar x:Name="BusyBar" Width="140" Height="4" IsIndeterminate="True"
+                                 Visibility="Collapsed" Margin="0,0,8,0"/>
+                    <Button x:Name="BusyCancelButton" Content="Stop" Padding="10,2" MinHeight="0"
+                            Visibility="Collapsed" Margin="0,0,8,0" Click="OnStopWork"/>
+                    <Button x:Name="TrashButton" Padding="10,2" MinHeight="0" Click="OnToggleTrash"
+                            ToolTip="What this page deleted, and how to put it back">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource IconFont}"
+                                       FontSize="11" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="TrashButtonLabel" Text="Recently deleted" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+                <TextBlock x:Name="StatusLabel" Style="{StaticResource Caption}"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
+        </Border>
+
+        <!-- ── The panes, and the two views that can replace them ── -->
+        <Grid>
+            <Grid x:Name="PaneGrid">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="14"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Game pane -->
+                <slate:SlateBorder Grid.Column="0" Style="{StaticResource Card}" Padding="0">
+                    <DockPanel>
+                        <slate:SlateBorder DockPanel.Dock="Top"
+                                Background="{DynamicResource Surface3Brush}"
+                                BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                                Padding="14,10" CornerRadius="10,10,0,0">
+                            <DockPanel>
+                                <slate:SlateBorder DockPanel.Dock="Left" Width="28" Height="28"
+                                        Background="{DynamicResource AccentSoftBrush}"
+                                        CornerRadius="6" Margin="0,0,12,0">
+                                    <TextBlock x:Name="GameHeaderGlyph" Text="&#xE7C3;" FontFamily="{DynamicResource IconFont}"
+                                               FontSize="14" Foreground="{DynamicResource AccentTextBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </slate:SlateBorder>
+                                <Button x:Name="OpenGameButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                        Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                        Click="OnOpenGameFolder" ToolTip="Open this folder in Explorer"/>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock x:Name="GameHeaderTitle" Text="Game" FontWeight="SemiBold" FontSize="13"/>
+                                    <TextBlock x:Name="GameHeaderSub" Text="Every file in this instance"
+                                               Style="{StaticResource Caption}"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </slate:SlateBorder>
+                        <!--  The menu is on this Grid because x:Named items inside the FolderView's
+                        ContextMenu would belong to the UserControl's own name scope and fail to
+                        compile (MC3093). Right-clicks in the list bubble up to here.  -->
+                        <Grid Margin="6">
+                            <Grid.ContextMenu>
+                                <ContextMenu Opened="OnGameMenuOpened">
+                                    <MenuItem Header="Edit file" Click="OnEditSelectedGameFile">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE70F;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="Open with Windows" Click="OnOpenWithShell"/>
+                                    <Separator/>
+                                    <MenuItem x:Name="GameShareItem" Header="Share" Click="OnMoveGameToShared"
+                                              ToolTip="Mark the selection shared - it uploads with this instance. Nothing moves."/>
+                                    <MenuItem x:Name="GameRuleSharedItem" Header="Add rule: > shared" Click="OnQuickRuleShared"/>
+                                    <MenuItem x:Name="GameRuleIgnoredItem" Header="Add rule: ignored" Click="OnQuickRuleIgnored"/>
+                                    <MenuItem x:Name="GameRuleFolderItem" Header="Add rule for parent folder" Click="OnQuickRuleFolder"/>
+                                    <Separator/>
+                                    <MenuItem x:Name="GameNewFileItem" Header="New file..." Click="OnNewFile">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8A5;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem x:Name="GameNewFolderItem" Header="New folder..." Click="OnNewFolder">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8F4;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem x:Name="GameRenameItem" Header="Rename..." InputGestureText="F2" Click="OnGameRename">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8AC;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="Copy full path" Click="OnGameCopyPath">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="Show in Explorer" Click="OnRevealGame">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <Separator/>
+                                    <MenuItem x:Name="GameZipItem" Header="Zip selection..." Click="OnBulkZip">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xEDE1;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem x:Name="GameUnzipItem" Header="Extract here..." Click="OnExtractHere">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xF12B;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="Copy to other instances..." Click="OnBulkCopyToInstances">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem x:Name="GameMoveItem" Header="Move to folder..." Click="OnBulkMove"/>
+                                    <Separator/>
+                                    <MenuItem x:Name="GameDeleteItem" Header="Delete..." InputGestureText="Del" Click="OnBulkDelete"
+                                              Foreground="{DynamicResource DangerBrush}">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                                       Foreground="{DynamicResource DangerBrush}"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                </ContextMenu>
+                            </Grid.ContextMenu>
+                            <local:FolderView x:Name="GameView"/>
+                        </Grid>
+                    </DockPanel>
+                </slate:SlateBorder>
+
+                <!-- Shared pane -->
+                <slate:SlateBorder Grid.Column="2" Style="{StaticResource Card}" Padding="0">
+                    <DockPanel>
+                        <slate:SlateBorder DockPanel.Dock="Top"
+                                Background="{DynamicResource Surface3Brush}"
+                                BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                                Padding="14,10" CornerRadius="10,10,0,0">
+                            <DockPanel>
+                                <slate:SlateBorder DockPanel.Dock="Left" Width="28" Height="28"
+                                        Background="{DynamicResource AccentSoftBrush}"
+                                        CornerRadius="6" Margin="0,0,12,0">
+                                    <TextBlock Text="&#xE753;" FontFamily="{DynamicResource IconFont}"
+                                               FontSize="14" Foreground="{DynamicResource AccentTextBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </slate:SlateBorder>
+                                <Button x:Name="OpenSharedButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}"
+                                        Content="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                        Click="OnOpenGameFolder" ToolTip="Open the instance folder in Explorer"/>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="Shared" FontWeight="SemiBold" FontSize="13"/>
+                                    <TextBlock x:Name="SharedHeaderSub" Text="The subset that uploads"
+                                               Style="{StaticResource Caption}"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </slate:SlateBorder>
+                        <Grid Margin="6">
+                            <Grid.ContextMenu>
+                                <ContextMenu Opened="OnSharedMenuOpened">
+                                    <MenuItem x:Name="SharedUnshareItem" Header="Unshare" Click="OnMoveSharedToGame"
+                                              ToolTip="Stop uploading this file. It stays on this PC."/>
+                                    <MenuItem Header="Edit file" Click="OnEditSelectedSharedFile">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE70F;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <Separator/>
+                                    <MenuItem x:Name="SharedRenameItem" Header="Rename..." InputGestureText="F2" Click="OnSharedRename">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8AC;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="Copy full path" Click="OnSharedCopyPath">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="Show in Explorer" Click="OnRevealShared">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8DA;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <Separator/>
+                                    <MenuItem Header="Zip selection..." Click="OnBulkZip">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xEDE1;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <MenuItem Header="Copy to other instances..." Click="OnBulkCopyToInstances">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                    <Separator/>
+                                    <MenuItem x:Name="SharedDeleteItem" Header="Delete from disk..." InputGestureText="Del"
+                                              Click="OnBulkDelete" Foreground="{DynamicResource DangerBrush}"
+                                              ToolTip="Deletes the file itself, not just its shared rule">
+                                        <MenuItem.Icon>
+                                            <TextBlock Text="&#xE74D;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                                       Foreground="{DynamicResource DangerBrush}"/>
+                                        </MenuItem.Icon>
+                                    </MenuItem>
+                                </ContextMenu>
+                            </Grid.ContextMenu>
+                            <local:FolderView x:Name="SharedView"/>
+                        </Grid>
+                    </DockPanel>
+                </slate:SlateBorder>
+            </Grid>
+
+            <!-- Content search results cover both panes, since a hit can be anywhere in the instance. -->
+            <slate:SlateBorder x:Name="SearchResultsPanel" Visibility="Collapsed"
+                    Style="{StaticResource Card}" Padding="0">
+                <DockPanel>
+                    <slate:SlateBorder DockPanel.Dock="Top" Background="{DynamicResource Surface3Brush}"
+                            BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                            Padding="14,10" CornerRadius="10,10,0,0">
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Content="Close" Padding="12,3" MinHeight="0"
+                                    Click="OnToggleContentSearch"/>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Search results" FontWeight="SemiBold" FontSize="13"/>
+                                <TextBlock x:Name="SearchResultsSub" Style="{StaticResource Caption}"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </slate:SlateBorder>
+                    <Grid>
+                    <ListBox x:Name="SearchResultsList" Background="Transparent" BorderThickness="0"
+                             Margin="6" MouseDoubleClick="OnSearchResultActivated">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                                <Setter Property="Padding" Value="6,4"/>
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel>
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" Text="{Binding LineLabel}"
+                                                   Foreground="{DynamicResource TextTertiaryBrush}"
+                                                   FontSize="10" VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                        <TextBlock Text="{Binding RelativePath}" TextTrimming="CharacterEllipsis"
+                                                   FontWeight="SemiBold" FontSize="12"/>
+                                    </DockPanel>
+                                    <TextBlock Text="{Binding Line}" FontFamily="{DynamicResource MonoFont}"
+                                               FontSize="11" TextTrimming="CharacterEllipsis"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <!-- Last in the cell so it draws over the list. Shows the searching, no-results and error
+                    states. -->
+                    <local:PageStateView x:Name="SearchStateHost"/>
+                    </Grid>
+                </DockPanel>
+            </slate:SlateBorder>
+
+            <!-- Recently deleted. This is the app's only undo, so it spells out where the files went and
+            what restoring them does. -->
+            <slate:SlateBorder x:Name="TrashPanel" Visibility="Collapsed"
+                    Style="{StaticResource Card}" Padding="0">
+                <DockPanel>
+                    <slate:SlateBorder DockPanel.Dock="Top" Background="{DynamicResource Surface3Brush}"
+                            BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,0,1"
+                            Padding="14,10" CornerRadius="10,10,0,0">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="TrashRestoreButton" Content="Put back" Padding="12,3" MinHeight="0"
+                                        Margin="0,0,8,0" Click="OnRestoreFromTrash"/>
+                                <Button x:Name="TrashPurgeButton" Content="Delete for good" Padding="12,3" MinHeight="0"
+                                        Margin="0,0,8,0" Click="OnPurgeTrash" Style="{StaticResource DangerButton}"/>
+                                <Button Content="Close" Padding="12,3" MinHeight="0" Click="OnToggleTrash"/>
+                            </StackPanel>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="Recently deleted" FontWeight="SemiBold" FontSize="13"/>
+                                <TextBlock x:Name="TrashSub" Style="{StaticResource Caption}"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </slate:SlateBorder>
+                    <TextBlock x:Name="TrashEmpty" DockPanel.Dock="Bottom" Style="{StaticResource Caption}"
+                               Margin="14,10,14,14" TextWrapping="Wrap" TextAlignment="Center"
+                               Visibility="Collapsed"/>
+                    <ListBox x:Name="TrashList" Background="Transparent" BorderThickness="0" Margin="6"
+                             SelectionMode="Extended" SelectionChanged="OnTrashSelectionChanged">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}">
+                                <Setter Property="Padding" Value="6,4"/>
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding SizeLabel}"
+                                               Foreground="{DynamicResource TextTertiaryBrush}" FontSize="10"
+                                               VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding WhenLabel}"
+                                               Foreground="{DynamicResource TextTertiaryBrush}" FontSize="10"
+                                               VerticalAlignment="Center" Margin="8,0,0,0"/>
+                                    <TextBlock Text="{Binding Summary}" TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center"/>
+                                </DockPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </slate:SlateBorder>
+
+            <!-- Thin busy bar while the instance folder is read; the rows stay visible underneath. Last in
+            the cell so it draws on top. -->
+            <ProgressBar x:Name="ScanBar" Style="{StaticResource PageStateBusyBar}" Visibility="Collapsed"
+                         Panel.ZIndex="10"/>
+        </Grid>
+    </DockPanel>
+</UserControl>

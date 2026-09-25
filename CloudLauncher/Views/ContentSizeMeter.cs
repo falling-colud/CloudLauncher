@@ -6,11 +6,8 @@ namespace CloudLauncher.Views;
 
 /// <summary>
 /// The content-size indicator: three ascending bars, filled up to the mod's
-/// <see cref="ModMeta.ContentSize"/>. Deliberately a different visual channel from priority (which
-/// owns the coloured stripe and border), so the two never compete for the same cue.
-///
-/// Collapses itself at size 0 — an empty meter on every untagged mod would be pure noise, and the
-/// absence of the glyph already says "unset".
+/// <see cref="ModMeta.ContentSize"/>. A different visual cue from priority, which uses the coloured
+/// stripe and border. Collapses at size 0, since an empty meter on every untagged mod is noise.
 /// </summary>
 public sealed class ContentSizeMeter : FrameworkElement
 {
@@ -37,8 +34,8 @@ public sealed class ContentSizeMeter : FrameworkElement
     private static void OnSizeChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
         ((ContentSizeMeter)d).Apply();
 
-    /// <summary>Every use site gets the collapse-when-unset behaviour and an explanatory tooltip for
-    /// free, so the meter means the same thing on a list row, a board card and a graph node.</summary>
+    /// <summary>Sets visibility and tooltip in one place, so the meter behaves the same on list rows,
+    /// board cards and graph nodes.</summary>
     private void Apply()
     {
         var size = ModContentSize.Clamp(Size);

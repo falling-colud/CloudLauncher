@@ -1,15 +1,17 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using CloudLauncher.Services;
 
 namespace CloudLauncher.Views;
 
 /// <remarks>
-/// This window is modal, so it hosts its own <see cref="IDialogHost"/> overlay — a confirmation
-/// drawn on the main window would appear behind it and could never be clicked.
+/// This window is modal, so it hosts its own <see cref="IDialogHost"/> overlay; a confirmation drawn
+/// on the main window would appear behind it and couldn't be clicked.
 /// </remarks>
 public partial class PackRulesDialog : Window, IDialogHost
 {
@@ -36,16 +38,103 @@ public partial class PackRulesDialog : Window, IDialogHost
 
         Load();
         ApplyReadOnlyState();
+        _ = RecountAsync();
+    }
+
+    /// <summary>
+    /// The instance's live files, for the per-rule match counts and the path tester.
+    /// </summary>
+    /// <remarks>Derived from the pack root rather than <see cref="PackFolderService"/>, since this
+    /// dialog also opens for local instances that have no pack id.</remarks>
+    private string GameDir => System.IO.Path.Combine(_packRoot, "game");
+
+    /// <summary>
+    /// Fills in how many files each rule actually wins.
+    /// </summary>
+    /// <remarks>Counted per rule object (<see cref="PackRuleService.Match"/> returns the winning
+    /// instance), so two rules with the same pattern text stay separate. Shows an ellipsis until the
+    /// walk returns, since a premature zero would mean "matches nothing".</remarks>
+    private async Task RecountAsync()
+    {
+        foreach (var row in _rows) row.MatchLabel = "...";
+
+        var gameDir = GameDir;
+        if (!Directory.Exists(gameDir))
+        {
+            foreach (var row in _rows) row.MatchLabel = "";
+            StatusLabel.Text = "This instance has no game folder yet, so there is nothing to count against.";
+            return;
+        }
+
+        var snapshot = _rows.Select(r => new PackRule { Pattern = r.Pattern, Action = r.Action }).ToList();
+
+        try
+        {
+            var (counts, unmatched, total) = await Task.Run(() =>
+            {
+                var map = new Dictionary<PackRule, int>();
+                var files = App.State.Packs.ListRelativeFiles(gameDir);
+                var none = 0;
+                foreach (var rel in files)
+                {
+                    var match = App.State.Rules.Match(rel, snapshot);
+                    if (match.Rule is null) { none++; continue; }
+                    map[match.Rule] = map.GetValueOrDefault(match.Rule) + 1;
+                }
+                return (snapshot.Select(r => map.GetValueOrDefault(r)).ToList(), none, files.Count);
+            });
+
+            for (var i = 0; i < _rows.Count && i < counts.Count; i++)
+                _rows[i].MatchLabel = counts[i] == 0 ? "none" : counts[i].ToString("N0");
+
+            var note = unmatched > 0
+                ? $"{total:N0} file(s) in this instance · {unmatched:N0} match no rule and stay on this PC."
+                : $"{total:N0} file(s) in this instance · every one is covered by a rule.";
+            // The read-only notice is the more important of the two, so the counts join it rather
+            // than replace it.
+            StatusLabel.Text = IsReadOnlyForMe
+                ? "File rules for a hosted instance are set by its owner. " + note
+                : note;
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("rules.count", ex);
+            foreach (var row in _rows) row.MatchLabel = "";
+            StatusLabel.Text = "Could not read the instance to count matches - see the Logs tab.";
+        }
+    }
+
+    /// <summary>Answers "what happens to this exact path" against the rules as they stand now.</summary>
+    private void OnTestPathChanged(object sender, TextChangedEventArgs e)
+    {
+        var path = TestPathBox.Text.Trim().Replace('\\', '/').TrimStart('/');
+        if (path.Length == 0) { TestResultLabel.Text = ""; return; }
+
+        var rules = _rows.Select(r => new PackRule { Pattern = r.Pattern, Action = r.Action }).ToList();
+        var match = App.State.Rules.Match(path, rules);
+
+        if (match.Rule is null)
+        {
+            TestResultLabel.Text = "No rule matches. It stays on this PC and is never uploaded.";
+            return;
+        }
+
+        var outcome = match.Action switch
+        {
+            RuleAction.Shared => "uploaded with this instance",
+            RuleAction.Ignored => "never uploaded and never downloaded",
+            _ => "kept on this PC"
+        };
+        var privately = PrivateAssetPolicy.IsPrivate(path, App.State.Settings)
+            ? " Held back from upload anyway: it is a private path."
+            : "";
+        TestResultLabel.Text = $"'{match.Rule.Pattern}' wins > {outcome}.{privately}";
     }
 
     /// <summary>True when edits here would only ever be written to this PC.</summary>
-    /// <remarks>
-    /// On a hosted pack the rules belong to the owner: <see cref="PushToServerAsync"/> is the only
-    /// thing that makes a rule change reach the other collaborators, and the server refuses it from
-    /// anyone else. A collaborator editing the grid used to see the change save and stick, while in
-    /// fact it lived on their disk alone until the next sync overwrote it — so the grid is locked
-    /// instead of quietly lying.
-    /// </remarks>
+    /// <remarks>On a hosted pack the rules belong to the owner: only <see cref="PushToServerAsync"/>
+    /// reaches other collaborators, and the server refuses it from anyone else. So for collaborators
+    /// the grid is locked rather than saving changes the next sync would overwrite.</remarks>
     private bool IsReadOnlyForMe => _packId.HasValue && !_isOwner;
 
     private void ApplyReadOnlyState()
@@ -108,8 +197,8 @@ public partial class PackRulesDialog : Window, IDialogHost
         var pattern = NewPatternBox.Text.Trim();
         if (string.IsNullOrEmpty(pattern)) { StatusLabel.Text = "Enter a pattern."; return; }
 
-        // Two rules for the same pattern is not an error the matcher can resolve usefully — the
-        // earlier one always wins — so replace rather than pile up a dead duplicate.
+        // With two rules for the same pattern the earlier one always wins, so replace rather than add
+        // a dead duplicate.
         if (_rows.FirstOrDefault(r => string.Equals(r.Pattern, pattern, StringComparison.OrdinalIgnoreCase))
             is { } existing)
         {
@@ -124,7 +213,13 @@ public partial class PackRulesDialog : Window, IDialogHost
         NewPatternBox.Text = "";
         StatusLabel.Text = "";
         Save();
+        _ = RecountAsync();
     }
+
+    /// <summary>An edited pattern matches a different set of files, so the counts beside it are
+    /// wrong the moment the cell is committed.</summary>
+    private void OnCellEditEnding(object sender, DataGridCellEditEndingEventArgs e) =>
+        Dispatcher.BeginInvoke(new Action(() => _ = RecountAsync()), DispatcherPriority.Background);
 
     private RuleAction SelectedNewAction() =>
         NewActionBox.SelectedIndex >= 0 && NewActionBox.SelectedIndex < ActionValues.Length
@@ -147,6 +242,7 @@ public partial class PackRulesDialog : Window, IDialogHost
 
             _rows.Remove(row);
             Save();
+            _ = RecountAsync();
         }
         catch (Exception ex)
         {
@@ -171,6 +267,7 @@ public partial class PackRulesDialog : Window, IDialogHost
             foreach (var r in PackRuleService.DefaultRules())
                 _rows.Add(new RuleRow(r));
             Save();
+            _ = RecountAsync();
         }
         catch (Exception ex)
         {
@@ -178,8 +275,7 @@ public partial class PackRulesDialog : Window, IDialogHost
         }
     }
 
-    /// <remarks>Closing runs the single save in <see cref="OnClosing"/>; saving here as well wrote
-    /// the same list twice and pushed it to the server twice.</remarks>
+    /// <remarks>Closing runs the save in <see cref="OnClosing"/>, so don't save here too.</remarks>
     private void OnClose(object sender, RoutedEventArgs e) => Close();
 
     protected override void OnClosing(CancelEventArgs e) { Save(); base.OnClosing(e); }
@@ -218,6 +314,7 @@ public sealed class RuleRow : INotifyPropertyChanged
 {
     private string _pattern;
     private RuleAction _action;
+    private string _matchLabel = "...";
 
     public RuleRow(PackRule r) { _pattern = r.Pattern; _action = r.Action; }
 
@@ -231,6 +328,14 @@ public sealed class RuleRow : INotifyPropertyChanged
     {
         get => _action;
         set { _action = value; OnPropertyChanged(); }
+    }
+
+    /// <summary>How many of the instance's files this rule wins, as text: a number, "none", "..."
+    /// while it is still being counted, or empty when there is nothing to count against.</summary>
+    public string MatchLabel
+    {
+        get => _matchLabel;
+        set { _matchLabel = value; OnPropertyChanged(); }
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

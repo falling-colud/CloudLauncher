@@ -1,7 +1,9 @@
 ﻿<Window x:Class="CloudLauncher.Views.MinecraftAccountDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Minecraft account" Height="380" Width="480"
+        xmlns:slate="clr-namespace:CloudLauncher.Controls"
+        xmlns:svc="clr-namespace:CloudLauncher.Services"
+        Title="Minecraft account" SizeToContent="Height" Width="480"
         WindowStartupLocation="CenterOwner" ResizeMode="NoResize"
         Background="{DynamicResource Surface1Brush}"
         Foreground="{DynamicResource TextPrimaryBrush}">
@@ -18,15 +20,15 @@
             <TextBlock x:Name="CurrentAccountLabel" Style="{StaticResource Muted}" Margin="0,4,0,0"/>
         </StackPanel>
 
-        <Border Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,12">
+        <slate:SlateBorder Grid.Row="1" Style="{StaticResource Card}" Margin="0,0,0,12">
             <StackPanel>
                 <DockPanel>
-                    <Border DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
+                    <slate:SlateBorder DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
                             Background="{DynamicResource AccentSoftBrush}" Margin="0,0,12,0">
-                        <TextBlock Text="&#xE748;" FontFamily="{StaticResource IconFont}" FontSize="16"
+                        <TextBlock Text="&#xE748;" FontFamily="{DynamicResource IconFont}" FontSize="16"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource AccentBrush}"/>
-                    </Border>
+                                   Foreground="{DynamicResource AccentTextBrush}"/>
+                    </slate:SlateBorder>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="Microsoft account" FontWeight="SemiBold"/>
                         <TextBlock Style="{StaticResource Caption}"
@@ -37,29 +39,32 @@
                         Style="{StaticResource AccentButton}" HorizontalAlignment="Left"
                         Click="OnMicrosoftSignIn" Margin="0,12,0,0"/>
             </StackPanel>
-        </Border>
+        </slate:SlateBorder>
 
-        <Border Grid.Row="2" Style="{StaticResource Card}">
+        <slate:SlateBorder Grid.Row="2" Style="{StaticResource Card}">
             <StackPanel>
                 <DockPanel>
-                    <Border DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
+                    <slate:SlateBorder DockPanel.Dock="Left" Width="36" Height="36" CornerRadius="8"
                             Background="{DynamicResource Surface4Brush}" Margin="0,0,12,0">
-                        <TextBlock Text="&#xE77B;" FontFamily="{StaticResource IconFont}" FontSize="16"
+                        <TextBlock Text="&#xE77B;" FontFamily="{DynamicResource IconFont}" FontSize="16"
                                    HorizontalAlignment="Center" VerticalAlignment="Center"
                                    Foreground="{DynamicResource TextSecondaryBrush}"/>
-                    </Border>
+                    </slate:SlateBorder>
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="Offline play" FontWeight="SemiBold"/>
                         <TextBlock Style="{StaticResource Caption}"
-                                   Text="Pick any username. Only joins offline-mode (cracked) servers."/>
+                                   Text="Pick any username. Only joins offline-mode servers."/>
                     </StackPanel>
                 </DockPanel>
                 <DockPanel Margin="0,12,0,0">
                     <Button DockPanel.Dock="Right" Content="Use offline" Click="OnOffline"/>
                     <TextBox x:Name="OfflineNameBox" Margin="0,0,8,0"/>
                 </DockPanel>
+                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
+                           Foreground="{DynamicResource TextTertiaryBrush}"
+                           Text="{x:Static svc:MinecraftAccountService.OfflineNeedsMicrosoftReason}"/>
             </StackPanel>
-        </Border>
+        </slate:SlateBorder>
 
         <DockPanel Grid.Row="3" Margin="0,16,0,0">
             <Button DockPanel.Dock="Right" Content="Close" Click="OnClose" IsCancel="True"/>

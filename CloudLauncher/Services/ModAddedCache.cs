@@ -4,18 +4,16 @@ using System.Text.Json;
 namespace CloudLauncher.Services;
 
 /// <summary>
-/// Remembers when each mod first appeared in a pack, so the List view can say "added 12 Sep, 21:04"
-/// and the "Add date" sort means what it says.
+/// Remembers when each mod first appeared in a pack, so the List view can show "added 12 Sep, 21:04"
+/// and the "Add date" sort is right.
 ///
-/// <para>The jar's own creation time cannot answer it on its own: updating a mod writes a new file
-/// (a new name, a new creation time) and deletes the old one, which would make every mod the user
-/// keeps current look like it was added today. The first time a mod is seen its file time is
-/// recorded against its stable store key (<c>modrinth:…</c> / <c>curseforge:…</c>, falling back to
-/// the file name), and that key survives the update.</para>
+/// <para>The jar's creation time alone can't answer this: updating a mod writes a new file and
+/// deletes the old one, so every updated mod would look like it was added today. The first time a
+/// mod is seen, its file time is recorded under its stable store key (<c>modrinth:...</c> /
+/// <c>curseforge:...</c>, falling back to the file name), which survives updates.</para>
 ///
-/// <para>Deliberately per-machine: it lives next to the fingerprint cache rather than in the pack's
-/// synced <c>mods.json</c>, because "when did this land in my copy" is a local question, and the
-/// file is rewritten on every mod scan — not something to push at collaborators.</para>
+/// <para>Per machine: it lives next to the fingerprint cache instead of in the pack's synced
+/// <c>mods.json</c>, because it's a local question and the file is rewritten on every mod scan.</para>
 /// </summary>
 public sealed class ModAddedCache
 {
@@ -32,9 +30,9 @@ public sealed class ModAddedCache
         Load();
     }
 
-    /// <summary>When this mod first showed up in the pack: the earliest of what we already recorded
-    /// under any of its keys and the jar's own file time. Records the answer under the mod's primary
-    /// key, so a later update (new file, new file time) still reports the original date.</summary>
+    /// <summary>When this mod first showed up in the pack: the earliest of any date recorded under its
+    /// keys and the jar's file time. Stored under the mod's primary key so later updates keep the
+    /// original date.</summary>
     public DateTime Resolve(Guid packId, IReadOnlyList<string> candidateKeys, DateTime fileTime)
     {
         if (candidateKeys.Count == 0) return fileTime;
@@ -49,8 +47,8 @@ public sealed class ModAddedCache
                 if (map.TryGetValue(key, out var stored) && stored > DateTime.MinValue && (known is null || stored < known))
                     known = stored;
 
-            // A jar with no readable file time (locked, or a filesystem that lost it) arrives as
-            // DateTime.MinValue: it must not overwrite, or be preferred to, a real recorded date.
+            // A jar with no readable file time (locked, or lost by the filesystem) arrives as
+            // DateTime.MinValue and must never replace or win over a real recorded date.
             var usable = fileTime > DateTime.MinValue;
             if (!usable && known is null) return fileTime;
             var first = !usable ? known!.Value
@@ -67,9 +65,9 @@ public sealed class ModAddedCache
         }
     }
 
-    /// <summary>Drops entries for mods that are no longer in the pack. Only safe to call after a
-    /// complete identity pass, where <paramref name="aliveKeys"/> holds every key of every mod that
-    /// is still installed — a partial pass would throw away the dates of the mods it missed.</summary>
+    /// <summary>Drops entries for mods that are no longer in the pack. Only call this after a complete
+    /// identity pass: <paramref name="aliveKeys"/> must hold every key of every installed mod, or the
+    /// mods it missed lose their dates.</summary>
     public void Prune(Guid packId, IEnumerable<string> aliveKeys)
     {
         var alive = new HashSet<string>(aliveKeys, StringComparer.OrdinalIgnoreCase);
@@ -117,7 +115,7 @@ public sealed class ModAddedCache
                     _packs[packId] = new Dictionary<string, DateTime>(map, StringComparer.OrdinalIgnoreCase);
             }
         }
-        catch { /* corrupt cache — start fresh, dates fall back to file times */ }
+        catch { /* corrupt cache: start fresh, dates fall back to file times */ }
     }
 
     private static string GetDataRoot() => Path.Combine(

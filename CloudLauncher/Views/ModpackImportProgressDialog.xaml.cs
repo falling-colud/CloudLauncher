@@ -13,7 +13,7 @@ public partial class ModpackImportProgressDialog : Window
         InitializeComponent();
         _path = path;
         NameBox.Text = suggestedName;
-        Title = $"Import — {Path.GetFileName(path)}";
+        Title = $"Import - {Path.GetFileName(path)}";
     }
 
     private async void OnImport(object sender, RoutedEventArgs e)

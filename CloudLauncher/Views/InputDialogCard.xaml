@@ -1,11 +1,12 @@
 ﻿<UserControl x:Class="CloudLauncher.Views.InputDialogCard"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls">
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="24" MinWidth="340" MaxWidth="440">
-        <Border.Effect>
+        <slate:SlateBorder.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
-        </Border.Effect>
+        </slate:SlateBorder.Effect>
         <StackPanel>
             <TextBlock x:Name="TitleText" Style="{StaticResource H2}" TextWrapping="Wrap"/>
             <TextBlock x:Name="LabelText" Style="{StaticResource Caption}"
@@ -16,5 +17,5 @@
                 <Button Content="OK" Style="{StaticResource AccentButton}" Click="OnOk"/>
             </StackPanel>
         </StackPanel>
-    </Border>
+    </slate:SlateBorder>
 </UserControl>

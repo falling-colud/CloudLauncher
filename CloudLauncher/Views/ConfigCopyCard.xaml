@@ -1,12 +1,16 @@
 <UserControl x:Class="CloudLauncher.Views.ConfigCopyCard"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
              xmlns:anim="clr-namespace:CloudLauncher.Animations">
-    <Border Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+    <!--  Fixed size and shadow are for the floating card. Embed() strips both when the control is
+    used as the body of a page pane.  -->
+    <slate:SlateBorder x:Name="CardRoot"
+            Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="22" Width="640" Height="580">
-        <Border.Effect>
+        <slate:SlateBorder.Effect>
             <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
-        </Border.Effect>
+        </slate:SlateBorder.Effect>
         <DockPanel>
             <StackPanel DockPanel.Dock="Top">
                 <TextBlock x:Name="TitleLabel" Style="{StaticResource H2}" TextTrimming="CharacterEllipsis"/>
@@ -36,7 +40,7 @@
                 </StackPanel>
             </Grid>
 
-            <Border CornerRadius="8" Background="{DynamicResource Surface1Brush}"
+            <slate:SlateBorder CornerRadius="8" Background="{DynamicResource Surface1Brush}"
                     BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1" Padding="6">
                 <Grid>
                     <ItemsControl x:Name="TargetList" anim:Animate.EntranceStagger="True">
@@ -50,25 +54,23 @@
                         </ItemsControl.Template>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Border Padding="12,9" Margin="3,3" CornerRadius="8"
+                                <slate:SlateBorder Padding="12,9" Margin="3,3" CornerRadius="8"
                                         Background="{DynamicResource Surface2Brush}"
                                         BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1">
                                     <DockPanel>
-                                        <!-- The tick lives at the right edge with the rest of the row's
-                                             actions, not in front of the name. -->
                                         <CheckBox DockPanel.Dock="Right" VerticalAlignment="Center"
                                                   Margin="10,0,2,0"
                                                   IsChecked="{Binding IsChecked, Mode=TwoWay}"
                                                   Checked="OnTargetToggled" Unchecked="OnTargetToggled"
                                                   ToolTip="Copy into this instance"/>
-                                        <Border DockPanel.Dock="Right" Style="{StaticResource Pill}"
+                                        <slate:SlateBorder DockPanel.Dock="Right" Style="{StaticResource Pill}"
                                                 VerticalAlignment="Center" Margin="8,0,0,0"
                                                 Background="{DynamicResource WarningBrush}"
                                                 Visibility="{Binding SharedVisibility}"
                                                 ToolTip="{Binding SharedHint}">
                                             <TextBlock Text="SHARED" Style="{StaticResource PillText}"
                                                        Foreground="White"/>
-                                        </Border>
+                                        </slate:SlateBorder>
                                         <StackPanel VerticalAlignment="Center">
                                             <TextBlock Text="{Binding PackName}" FontWeight="SemiBold"
                                                        TextTrimming="CharacterEllipsis"/>
@@ -76,7 +78,7 @@
                                                        TextWrapping="Wrap"/>
                                         </StackPanel>
                                     </DockPanel>
-                                </Border>
+                                </slate:SlateBorder>
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
@@ -85,10 +87,10 @@
                         <ProgressBar Width="160" Height="4" IsIndeterminate="True"/>
                         <TextBlock Style="{StaticResource Caption}" Margin="0,10,0,0"
                                    HorizontalAlignment="Center"
-                                   Text="Checking what each instance already has…"/>
+                                   Text="Checking what each instance already has..."/>
                     </StackPanel>
                 </Grid>
-            </Border>
+            </slate:SlateBorder>
         </DockPanel>
-    </Border>
+    </slate:SlateBorder>
 </UserControl>

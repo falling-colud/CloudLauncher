@@ -1,0 +1,242 @@
+<UserControl x:Class="CloudLauncher.Views.ServerPropertiesEditor"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls">
+    <UserControl.Resources>
+        <!--  One field = a caption over its control; one style keeps all eighteen aligned.  -->
+        <Style x:Key="Field" TargetType="StackPanel">
+            <Setter Property="Margin" Value="0,0,16,12"/>
+        </Style>
+        <Style x:Key="FieldLabel" TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+            <Setter Property="Margin" Value="0,0,0,4"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+        </Style>
+        <Style x:Key="FieldCheck" TargetType="CheckBox">
+            <Setter Property="Margin" Value="0,0,20,10"/>
+        </Style>
+        <Style x:Key="SectionCard" TargetType="Border" BasedOn="{StaticResource Card}">
+            <Setter Property="Margin" Value="0,0,0,12"/>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!--  Header. Save is a plain button: the hosting panel's Start is the one accent action.  -->
+        <!--  18 of left inset so the file name lines up with the section-card titles below it,
+             which carry the Card style's own padding.  -->
+        <DockPanel Grid.Row="0" Margin="18,0,18,10">
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top">
+                <Button x:Name="ReloadButton" Click="OnReload" Padding="12,6" Margin="0,0,8,0"
+                        ToolTip="Read the file again and throw away anything not saved">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE72C;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Reload" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="SaveButton" Click="OnSave" Padding="12,6" IsEnabled="False"
+                        ToolTip="Write these settings back to server.properties">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE74E;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Save" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+            <StackPanel>
+                <TextBlock Text="server.properties" Style="{StaticResource H3}"/>
+                <TextBlock x:Name="PathLabel" Style="{StaticResource Caption}" Margin="0,2,0,0"
+                           TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+        </DockPanel>
+
+        <!--  The warning banner shape from the shader page: Surface2 with a Warning border.  -->
+        <slate:SlateBorder x:Name="NoticePanel" Grid.Row="1" Background="{DynamicResource Surface2Brush}"
+                BorderBrush="{DynamicResource WarningBrush}" BorderThickness="1" CornerRadius="8"
+                Padding="12,9" Margin="0,0,0,12" Visibility="Collapsed">
+            <DockPanel>
+                <TextBlock Text="&#xE7BA;" FontFamily="{DynamicResource IconFont}" FontSize="14"
+                           Foreground="{DynamicResource WarningBrush}" Margin="0,0,10,0"
+                           VerticalAlignment="Top"/>
+                <TextBlock x:Name="NoticeLabel" Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+            </DockPanel>
+        </slate:SlateBorder>
+
+        <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" Padding="0,0,6,0">
+            <StackPanel>
+
+                <!-- ── world ───────────────────────────────────────────────── -->
+                <Border Style="{StaticResource SectionCard}">
+                    <StackPanel>
+                        <TextBlock Text="World" Style="{StaticResource H3}" Margin="0,0,0,12"/>
+
+                        <StackPanel Style="{StaticResource Field}">
+                            <TextBlock Text="Message of the day" Style="{StaticResource FieldLabel}"/>
+                            <TextBox x:Name="MotdBox" TextChanged="OnFieldChanged"
+                                     ToolTip="The line players see beside this server in their list"/>
+                        </StackPanel>
+
+                        <UniformGrid Columns="3">
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="World folder (level-name)" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="LevelNameBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Seed (blank = random)" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="LevelSeedBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Spawn protection (blocks)" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="SpawnProtectionBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Game mode" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="GamemodeBox" SelectionChanged="OnFieldChanged">
+                                    <ComboBoxItem Content="survival"/>
+                                    <ComboBoxItem Content="creative"/>
+                                    <ComboBoxItem Content="adventure"/>
+                                    <ComboBoxItem Content="spectator"/>
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Difficulty" Style="{StaticResource FieldLabel}"/>
+                                <ComboBox x:Name="DifficultyBox" SelectionChanged="OnFieldChanged">
+                                    <ComboBoxItem Content="peaceful"/>
+                                    <ComboBoxItem Content="easy"/>
+                                    <ComboBoxItem Content="normal"/>
+                                    <ComboBoxItem Content="hard"/>
+                                </ComboBox>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Max world size (blocks)" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="MaxWorldSizeBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                        </UniformGrid>
+
+                        <WrapPanel>
+                            <CheckBox x:Name="HardcoreCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Hardcore" Click="OnFieldChanged"
+                                      ToolTip="Death is permanent and the difficulty is locked to hard"/>
+                            <CheckBox x:Name="AllowNetherCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Allow the Nether" Click="OnFieldChanged"/>
+                            <CheckBox x:Name="CommandBlockCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Command blocks" Click="OnFieldChanged"/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── players ─────────────────────────────────────────────── -->
+                <Border Style="{StaticResource SectionCard}">
+                    <StackPanel>
+                        <TextBlock Text="Players" Style="{StaticResource H3}" Margin="0,0,0,12"/>
+                        <UniformGrid Columns="3">
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Max players" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="MaxPlayersBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Idle kick after (minutes, 0 = never)" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="IdleTimeoutBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="View distance (chunks)" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="ViewDistanceBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Simulation distance (chunks)" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="SimulationDistanceBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                        </UniformGrid>
+                        <WrapPanel>
+                            <CheckBox x:Name="OnlineModeCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Online mode (Mojang accounts)" Click="OnFieldChanged"
+                                      ToolTip="Off skips the Microsoft account check, so anyone can join under any name"/>
+                            <CheckBox x:Name="WhitelistCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Whitelist" Click="OnFieldChanged"/>
+                            <CheckBox x:Name="EnforceWhitelistCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Kick players removed from the whitelist" Click="OnFieldChanged"/>
+                            <CheckBox x:Name="PvpCheck" Style="{StaticResource FieldCheck}"
+                                      Content="PvP" Click="OnFieldChanged"/>
+                            <CheckBox x:Name="AllowFlightCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Allow flight" Click="OnFieldChanged"
+                                      ToolTip="Leave on for packs with jetpacks or elytra mods, or players get kicked for flying"/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── network ─────────────────────────────────────────────── -->
+                <Border Style="{StaticResource SectionCard}">
+                    <StackPanel>
+                        <TextBlock Text="Network" Style="{StaticResource H3}" Margin="0,0,0,12"/>
+                        <UniformGrid Columns="3">
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Port" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="PortBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="Query port" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="QueryPortBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                            <StackPanel Style="{StaticResource Field}">
+                                <TextBlock Text="RCON port" Style="{StaticResource FieldLabel}"/>
+                                <TextBox x:Name="RconPortBox" TextChanged="OnFieldChanged"/>
+                            </StackPanel>
+                        </UniformGrid>
+                        <StackPanel Style="{StaticResource Field}">
+                            <TextBlock Text="RCON password" Style="{StaticResource FieldLabel}"/>
+                            <TextBox x:Name="RconPasswordBox" TextChanged="OnFieldChanged"/>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"
+                                       Text="server.properties stores this in plain text - that is the file format, not a launcher choice. Anyone who can read the folder can read the password."/>
+                        </StackPanel>
+                        <WrapPanel>
+                            <CheckBox x:Name="EnableQueryCheck" Style="{StaticResource FieldCheck}"
+                                      Content="Query protocol" Click="OnFieldChanged"/>
+                            <CheckBox x:Name="EnableRconCheck" Style="{StaticResource FieldCheck}"
+                                      Content="RCON" Click="OnFieldChanged"
+                                      ToolTip="Lets the Servers page's remote console log in to this server"/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── raw ─────────────────────────────────────────────────── -->
+                <!--  Every key, including ones the form does not know; saving must keep them.  -->
+                <Expander x:Name="RawExpander" Header="Every key in this file" Margin="0,0,0,4">
+                    <StackPanel Margin="0,10,0,0">
+                        <DockPanel Margin="0,0,0,8">
+                            <Button x:Name="AddKeyButton" DockPanel.Dock="Right" Click="OnAddKey" Padding="10,4">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE710;" FontFamily="{DynamicResource IconFont}" FontSize="12"
+                                               Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="Add a key" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                            <TextBlock x:Name="RawCountLabel" Style="{StaticResource Caption}"
+                                       VerticalAlignment="Center"/>
+                        </DockPanel>
+                        <DataGrid x:Name="RawGrid" AutoGenerateColumns="False" MaxHeight="320"
+                                  CanUserAddRows="False" CanUserDeleteRows="False" HeadersVisibility="Column"
+                                  CellEditEnding="OnRawCellEdited">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="Key" Binding="{Binding Key}" IsReadOnly="True" Width="*"/>
+                                <DataGridTextColumn Header="Value" Binding="{Binding Value}" Width="*"/>
+                            </DataGrid.Columns>
+                            <DataGrid.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="Remove this key" Click="OnRemoveKey"/>
+                                </ContextMenu>
+                            </DataGrid.ContextMenu>
+                        </DataGrid>
+                    </StackPanel>
+                </Expander>
+
+                <TextBlock x:Name="ErrorLabel" Style="{StaticResource ErrorText}" Margin="0,8,0,0"
+                           Visibility="Collapsed"/>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

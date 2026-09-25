@@ -1,6 +1,5 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
@@ -14,13 +13,21 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Views;
 
-public partial class PackListView : Page
+public partial class PackListView : Page, IReusablePage, IRefreshablePage
 {
     private readonly MainWindow _shell;
+    /// <summary>Every instance the scan found. Not what the list is bound to; see
+    /// <see cref="_shown"/>.</summary>
     private readonly ObservableCollection<PackRow> _rows = new();
+
+    /// <summary>The rows on screen after the folder, search and sort are applied.</summary>
+    /// <remarks>Bound once and updated with <see cref="ListDiff"/>. Replacing ItemsSource instead would
+    /// reset the scroll position and selection on every keystroke.</remarks>
+    private readonly ObservableCollection<PackRow> _shown = new();
     private readonly ObservableCollection<FolderChipRow> _folderChips = new();
     private readonly Dictionary<Guid, ProgressInfo> _activeProgress = new();
     private PackSortMode _sortMode;
+    private PackListLayout _layout;
 
     // Active folder. null = "All". "team:<teamId>" = team folder. Otherwise user folder name.
     private string? _activeFolder;
@@ -31,30 +38,55 @@ public partial class PackListView : Page
 
     // Card minimum width (used as the divisor for column count). Cards stretch to fill cells.
     private const double CardMinWidth = 220;
-    private const double SearchCollapsedWidth = 36;
-    private const double SearchExpandedWidth = 260;
+
+    /// <summary>Owns the loading / empty / error / offline answer for this page. Nothing else
+    /// writes the count slot or shows an empty panel, so the page never claims zero before it has
+    /// looked.</summary>
+    private readonly PageState _state;
 
     public PackListView(MainWindow shell)
     {
         InitializeComponent();
         _shell = shell;
         _sortMode = App.State.Settings.PackSortMode;
-        PackList.ItemsSource = _rows;
+        PackList.ItemsSource = _shown;   // bound once; ApplyFilter reconciles it, never replaces it
         FolderStrip.ItemsSource = _folderChips;
         UpdateSortMenuState();
-        ProgressHub.ProgressChanged += OnProgressChanged;
-        ProgressHub.ProgressCleared += OnProgressCleared;
-        App.State.Instances.StateChanged += OnInstanceStateChanged;
-        App.State.ModpackDownload.PackAdded += OnPackAdded;
+        ApplyLayout(App.State.Settings.PackListLayout, save: false);
+
+        _state = new PageState(PackList, PageStateHost, nameof(PackListView))
+            .Copy(PageCopy.Instances)
+            .Slots(CountLabel, StatusLabel)
+            .DisableWhileBusy(RefreshButton, SortButton);
+        // The empty panel offers one action, "create", which is what someone with no instances needs.
+        // Import stays in the header.
+        _state.EmptyCopy(PageCopy.Instances.EmptyTitle, PageCopy.Instances.EmptyBody,
+                         "Create instance", () => _ = CreatePackAsync());
+        _state.RetryRequested += () => _ = RefreshAsync();
+
+        // Local, in-memory filter: react to every keystroke rather than the debounced event.
+        SearchBox.TextChanged += OnSearchTextChanged;
+
+        // Subscribed on Loaded and removed on Unloaded. The page is reused (IReusablePage), so
+        // subscribing in the constructor would leave these dead after the first navigation.
         Loaded += async (_, _) =>
         {
-            await RefreshAsync();
+            ProgressHub.ProgressChanged += OnProgressChanged;
+            ProgressHub.ProgressCleared += OnProgressCleared;
+            PackJobs.Changed += OnPackJobChanged;
+            App.State.Instances.StateChanged += OnInstanceStateChanged;
+            App.State.ModpackDownload.PackAdded += OnPackAdded;
             Window.GetWindow(this)!.PreviewKeyDown += OnShellKeyDown;
+
+            // Opening or reopening the page: nobody asked, so the refresh stays quiet unless it
+            // runs long or the server's list differs.
+            await RefreshCoreAsync(quiet: true);
         };
         Unloaded += (_, _) =>
         {
             ProgressHub.ProgressChanged -= OnProgressChanged;
             ProgressHub.ProgressCleared -= OnProgressCleared;
+            PackJobs.Changed -= OnPackJobChanged;
             App.State.Instances.StateChanged -= OnInstanceStateChanged;
             App.State.ModpackDownload.PackAdded -= OnPackAdded;
             if (Window.GetWindow(this) is Window w) w.PreviewKeyDown -= OnShellKeyDown;
@@ -77,6 +109,15 @@ public partial class PackListView : Page
         UpdateBottomProgress();
     }
 
+    /// <summary>A transfer started, paused, resumed or ended: the card's hover controls follow
+    /// it.</summary>
+    private void OnPackJobChanged(Guid packId)
+    {
+        var row = _rows.FirstOrDefault(r => r.Source.Id == packId);
+        row?.RefreshTransferState();
+        UpdateBottomProgress();
+    }
+
     private void OnInstanceStateChanged(Guid packId)
     {
         var row = _rows.FirstOrDefault(r => r.Source.Id == packId);
@@ -93,12 +134,12 @@ public partial class PackListView : Page
         var existing = _rows.FirstOrDefault(r => r.Source.Id == pack.Id);
         if (existing is not null)
         {
-            var index = _rows.IndexOf(existing);
-            var row = new PackRow(pack);
-            row.SetInstanceStatus(App.State.Instances.GetStatus(pack.Id));
+            // Rebind rather than replace, so a running transfer stays on the row and the object on screen
+            // stays the one in the list.
+            existing.Rebind(pack);
+            existing.SetInstanceStatus(App.State.Instances.GetStatus(pack.Id));
             if (_activeProgress.TryGetValue(pack.Id, out var progress))
-                row.SetProgress(progress.Fraction, progress.Label);
-            _rows[index] = row;
+                existing.SetProgress(progress.Fraction, progress.Label);
         }
         else
         {
@@ -107,11 +148,10 @@ public partial class PackListView : Page
             if (_activeProgress.TryGetValue(pack.Id, out var progress))
                 row.SetProgress(progress.Fraction, progress.Label);
             _rows.Add(row);
-            EmptyState.Visibility = Visibility.Collapsed;
         }
 
         RefreshFolderChips();
-        ApplyFilter();
+        ApplyFilter();   // re-decides the count and the empty panel from the rows we now have
     }
 
     private void UpdateBottomProgress()
@@ -183,9 +223,7 @@ public partial class PackListView : Page
         if (!IsVisible) return;
         if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
         {
-            ExpandSearch();
-            SearchBox.Focus();
-            SearchBox.SelectAll();
+            SearchBox.Focus();   // expands, focuses and selects; the control handles all three
             e.Handled = true;
         }
         else if (e.Key == Key.F5)
@@ -193,50 +231,6 @@ public partial class PackListView : Page
             _ = RefreshAsync();
             e.Handled = true;
         }
-    }
-
-    private void OnSearchToggle(object sender, RoutedEventArgs e)
-    {
-        ExpandSearch();
-        SearchBox.Focus();
-        SearchBox.SelectAll();
-    }
-
-    private void OnSearchPreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key != Key.Escape) return;
-        SearchBox.Text = "";
-        CollapseSearch();
-        e.Handled = true;
-    }
-
-    private void OnSearchLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
-    {
-        if (e.NewFocus is DependencyObject nextFocus && IsDescendantOf(nextFocus, CompactSearchHost))
-            return;
-        CollapseSearch();
-    }
-
-    private void ExpandSearch()
-    {
-        CompactSearchHost.Width = SearchExpandedWidth;
-        SearchBox.Visibility = Visibility.Visible;
-    }
-
-    private void CollapseSearch()
-    {
-        CompactSearchHost.Width = SearchCollapsedWidth;
-        SearchBox.Visibility = Visibility.Collapsed;
-        Keyboard.ClearFocus();
-    }
-
-    private static bool IsDescendantOf(DependencyObject child, DependencyObject ancestor)
-    {
-        for (var current = child; current is not null; current = VisualTreeHelper.GetParent(current))
-        {
-            if (ReferenceEquals(current, ancestor)) return true;
-        }
-        return false;
     }
 
     // ── responsive card grid ─────────────────────────────────────────────────
@@ -255,7 +249,7 @@ public partial class PackListView : Page
     /// </summary>
     private void UpdateColumns()
     {
-        if (_packGrid is null) return;
+        if (_packGrid is null || _layout != PackListLayout.Cards) return;
         var width = _packGrid.ActualWidth;
         if (width <= 0) width = ActualWidth - 80;        // fallback before measured
         if (width <= 0) return;
@@ -263,10 +257,56 @@ public partial class PackListView : Page
         if (_packGrid.Columns != cols) _packGrid.Columns = cols;
     }
 
-    private async Task RefreshAsync()
+    private void OnLayoutCardsClick(object sender, RoutedEventArgs e) => ApplyLayout(PackListLayout.Cards);
+
+    private void OnLayoutListClick(object sender, RoutedEventArgs e) => ApplyLayout(PackListLayout.List);
+
+    /// <summary>Switches between the card grid and the compact list and remembers the choice.</summary>
+    /// <remarks>Only the panel and the item template change; the bound collection stays the same, so
+    /// the filter, sort, selection and any running transfer carry over. The old UniformGrid goes away
+    /// with the panel, which is why the reference is dropped here and picked up again by
+    /// <see cref="OnPackGridLoaded"/> when the cards come back.</remarks>
+    private void ApplyLayout(PackListLayout layout, bool save = true)
     {
-        StatusLabel.Text = "Loading…";
-        EmptyState.Visibility = Visibility.Collapsed;
+        var list = layout == PackListLayout.List;
+        LayoutCardsButton.IsChecked = !list;
+        LayoutListButton.IsChecked = list;
+
+        _layout = layout;
+        if (list) _packGrid = null;
+        // Assigning the template already in use is a no-op, so clicking the checked button costs nothing.
+        PackList.ItemsPanel = (ItemsPanelTemplate)Resources[list ? "PackRowsPanel" : "PackGridPanel"];
+        PackList.ItemTemplate = (DataTemplate)Resources[list ? "PackRowTemplate" : "PackCardTemplate"];
+
+        if (!save || App.State.Settings.PackListLayout == layout) return;
+        App.State.Settings.PackListLayout = layout;
+        App.State.Settings.Save();
+    }
+
+    /// <summary>The page's one message line. Accent for success, danger for failure; set by resource
+    /// reference so a live theme change recolours it.</summary>
+    /// <remarks>Pass a sentence, not raw exception text, and give the exception to
+    /// <see cref="AppLog.LogError"/> (or <see cref="PageState.Error"/>, which does both).</remarks>
+    private void SetStatus(string message, bool error = false)
+    {
+        StatusLabel.SetResourceReference(TextBlock.ForegroundProperty, error ? "DangerBrush" : "AccentBrush");
+        StatusLabel.Text = message;
+    }
+
+    /// <summary>Re-reads the instance list in place (the offline banner's Retry, a page reopen).
+    /// Public as this page's <see cref="IRefreshablePage"/> implementation. <see cref="PageState"/>
+    /// keeps the cards on screen with a thin refresh bar rather than blanking them.</summary>
+    public Task RefreshAsync() => RefreshCoreAsync(quiet: false);
+
+    /// <param name="quiet">True when nobody asked: the page opening, reopening, or retrying on its own
+    /// after the server failed. See <see cref="PageState.Begin(string?, bool?, bool, Action?)"/>.</param>
+    private async Task RefreshCoreAsync(bool quiet)
+    {
+        // First showing: paint the list the server gave last time straight away, then reconcile the
+        // server's answer onto it, so the first screen doesn't visibly load twice.
+        if (!_state.HasData && _rows.Count == 0) PaintRemembered();
+
+        _state.Begin(null, null, quiet);
         try
         {
             // First launch on a fresh install: join the pack this launcher ships for, so the list is
@@ -274,38 +314,97 @@ public partial class PackListView : Page
             await App.State.ModpackDownload.EnsureDefaultPackAsync();
 
             var packs = await App.State.Api.ListPacksAsync();
-            _rows.Clear();
-            foreach (var p in packs.Where(p => !App.State.Settings.IsPackHidden(p.Id)))
+
+            // Reconciled, not rebuilt: there must be one PackRow per instance for the page's lifetime.
+            // OnProgressChanged, OnInstanceStateChanged and the transfer buttons look rows up in _rows and
+            // mutate them, so fresh objects would leave progress going to rows no longer on screen.
+            // ApplyFilter then narrows these same objects into _shown.
+            var fresh = packs
+                .Where(p => !App.State.Settings.IsPackHidden(p.Id))
+                .Select(p =>
+                {
+                    var row = new PackRow(p);
+                    row.SetInstanceStatus(App.State.Instances.GetStatus(p.Id));
+                    if (_activeProgress.TryGetValue(p.Id, out var progress))
+                        row.SetProgress(progress.Fraction, progress.Label);
+                    return row;
+                })
+                .ToList();
+
+            ListDiff.Apply(_rows, fresh, r => r.Source.Id, update: (kept, scanned) =>
+            {
+                kept.Rebind(scanned.Source);
+                kept.SetInstanceStatus(App.State.Instances.GetStatus(scanned.Source.Id));
+            });
+
+            // Pull teams for team-folder display
+            await ReloadTeamsAsync();
+
+            // Guarded: the chip strip is decoration, so a failure building it loses the strip, not the
+            // instance list, and is reported in the status line. Unguarded it would reach the catch below
+            // and show as "no list to show".
+            try
+            {
+                RefreshFolderChips();
+            }
+            catch (Exception ex)
+            {
+                AppLog.LogError("packs.folder-chips", ex);
+                _folderChips.Clear();
+                SetStatus("Folders could not be shown -- the instance list below is unaffected.", error: true);
+            }
+
+            ApplyFilter();   // the only place that writes the count and the empty panel
+
+            // A list served from the cache is still a list: say where it came from and retry shortly.
+            // Offline is not an error, since the instances on this PC are still playable.
+            if (App.State.Api.PackListStale is { Length: > 0 } why)
+            {
+                _state.Offline(why);
+                ScheduleStaleRetry();
+            }
+        }
+        catch (OfflineException ex)
+        {
+            _state.Offline(ex.Reason ?? "the server is unreachable", PackListCache.AgeInWords());
+            ScheduleStaleRetry();
+        }
+        catch (Exception ex)
+        {
+            // This follows the panel's title, so it adds a fact: ListPacksAsync has already tried the
+            // server, the saved list and the folders on disk by the time it throws.
+            _state.Error("Neither the server nor this PC had a list to show.", ex);
+        }
+    }
+
+    /// <summary>Draws the instance list and teams this PC last got from the server, before asking
+    /// again.</summary>
+    /// <remarks><see cref="RefreshCoreAsync"/> reconciles the server's answer onto these rows right
+    /// after. The caches are cleared when the signed-in account changes (<c>ApiClient.ClearTokens</c>),
+    /// so one account's instances are never shown to another.</remarks>
+    private void PaintRemembered()
+    {
+        var remembered = PackListCache.Load();
+        if (remembered is not { Count: > 0 }) return;
+
+        var rows = remembered
+            .Where(p => !App.State.Settings.IsPackHidden(p.Id))
+            .Select(p =>
             {
                 var row = new PackRow(p);
                 row.SetInstanceStatus(App.State.Instances.GetStatus(p.Id));
                 if (_activeProgress.TryGetValue(p.Id, out var progress))
                     row.SetProgress(progress.Fraction, progress.Label);
-                _rows.Add(row);
-            }
+                return row;
+            })
+            .ToList();
+        if (rows.Count == 0) return;
 
-            // Pull teams for team-folder display
-            await ReloadTeamsAsync();
-
-            // Build the folder chip strip
-            RefreshFolderChips();
-            ApplyFilter();
-
-            // A list served from the cache is still a list — say where it came from and come back for
-            // a real one shortly, rather than leaving someone staring at instances that may be stale.
-            if (App.State.Api.PackListStale is { Length: > 0 } why)
-            {
-                StatusLabel.Text = $"Showing your last known instances — the server is not answering ({why}). Retrying…";
-                ScheduleStaleRetry();
-            }
-            else StatusLabel.Text = "";
-
-            EmptyState.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        }
-        catch (Exception ex)
-        {
-            StatusLabel.Text = ex.Message;
-        }
+        ListDiff.Apply(_rows, rows, r => r.Source.Id, update: (kept, scanned) => kept.Rebind(scanned.Source));
+        if (TeamListCache.LoadTeams() is { } teams) _teams = teams;
+        try { RefreshFolderChips(); }
+        catch (Exception ex) { AppLog.LogError("packs.folder-chips", ex); }
+        ApplyFilter();
     }
 
     private DispatcherTimer? _staleRetry;
@@ -324,57 +423,89 @@ public partial class PackListView : Page
     {
         _staleRetry?.Stop();
         if (!IsLoaded) return;
-        await RefreshAsync();
+        await RefreshCoreAsync(quiet: true);
     }
+
+    /// <summary>Id of the trailing "New folder" chip. Colon-prefixed like the other pages' sentinels,
+    /// so it can't collide with a real folder name.</summary>
+    private const string NewFolderChipId = ":new";
+
+    /// <summary>Why this folder name cannot be used, or null when it can.</summary>
+    /// <remarks><c>team:</c> keys computed team folders, so a user folder with that prefix would be read
+    /// as one. A leading colon keys every page's pseudo-chips, including this strip's "New folder"
+    /// action. Checked on rename as well as on create.</remarks>
+    private static string? ReservedFolderReason(string name) =>
+        IsTeamFolderId(name) ? "Names starting with 'team:' are reserved for team folders."
+        : name.StartsWith(':') ? "Names starting with ':' are reserved by the launcher."
+        : null;
 
     private void RefreshFolderChips()
     {
-        _folderChips.Clear();
-        var rs = Application.Current.Resources;
-        var accent      = (Brush)rs["AccentBrush"];
-        var surface     = (Brush)rs["Surface3Brush"];
-        var border      = (Brush)rs["BorderBrush"];
-        var textPrimary = (Brush)rs["TextPrimaryBrush"];
-        var textSecond  = (Brush)rs["TextSecondaryBrush"];
+        // Built aside and compared first: the strip is rebuilt on every refresh, and replacing chips
+        // that did not change regenerates every container in it for nothing.
+        var next = new List<FolderChipRow>();
 
+        // The All chip's id is "", never null, while _activeFolder uses null for "no folder". The two
+        // are converted here, as in the other folder strips, since Id is non-nullable.
         FolderChipRow chip(string id, string label, int count, string icon, bool isTeam = false)
         {
-            var active = _activeFolder == id;
             return new FolderChipRow
             {
                 Id = id,
                 Label = label,
                 Icon = icon,
                 CountLabel = count > 0 ? $"({count})" : "",
-                Background = surface,
-                BorderColor = active ? accent : border,
-                Foreground = textPrimary,
-                CountForeground = textSecond,
-                FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
-                IsTeam = isTeam
+                IsActive = string.IsNullOrEmpty(id)
+                    ? string.IsNullOrEmpty(_activeFolder)   // "All" is active when no folder is
+                    : _activeFolder == id,
+                IsTeam = isTeam,
+                ToolTipText = isTeam
+                    ? $"Instances shared with the {label} team"
+                    : string.IsNullOrEmpty(id) ? "Every instance" : $"Instances filed under {label}"
             };
         }
 
-        // All — pseudo-folder
-        _folderChips.Add(chip(null!, "All", _rows.Count, ""));  // FilterAll-ish
+        // All (pseudo-folder)
+        next.Add(chip("", "All", _rows.Count, ""));
 
         // Team folders
         foreach (var t in _teams.OrderBy(t => t.Name))
         {
             var teamId = TeamFolderId(t.Id);
-            // Team instances aren't directly listed from PackSummary, so for now show 0 count.
-            // User can still drill in to see manually-added instances (since we treat team:xxx as a folder key).
+            // Team instances aren't listed via PackSummary, so this only counts instances filed under the
+            // team:xxx key by hand.
             var count = PacksInFolder(teamId).Count;
-            _folderChips.Add(chip(teamId, t.Name, count, "", isTeam: true));
+            next.Add(chip(teamId, t.Name, count, "", isTeam: true));
         }
 
         // User folders
         foreach (var fname in App.State.Settings.PackFolders.Keys.Where(k => !IsTeamFolderId(k)).OrderBy(s => s))
         {
             var count = PacksInFolder(fname).Count;
-            _folderChips.Add(chip(fname, fname, count, ""));
+            next.Add(chip(fname, fname, count, ""));
         }
+
+        // Always last: the chip that creates a folder. A plus rather than a folder glyph, and outlined
+        // by the shared FolderChipBorder style, because it is an action in a row of filters.
+        next.Add(new FolderChipRow
+        {
+            Id = NewFolderChipId,
+            Label = "New folder",
+            Icon = "",
+            ToolTipText = "Make a folder to file instances under",
+            IsNewAction = true
+        });
+
+        if (next.Count == _folderChips.Count && next.Zip(_folderChips).All(p => SameChip(p.First, p.Second)))
+            return;
+        _folderChips.Clear();
+        foreach (var c in next) _folderChips.Add(c);
     }
+
+    private static bool SameChip(FolderChipRow a, FolderChipRow b) =>
+        a.Id == b.Id && a.Label == b.Label && a.Icon == b.Icon && a.CountLabel == b.CountLabel
+        && a.ToolTipText == b.ToolTipText && a.IsTeam == b.IsTeam && a.IsActive == b.IsActive
+        && a.IsNewAction == b.IsNewAction;
 
     public async Task RefreshTeamFoldersAsync()
     {
@@ -417,33 +548,43 @@ public partial class PackListView : Page
                                     || (r.Description ?? "").ToLowerInvariant().Contains(filter));
 
         var filtered = SortRows(source).ToList();
-        PackList.ItemsSource = filtered;
 
-        // Toggle empty states
-        if (_rows.Count == 0)
+        // Keyed by pack id, with update: a refresh builds new PackRow objects, so without it the row on
+        // screen would keep showing the previous scan's values. Rebinding also keeps its live transfer
+        // progress.
+        ListDiff.Apply(_shown, filtered, r => r.Source.Id,
+                       update: (onScreen, fresh) => onScreen.Rebind(fresh.Source));
+
+        // Which "nothing here" to show depends on what is hiding the rows.
+        if (_rows.Count > 0 && filtered.Count == 0)
         {
-            EmptyState.Visibility       = Visibility.Visible;
-            EmptyFolderState.Visibility = Visibility.Collapsed;
+            if (!string.IsNullOrEmpty(filter))
+                _state.EmptyFiltered();
+            else if (!string.IsNullOrEmpty(_activeFolder))
+                _state.EmptyNext($"Nothing in {ActiveFolderLabel()} yet",
+                    "Right-click an instance on the All page and pick 'Add to folder' to link it here.",
+                    glyph: "");
         }
-        else if (filtered.Count == 0 && !string.IsNullOrEmpty(_activeFolder))
-        {
-            EmptyState.Visibility       = Visibility.Collapsed;
-            EmptyFolderState.Visibility = Visibility.Visible;
-            var label = IsTeamFolderId(_activeFolder)
-                ? _teams.FirstOrDefault(t => TeamFolderId(t.Id).Equals(_activeFolder, StringComparison.OrdinalIgnoreCase))?.Name ?? "Team"
-                : _activeFolder;
-            EmptyFolderTitle.Text = $"Nothing in {label} yet";
-        }
-        else
-        {
-            EmptyState.Visibility       = Visibility.Collapsed;
-            EmptyFolderState.Visibility = Visibility.Collapsed;
-        }
+
+        // Content(0) is the only door into the empty panel, so it can only ever mean "we looked".
+        _state.Content(filtered.Count,
+            countText: _rows.Count == filtered.Count
+                ? $"{filtered.Count:N0} instance(s)"
+                : $"{filtered.Count:N0} of {_rows.Count:N0} instance(s)");
     }
+
+    /// <summary>The active folder's display name. A team chip shows the team's name, not its id.</summary>
+    private string ActiveFolderLabel() =>
+        IsTeamFolderId(_activeFolder)
+            ? _teams.FirstOrDefault(t => TeamFolderId(t.Id).Equals(_activeFolder, StringComparison.OrdinalIgnoreCase))?.Name ?? "Team"
+            : _activeFolder ?? "";
 
     private async void OnRefresh(object sender, RoutedEventArgs e) => await RefreshAsync();
 
-    private async void OnCreatePack(object sender, RoutedEventArgs e)
+    private async void OnCreatePack(object sender, RoutedEventArgs e) => await CreatePackAsync();
+
+    /// <summary>Shared by the header button and the empty panel's action, which offer the same move.</summary>
+    private async Task CreatePackAsync()
     {
         var dlg = new CreatePackDialog { Owner = _shell };
         if (dlg.ShowDialog() == true)
@@ -454,7 +595,31 @@ public partial class PackListView : Page
                 App.State.Settings.AddPackToFolder(_activeFolder, created.Id);
                 App.State.Settings.Save();
             }
+
+            // Apply the shared defaults to a new instance so the user doesn't have to add their resource
+            // pack and shader by hand. Fire-and-forget: a failure here shouldn't fail creation, and the
+            // launch-time reconcile will catch up.
+            if (dlg.CreatedPack is { } fresh)
+                _ = ApplyDefaultsToNewInstanceAsync(fresh);
+
             await RefreshAsync();
+        }
+    }
+
+    /// <summary>Puts the user's shared defaults into an instance that has just been created.</summary>
+    /// <remarks>Includes activation: a default resource pack should be switched on in a new instance,
+    /// not just sit in its folder. A no-op for anyone who has set no defaults.</remarks>
+    private async Task ApplyDefaultsToNewInstanceAsync(PackSummary pack)
+    {
+        try
+        {
+            var result = await App.State.ContentDefaults.ReconcileAsync(pack);
+            // Silent when there was nothing to do, as for anyone without defaults.
+            if (result.DidAnything) SetStatus($"{pack.Name}: {result.Summary()}");
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("content-defaults", ex);
         }
     }
 
@@ -471,6 +636,25 @@ public partial class PackListView : Page
     }
 
     private void OnDownloadPack(object sender, RoutedEventArgs e) => _shell.OpenPackBrowser();
+
+    /// <summary>Opens the folder every instance lives in.</summary>
+    /// <remarks>Creates it first so opening can't fail on a packs root nobody has written to yet, like
+    /// the card's "Open game folder".</remarks>
+    private void OnOpenInstancesFolder(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var dir = App.State.Settings.PacksRoot;
+            Directory.CreateDirectory(dir);
+            if (!SafeLaunch.OpenFolder(dir))
+                SetStatus("That folder could not be opened. The full error is in the launcher log.", error: true);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("That folder could not be opened. The full error is in the launcher log.", error: true);
+        }
+    }
 
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => ApplyFilter();
 
@@ -550,15 +734,16 @@ public partial class PackListView : Page
 
     // ── folder strip ─────────────────────────────────────────────────────────
 
-    private void OnCreateFolder(object sender, RoutedEventArgs e)
+    /// <summary>Makes a folder and selects it. Reached from the strip's trailing chip.</summary>
+    private void CreateFolder()
     {
         var dlg = new SimpleInputDialog("Create folder", "Folder name", "") { Owner = _shell };
         if (dlg.ShowDialog() != true) return;
         var name = (dlg.Result ?? "").Trim();
         if (string.IsNullOrEmpty(name)) return;
-        if (IsTeamFolderId(name))
+        if (ReservedFolderReason(name) is { } why)
         {
-            StatusLabel.Text = "Names starting with 'team:' are reserved.";
+            SetStatus(why, error: true);
             return;
         }
         App.State.Settings.CreatePackFolder(name);
@@ -570,19 +755,22 @@ public partial class PackListView : Page
 
     private void OnFolderChipClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is FrameworkElement el && el.DataContext is FolderChipRow chip)
-        {
-            _activeFolder = chip.Id;
-            RefreshFolderChips();
-            ApplyFilter();
-        }
+        if (sender is not FrameworkElement { DataContext: FolderChipRow chip }) return;
+
+        // The trailing chip is an action, not a filter: it must never become the active folder.
+        if (chip.IsNewAction) { CreateFolder(); return; }
+
+        _activeFolder = string.IsNullOrEmpty(chip.Id) ? null : chip.Id;
+        RefreshFolderChips();
+        ApplyFilter();
     }
 
     private void OnFolderChipRightClick(object sender, MouseButtonEventArgs e)
     {
-        // Suppress context menu for the All chip
+        // No context menu on the two chips that are not folders: All and the trailing New-folder chip.
+        // Rename/Delete have their own guards, but a menu that refuses itself is worse than none.
         if (sender is FrameworkElement el && el.DataContext is FolderChipRow chip
-            && string.IsNullOrEmpty(chip.Id))
+            && (string.IsNullOrEmpty(chip.Id) || chip.IsNewAction))
         {
             e.Handled = true;
         }
@@ -590,14 +778,22 @@ public partial class PackListView : Page
 
     private void OnFolderRename(object sender, RoutedEventArgs e)
     {
-        if (FolderFromMenu(sender) is not { } chip || string.IsNullOrEmpty(chip.Id) || chip.IsTeam) return;
+        // The "New folder" chip has a sentinel id (":new") that PackFolders never holds, so it is
+        // excluded along with All and team chips.
+        if (FolderFromMenu(sender) is not { } chip || string.IsNullOrEmpty(chip.Id)
+            || chip.IsNewAction || chip.IsTeam) return;
         var dlg = new SimpleInputDialog("Rename folder", "New name", chip.Id) { Owner = _shell };
         if (dlg.ShowDialog() != true) return;
         var newName = (dlg.Result ?? "").Trim();
         if (string.IsNullOrEmpty(newName) || newName == chip.Id) return;
+        if (ReservedFolderReason(newName) is { } why)
+        {
+            SetStatus(why, error: true);
+            return;
+        }
         if (App.State.Settings.PackFolders.ContainsKey(newName))
         {
-            StatusLabel.Text = "A folder with that name already exists.";
+            SetStatus("A folder with that name already exists.", error: true);
             return;
         }
         var members = App.State.Settings.PackFolders[chip.Id];
@@ -609,12 +805,16 @@ public partial class PackListView : Page
         ApplyFilter();
     }
 
-    private void OnFolderDelete(object sender, RoutedEventArgs e)
+    private async void OnFolderDelete(object sender, RoutedEventArgs e)
     {
-        if (FolderFromMenu(sender) is not { } chip || string.IsNullOrEmpty(chip.Id) || chip.IsTeam) return;
-        if (MessageBox.Show(_shell, $"Delete folder '{chip.Id}'? The instances themselves stay.",
-                "Delete folder", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
-            return;
+        // The "New folder" chip has a sentinel id (":new") that PackFolders never holds, so it is
+        // excluded along with All and team chips.
+        if (FolderFromMenu(sender) is not { } chip || string.IsNullOrEmpty(chip.Id)
+            || chip.IsNewAction || chip.IsTeam) return;
+        var confirmed = await AppDialog.ConfirmAsync(_shell, "Delete folder",
+            $"Delete the folder '{chip.Id}'?\n\nThe instances themselves stay - they just stop being linked here.",
+            "Delete folder", "Cancel", danger: true);
+        if (!confirmed) return;
         App.State.Settings.DeletePackFolder(chip.Id);
         App.State.Settings.Save();
         if (_activeFolder == chip.Id) _activeFolder = null;
@@ -636,11 +836,46 @@ public partial class PackListView : Page
 
     // ── card click / play / update ───────────────────────────────────────────
 
+    /// <summary>One click opens the instance; two go straight to its Modpack Management.</summary>
+    /// <remarks>The card root is a Border, which has no <c>MouseDoubleClick</c>, so this uses the click
+    /// count. The second click must return early: calling <c>OpenPackDetail</c> again would reopen the
+    /// side panel and replace the hub just pushed. The first click is not suppressed, so Back from the
+    /// hub lands on the instance page.</remarks>
     private void OnCardClick(object sender, MouseButtonEventArgs e)
     {
+        // A click on Play, Kill, Pin or a transfer control belongs to that control and must not open
+        // anything, even on a double-click.
         if (e.OriginalSource is FrameworkElement el && IsInsideButton(el)) return;
-        if (sender is FrameworkElement fe && fe.DataContext is PackRow row)
-            _shell.OpenPackDetail(row.Source.Id, row.Source.Name);
+        if (sender is not FrameworkElement fe || fe.DataContext is not PackRow row) return;
+
+        if (e.ClickCount >= 2)
+        {
+            e.Handled = true;
+            _ = OpenModHubAsync(row);
+            return;
+        }
+
+        _shell.OpenPackDetail(row.Source.Id, row.Source.Name);
+    }
+
+    /// <summary>Opens one instance's Modpack Management.</summary>
+    /// <remarks>The hub needs a full <c>PackDetail</c>. The first click already opened the detail page,
+    /// which fetched and cached it, so the cache is tried first to keep the double-click quick; the fetch
+    /// is the fallback.</remarks>
+    private async Task OpenModHubAsync(PackRow row)
+    {
+        try
+        {
+            var detail = PackDetailCache.Load(row.Source.Id)
+                         ?? await App.State.Api.GetPackAsync(row.Source.Id);
+            _shell.OpenModManagementForPack(detail);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("Modpack management could not be opened for that instance. "
+                    + "The full error is in the launcher log.", error: true);
+        }
     }
 
     private void OnCardRightClick(object sender, MouseButtonEventArgs e) { /* let ContextMenu open */ }
@@ -667,11 +902,12 @@ public partial class PackListView : Page
         try
         {
             App.State.Instances.Stop(id);
-            StatusLabel.Text = "Stopping Minecraft instance...";
+            SetStatus("Stopping Minecraft instance...");
         }
         catch (Exception ex)
         {
-            StatusLabel.Text = "Stop failed: " + ex.Message;
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("That instance could not be stopped. The full error is in the launcher log.", error: true);
         }
     }
 
@@ -681,45 +917,106 @@ public partial class PackListView : Page
             await QuickUpdateAsync(id);
     }
 
+    /// <summary>The pause / resume control that the card's progress bar reveals on hover.</summary>
+    private void OnCardPauseJob(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: Guid id }) return;
+        var job = PackJobs.For(id);
+        if (job is null) return;
+        // Stop was already requested; pausing now would do nothing, so don't claim "Paused".
+        if (job.IsStopping) { SetStatus($"The {job.KindLabel} is already stopping..."); return; }
+
+        if (job.IsPaused)
+        {
+            job.Resume();
+            SetStatus($"Resumed the {job.KindLabel}.");
+        }
+        else
+        {
+            job.Pause();
+            SetStatus($"Paused - the {job.KindLabel} is holding where it is.");
+        }
+    }
+
+    private void OnCardStopJob(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: Guid id }) return;
+        var job = PackJobs.For(id);
+        if (job is null) return;
+        SetStatus($"Stopping the {job.KindLabel} - the files it downloaded are being removed...");
+        job.Stop();
+    }
+
     private async Task QuickPlayAsync(Guid id)
     {
-        StatusLabel.Text = "Preparing to launch…";
+        SetStatus("Preparing to launch...");
         try
         {
             var pack = await App.State.Api.GetPackAsync(id);
             if (pack.IsEmpty)
             {
-                StatusLabel.Text = "This instance is empty - open it to configure first.";
+                SetStatus("This instance is empty - open it to configure it first.", error: true);
                 return;
             }
             if (App.State.MinecraftAccounts.Current is null)
             {
-                StatusLabel.Text = "Sign in to a Minecraft account first.";
+                SetStatus("Sign in to a Minecraft account first.", error: true);
                 _shell.OpenMcAccount();
                 return;
             }
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
             var proc = await App.State.Launcher.LaunchTrackedAsync(pack, new Progress<string>(_ => { }));
             _shell.OpenMinecraftHost(pack, proc);
-            StatusLabel.Text = $"Minecraft started (PID {proc.Id}).";
+            // Re-filter first: ApplyFilter clears the status line on its way past, so the message is
+            // written after it.
             RefreshUsageState(id);
+            SetStatus($"Minecraft started (PID {proc.Id}).");
         }
-        catch (OperationCanceledException) { StatusLabel.Text = "Launch cancelled."; }
-        catch (Exception ex) { StatusLabel.Text = "Launch failed: " + ex.Message; }
+        catch (OperationCanceledException) { SetStatus("Launch cancelled."); }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("That instance could not be launched. The full error is in the launcher log.", error: true);
+        }
     }
 
     private async Task QuickUpdateAsync(Guid id)
     {
-        StatusLabel.Text = "Updating from server…";
+        if (PackJobs.For(id) is { } running)
+        {
+            // An export has no bar on the card to hover (it reports in its own card), so it gets its own words.
+            SetStatus(running.Kind == PackJobKind.Export
+                ? "An export is reading that instance. Update it once that has finished."
+                : "Already transferring - hover the bar to pause or stop it.");
+            return;
+        }
+
+        SetStatus("Updating from server...");
+        // Registered as a job so the bar this update draws can be paused and stopped from the
+        // same hover controls a modpack download gets.
+        var job = PackJobs.Start(id, PackJobKind.Sync);
         try
         {
-            var pack = await App.State.Api.GetPackAsync(id);
-            if (!pack.IsShared) { StatusLabel.Text = "Instance is not shared."; return; }
+            var pack = await App.State.Api.GetPackAsync(id, job.Token);
+            if (!pack.IsShared) { SetStatus("That instance is not hosted on the server, so there is nothing to update from.", error: true); return; }
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
-            await App.State.Packs.DownloadSharedAsync(pack.Id, new Progress<string>(_ => { }));
-            StatusLabel.Text = "Updated.";
+            await App.State.Packs.DownloadSharedAsync(pack.Id, new Progress<string>(_ => { }), job.Token, job);
+            SetStatus("Updated.");
         }
-        catch (Exception ex) { StatusLabel.Text = "Update failed: " + ex.Message; }
+        catch (OperationCanceledException)
+        {
+            var removed = job.RollbackCreatedFiles();
+            SetStatus(removed > 0
+                ? $"Update stopped - the {removed} file(s) it had downloaded were removed."
+                : "Update stopped.");
+            ProgressHub.Clear(id);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("The update did not finish. The full error is in the launcher log.", error: true);
+        }
+        finally { PackJobs.Finish(job); }
     }
 
     // ── context-menu actions ─────────────────────────────────────────────────
@@ -784,7 +1081,7 @@ public partial class PackListView : Page
         if (RowFromMenuSender(sender) is not { } row) return;
         if (App.State.Settings.UserId != row.Source.OwnerId)
         {
-            StatusLabel.Text = "Only the instance owner can rename it.";
+            SetStatus("Only the instance owner can rename it.", error: true);
             return;
         }
 
@@ -795,7 +1092,7 @@ public partial class PackListView : Page
         if (string.IsNullOrEmpty(name) || string.Equals(name, row.Source.Name, StringComparison.Ordinal))
             return;
 
-        StatusLabel.Text = "Renaming instance...";
+        SetStatus("Renaming instance...");
         try
         {
             var updated = await App.State.Api.UpdatePackAsync(
@@ -803,11 +1100,12 @@ public partial class PackListView : Page
                 new UpdatePackRequest(name, null, null, null, null, null, null, null));
             App.State.Packs.TryRenameFolder(row.Source.Id, name); // keep the on-disk folder in step
             AddOrUpdatePack(updated);
-            StatusLabel.Text = "Instance renamed.";
+            SetStatus("Instance renamed.");
         }
         catch (Exception ex)
         {
-            StatusLabel.Text = "Rename failed: " + ex.Message;
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("That instance could not be renamed. The full error is in the launcher log.", error: true);
         }
     }
 
@@ -816,7 +1114,7 @@ public partial class PackListView : Page
         if (RowFromMenuSender(sender) is not { } row) return;
         if (App.State.Settings.UserId != row.Source.OwnerId)
         {
-            StatusLabel.Text = "Only the instance owner can change its image.";
+            SetStatus("Only the instance owner can change its image.", error: true);
             return;
         }
 
@@ -834,11 +1132,12 @@ public partial class PackListView : Page
             App.State.PackAssets.SaveIconFromFile(row.Source.Id, dlg.FileName);
             row.RefreshCover();
             _shell.RefreshPackDetailHero(row.Source.Id);
-            StatusLabel.Text = "Image updated.";
+            SetStatus("Image updated.");
         }
         catch (Exception ex)
         {
-            StatusLabel.Text = "Couldn't set image: " + ex.Message;
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("That image could not be used. The full error is in the launcher log.", error: true);
         }
     }
 
@@ -848,13 +1147,15 @@ public partial class PackListView : Page
         {
             var dir = App.State.Packs.GameDir(row.Source.Id, row.Source.Name);
             Directory.CreateDirectory(dir);
-            Process.Start(new ProcessStartInfo { FileName = dir, UseShellExecute = true });
+            if (!SafeLaunch.OpenFolder(dir))
+                SetStatus("That folder could not be opened. The full error is in the launcher log.", error: true);
         }
     }
 
+    /// <summary>The card menu's route to Modpack Management, matching the double-click.</summary>
     private void OnCtxPackManagement(object sender, RoutedEventArgs e)
     {
-        if (RowFromMenuSender(sender) is { } row) _shell.OpenPackDetail(row.Source.Id, row.Source.Name);
+        if (RowFromMenuSender(sender) is { } row) _ = OpenModHubAsync(row);
     }
 
     private async void OnCtxBrowseMods(object sender, RoutedEventArgs e)
@@ -865,15 +1166,48 @@ public partial class PackListView : Page
             var detail = await App.State.Api.GetPackAsync(row.Source.Id);
             _shell.OpenModExplorerForPack(detail);
         }
-        catch (Exception ex) { StatusLabel.Text = ex.Message; }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("The mod browser could not be opened for that instance. The full error is in the launcher log.", error: true);
+        }
+    }
+
+    /// <summary>The card menu's route to <see cref="ExportPackDialog"/>, the same card the instance
+    /// page's Export button opens.</summary>
+    /// <remarks>Fetches the full record rather than trusting the cached one: both formats are written
+    /// around the Minecraft and loader versions, which may have changed since.
+    /// <see cref="ApiClient.GetPackAsync"/> still falls back to the cache when the server can't be
+    /// reached.</remarks>
+    private async void OnCtxExport(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender) is not { } row) return;
+        if (row.Source.IsEmpty)
+        {
+            SetStatus("That instance is empty, so there is nothing to export yet.", error: true);
+            return;
+        }
+        try
+        {
+            var detail = await App.State.Api.GetPackAsync(row.Source.Id);
+            await ExportPackDialog.ShowAsync(_shell, detail);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus("That instance could not be exported. The full error is in the launcher log.", error: true);
+        }
     }
 
     private void OnCtxCopyId(object sender, RoutedEventArgs e)
     {
         if (RowFromMenuSender(sender) is { } row)
         {
-            try { Clipboard.SetText(row.Source.Id.ToString()); StatusLabel.Text = "Instance ID copied."; }
-            catch { /* clipboard locked */ }
+            var copied = ClipboardHelper.TrySetText(row.Source.Id.ToString());
+            SetStatus(copied
+                ? "Instance ID copied."
+                : "Couldn't copy - the clipboard is in use by another program.",
+                error: !copied);
         }
     }
 
@@ -888,7 +1222,9 @@ public partial class PackListView : Page
         var packId = row.Source.Id;
         foreach (var f in App.State.Settings.PackFolders.Values) f.Remove(packId);
 
-        string? syncWarning = null;
+        // Set when the local hide worked but the server was not told: a partial success with its own
+        // message.
+        var syncWarning = false;
         try
         {
             if (isOwner)
@@ -905,7 +1241,8 @@ public partial class PackListView : Page
                 }
                 catch (Exception ex)
                 {
-                    syncWarning = ex.Message;
+                    AppLog.LogError(nameof(PackListView), ex);
+                    syncWarning = true;
                 }
             }
 
@@ -913,13 +1250,18 @@ public partial class PackListView : Page
             _shell.CloseSidePanelForPack(packId);
             await RefreshAsync();
 
-            StatusLabel.Text = syncWarning is null
-                ? isOwner ? "Instance deleted." : "Instance removed."
-                : "Removed from your list. Server sync failed: " + syncWarning;
+            SetStatus(syncWarning
+                ? "Removed from your list, but the server was not told - it may come back on the next refresh."
+                : isOwner ? "Instance deleted." : "Instance removed.",
+                error: syncWarning);
         }
         catch (Exception ex)
         {
-            StatusLabel.Text = (isOwner ? "Delete" : "Remove") + " failed: " + ex.Message;
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus(isOwner
+                ? "That instance could not be deleted. The full error is in the launcher log."
+                : "That instance could not be removed. The full error is in the launcher log.",
+                error: true);
         }
     }
 
@@ -986,20 +1328,22 @@ public partial class PackListView : Page
         }
         if (!hasAny)
         {
-            var none = new MenuItem { Header = "(no folders — create one first)", IsEnabled = false };
+            var none = new MenuItem { Header = "(no folders - create one first)", IsEnabled = false };
             mi.Items.Add(none);
         }
         mi.Items.Add(new Separator());
-        var create = new MenuItem { Header = "Create new folder…" };
+        var create = new MenuItem { Header = "Create new folder..." };
         create.Click += (_, _) =>
         {
             var dlg = new SimpleInputDialog("Create folder", "Folder name", "") { Owner = _shell };
             if (dlg.ShowDialog() == true && !string.IsNullOrWhiteSpace(dlg.Result))
             {
                 var fname = dlg.Result!.Trim();
-                if (IsTeamFolderId(fname))
+                // Same validator as the chip strip's create path, so this menu can't make a folder
+                // the strip would refuse (such as ":new").
+                if (ReservedFolderReason(fname) is { } why)
                 {
-                    StatusLabel.Text = "Names starting with 'team:' are reserved.";
+                    SetStatus(why, error: true);
                     return;
                 }
                 App.State.Settings.CreatePackFolder(fname);
@@ -1023,7 +1367,18 @@ public sealed class PackRow : INotifyPropertyChanged
 {
     public PackRow(PackSummary src) { Source = src; }
 
-    public PackSummary Source { get; }
+    public PackSummary Source { get; private set; }
+
+    /// <summary>Points this row at a freshly fetched summary of the same instance.</summary>
+    /// <remarks>Every display property is computed from <see cref="Source"/>, so one null-named change
+    /// notification re-reads them all (as <c>PackMod.Refresh</c> does). Updating the row in place rather
+    /// than replacing it keeps the scroll position, the selection and any running transfer.</remarks>
+    public void Rebind(PackSummary src)
+    {
+        if (ReferenceEquals(Source, src)) return;
+        Source = src;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+    }
     public string Name => Source.Name;
     public string? Summary => Source.Summary;
     public string? Description => Source.Description;
@@ -1037,6 +1392,14 @@ public sealed class PackRow : INotifyPropertyChanged
     public DateTimeOffset? LastPlayedAt => Usage.LastPlayedAt;
     public string PinToolTip => IsPinned ? "Unpin instance" : "Pin instance";
     public string PinMenuHeader => IsPinned ? "Unpin instance" : "Pin instance";
+    public Visibility PinnedVisibility => IsPinned ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Second line of a list row: version and loader, then the owner.</summary>
+    public string RowSubtitle => $"{VersionLabel} · {OwnerShortLabel}";
+
+    public string LastPlayedLabel => LastPlayedAt is { } at && TimeFormat.Ago(at) is { } ago
+        ? $"Played {ago}"
+        : "Not played yet";
     public Visibility UpdateButtonVisibility => Source.IsShared && !_isWorking && !IsInstanceBusy
         ? Visibility.Visible : Visibility.Collapsed;
 
@@ -1054,11 +1417,64 @@ public sealed class PackRow : INotifyPropertyChanged
     public double ProgressPercent => _progressPercent;
     public bool IsIndeterminate => _isIndeterminate;
     public string ProgressLabel => _progressLabel;
-    public string ProgressPercentLabel => _isIndeterminate ? "..." : $"{_progressPercent:0}%";
+    public string ProgressPercentLabel =>
+        // A paused transfer with a frozen percentage reads as a stuck one, so the bar says so itself.
+        Job is { IsPaused: true } ? "Paused" : _isIndeterminate ? "..." : $"{_progressPercent:0}%";
     public string ProgressSummaryLabel => string.IsNullOrWhiteSpace(_progressLabel) ? "Working..." : _progressLabel;
     public Visibility PlayVisibility     => !_isWorking && !IsInstanceBusy ? Visibility.Visible : Visibility.Collapsed;
     public Visibility KillVisibility     => IsInstanceBusy ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ProgressVisibility => _isWorking && !IsInstanceBusy ? Visibility.Visible : Visibility.Collapsed;
+
+    // ── transfer controls ────────────────────────────────────────────────────
+
+    /// <summary>The pausable transfer behind the bar, when there is one.</summary>
+    private PackJob? Job => PackJobs.For(Source.Id);
+
+    /// <summary>
+    /// The hover controls only exist for a transfer this launcher is running. Progress can also
+    /// come from a launch, and there is nothing to pause about that.
+    /// </summary>
+    public Visibility TransferControlsVisibility =>
+        ProgressVisibility == Visibility.Visible && Job is not null ? Visibility.Visible : Visibility.Collapsed;
+
+    public string PauseGlyph => Job is { IsPaused: true } ? "" : "";   // play / pause
+
+    public string PauseToolTip => Job is { } job
+        ? job.IsPaused
+            ? $"Resume the {job.KindLabel}"
+            : $"Pause the {job.KindLabel} - nothing already downloaded is lost"
+        : "";
+
+    public bool CanStopJob => Job is { IsStopping: false };
+
+    /// <summary>A job on its way out cannot be paused, so the button stops offering it.</summary>
+    public bool CanPauseJob => Job is { IsStopping: false };
+
+    public string StopToolTip => Job is { } job
+        ? $"Stop the {job.KindLabel} and delete the files it downloaded"
+        : "";
+
+    public string ProgressToolTip
+    {
+        get
+        {
+            var label = string.IsNullOrWhiteSpace(_progressLabel) ? "Working..." : _progressLabel;
+            return Job is { IsPaused: true } ? $"Paused - {label}" : label;
+        }
+    }
+
+    /// <summary>Re-reads the job state after it started, paused, resumed or ended.</summary>
+    public void RefreshTransferState()
+    {
+        OnPropertyChanged(nameof(TransferControlsVisibility));
+        OnPropertyChanged(nameof(PauseGlyph));
+        OnPropertyChanged(nameof(PauseToolTip));
+        OnPropertyChanged(nameof(CanStopJob));
+        OnPropertyChanged(nameof(CanPauseJob));
+        OnPropertyChanged(nameof(StopToolTip));
+        OnPropertyChanged(nameof(ProgressToolTip));
+        OnPropertyChanged(nameof(ProgressPercentLabel));
+    }
 
     public void SetInstanceStatus(MinecraftInstanceStatus status)
     {
@@ -1106,6 +1522,7 @@ public sealed class PackRow : INotifyPropertyChanged
         OnPropertyChanged(nameof(KillVisibility));
         OnPropertyChanged(nameof(ProgressVisibility));
         OnPropertyChanged(nameof(UpdateButtonVisibility));
+        RefreshTransferState();
     }
 
     public void RefreshUsage()
@@ -1114,8 +1531,10 @@ public sealed class PackRow : INotifyPropertyChanged
         OnPropertyChanged(nameof(PlayCount));
         OnPropertyChanged(nameof(TotalPlayTimeSeconds));
         OnPropertyChanged(nameof(LastPlayedAt));
+        OnPropertyChanged(nameof(LastPlayedLabel));
         OnPropertyChanged(nameof(PinToolTip));
         OnPropertyChanged(nameof(PinMenuHeader));
+        OnPropertyChanged(nameof(PinnedVisibility));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -1231,16 +1650,26 @@ public sealed class PackRow : INotifyPropertyChanged
         : (Brush)App.Current.FindResource("TagEmptyFgBrush");
 }
 
+/// <summary>One chip on the folder strip.</summary>
+/// <remarks>Flags rather than brushes: ThemeService creates new brush objects on every apply, so
+/// brushes baked into the chip would keep the old accent. The shared FolderChip* styles in
+/// Themes/Controls.xaml paint from these flags with DynamicResource.</remarks>
 public sealed class FolderChipRow
 {
-    public string Id { get; set; } = "";        // null/empty = "All". "team:..." for team folder. Else user-folder name.
+    /// <summary>Empty for "All"; <c>team:{id:N}</c> for a computed team folder; otherwise the
+    /// user folder's own name, which is also its key in settings.</summary>
+    public string Id { get; set; } = "";
     public string Label { get; set; } = "";
     public string Icon { get; set; } = "";
     public string CountLabel { get; set; } = "";
-    public Brush Background { get; set; } = Brushes.Transparent;
-    public Brush BorderColor { get; set; } = Brushes.Transparent;
-    public Brush Foreground { get; set; } = Brushes.White;
-    public Brush CountForeground { get; set; } = Brushes.Gray;
-    public FontWeight FontWeight { get; set; } = FontWeights.Normal;
+    public string ToolTipText { get; set; } = "";
     public bool IsTeam { get; set; }
+
+    /// <summary>The chip the strip is currently filtered by. A bool the style triggers on.</summary>
+    public bool IsActive { get; set; }
+
+    /// <summary>True for the trailing "New folder" chip, which makes a folder rather than
+    /// selecting one. The shared style draws it as an outline so it cannot be mistaken for a
+    /// folder you can select.</summary>
+    public bool IsNewAction { get; set; }
 }

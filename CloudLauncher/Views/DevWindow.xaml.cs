@@ -132,7 +132,7 @@ public partial class DevWindow : Window
         }
         catch (Exception ex)
         {
-            // Server push failed — still persist locally so the edit isn't lost.
+            // Server push failed; still save locally so the edit isn't lost.
             App.State.Rules.SaveGlobalDefaults(rules);
             DevStatusLabel.Text = "Saved locally, server push failed: " + ex.Message;
         }
@@ -176,7 +176,7 @@ public partial class DevWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
-        // Fire-and-forget — closing the window shouldn't block on a network call.
+        // Fire and forget: closing the window shouldn't wait on a network call.
         _ = SaveRulesAsync();
         base.OnClosing(e);
     }
@@ -196,7 +196,7 @@ public partial class DevWindow : Window
         }
         catch (Services.ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Forbidden)
         {
-            QuotaStatusLabel.Text = "⚠ Admin token not active — log out and back in as 'colud' to refresh your JWT.";
+            QuotaStatusLabel.Text = "The server did not accept this account as an administrator. Sign out and back in, then try again.";
         }
         catch (Exception ex) { QuotaStatusLabel.Text = "Load failed: " + ex.Message; }
     }
@@ -233,7 +233,7 @@ public partial class DevWindow : Window
             }
             var updated = await App.State.Api.SetUserQuotaAsync(row.UserId, new SetQuotaRequest(quotaBytes));
             row.UpdateFrom(updated);
-            QuotaStatusLabel.Text = $"Saved: {row.Username} → {(quotaBytes is null ? "unlimited" : $"{row.QuotaMb} MB")}";
+            QuotaStatusLabel.Text = $"Saved: {row.Username} > {(quotaBytes is null ? "unlimited" : $"{row.QuotaMb} MB")}";
         }
         catch (Exception ex) { QuotaStatusLabel.Text = "Save failed: " + ex.Message; }
     }
@@ -252,7 +252,7 @@ public sealed class QuotaRow(UserQuotaInfo info) : INotifyPropertyChanged
 
     public string UsedLabel    => FormatBytes(_usedBytes);
     public string PercentLabel =>
-        _quotaBytes is null || _quotaBytes == 0 ? "—"
+        _quotaBytes is null || _quotaBytes == 0 ? "-"
         : $"{(double)_usedBytes / _quotaBytes.Value * 100:F1}%";
 
     public Brush QuotaColor =>

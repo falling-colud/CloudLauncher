@@ -9,20 +9,10 @@ using Entry = CloudLauncher.Services.ConfigHubService.Entry;
 
 namespace CloudLauncher.Views;
 
-/// <summary>
-/// An in-window card that compares one config file between two instances, line by line, and can push
-/// either side over the other.
-/// </summary>
-/// <remarks>
-/// <para>The page's headline question is "is this config the same in all my instances, and if not,
-/// what changed?". A unified diff answers the second half; the first half is answered plainly — when
-/// the two files match, the diff is replaced by a sentence saying so, because "identical" is usually
-/// the answer the user came for and a blank grey list does not say it.</para>
-///
-/// <para>Both sides are re-read from disk every time the selection changes, so a file edited in the
-/// launcher's editor while this card is open shows its new contents on the next switch rather than a
-/// stale snapshot.</para>
-/// </remarks>
+/// <summary>An in-window card that compares one config file between two instances, line by line,
+/// and can copy either side over the other.</summary>
+/// <remarks>When the files match, the diff is replaced by a sentence saying so. Both sides are
+/// re-read from disk on every selection change, so edits made elsewhere show up.</remarks>
 public partial class ConfigCompareCard : UserControl
 {
     private readonly TaskCompletionSource<bool> _tcs = new();
@@ -33,13 +23,21 @@ public partial class ConfigCompareCard : UserControl
     /// <summary>Guards against a slow diff landing after the user has switched sides again.</summary>
     private int _diffToken;
 
+    /// <summary>Set by <see cref="Embed"/>. Suppresses the three things that only make sense over a
+    /// backdrop: the fixed card size, the focus grab, and Esc-to-close.</summary>
+    private bool _embedded;
+
     /// <summary>True when this card wrote a file, so the page knows to re-scan on close.</summary>
     public bool CopiedSomething { get; private set; }
+
+    /// <summary>Raised after this card overwrote one of the two files, so a host pane can re-read its
+    /// list. Modal callers check <see cref="CopiedSomething"/> on close instead.</summary>
+    public event Action? Copied;
 
     public Task Completion => _tcs.Task;
 
     /// <param name="copies">Every instance that has a file at this relative path.</param>
-    /// <param name="left">The copy the page was showing — the left side by default.</param>
+    /// <param name="left">The copy the page was showing (the left side by default).</param>
     /// <param name="right">The copy to compare against, or null to pick the first other instance.</param>
     public ConfigCompareCard(IReadOnlyList<Entry> copies, Entry left, Entry? right, Window owner)
     {
@@ -64,9 +62,25 @@ public partial class ConfigCompareCard : UserControl
         Loaded += (_, _) =>
         {
             Animate.SlideFadeIn(this, 0, 14, 200);
-            Focus();
+            // Embedded, the card is a pane beside a list the user is arrowing through; grabbing the
+            // caret on every selection change would make the list unusable.
+            if (!_embedded) Focus();
             _ = RunDiffAsync();
         };
+    }
+
+    /// <summary>Turns the floating card into a pane: drops the fixed 1040x680 size and the drop shadow
+    /// so it fills its cell, and hides both Close buttons.</summary>
+    /// <remarks>Call before the control is loaded. The Surface2 fill and 1px border stay, so it still
+    /// reads as a card.</remarks>
+    public void Embed()
+    {
+        _embedded = true;
+        CardRoot.Width = double.NaN;
+        CardRoot.Height = double.NaN;
+        CardRoot.Effect = null;
+        CloseIconButton.Visibility = Visibility.Collapsed;
+        CloseButton.Visibility = Visibility.Collapsed;
     }
 
     public void Close() => _tcs.TrySetResult(true);
@@ -78,7 +92,9 @@ public partial class ConfigCompareCard : UserControl
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
-        if (e.Key == Key.Escape) { Close(); e.Handled = true; }
+        // Embedded there is nothing to dismiss, and swallowing Esc would eat the host page's own
+        // "clear the search" shortcut.
+        if (e.Key == Key.Escape && !_embedded) { Close(); e.Handled = true; }
         base.OnPreviewKeyDown(e);
     }
 
@@ -101,14 +117,13 @@ public partial class ConfigCompareCard : UserControl
         var token = ++_diffToken;
         _rows.Clear();
         SameState.Visibility = Visibility.Collapsed;
-        SummaryLabel.Text = "Reading both files…";
+        SummaryLabel.Text = "Reading both files...";
         CopyLeftButton.IsEnabled = false;
         CopyRightButton.IsEnabled = false;
 
         try
         {
-            // Reading and diffing two multi-thousand-line configs is exactly the kind of work that
-            // makes a WPF window stop repainting, so none of it happens here.
+            // Reading and diffing two large configs would freeze the window, so do it off-thread.
             var result = await Task.Run(() =>
             {
                 if (left.FullPath == right.FullPath) return (Diff: (ConfigHubService.DiffResult?)null, Error: (string?)null);
@@ -146,7 +161,7 @@ public partial class ConfigCompareCard : UserControl
                 if (diff.OnlyLineEndings)
                     ShowSame("Same text, different file",
                         "Every line matches. The files differ only in their line endings or a byte-order " +
-                        "mark — harmless for the game, but enough to make a sync see a change.", success: true);
+                        "mark - harmless for the game, but enough to make a sync see a change.", success: true);
                 else
                     ShowSame("These files are identical",
                         $"{left.PackName} and {right.PackName} have exactly the same {left.FileName}.",
@@ -211,14 +226,18 @@ public partial class ConfigCompareCard : UserControl
         var dest = to.FullPath;
         await Task.Run(() =>
         {
-            File.Copy(dest, $"{dest}.bak-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: true);
+            // Invariant: ConfigHubService.BackupTakenUtc parses this suffix back, and the Cleanup
+            // page orders and dates the backups from it.
+            File.Copy(dest, $"{dest}.bak-{TimeFormat.StampNow()}", overwrite: true);
             File.Copy(source, dest, overwrite: true);
         });
 
         ConfigHubService.Invalidate(to.PackId);
         CopiedSomething = true;
+        AppLog.Log("files", $"Copied {from.PackName}/{from.RelativePath} over {to.PackName}'s copy.");
         SummaryLabel.Text = $"Replaced {to.FileName} in {to.PackName} with {from.PackName}'s copy " +
                             "(the old one was backed up).";
+        Copied?.Invoke();
         await RunDiffAsync();
     }
 
@@ -241,8 +260,8 @@ public partial class ConfigCompareCard : UserControl
         public string LeftNumberLabel { get; } = line.LeftNumber?.ToString() ?? "";
         public string RightNumberLabel { get; } = line.RightNumber?.ToString() ?? "";
 
-        /// <summary>A tab inside a config renders as a single glyph in a WPF TextBlock, which silently
-        /// destroys the indentation that makes a JSON or TOML diff readable.</summary>
+        /// <summary>Tabs expanded to spaces: a WPF TextBlock renders a tab as a single glyph, which
+        /// ruins the indentation of a JSON or TOML diff.</summary>
         public string Text { get; } = line.Text.Replace("\t", "    ");
     }
 }

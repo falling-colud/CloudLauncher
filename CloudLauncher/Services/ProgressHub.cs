@@ -7,21 +7,21 @@ namespace CloudLauncher.Services;
 public sealed class ProgressInfo
 {
     public Guid PackId { get; init; }
-    /// <summary>0.0 – 1.0. Use -1 for indeterminate / spinner mode.</summary>
+    /// <summary>0.0 to 1.0, or -1 for indeterminate.</summary>
     public double Fraction { get; init; }
-    /// <summary>Short human-readable description, e.g. "Downloading assets…".</summary>
+    /// <summary>Short description, e.g. "Downloading assets...".</summary>
     public string Label { get; init; } = "";
-    /// <summary>0.0 – 1.0 for the current item/stage. Use -1 when unavailable.</summary>
+    /// <summary>0.0 to 1.0 for the current item or stage, or -1 when unknown.</summary>
     public double CurrentFraction { get; init; } = -1;
-    /// <summary>Short label for the current item/stage, e.g. the file being downloaded.</summary>
+    /// <summary>Label for the current item or stage, e.g. the file being downloaded.</summary>
     public string CurrentLabel { get; init; } = "";
     public bool HasCurrentProgress => CurrentFraction >= 0 || !string.IsNullOrWhiteSpace(CurrentLabel);
 }
 
 /// <summary>
-/// Global progress channel used by Launch + sync flows. Views (pack cards, pack detail)
-/// subscribe to <see cref="ProgressChanged"/> / <see cref="ProgressCleared"/> and update
-/// their UI for the matching pack. Events are always raised on the UI thread.
+/// Global progress channel for launch and sync. Pack views subscribe to
+/// <see cref="ProgressChanged"/> and <see cref="ProgressCleared"/> and update for their pack.
+/// Events are always raised on the UI thread.
 /// </summary>
 public static class ProgressHub
 {

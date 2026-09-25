@@ -66,12 +66,11 @@ public sealed record CreateWorldRequest(
     PackVisibility Visibility,
     string? McVersion);
 
-/// <summary>Patch for a shared world. Every property is optional; null leaves the stored value alone.</summary>
+/// <summary>Patch for a shared world. Every property is optional; null leaves the stored value
+/// alone.</summary>
 /// <param name="McVersion">Replaces the world's advertised Minecraft version.</param>
-/// <remarks>
-/// Compatibility is editable here because uploading a version was previously the only thing that
-/// could write it: a world created against the wrong Minecraft version could never be corrected.
-/// </remarks>
+/// <remarks>Editable here so a world created with the wrong Minecraft version can be corrected
+/// without uploading a new save.</remarks>
 public sealed record UpdateWorldRequest(
     string? Name,
     string? Summary,

@@ -14,15 +14,23 @@ namespace CloudLauncher;
 public partial class MainWindow : Window, IDialogHost
 {
     // ── master page state ────────────────────────────────────────────────────
-    private enum MasterPage { None, Packs, Worlds, Mods, ResourcePacks, Shaders, Servers, Configs }
+    private enum MasterPage { None, Sharing, Packs, Worlds, Mods, ResourcePacks, Shaders, Servers, Configs, Storage }
     private MasterPage _currentMaster = MasterPage.None;
+
+    /// <summary>Master pages kept alive between navigations, so reopening one refreshes it instead
+    /// of rebuilding it. Only pages that implement <see cref="IReusablePage"/> go in here (see that
+    /// interface for what they have to handle).</summary>
+    /// <remarks>Bounded by the number of nav buttons, and none of them hosts a web view, so this is
+    /// cheap. It is separate from the frame journal, which stays drained.</remarks>
+    private readonly Dictionary<MasterPage, Page> _masterPages = new();
 
     // ── side-panel state ─────────────────────────────────────────────────────
     private enum SidePanelKind
     {
         None, Settings, Account, Teams, McAccount, McDefaults,
-        PackDetail, ModExplorer, ModManagement, WorldDetail, PackBrowser, WorldBrowser, ModDetail,
-        ResourcePackDetail, LocalResourcePackDetail, ResourcePackBrowser, ResourcePackExplorer
+        PackDetail, ModExplorer, ModManagement, FileManagement, WorldDetail, PackBrowser, WorldBrowser, ModDetail,
+        ResourcePackDetail, LocalResourcePackDetail, ShaderPackDetail, ResourcePackBrowser,
+        ResourcePackExplorer, ShaderBrowser, BundleDetail
     }
     private SidePanelKind _currentSidePanel = SidePanelKind.None;
     private string _currentSidePanelTitle = "";
@@ -31,20 +39,31 @@ public partial class MainWindow : Window, IDialogHost
     private const double SidePanelDefaultFraction = 0.45;
     private const double SidePanelMinPx = 309;
     private const double SidePanelMaxFraction = 0.772;
+
+    /// <summary>The master list's readable minimum, and the narrowest side panel worth showing
+    /// beside it: below their sum the panel covers the master instead (see
+    /// <see cref="LayoutSidePanel"/>).</summary>
+    private const double MainMinPx = 360;
+    private const double SidePanelUsablePx = 460;
+
+    /// <summary>True while the panel covers the master only because the window is too narrow, so the
+    /// side-by-side split is recomputed rather than restored when the window grows again.</summary>
+    private bool _autoCover;
     private HwndSource? _source;
 
     // ── sidebar state ────────────────────────────────────────────────────────
     // Starts collapsed (icon-only). Toggle button expands to 240px.
     private bool _sidebarCollapsed = true;
 
+    // Keep this in step with the sidebar in MainWindow.xaml and with NavLabelNames below.
     private static readonly string[] NavButtonNames =
-        { "NavPacks", "NavWorlds", "NavMods", "NavResourcePacks", "NavServers", "NavConfigs",
-          "NavTeams", "NavAccount", "NavSettings", "NavDev" };
+        { "NavPacks", "NavWorlds", "NavMods", "NavResourcePacks", "NavShaders", "NavServers", "NavConfigs",
+          "NavStorage", "NavSharing", "NavAccount", "NavSettings", "NavDev" };
 
     private static readonly string[] NavLabelNames =
         { "NavPacksLabel", "NavWorldsLabel", "NavModsLabel", "NavResourcePacksLabel", "NavShadersLabel",
-          "NavServersLabel", "NavConfigsLabel",
-          "NavTeamsLabel", "NavAccountLabel", "NavSettingsLabel", "NavDevLabel" };
+          "NavServersLabel", "NavConfigsLabel", "NavStorageLabel",
+          "NavSharingLabel", "NavAccountLabel", "NavSettingsLabel", "NavDevLabel" };
 
     public MainWindow()
     {
@@ -54,15 +73,13 @@ public partial class MainWindow : Window, IDialogHost
         Closed += OnClosed;
         SizeChanged   += (_, _) => LayoutSidePanel();
         StateChanged  += (_, _) => UpdateMaximizeIcon();
-        // A standalone Frame keeps a navigation journal, and object-content journal entries are
-        // keep-alive: every page ever shown (each PackDetailView, browser, settings panel, with
-        // its WebView2/WebBrowser hosts and collections) would be rooted for the app's lifetime.
-        // We manage our own back-stack (_sideStack) and never use Frame.GoBack, so drain the
-        // journal after each navigation to let discarded pages be collected.
-        // Navigated also fires here for nested frames (ModManagementView's BrowseFrame), so
-        // drain the frame we subscribed to rather than the event's sender — a nested frame
-        // journals into its parent anyway, and RemoveBackEntry throws on one that doesn't
-        // own a journal.
+        // A standalone Frame keeps a navigation journal whose entries keep their pages alive, so
+        // every page ever shown (with its WebView2 hosts and collections) would stay in memory. We
+        // keep our own back stack (_sideStack) and never call GoBack, so drain the journal after
+        // each navigation.
+        // Navigated also fires for nested frames (ModManagementView's BrowseFrame), so drain the
+        // frame we subscribed to rather than the sender: a nested frame journals into its parent,
+        // and RemoveBackEntry throws on a frame without its own journal.
         MainFrame.Navigated += (_, _) => DrainFrameJournal(MainFrame);
         SideFrame.Navigated += (_, _) => DrainFrameJournal(SideFrame);
     }
@@ -70,10 +87,10 @@ public partial class MainWindow : Window, IDialogHost
     /// <summary>Empties <paramref name="f"/>'s back-stack so discarded pages aren't rooted by it.</summary>
     private static void DrainFrameJournal(Frame f)
     {
-        // A Frame creates its journal lazily, on the navigation that first needs a back entry.
-        // Before that — notably the first navigation of each frame — RemoveBackEntry() throws
-        // "This operation is available only when Frame has its own journal". CanGoBack is false
-        // in exactly that case (and when the stack is already empty), so it guards both.
+        // A Frame creates its journal lazily, on the first navigation that needs a back entry.
+        // Before that, RemoveBackEntry() throws "This operation is available only when Frame has
+        // its own journal". CanGoBack is false in that case and when the stack is empty, so it
+        // guards both.
         while (f.CanGoBack && f.RemoveBackEntry() != null) { }
     }
 
@@ -100,6 +117,14 @@ public partial class MainWindow : Window, IDialogHost
         UpdateMaximizeIcon();
         ApplyUiScale();
         UiScale.Changed += ApplyUiScale;
+
+        // ConnectivityChanged is a static-lifetime event on AppState, so OnClosed has to
+        // unsubscribe (see the matching -= there).
+        App.State.ConnectivityChanged += OnConnectivityChanged;
+        OfflineBar.RetryRequested += OnOfflineRetry;
+        // Sync now rather than on the next change: a call may already have failed during startup.
+        OfflineBar.Sync();
+
         if (App.State.Settings.IsLoggedIn)
             NavigateToPacks();
         else
@@ -119,7 +144,7 @@ public partial class MainWindow : Window, IDialogHost
             var chrome = System.Windows.Shell.WindowChrome.GetWindowChrome(this);
             if (chrome is not null) chrome.CaptionHeight = 40 * s;
         }
-        catch { /* frozen chrome — caption buttons still work via IsHitTestVisibleInChrome */ }
+        catch { /* frozen chrome: caption buttons still work via IsHitTestVisibleInChrome */ }
     }
 
     private bool _updatePrompted;
@@ -144,8 +169,72 @@ public partial class MainWindow : Window, IDialogHost
     private void OnClosed(object? sender, EventArgs e)
     {
         UiScale.Changed -= ApplyUiScale;
+        App.State.ConnectivityChanged -= OnConnectivityChanged;
+        OfflineBar.RetryRequested -= OnOfflineRetry;
         _source?.RemoveHook(WndProc);
         _source = null;
+    }
+
+    // ── connectivity ─────────────────────────────────────────────────────────
+
+    /// <summary>Raised on the UI thread by <see cref="AppState"/> whenever the server's
+    /// reachability flips, in either direction.</summary>
+    private void OnConnectivityChanged()
+    {
+        OfflineBar.Sync();
+        // The three server-backed nav items explain themselves differently offline, and the tooltip
+        // is the only place that message lives.
+        UpdateChrome();
+    }
+
+    private async void OnOfflineRetry()
+    {
+        OfflineBar.SetBusy(true);
+        try { await RetryCurrentPageAsync(); }
+        finally
+        {
+            OfflineBar.SetBusy(false);
+            OfflineBar.Sync();   // the retry may have succeeded, in which case the banner goes away
+        }
+    }
+
+    /// <summary>
+    /// Re-runs whatever the current master page loads. Pages opt into keeping their scroll position
+    /// and selection by implementing <see cref="IRefreshablePage"/>; the rest are rebuilt.
+    /// </summary>
+    private async Task RetryCurrentPageAsync()
+    {
+        if (MainFrame.Content is IRefreshablePage page)
+        {
+            // A failed retry is normal here (the network was down a moment ago), so it must not
+            // reach the app-level crash handler.
+            try { await page.RefreshAsync(); }
+            catch (Exception ex) { AppLog.LogError("net", ex); }
+            return;
+        }
+
+        RebuildCurrentMaster();
+    }
+
+    /// <summary>Navigates a fresh copy of the current master page, which re-runs its own load.</summary>
+    /// <remarks>Drops the cached instance first, or <see cref="ShowMaster"/> would hand the same
+    /// page back.</remarks>
+    private void RebuildCurrentMaster()
+    {
+        _masterPages.Remove(_currentMaster);
+        switch (_currentMaster)
+        {
+            case MasterPage.Sharing:       MainFrame.Navigate(new SharingHubView(this));   break;
+            case MasterPage.Packs:         MainFrame.Navigate(new PackListView(this));     break;
+            case MasterPage.Worlds:        MainFrame.Navigate(new WorldsView(this));       break;
+            case MasterPage.Mods:          MainFrame.Navigate(new ModsView(this));         break;
+            case MasterPage.ResourcePacks: MainFrame.Navigate(new ResourcePacksView(this)); break;
+            case MasterPage.Shaders:       MainFrame.Navigate(new ShaderPacksView(this));  break;
+            case MasterPage.Servers:       MainFrame.Navigate(new ServersView(this));      break;
+            case MasterPage.Configs:       MainFrame.Navigate(new ConfigHubView(this));    break;
+            case MasterPage.Storage:       MainFrame.Navigate(new SharingStoragePanel(this)); break;
+            // MasterPage.None is the login screen: there is nothing cached there to ask for again.
+        }
     }
 
     private static IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -158,10 +247,63 @@ public partial class MainWindow : Window, IDialogHost
 
     // ── master navigation ────────────────────────────────────────────────────
 
+    /// <summary>Shows one of the master pages, reusing the live instance when there is one.</summary>
+    /// <param name="build">Constructs the page. Called only on a cache miss.</param>
+    /// <remarks>Pages that don't implement <see cref="IReusablePage"/> are built fresh every
+    /// time.</remarks>
+    private void ShowMaster(MasterPage which, Func<Page> build)
+    {
+        Sidebar.IsEnabled = true;
+        ResetSidePanel();
+
+        if (!_masterPages.TryGetValue(which, out var page))
+        {
+            page = build();
+            // Only cache pages that opted in.
+            if (page is IReusablePage) _masterPages[which] = page;
+        }
+
+        // Navigating a page that is already the content would re-run the transition for nothing.
+        if (!ReferenceEquals(MainFrame.Content, page))
+            MainFrame.Navigate(page);
+
+        _currentMaster = which;
+        UpdateChrome();
+    }
+
+    /// <summary>Drops the cached copy of one master page, and rebuilds it if it is on screen.</summary>
+    /// <remarks>For when a page's contents are invalidated by something it can't see, like the
+    /// instances folder moving under <c>PackListView</c>. Re-navigating would show the same stale
+    /// objects.</remarks>
+    private void EvictMaster(MasterPage which)
+    {
+        _masterPages.Remove(which);
+        if (_currentMaster == which) RebuildCurrentMaster();
+    }
+
+    /// <summary>Drops every cached master page. Used when the signed-in account changes, so one user's
+    /// rows can never be left on screen for the next.</summary>
+    private void EvictAllMasters() => _masterPages.Clear();
+
+    /// <summary>The instances folder has moved: throw away every page built from paths inside the
+    /// old one.</summary>
+    /// <remarks>Not just Instances: Worlds, Resource packs, Shader packs, Servers and Config &amp;
+    /// scripts all hold rows keyed by paths under the packs root (save folders, pack zips,
+    /// <c>servers.dat</c>, config files). Since those pages are kept alive, they would otherwise
+    /// keep showing the old folder.</remarks>
+    public void OnInstancesRootMoved()
+    {
+        EvictAllMasters();
+        RebuildCurrentMaster();
+    }
+
     public void NavigateToLogin()
     {
         ResetSidePanel();
         Sidebar.IsEnabled = false;
+        // Signing out must not leave the previous account's instances, worlds or teams cached where
+        // the next sign-in would navigate straight back into them.
+        EvictAllMasters();
         MainFrame.Navigate(new LoginView(this));
         _currentMaster = MasterPage.None;
         UpdateChrome();
@@ -169,37 +311,24 @@ public partial class MainWindow : Window, IDialogHost
 
     public void NavigateToPacks()
     {
-        Sidebar.IsEnabled = true;
-        ResetSidePanel();
-        if (MainFrame.Content is not PackListView)
-            MainFrame.Navigate(new PackListView(this));
-        _currentMaster = MasterPage.Packs;
-        UpdateChrome();
-        // Pull the admin-managed global default rules so this launcher seeds new
-        // packs with the same routing every other launcher uses. Fire-and-forget —
-        // failures fall back to the local cache.
+        ShowMaster(MasterPage.Packs, () => new PackListView(this));
+        // Pull the admin-managed global default rules so new packs get the same routing as on every
+        // other launcher. Fire and forget; failures fall back to the local cache.
         _ = App.State.Rules.SyncGlobalDefaultsFromServerAsync();
     }
 
     /// <summary>Rebuilds the Instances screen from scratch, discarding whatever is on it.</summary>
-    /// <remarks>
-    /// <see cref="NavigateToPacks"/> deliberately reuses a <see cref="PackListView"/> that is already
-    /// showing, so clicking Instances while you are on Instances does not throw away your scroll
-    /// position and folder selection. That is the wrong answer when the instances folder itself has
-    /// moved: every card on that page was built from paths under the previous root. This forces the
-    /// fresh page the folder change needs, and stays out of the normal navigation path where the
-    /// reuse is the point.
-    /// </remarks>
-    /// <remarks>
-    /// Does nothing unless the Instances screen is the one on show. If the user is somewhere else,
-    /// there is nothing stale in front of them and <see cref="NavigateToPacks"/> will build a fresh
-    /// page the next time they go there anyway. It also leaves the side panel alone, so the Settings
-    /// page that asked for this refresh is still open behind the result.
-    /// </remarks>
+    /// <remarks><see cref="NavigateToPacks"/> reuses a <see cref="PackListView"/> that is already
+    /// showing, to keep scroll position and folder selection. After the instances folder moves,
+    /// every card was built from old paths, so this forces a fresh page. Does nothing unless
+    /// Instances is on screen, and leaves the side panel alone so the Settings page that asked for
+    /// this stays open.</remarks>
     public void RefreshPacks()
     {
         if (MainFrame.Content is not PackListView) return;
-        MainFrame.Navigate(new PackListView(this));
+        // Evict rather than re-navigate: ShowMaster would otherwise hand back the very page whose
+        // cards were all built from paths under the old root.
+        EvictMaster(MasterPage.Packs);
     }
 
     public async Task RefreshPackTeamFoldersAsync()
@@ -228,68 +357,34 @@ public partial class MainWindow : Window, IDialogHost
             detail.RefreshHeroIcon();
     }
 
-    public void NavigateToWorlds()
-    {
-        Sidebar.IsEnabled = true;
-        ResetSidePanel();
-        if (MainFrame.Content is not WorldsView)
-            MainFrame.Navigate(new WorldsView(this));
-        _currentMaster = MasterPage.Worlds;
-        UpdateChrome();
-    }
+    public void NavigateToWorlds() => ShowMaster(MasterPage.Worlds, () => new WorldsView(this));
 
-    public void NavigateToMods()
-    {
-        Sidebar.IsEnabled = true;
-        ResetSidePanel();
-        if (MainFrame.Content is not ModsView)
-            MainFrame.Navigate(new ModsView(this));
-        _currentMaster = MasterPage.Mods;
-        UpdateChrome();
-    }
+    public void NavigateToMods() => ShowMaster(MasterPage.Mods, () => new ModsView(this));
 
-    public void NavigateToResourcePacks()
-    {
-        Sidebar.IsEnabled = true;
-        ResetSidePanel();
-        if (MainFrame.Content is not ResourcePacksView)
-            MainFrame.Navigate(new ResourcePacksView(this));
-        _currentMaster = MasterPage.ResourcePacks;
-        UpdateChrome();
-    }
+    public void NavigateToResourcePacks() =>
+        ShowMaster(MasterPage.ResourcePacks, () => new ResourcePacksView(this));
 
-    public void NavigateToShaders()
-    {
-        Sidebar.IsEnabled = true;
-        ResetSidePanel();
-        if (MainFrame.Content is not ShaderPacksView)
-            MainFrame.Navigate(new ShaderPacksView(this));
-        _currentMaster = MasterPage.Shaders;
-        UpdateChrome();
-    }
+    public void NavigateToShaders() => ShowMaster(MasterPage.Shaders, () => new ShaderPacksView(this));
 
-    public void NavigateToServers()
-    {
-        Sidebar.IsEnabled = true;
-        ResetSidePanel();
-        if (MainFrame.Content is not ServersView)
-            MainFrame.Navigate(new ServersView(this));
-        _currentMaster = MasterPage.Servers;
-        UpdateChrome();
-    }
+    public void NavigateToServers() => ShowMaster(MasterPage.Servers, () => new ServersView(this));
 
-    public void NavigateToConfigs()
+    public void NavigateToConfigs() => ShowMaster(MasterPage.Configs, () => new ConfigHubView(this));
+
+    /// <summary>How much of this PC the launcher is using, and what it is.</summary>
+    /// <remarks>Cached like the other content pages. It matters most here, since a full pass reads
+    /// every file under every instance.</remarks>
+    public void NavigateToStorage() =>
+        ShowMaster(MasterPage.Storage, () => new SharingStoragePanel(this));
+
+    public void NavigateToSharing()
     {
-        Sidebar.IsEnabled = true;
-        ResetSidePanel();
-        if (MainFrame.Content is not ConfigHubView)
-            MainFrame.Navigate(new ConfigHubView(this));
-        _currentMaster = MasterPage.Configs;
-        UpdateChrome();
+        ShowMaster(MasterPage.Sharing, () => new SharingHubView(this));
     }
 
     // ── side-panel openers ───────────────────────────────────────────────────
 
+    /// <summary>The Teams side panel. No nav button opens it (Sharing has its own "People &amp;
+    /// teams" tab), but the activity feed links team rows here.</summary>
     public void OpenTeams()     => OpenSidePanelFresh(SidePanelKind.Teams,     "Teams",              new TeamsView(this));
     public void OpenAccount()   => OpenSidePanelFresh(SidePanelKind.Account,   "Account",            new AccountPanel(this));
     public void OpenSettings()  => OpenSidePanelFresh(SidePanelKind.Settings,  "Settings",           new SettingsPanel(this));
@@ -315,23 +410,84 @@ public partial class MainWindow : Window, IDialogHost
     public void OpenModManagementForPack(CloudLauncher.Shared.PackDetail pack) =>
         OpenSidePanelPushed(SidePanelKind.ModManagement, $"Mods · {pack.Name}", new ModManagementView(this, pack));
 
+    public void OpenFileManagementForPack(CloudLauncher.Shared.PackDetail pack) =>
+        OpenSidePanelPushed(SidePanelKind.FileManagement, $"Files · {pack.Name}", new FileManagementView(this, pack));
+
     public void OpenPackBrowser() =>
         OpenSidePanelFresh(SidePanelKind.PackBrowser, "Download a pack", new PackBrowserView(this));
 
     public void OpenWorldBrowser() =>
         OpenSidePanelFresh(SidePanelKind.WorldBrowser, "Download a world", new WorldBrowserView(this));
 
+    /// <summary>A world somebody hosts, by its id. Hosted worlds have no page of their own: this is
+    /// Download a world, opened on that one.</summary>
+    /// <remarks>Pushed, not fresh: it is opened from a row on another page (the Sharing
+    /// overview), and Back has to return there.</remarks>
+    public void OpenHostedWorld(Guid worldId, string title) =>
+        OpenSidePanelPushed(SidePanelKind.WorldBrowser, title, new WorldBrowserView(this, worldId));
+
     public void OpenResourcePackDetail(Guid packId, string title) =>
         OpenSidePanelPushed(SidePanelKind.ResourcePackDetail, title,
             new ResourcePackDetailView(this, packId));
 
+    /// <summary>One instance's copy of a resource pack, by that copy's
+    /// <c>&lt;instanceGuid&gt;:&lt;fileName&gt;</c> key.</summary>
+    /// <remarks>The instance's own Resources tab opens the page this way, so the key route stays.
+    /// It is not the only way in: see <see cref="OpenLibraryResourcePackDetail"/>.</remarks>
     public void OpenLocalResourcePackDetail(string key, string title) =>
         OpenSidePanelPushed(SidePanelKind.LocalResourcePackDetail, title,
             new LocalResourcePackDetailView(this, key));
 
+    /// <summary>The same page, for a pack the launcher holds that no instance has a copy of
+    /// yet.</summary>
+    /// <remarks>Content is only placed into instances on their next launch, so right after an
+    /// import there may be no instance copy for the key above to name. The page is about the item;
+    /// an instance's copy is just one way to name it.</remarks>
+    public void OpenLibraryResourcePackDetail(LibraryItem item, string title) =>
+        OpenSidePanelPushed(SidePanelKind.LocalResourcePackDetail, title,
+            new LocalResourcePackDetailView(this, item));
+
+    /// <summary>The shader pack's own page, the Shaders list's counterpart to
+    /// <see cref="OpenLocalResourcePackDetail"/>.</summary>
+    /// <remarks>Pushed rather than fresh, like its two siblings, so Back returns to the list it
+    /// came from.</remarks>
+    public void OpenShaderPackDetail(string key, string title) =>
+        OpenSidePanelPushed(SidePanelKind.ShaderPackDetail, title,
+            new ShaderPackDetailView(this, key));
+
+    /// <inheritdoc cref="OpenLibraryResourcePackDetail"/>
+    public void OpenLibraryShaderPackDetail(LibraryItem item, string title) =>
+        OpenSidePanelPushed(SidePanelKind.ShaderPackDetail, title,
+            new ShaderPackDetailView(this, item));
+
     public void OpenResourcePackBrowser() =>
         OpenSidePanelFresh(SidePanelKind.ResourcePackBrowser, "Download resource packs",
             new ResourcePackBrowserView(this));
+
+    /// <summary>A hosted bundle's own page (a shader pack, config set, KubeJS scripts or data pack
+    /// someone hosts), in the side panel like every other item page.</summary>
+    /// <remarks>The page is a UserControl, so it travels in a bare Page, and closing it pops the
+    /// panel.</remarks>
+    public void OpenBundleDetail(Guid bundleId, string title)
+    {
+        var bundles = new Services.ContentBundleService(App.State.Api, App.State.Settings, App.State.Packs);
+        var view = Views.BundleDetailView.ForExisting(this, bundles, bundleId, title, publishOnOpen: false);
+        // The page has no padding of its own; this is the inset the other side-panel pages use.
+        view.Margin = new Thickness(24, 8, 24, 12);
+        var page = new Page { Content = view };
+        view.Closed += _ => CloseSidePanel();
+        OpenSidePanelPushed(SidePanelKind.BundleDetail, title, page);
+    }
+
+    /// <summary>Opens the shader store as its own side panel, the way every other Browse works.
+    /// Returns the page so the Shaders list can hear about an install and re-scan.</summary>
+    public ShaderBrowserView OpenShaderBrowser(
+        IReadOnlyList<CloudLauncher.Shared.PackSummary> packs, Guid? preferredTarget)
+    {
+        var page = new ShaderBrowserView(this, packs, preferredTarget);
+        OpenSidePanelFresh(SidePanelKind.ShaderBrowser, "Download shader packs", page);
+        return page;
+    }
 
     public void OpenResourcePackExplorerForPack(CloudLauncher.Shared.PackDetail pack) =>
         OpenSidePanelPushed(SidePanelKind.ResourcePackExplorer,
@@ -340,10 +496,8 @@ public partial class MainWindow : Window, IDialogHost
 
     public void OpenMinecraftHost(CloudLauncher.Shared.PackDetail pack, System.Diagnostics.Process process)
     {
-        // When the custom game window is turned off, Minecraft runs in its own native
-        // window. The launcher already started the process and still tracks it (play
-        // time, instance state), so there is nothing to host — just let the game show
-        // its own window.
+        // With the custom game window off, Minecraft runs in its own window. The launcher already
+        // started and tracks the process (play time, instance state), so there is nothing to host.
         if (!App.State.Settings.UseCustomGameWindow)
             return;
 
@@ -367,7 +521,7 @@ public partial class MainWindow : Window, IDialogHost
 
     private void SetSidePanelContent(SidePanelKind which, string title, Page content)
     {
-        // Was the panel closed before this call? If so, play the slide-in on the host.
+        // Play the slide-in on the host only if the panel was closed before this call.
         bool wasClosed = SidePanelHost.Visibility != Visibility.Visible;
 
         _currentSidePanel = which;
@@ -463,21 +617,32 @@ public partial class MainWindow : Window, IDialogHost
             return;
         }
 
-        // Side panel is open — restore minimum so the user can't drag it below 280 px.
+        // Side panel is open: restore the minimum so it can't be dragged below 280 px.
         SidePanelColumn.MinWidth = SidePanelMinPx;
 
-        // The mod explorer is a full browsing experience (two-column list + detail),
-        // so always present it full-width like the standalone mod browser — even when
-        // side-by-side panels are enabled.
-        var forceCover = _currentSidePanel is SidePanelKind.ModExplorer or SidePanelKind.ModManagement;
-        var useSideBySide = App.State.Settings.UseSidePanel && !forceCover;
+        // The mod explorer is a full browsing view (list + detail), so it is always shown
+        // full-width, even with side-by-side panels on. File management too: a tree beside a file
+        // pane doesn't fit in a 45% column.
+        var forceCover = _currentSidePanel is SidePanelKind.ModExplorer or SidePanelKind.ModManagement
+                                           or SidePanelKind.FileManagement;
+
+        // ActualWidth is in window units; the grid (and its columns) live inside RootScale, so
+        // convert to the scaled grid's coordinates before mixing with column widths.
+        var contentPx = ActualWidth / Math.Max(RootScale.ScaleX, 0.1) - SidebarColumn.ActualWidth;
+        if (contentPx < 100) contentPx = 1000;
+
+        // Too narrow for both: below the width where a readable master and a usable page both fit,
+        // the page covers the master (as with the "pages cover the main content" setting).
+        // Side-by-side comes back when the window grows.
+        var tooNarrow = contentPx < MainMinPx + 5 + SidePanelUsablePx;
+        var useSideBySide = App.State.Settings.UseSidePanel && !forceCover && !tooNarrow;
 
         if (!useSideBySide)
         {
-            // Cover mode — side panel takes the whole content area, master is hidden.
-            // Clear the master column's MinWidth too: a column's MinWidth overrides its
-            // Width, so without this the 360-px minimum keeps an empty band on the left
-            // (the collapsed MainFrame) instead of letting the side panel fill the screen.
+            _autoCover = tooNarrow && App.State.Settings.UseSidePanel && !forceCover;
+            // Cover mode: the side panel takes the whole content area and the master is hidden.
+            // Clear the master column's MinWidth too, since MinWidth overrides Width and would
+            // leave an empty band on the left.
             MainColumn.MinWidth   = 0;
             MainColumn.Width      = new GridLength(0);
             SplitterColumn.Width  = new GridLength(0);
@@ -489,21 +654,27 @@ public partial class MainWindow : Window, IDialogHost
             return;
         }
 
-        // Side-by-side mode (default) — restore the master column's readable minimum.
-        MainColumn.MinWidth = 360;
+        // Side-by-side mode (default): restore the master column's readable minimum.
+        MainColumn.MinWidth = MainMinPx;
         MainFrame.Visibility = Visibility.Visible;
+
+        // Coming back from an automatic cover: the columns still hold cover's 0 / 1* split, so the
+        // initial split is computed again below.
+        if (_autoCover)
+        {
+            _autoCover = false;
+            SidePanelColumn.Width = new GridLength(0);
+        }
 
         // Only set the initial split when the side panel is transitioning from closed.
         // After the user drags the splitter we leave their ratio intact.
         if (SidePanelColumn.Width.Value == 0 || SidePanelColumn.Width.GridUnitType == GridUnitType.Pixel)
         {
-            // ActualWidth is in window units; the grid (and its columns) live inside RootScale, so
-            // convert to the scaled grid's coordinates before mixing with column widths.
-            var contentPx = ActualWidth / Math.Max(RootScale.ScaleX, 0.1) - SidebarColumn.ActualWidth;
-            if (contentPx < 100) contentPx = 1000;
+            // Never opens narrower than a usable page (the user can still drag it down to
+            // SidePanelMinPx); 45% of a small window wraps a word per line.
             var panelPx = Math.Max(
                 Math.Min(contentPx * SidePanelDefaultFraction, contentPx * SidePanelMaxFraction),
-                SidePanelMinPx);
+                SidePanelUsablePx);
             var mainPx = contentPx - panelPx - 5;
 
             MainColumn.Width      = new GridLength(Math.Max(mainPx, 1), GridUnitType.Star);
@@ -537,13 +708,29 @@ public partial class MainWindow : Window, IDialogHost
     private async Task<bool> ShowOverlayAsync(Views.DialogOverlay overlay)
     {
         DialogLayer.Children.Add(overlay);
-        DialogLayer.Visibility = Visibility.Visible;
+        SetOverlayVisible(true);
         try { return await overlay.Result; }
         finally
         {
             DialogLayer.Children.Remove(overlay);
-            if (DialogLayer.Children.Count == 0) DialogLayer.Visibility = Visibility.Collapsed;
+            if (DialogLayer.Children.Count == 0) SetOverlayVisible(false);
         }
+    }
+
+    /// <summary>True while a card or dialog is up in the dialog layer.</summary>
+    public static bool IsOverlayVisible { get; private set; }
+
+    /// <summary>Raised when the dialog layer appears or disappears. Native (airspace) surfaces like
+    /// the WebView2 description views paint over anything WPF draws, so they swap to a snapshot of
+    /// themselves while an overlay is up.</summary>
+    public static event Action<bool>? OverlayChanged;
+
+    private void SetOverlayVisible(bool visible)
+    {
+        DialogLayer.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (IsOverlayVisible == visible) return;
+        IsOverlayVisible = visible;
+        OverlayChanged?.Invoke(visible);
     }
 
     private static readonly System.Windows.Media.Brush OverlayBackdrop = MakeBackdrop();
@@ -557,7 +744,9 @@ public partial class MainWindow : Window, IDialogHost
     /// <summary>Hosts an arbitrary card element centred over a dimming backdrop in the dialog layer
     /// and awaits <paramref name="completion"/>. <paramref name="onBackdropCancel"/> (if given) runs
     /// when the backdrop is clicked.</summary>
-    public async Task ShowCardAsync(FrameworkElement card, Task completion, Action? onBackdropCancel = null)
+    public async Task ShowCardAsync(
+        FrameworkElement card, Task completion, Action? onBackdropCancel = null,
+        ResizableCardSpec? resizable = null)
     {
         var layer = new Grid();
         var backdrop = new Border { Background = OverlayBackdrop };
@@ -567,15 +756,17 @@ public partial class MainWindow : Window, IDialogHost
 
         card.HorizontalAlignment = HorizontalAlignment.Center;
         card.VerticalAlignment = VerticalAlignment.Center;
-        layer.Children.Add(card);
+        // A resizable card is shown inside its own container, which owns the grip and the remembered
+        // size; everything after this point treats the two cases the same.
+        layer.Children.Add(resizable is null ? card : ResizableCard.Wrap(card, resizable));
 
         DialogLayer.Children.Add(layer);
-        DialogLayer.Visibility = Visibility.Visible;
+        SetOverlayVisible(true);
         try { await completion; }
         finally
         {
             DialogLayer.Children.Remove(layer);
-            if (DialogLayer.Children.Count == 0) DialogLayer.Visibility = Visibility.Collapsed;
+            if (DialogLayer.Children.Count == 0) SetOverlayVisible(false);
         }
     }
 
@@ -660,11 +851,8 @@ public partial class MainWindow : Window, IDialogHost
         }
     }
 
-    /// <summary>
-    /// Apply the current _sidebarCollapsed flag visually.
-    /// Layout-wise, every nav row already uses a fixed 60-px icon column + flex label column,
-    /// so we only need to show/hide the labels — icons stay anchored automatically.
-    /// </summary>
+    /// <summary>Applies the current _sidebarCollapsed flag. Every nav row has a fixed 60 px icon
+    /// column and a flexible label column, so only the labels need showing or hiding.</summary>
     private void ApplySidebarVisualState()
     {
         SidebarHeaderLabel.Visibility = _sidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
@@ -693,6 +881,7 @@ public partial class MainWindow : Window, IDialogHost
 
     // ── sidebar nav clicks ───────────────────────────────────────────────────
 
+    private void OnNavSharing(object sender, RoutedEventArgs e) => NavigateToSharing();
     private void OnNavPacks(object sender, RoutedEventArgs e)  => NavigateToPacks();
     private void OnNavWorlds(object sender, RoutedEventArgs e) => NavigateToWorlds();
     private void OnNavMods(object sender, RoutedEventArgs e)           => NavigateToMods();
@@ -700,12 +889,18 @@ public partial class MainWindow : Window, IDialogHost
     private void OnNavShaders(object sender, RoutedEventArgs e) => NavigateToShaders();
     private void OnNavServers(object sender, RoutedEventArgs e) => NavigateToServers();
     private void OnNavConfigs(object sender, RoutedEventArgs e) => NavigateToConfigs();
+    private void OnNavStorage(object sender, RoutedEventArgs e) => NavigateToStorage();
 
-    private void OnNavTeams(object sender, RoutedEventArgs e)    => ToggleTopLevel(SidePanelKind.Teams,    OpenTeams);
     private void OnNavAccount(object sender, RoutedEventArgs e)  => ToggleTopLevel(SidePanelKind.Account,  OpenAccount);
     private void OnNavSettings(object sender, RoutedEventArgs e) => ToggleTopLevel(SidePanelKind.Settings, OpenSettings);
 
-    private void OnNavDev(object sender, RoutedEventArgs e)       => new DevWindow { Owner = this }.ShowDialog();
+    private void OnNavDev(object sender, RoutedEventArgs e)
+    {
+        if (!App.State.Settings.IsAdmin) { UpdateChrome(); return; }
+        new DevWindow { Owner = this }.ShowDialog();
+        // A toggle button latches on when clicked, and nothing else unchecks this one.
+        NavDev.IsChecked = false;
+    }
     /// <summary>
     /// Title-bar chip: dropdown with all saved accounts and quick actions to switch / add / manage.
     /// </summary>
@@ -736,7 +931,7 @@ public partial class MainWindow : Window, IDialogHost
             }
         }
         menu.Items.Add(new System.Windows.Controls.Separator());
-        var add = new System.Windows.Controls.MenuItem { Header = "Add or manage accounts…" };
+        var add = new System.Windows.Controls.MenuItem { Header = "Add or manage accounts..." };
         add.Click += (_, _) => OpenMcAccount();
         menu.Items.Add(add);
 
@@ -756,6 +951,9 @@ public partial class MainWindow : Window, IDialogHost
 
     private void RefreshNavCheckedStates()
     {
+        // A ToggleButton checks itself on click, so an entry missing here would stay lit after you
+        // navigate away.
+        NavSharing.IsChecked  = _currentMaster == MasterPage.Sharing;
         NavPacks.IsChecked    = _currentMaster == MasterPage.Packs;
         NavWorlds.IsChecked   = _currentMaster == MasterPage.Worlds;
         NavMods.IsChecked           = _currentMaster == MasterPage.Mods;
@@ -763,7 +961,7 @@ public partial class MainWindow : Window, IDialogHost
         NavShaders.IsChecked       = _currentMaster == MasterPage.Shaders;
         NavServers.IsChecked       = _currentMaster == MasterPage.Servers;
         NavConfigs.IsChecked       = _currentMaster == MasterPage.Configs;
-        NavTeams.IsChecked    = _currentSidePanel == SidePanelKind.Teams;
+        NavStorage.IsChecked       = _currentMaster == MasterPage.Storage;
         NavAccount.IsChecked  = _currentSidePanel == SidePanelKind.Account
                              || _currentSidePanel == SidePanelKind.McAccount;
         NavSettings.IsChecked = _currentSidePanel == SidePanelKind.Settings;
@@ -771,25 +969,80 @@ public partial class MainWindow : Window, IDialogHost
 
     // ── chrome / user state ──────────────────────────────────────────────────
 
+    /// <summary>Gates each nav item on what it needs, with a tooltip saying so.</summary>
+    /// <remarks>Pages that read this PC's disk are always available. Sharing is the server's page
+    /// and needs a signed-in account; it stays enabled offline and explains itself on the page. A
+    /// signed-in user stays signed in while offline, so <c>IsLoggedIn</c> is not an online
+    /// check.</remarks>
     public void UpdateChrome()
     {
         var loggedIn = App.State.Settings.IsLoggedIn;
+        var offline  = App.State.IsOffline;
         var username = App.State.Settings.Username ?? "";
 
-        NavAccountLabel.Text  = loggedIn ? username : "Sign in";
-        NavTeams.IsEnabled    = loggedIn;
-        NavWorlds.IsEnabled   = loggedIn;
-        NavMods.IsEnabled           = loggedIn;
-        NavResourcePacks.IsEnabled = loggedIn;
-        NavShaders.IsEnabled       = loggedIn;
-        NavServers.IsEnabled       = loggedIn;
-        NavConfigs.IsEnabled       = loggedIn;
+        NavAccountLabel.Text = loggedIn ? username : "Sign in";
 
-        NavDev.Visibility = (loggedIn && string.Equals(username, "colud", StringComparison.OrdinalIgnoreCase))
-            ? Visibility.Visible : Visibility.Collapsed;
+        // Local disk only; none of these need the network.
+        GateNav(NavPacks,         true, "Instances");
+        GateNav(NavWorlds,        true, "Worlds");
+        GateNav(NavResourcePacks, true, "Resource packs");
+        GateNav(NavShaders,       true, "Shader packs");
+        GateNav(NavServers,       true, "Servers");
+        GateNav(NavConfigs,       true, "Config & scripts");
+        // Mods manages the mods already on disk across every instance, which needs no account. Its
+        // hosted-store chips do, and the page says so itself.
+        GateNav(NavMods,          true, "Mods");
+        // Every figure on it is read off this disk, so it answers signed out and offline alike.
+        GateNav(NavStorage,       true, "Storage");
+
+        // Needs the server. Signed out is the hard gate; offline only changes the tooltip.
+        GateNav(NavSharing, loggedIn, ServerTip("Sharing", "what is shared, and with whom"));
+
+        // The admin flag comes from auth/me and is cached with the account; the server checks it again
+        // on every admin route, so this only decides whether the entry is shown.
+        NavDev.Visibility = loggedIn && App.State.Settings.IsAdmin ? Visibility.Visible : Visibility.Collapsed;
+        if (loggedIn && App.State.Settings.UserId is { } userId && _accountReadFor != userId)
+        {
+            _accountReadFor = userId;
+            _ = RefreshAccountDetailsAsync(userId);
+        }
 
         RefreshNavCheckedStates();
         UpdateMcChip();
+
+        string ServerTip(string name, string what) =>
+            !loggedIn ? $"{name} - sign in to use this"
+            : offline ? $"{name} - offline, so {what} is whatever the server last told us"
+            : name;
+    }
+
+    /// <summary>The account whose details (name, admin flag) have been read from the server this
+    /// session, so a sign-in or a new launch reads them once rather than on every navigation.</summary>
+    private Guid? _accountReadFor;
+
+    private async Task RefreshAccountDetailsAsync(Guid userId)
+    {
+        try
+        {
+            await App.State.Api.RefreshAccountAsync();
+            UpdateChrome();
+        }
+        catch (Exception ex)
+        {
+            // Offline or refused: the cached details stand, and the next navigation tries again.
+            AppLog.Log("account", "Could not read the account details: " + ex.Message);
+            if (_accountReadFor == userId) _accountReadFor = null;
+        }
+    }
+
+    /// <summary>Enables or disables a nav item and gives it a tooltip explaining why.</summary>
+    /// <remarks><see cref="ToolTipService.SetShowOnDisabled"/> matters here: WPF hides a disabled
+    /// control's tooltip, and that is when the explanation is needed.</remarks>
+    private static void GateNav(ToggleButton nav, bool enabled, string tip)
+    {
+        nav.IsEnabled = enabled;
+        nav.ToolTip   = tip;
+        ToolTipService.SetShowOnDisabled(nav, true);
     }
 
     public void UpdateMcChip()

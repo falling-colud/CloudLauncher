@@ -5,28 +5,25 @@ using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
 
-public sealed class AppSettings
+public sealed partial class AppSettings
 {
-    /// <summary>
-    /// Where the launcher talks to its server. The default moved to the HTTPS name in 1.3.0;
-    /// <see cref="MigrateServerUrl"/> carries settings written by older builds over to it.
-    /// </summary>
+    /// <summary>Where the launcher talks to its server. <see cref="MigrateServerUrl"/> moves settings
+    /// from older builds onto the HTTPS default.</summary>
     public string ServerUrl { get; set; } = DefaultServerUrl;
 
-    /// <summary>The address every new install uses: a real name over TLS, not an IP and a port.</summary>
+    /// <summary>The address every new install uses, over TLS.</summary>
     public const string DefaultServerUrl = "https://launcher.crispythedev.duckdns.org";
 
-    /// <summary>Addresses earlier builds shipped with. A settings file still pointing at one of these
-    /// is moved to <see cref="DefaultServerUrl"/> on load — the plain-HTTP endpoint keeps working, but
-    /// nobody should still be sending their tokens over it.</summary>
+    /// <summary>Addresses older builds shipped with. Settings still pointing at one are moved to
+    /// <see cref="DefaultServerUrl"/> on load, so tokens stop going over plain HTTP.</summary>
     private static readonly string[] LegacyServerUrls =
     [
         "http://130.61.131.193:5000",
         "https://130.61.131.193:5000",
         "http://130.61.131.193:5000/",
     ];
-    public string? RefreshToken { get; set; }
-    public string? AccessToken { get; set; }
+
+    // AccessToken and RefreshToken live in AppSettings.Secrets.cs, in the secret store.
     public DateTimeOffset? AccessTokenExpiresAt { get; set; }
     public string? Username { get; set; }
     public Guid? UserId { get; set; }
@@ -38,20 +35,37 @@ public sealed class AppSettings
     /// <summary>Per-pack max RAM override (MB). Empty/missing means "use default".</summary>
     public Dictionary<Guid, int> PackMaxRamMb { get; set; } = new();
 
-    /// <summary>
-    /// Per-pack extra JVM arguments, appended after CmlLib's stock GC flags. Whitespace-separated,
-    /// e.g. "-Dvoxy.geometryBufferSizeOverrideMB=1280". Missing entry = none.
-    /// </summary>
+    /// <summary>Per-pack extra JVM arguments, appended after CmlLib's stock GC flags. Whitespace-separated,
+    /// e.g. "-Dvoxy.geometryBufferSizeOverrideMB=1280". Missing entry = none.</summary>
     public Dictionary<Guid, string> PackJvmArgs { get; set; } = new();
+
+    // ── dedicated server, per pack ───────────────────────────────────────────
+    // A server usually wants a smaller heap and different GC flags than the client, so these are
+    // separate keys, but each falls back to the client value. All are optional: older builds drop
+    // keys they don't know when they save.
+
+    /// <summary>Per-pack server max RAM override (MB). Missing = use the client's value for the pack.</summary>
+    public Dictionary<Guid, int> PackServerMaxRamMb { get; set; } = new();
+
+    /// <summary>Per-pack extra JVM arguments for the server, added after the stock GC flags (see
+    /// <c>LaunchService.BuildServerJvmArguments</c>). Missing entry = none.</summary>
+    public Dictionary<Guid, string> PackServerJvmArgs { get; set; } = new();
+
+    /// <summary>Whether the user has accepted the Minecraft EULA for this pack's server.</summary>
+    /// <remarks>Per pack and false by default, since the user has to accept it themselves. An
+    /// <c>eula.txt</c> accepted on disk is also honoured (<c>LaunchService.EulaAcceptedOnDisk</c>).</remarks>
+    public Dictionary<Guid, bool> PackServerEulaAccepted { get; set; } = new();
+
+    /// <summary>Per-pack "bring the server back up after a crash". Missing entry = off.</summary>
+    /// <remarks>Off by default so a crashed server stays down with its log intact.
+    /// <c>ServerHostService</c> caps the restarts so a boot loop can't spin forever.</remarks>
+    public Dictionary<Guid, bool> PackServerAutoRestart { get; set; } = new();
 
     /// <summary>Per-pack auto-update preference. True = always update before launch.</summary>
     public Dictionary<Guid, bool> PackAutoUpdate { get; set; } = new();
 
-    /// <summary>
-    /// Java executable used for every pack that has no override of its own. Empty/missing means
-    /// automatic: the launcher picks (and if needed downloads) the Java major the pack's Minecraft
-    /// version wants.
-    /// </summary>
+    /// <summary>Java executable for packs without their own override. Empty means automatic: the
+    /// launcher picks (and if needed downloads) the Java version the pack's Minecraft needs.</summary>
     public string? DefaultJavaPath { get; set; }
 
     /// <summary>Per-pack Java executable override (full path to java.exe). Missing entry = use
@@ -73,66 +87,40 @@ public sealed class AppSettings
         else PackJavaPath[packId] = path.Trim();
     }
 
-    /// <summary>
-    /// Extra game/-relative paths that never leave this machine on upload and are never touched by a
-    /// download, on top of <see cref="PrivateAssetPolicy.BuiltIn"/>. Rule syntax ("config/foo/" = whole
-    /// folder). Applies to every pack: the point is that a private asset stays private no matter which
-    /// pack it is copied into.
-    /// </summary>
-    /// <remarks>Edited by hand in settings.json until now; it is surfaced in Settings, so the list a
-    /// user sees there is this one and nothing else filters it. Keep the stored strings verbatim —
-    /// a pattern rewritten on load would silently stop matching the path someone typed.</remarks>
+    /// <summary>Extra game/-relative paths that are never uploaded and never touched by a download,
+    /// on top of <see cref="PrivateAssetPolicy.BuiltIn"/>. Rule syntax ("config/foo/" = whole folder);
+    /// applies to every pack.</summary>
+    /// <remarks>Edited in Settings. Stored verbatim: rewriting a pattern on load could stop it matching
+    /// the path the user typed.</remarks>
     public List<string> PrivatePathPatterns { get; set; } = new();
 
-    /// <summary>
-    /// Whether "auto-update before launch" is on for a pack the user has never toggled it for.
-    /// </summary>
-    /// <remarks>
-    /// A shared pack you do NOT own is maintained by someone else, so tracking their updates is what
-    /// you actually want: someone who downloads a modpack should get its fixes without having to know
-    /// a setting exists. A pack you DO own defaults off - you are the source of truth for it, and
-    /// pulling the server copy over your working directory before every launch would overwrite local
-    /// changes you have not uploaded yet. Once the checkbox is touched the stored value always wins.
-    /// </remarks>
+    /// <summary>Whether "auto-update before launch" is on for a pack the user has never toggled.</summary>
+    /// <remarks>On for shared packs owned by someone else, so people get the owner's fixes. Off for packs
+    /// you own, since pulling the server copy would overwrite local changes not uploaded yet. A stored
+    /// value always wins.</remarks>
     public bool GetAutoUpdateFor(Guid packId, bool isShared, Guid ownerId) =>
         PackAutoUpdate.TryGetValue(packId, out var stored) ? stored : (isShared && ownerId != UserId);
 
-    /// <summary>Per-pack auto-apply-rules preference. Missing entry = ON by default.</summary>
+    /// <summary>Per-pack auto-apply-rules preference. Missing entry = on.</summary>
     public Dictionary<Guid, bool> PackAutoApplyRules { get; set; } = new();
 
-    /// <summary>
-    /// Per-pack "Low mode": turn the heavy visual settings down before launch so the pack runs on a modest machine.
-    /// Missing entry = ON by default, because a first-time player is exactly the one who cannot afford the full
-    /// settings and has no idea which of four hundred mods is costing them the frames.
-    /// </summary>
+    /// <summary>Per-pack "Low mode": turn the heavy visual settings down before launch so the pack
+    /// runs on a modest machine. Missing entry = on, since new players are the most likely to need
+    /// it.</summary>
     public Dictionary<Guid, bool> PackLowMode { get; set; } = new();
 
-    /// <summary>
-    /// When true, launcher-started games are embedded in CloudLauncher's custom host
-    /// window (play-time bar, instance side-panel, collapse/fullscreen hotkeys). When
-    /// false, Minecraft opens in its own native window and the launcher just tracks the
-    /// process.
-    /// </summary>
-    /// <remarks>Off by default since 1.1.10: the embedded host window is the launcher's own feature
-    /// and a first-time player is better served by Minecraft behaving exactly as it does everywhere
-    /// else. Anyone who wants the play-time bar and the side panel turns it back on in Settings; the
-    /// stored value of anyone who already had it on is untouched, because this default only applies
-    /// when the key is absent from settings.json.</remarks>
+    /// <summary>When true, launcher-started games are embedded in the custom host window (play-time
+    /// bar, instance side panel, collapse/fullscreen hotkeys); when false, Minecraft opens in its own
+    /// window and the launcher just tracks the process. Off by default.</summary>
     public bool UseCustomGameWindow { get; set; } = false;
 
     /// <summary>Set once <see cref="ApplyCustomGameWindowDefault"/> has run for this profile.</summary>
     public bool CustomGameWindowDefaultApplied { get; set; }
 
-    /// <summary>
-    /// Turns the custom game window off once, for profiles written before it stopped being the
-    /// default.
-    /// </summary>
-    /// <remarks>
-    /// The default flipped to off in 1.1.10, but a default only applies when the key is absent — a
-    /// settings.json from an earlier build carries <c>true</c> forever, so those installs kept
-    /// hosting Minecraft in the launcher's window long after new ones stopped. This clears that
-    /// once. The flag means it never runs again, so turning it back on in Settings sticks.
-    /// </remarks>
+    /// <summary>Turns the custom game window off once, for profiles written while it was on by
+    /// default.</summary>
+    /// <remarks>Settings files from before 1.1.10 store an explicit <c>true</c>, so the new default never
+    /// reached them. The flag makes this run once, so turning it back on in Settings sticks.</remarks>
     public void ApplyCustomGameWindowDefault()
     {
         if (CustomGameWindowDefaultApplied) return;
@@ -141,11 +129,28 @@ public sealed class AppSettings
         try { Save(); } catch { /* read-only profile: the in-memory value is still right */ }
     }
 
-    /// <summary>
-    /// Id of the pack every new install starts subscribed to, and whether that has been done.
-    /// </summary>
-    /// <remarks>Seeded once, not enforced: the flag is set even when the subscribe fails, and
-    /// leaving the pack afterwards must stick rather than being undone on the next launch.</remarks>
+    /// <summary>Set once <see cref="ApplyLookAccentDefault"/> has run for this profile.</summary>
+    public bool LookAccentDefaultApplied { get; set; }
+
+    /// <summary>The default Slate accent that 1.8.0 to 1.8.2 saved into every profile.</summary>
+    private const string PreviousDefaultAccent = "#D9805E";
+
+    /// <summary>Moves a profile still on the old default accent onto the new one, once.</summary>
+    /// <remarks>1.8.0 writes the whole <see cref="LookSettings"/> on the first save, so a new
+    /// <see cref="LookSettings.DefaultAccent"/> would otherwise only reach fresh installs. Terracotta is
+    /// still a preset, and the flag means picking it again sticks.</remarks>
+    public void ApplyLookAccentDefault()
+    {
+        if (LookAccentDefaultApplied) return;
+        LookAccentDefaultApplied = true;
+        if (Look is { } look && string.Equals(look.Accent?.Trim(), PreviousDefaultAccent, StringComparison.OrdinalIgnoreCase))
+            look.Accent = LookSettings.DefaultAccent;
+        try { Save(); } catch { /* read-only profile: the in-memory value is still right */ }
+    }
+
+    /// <summary>Id of the pack every new install starts subscribed to, and whether that has been done.</summary>
+    /// <remarks>Seeded once: the flag is set even when the subscribe fails, and leaving the pack later
+    /// sticks.</remarks>
     public static readonly Guid DefaultPackId = Guid.Parse("9dc74fcc-8baf-4a33-8eec-8e985ca309f3");
 
     public bool DefaultPackSeeded { get; set; }
@@ -165,20 +170,19 @@ public sealed class AppSettings
     /// <summary>Pack list sort preference. Pinned packs are always shown first.</summary>
     public PackSortMode PackSortMode { get; set; } = PackSortMode.LastPlayed;
 
+    /// <summary>Instances page layout: cards (the default) or a compact list.</summary>
+    public PackListLayout PackListLayout { get; set; } = PackListLayout.Cards;
+
     /// <summary>World list sort preference.</summary>
     public WorldSortMode WorldSortMode { get; set; } = WorldSortMode.Modified;
 
     public ResourcePackSortMode ResourcePackSortMode { get; set; } = ResourcePackSortMode.Modified;
 
-    /// <summary>Shader list sort preference.</summary>
-    /// <remarks>Newest first by default, which is what <see cref="ShaderPackService.ScanAll"/> already
-    /// hands back: someone who has just dropped a shader in wants to see it without hunting, and the
-    /// alphabetical order a shader folder happens to be in means nothing to anyone. The stored value
-    /// wins once the Sort box is touched, and an absent key (an older settings.json) lands here rather
-    /// than on the enum's zero member.</remarks>
+    /// <summary>Shader list sort preference. Newest first by default, so a just-added shader is at the
+    /// top. An older settings.json without the key gets this default too.</summary>
     public ShaderSortMode ShaderSortMode { get; set; } = ShaderSortMode.RecentlyAdded;
 
-    // ── mod list view (a pack's Mods Management → List view) ──────────────────
+    // ── mod list view (Mods Management, List view) ──────────────────────────
 
     /// <summary>Which column the List view sorts by. Sticky across sessions.</summary>
     public ModListSortMode ModListSortMode { get; set; } = ModListSortMode.Priority;
@@ -189,18 +193,15 @@ public sealed class AppSettings
     /// <summary>List view "Hide disabled" filter. Sticky across sessions.</summary>
     public bool ModListHideDisabled { get; set; }
 
-    /// <summary>List view store filter. Sticky across sessions. ("Only updates" deliberately is not:
-    /// it is a triage filter, and reopening the launcher to an apparently empty pack is alarming.)</summary>
+    /// <summary>List view store filter. Sticky across sessions. "Only updates" is not persisted, so
+    /// the launcher never reopens to an apparently empty pack.</summary>
     public ModListSourceFilter ModListSourceFilter { get; set; } = ModListSourceFilter.All;
 
-    /// <summary>
-    /// How wide a List view row's name/version block may get before the row's buttons start, in
-    /// device-independent pixels. The row itself still spans the list; capping this is what keeps the
-    /// Options button a short hop from the mod's name on a wide monitor instead of a screen away.
-    /// </summary>
+    /// <summary>Maximum width (DIPs) of a List view row's name/version block before its buttons start.
+    /// Keeps the Options button near the mod name on a wide monitor.</summary>
     public double ModRowContentWidth { get; set; } = 620;
 
-    /// <summary>Bounds for <see cref="ModRowContentWidth"/>, and the value a stored nonsense clamps to.</summary>
+    /// <summary>Range a stored <see cref="ModRowContentWidth"/> is clamped to.</summary>
     public const double MinModRowContentWidth = 360, MaxModRowContentWidth = 2000;
 
     public double EffectiveModRowContentWidth =>
@@ -208,86 +209,136 @@ public sealed class AppSettings
             ? Math.Clamp(ModRowContentWidth, MinModRowContentWidth, MaxModRowContentWidth)
             : 620;
 
-    /// <summary>
-    /// Whether a List view row's buttons sit against the right edge of the row (the default) or
-    /// immediately after the name block, where the width cap above puts them.
-    /// </summary>
-    /// <remarks>
-    /// The cap alone used to decide both, which left the controls stranded mid-row on a wide window
-    /// with no straight edge to aim down. They are two separate questions, so they are two settings.
-    /// </remarks>
+    /// <summary>Whether a List view row's buttons sit against the right edge of the row (the default)
+    /// or right after the name block.</summary>
     public bool ModRowActionsAtRight { get; set; } = true;
 
-    // ── mod graph view (a pack's Mods Management → Graph view) ────────────────
+    // ── mod graph view (Mods Management, Graph view) ────────────────────────
 
     /// <summary>Whether the Graph view draws the dependency lines between nodes.</summary>
-    /// <remarks>
-    /// The pack's own <see cref="ModAdvancedSettings.ShowDependencyLines"/> is a property OF THE PACK:
-    /// it is written into <c>mods.json</c> and synced to collaborators, so flipping it to read one
-    /// crowded graph changes what everyone else opens. This is the same switch as a per-launcher view
-    /// preference, so the toolbar can remember how this person likes to look at a graph without
-    /// touching a shared document.
-    /// </remarks>
+    /// <remarks>A per-launcher view preference. The pack's own
+    /// <see cref="ModAdvancedSettings.ShowDependencyLines"/> lives in <c>mods.json</c> and syncs to
+    /// collaborators, so toggling that would change the graph for everyone.</remarks>
     public bool GraphShowDependencyLines { get; set; } = true;
 
-    /// <summary>
-    /// How the Graph view groups nodes — the name of a <see cref="ModClusterMode"/> member. Null means
-    /// "follow the pack's <see cref="ModAdvancedSettings.DefaultClusterMode"/>", which is the state a
-    /// launcher starts in.
-    /// </summary>
-    /// <remarks>Stored as the member NAME rather than the enum, because settings.json outlives the
-    /// build that wrote it: a mode added by a newer launcher would deserialize into an out-of-range
-    /// enum value here and be applied as whatever member happens to share its number. An unrecognised
-    /// name parses as "not a mode I know" and falls back to the pack default instead.</remarks>
+    /// <summary>How the Graph view groups nodes: the name of a <see cref="ModClusterMode"/> member, or
+    /// null to follow the pack's <see cref="ModAdvancedSettings.DefaultClusterMode"/>.</summary>
+    /// <remarks>Stored as the name, not the enum value, so a mode added by a newer launcher falls back
+    /// to the pack default instead of mapping to whatever member shares its number.</remarks>
     public string? GraphClusterMode { get; set; }
 
-    /// <summary>
-    /// Which release channel a mod download or update follows when the pack has no channel of its own:
-    /// "alpha" = the latest version whatever its channel, "beta" = releases and betas, "release" =
-    /// stable releases only. See <see cref="ModUpdateChannel"/>.
-    /// </summary>
-    /// <remarks>Alpha by default: "give me the newest file" is what people mean by an update, and a
-    /// pack (Mods Management → Advanced) or a single mod (right-click → Update channel) can still be
-    /// pinned to release.</remarks>
+    /// <summary>Whether the Planning board draws its grid and snaps cards to it. Applies to every board.</summary>
+    public bool PlanGridEnabled { get; set; } = true;
+
+    /// <summary>Release channel for mod downloads and updates when the pack has none of its own:
+    /// "alpha" = newest whatever its channel, "beta" = releases and betas, "release" = stable only.
+    /// See <see cref="ModUpdateChannel"/>.</summary>
+    /// <remarks>Packs (Mods Management, Advanced) and single mods (right-click, Update channel) can
+    /// still be pinned to release.</remarks>
     public string ModVersionChannel { get; set; } = ModUpdateChannel.Alpha;
 
     // ── downloads ────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// How many mod files the launcher downloads at the same time — during "Update all", a browse-page
-    /// download with dependencies, and a modpack install.
-    /// </summary>
-    /// <remarks>Three by default. One at a time is slower than the connection allows; past a handful the
-    /// bottleneck moves to the stores, which answer a burst from one address with 403s and 429s
-    /// (see <see cref="ApiClient"/>), so the ceiling is deliberately 9 rather than "as many as you like".</remarks>
+    /// <summary>How many mod files download at once: "Update all", browse-page downloads with
+    /// dependencies, and modpack installs.</summary>
+    /// <remarks>Capped at 9 because the stores answer bigger bursts from one address with 403s and 429s
+    /// (see <see cref="ApiClient"/>).</remarks>
     public int ModDownloadConcurrency { get; set; } = 3;
 
     public const int MinModDownloadConcurrency = 1, MaxModDownloadConcurrency = 9;
 
-    /// <summary>The concurrency actually used, with a stored nonsense clamped into range.</summary>
+    /// <summary>The concurrency actually used, with the stored value clamped into range.</summary>
     public int EffectiveModDownloadConcurrency =>
         Math.Clamp(ModDownloadConcurrency, MinModDownloadConcurrency, MaxModDownloadConcurrency);
 
-    /// <summary>
-    /// The user's own CurseForge API key. Empty means "use the server's shared key", which is what
-    /// almost everyone does; a personal key gives its owner their own quota, so a busy evening on the
-    /// shared one (CurseForge answers a burst from the server's single address with 403s) stops being
-    /// their problem. Sent per request to the launcher's proxy and never stored server-side.
-    /// </summary>
-    public string? CurseForgeApiKey { get; set; }
+    /// <summary>How many mods are checked for updates at once.</summary>
+    /// <remarks>Higher than the download concurrency: a check is a metadata read, usually answered from
+    /// the shared version catalog's cache, so the connection is not the limit.</remarks>
+    public int ModUpdateCheckConcurrency { get; set; } = 12;
+
+    public const int MinModUpdateCheckConcurrency = 1, MaxModUpdateCheckConcurrency = 32;
+
+    public int EffectiveModUpdateCheckConcurrency =>
+        Math.Clamp(ModUpdateCheckConcurrency, MinModUpdateCheckConcurrency, MaxModUpdateCheckConcurrency);
+
+    /// <summary>How many per-mod store requests an update check may make per second.</summary>
+    /// <remarks>Most mods are answered by a few bulk requests first, so this only paces the rest. Set too
+    /// high, the stores ask to slow down, which the check then waits out.</remarks>
+    public int ModUpdateChecksPerSecond { get; set; } = 10;
+
+    public const int MinModUpdateChecksPerSecond = 1, MaxModUpdateChecksPerSecond = 100;
+
+    public int EffectiveModUpdateChecksPerSecond =>
+        Math.Clamp(ModUpdateChecksPerSecond, MinModUpdateChecksPerSecond, MaxModUpdateChecksPerSecond);
+
+    /// <summary>The user's own CurseForge API key; empty means the server's shared key. A personal key
+    /// has its own quota, so it avoids the 403s the shared key gets under load. Sent per request to the
+    /// launcher's proxy, never stored server-side.</summary>
+    /// <remarks>Kept in <see cref="SecretStore"/> (see <see cref="SetCurseForgeApiKey"/>); this is the
+    /// in-memory copy.</remarks>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? CurseForgeApiKey { get; private set; }
+
+    /// <summary>With a personal key set, talk to CurseForge directly instead of through the server's
+    /// proxy, which queues everyone's traffic behind one address. On by default, since only people who
+    /// want this set a key.</summary>
+    public bool CurseForgeDirect { get; set; } = true;
+
+    /// <summary>The plain-text settings.json slot the key was kept in before 1.8.0. Read so an
+    /// existing key moves into <see cref="SecretStore"/>, then written back empty, unless the store
+    /// can't be written on this PC; then the key stays here so it survives a restart.</summary>
+    [System.Text.Json.Serialization.JsonPropertyName("CurseForgeApiKey")]
+    public string? LegacyCurseForgeApiKey
+    {
+        get => _keyLivesInSettings ? CurseForgeApiKey : null;
+        set => _legacyCurseForgeApiKey = value;
+    }
+
+    private string? _legacyCurseForgeApiKey;
+
+    /// <summary>True when the secret store failed and settings.json is carrying the key instead.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool CurseForgeKeyInSettingsFile => _keyLivesInSettings;
+
+    private bool _keyLivesInSettings;
+
+    private const string CurseForgeKeySecret = "curseforge-key";
+
+    /// <summary>Sets (or, with null/blank, clears) the user's own CurseForge key and stores it at once.
+    /// Returns false when the secret store could not be written; the key is then kept in settings.json
+    /// instead (see <see cref="SecretStore.LastError"/>).</summary>
+    /// <remarks>The key has its own encrypted file because any running copy of the launcher (an older
+    /// build, a second window) rewrites settings.json whole and would drop it. The settings.json
+    /// fallback is there because an unencrypted key beats a lost one.</remarks>
+    public bool SetCurseForgeApiKey(string? key)
+    {
+        key = string.IsNullOrWhiteSpace(key) ? null : key.Trim();
+        CurseForgeApiKey = key;
+        var stored = SecretStore.Write(CurseForgeKeySecret, key);
+        _keyLivesInSettings = !stored && key is not null;
+        if (!stored) Save();
+        return stored;
+    }
+
+    /// <summary>Loads the key from <see cref="SecretStore"/>, moving a key still sitting in
+    /// settings.json (an older build, or the fallback above) into it first.</summary>
+    private void LoadCurseForgeApiKey()
+    {
+        var stored = SecretStore.Read(CurseForgeKeySecret);
+        if (stored is null && !string.IsNullOrWhiteSpace(_legacyCurseForgeApiKey))
+        {
+            stored = _legacyCurseForgeApiKey.Trim();
+            _keyLivesInSettings = !SecretStore.Write(CurseForgeKeySecret, stored);
+        }
+        CurseForgeApiKey = stored;
+        _legacyCurseForgeApiKey = null;
+    }
 
     // ── servers ──────────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Admin details for servers the user runs, keyed by the server address exactly as it appears in
-    /// an instance's <c>servers.dat</c> (lower-cased, and with the default port left off when that is
-    /// how it was typed — see <see cref="ServerKey"/>).
-    /// </summary>
-    /// <remarks>
-    /// Deliberately keyed on the address rather than on an instance, because one server is usually
-    /// reachable from several instances and the console is a property of the server, not of the copy
-    /// of the server list that happens to name it.
-    /// </remarks>
+    /// <summary>Admin details for servers the user runs, keyed by the server address as it appears in
+    /// an instance's <c>servers.dat</c>, lower-cased (see <see cref="ServerKey"/>). Keyed on the address
+    /// rather than an instance, since one server is usually reachable from several.</summary>
     public Dictionary<string, ServerAdminEntry> ServerAdmins { get; set; } = new();
 
     /// <summary>The key <see cref="ServerAdmins"/> uses for a server address.</summary>
@@ -308,27 +359,27 @@ public sealed class AppSettings
 
     // ── config & scripts hub ─────────────────────────────────────────────────
 
-    /// <summary>
-    /// Files the user has pinned in the Config and scripts page, as "{packId:N}/{relative/path}".
-    /// A pinned file that no longer exists is shown greyed rather than dropped, so a pin survives an
-    /// instance being re-synced or a pack being temporarily unavailable.
-    /// </summary>
+    /// <summary>Files pinned in the Config and scripts page, as "{packId:N}/{relative/path}". A pin
+    /// whose file is missing is shown greyed rather than dropped, so it survives a re-sync or an
+    /// unavailable pack.</summary>
     public List<string> ConfigHubPins { get; set; } = new();
 
     /// <summary>Last filter the Config and scripts page was left on, so it opens where it was left.</summary>
     public string? ConfigHubLastFilter { get; set; }
 
-    /// <summary>Colours for the launcher chrome and the log views.</summary>
+    /// <summary>Colours for the launcher chrome and log views in the Classic style. Left alone while
+    /// Slate is active, so switching back to Classic restores them.</summary>
     public ThemeSettings Theme { get; set; } = new();
+
+    /// <summary>The launcher's look: the Slate style (default) and its options, or Classic.</summary>
+    public LookSettings Look { get; set; } = new();
 
     /// <summary>Text files the built-in editor has been told to keep open across sessions, newest first.</summary>
     public List<string> RecentEditedFiles { get; set; } = new();
 
-    /// <summary>Local usage stats for ordering and display. These are intentionally per-device.</summary>
-    // ConcurrentDictionary: mutated from background threads (play time recorded on the process-exit
-    // callback) while Save() may be serializing on another thread. A plain Dictionary would throw
-    // "collection was modified" mid-serialize; ConcurrentDictionary enumerates safely. JSON shape
-    // is unchanged (still a { guid: stats } object).
+    /// <summary>Local, per-device usage stats for ordering and display.</summary>
+    // ConcurrentDictionary: play time is recorded on a background thread (process exit) while Save()
+    // may be serializing on another. The JSON shape is the same as a plain dictionary.
     public System.Collections.Concurrent.ConcurrentDictionary<Guid, PackUsageStats> PackUsage { get; set; } = new();
 
     public bool GetAutoApplyRulesFor(Guid packId) =>
@@ -406,22 +457,50 @@ public sealed class AppSettings
     /// <summary>User-defined world folders. Key = folder name; value = list of world keys.</summary>
     public Dictionary<string, List<string>> WorldFolders { get; set; } = new();
 
+    /// <summary>Per-folder rules for world folders. Key = the same folder name as
+    /// <see cref="WorldFolders"/>; a folder with no entry has no rule.</summary>
+    /// <remarks>A separate map because <see cref="WorldFolders"/> values are JSON arrays on disk, and
+    /// changing their shape would lose every existing install's folders. Rename and delete go through
+    /// <see cref="RenameWorldFolder"/> and <see cref="DeleteWorldFolder"/> so the two maps stay in step.</remarks>
+    public Dictionary<string, ContentFolderRule> WorldFolderRules { get; set; } = new();
+
     /// <summary>Resource pack metadata, keyed by ResourcePackService.Key().</summary>
     public Dictionary<string, ResourcePackEntry> ResourcePacks { get; set; } = new();
 
     /// <summary>User-defined resource pack folders. Key = folder name; value = list of resource pack keys.</summary>
     public Dictionary<string, List<string>> ResourcePackFolders { get; set; } = new();
 
+    /// <summary>Per-folder rules for resource pack folders, keyed the same way
+    /// <see cref="ResourcePackFolders"/> is. A separate map for the reason given on
+    /// <see cref="WorldFolderRules"/>.</summary>
+    public Dictionary<string, ContentFolderRule> ResourcePackFolderRules { get; set; } = new();
+
+    /// <summary>The drag order for the Resource packs page's "All" and "Defaults" chips, as item
+    /// keys, first shown first.</summary>
+    /// <remarks>User folders keep their order in <see cref="ResourcePackFolders"/>; "All" isn't a folder,
+    /// and a reserved key in that map would show up as a chip. Only used by
+    /// <see cref="ResourcePackSortMode.Manual"/>. Keys of deleted packs never match, so this needs no
+    /// pruning.</remarks>
+    public List<string> ResourcePackOrder { get; set; } = new();
+
+    /// <summary>When true, dragging a row in the Resource packs page's "All" view also reorders every
+    /// folder holding that pack, so the folders agree with the new order.</summary>
+    /// <remarks>On by default. One drag can rewrite several folders, so it can be turned off to protect
+    /// folders arranged by hand.</remarks>
+    public bool PropagateResourcePackOrderToFolders { get; set; } = true;
+
     /// <summary>Shader pack metadata, keyed the way <see cref="ShaderPackService"/> keys a shader:
     /// <c>"{sourcePackId:N}:{fileNameOrFolderName}"</c>.</summary>
-    /// <remarks>A shader is a file in a folder and nothing else — no manifest, no id, no version. This
-    /// is where the launcher remembers what a given file actually IS (see
-    /// <see cref="ShaderPackEntry"/>); an entry with no matching file on disk is harmless and is simply
-    /// never looked up, so a shader deleted outside the launcher costs nothing.</remarks>
+    /// <remarks>A shader has no manifest, id or version, so this is where the launcher remembers what a
+    /// file is (see <see cref="ShaderPackEntry"/>). Entries with no file on disk are harmless.</remarks>
     public Dictionary<string, ShaderPackEntry> ShaderPacks { get; set; } = new();
 
     /// <summary>User-defined shader folders. Key = folder name; value = list of shader keys.</summary>
     public Dictionary<string, List<string>> ShaderFolders { get; set; } = new();
+
+    /// <summary>Per-folder rules for shader folders, keyed the same way <see cref="ShaderFolders"/>
+    /// is. A separate map for the reason given on <see cref="WorldFolderRules"/>.</summary>
+    public Dictionary<string, ContentFolderRule> ShaderFolderRules { get; set; } = new();
 
     /// <summary>Per-pack last-known shared manifest version (for update detection).
     /// ConcurrentDictionary: written from background sync tasks while Save() may serialize.</summary>
@@ -430,11 +509,8 @@ public sealed class AppSettings
     /// <summary>Default Minecraft options applied as a template for new packs.</summary>
     public McDefaults McDefaults { get; set; } = new();
 
-    /// <summary>
-    /// When true, secondary pages (settings, worlds, pack detail, etc.) open in a
-    /// resizable right-hand panel next to the master pack list. When false, they
-    /// cover the main content area like a full-screen page.
-    /// </summary>
+    /// <summary>When true, secondary pages (settings, worlds, pack detail, etc.) open in a resizable
+    /// panel next to the pack list; when false, they cover the main content area.</summary>
     public bool UseSidePanel { get; set; } = true;
 
     /// <summary>Global UI scale for the whole launcher (1.0 = 100%), applied as a layout zoom.</summary>
@@ -443,6 +519,30 @@ public sealed class AppSettings
     /// <summary>Extra zoom applied to mod entries in the list/browse views, on top of <see cref="LauncherScale"/>.</summary>
     public double ModListScale { get; set; } = 1.0;
 
+    /// <summary>Sizes the user has dragged an in-window dialog card to, keyed by the card's resize key
+    /// (see <c>ResizableCard</c>). A key with no entry means "use the card's own default".</summary>
+    /// <remarks>Not validated here: the window can be a different size next launch, so the restore path
+    /// clamps against the live window.</remarks>
+    public Dictionary<string, DialogSizeEntry> DialogSizes { get; set; } = new();
+
+    /// <summary>Reads a remembered dialog size, or the supplied default when there is none.</summary>
+    public (double Width, double Height) GetDialogSize(string key, double defaultWidth, double defaultHeight) =>
+        DialogSizes.TryGetValue(key, out var saved) && saved.Width > 0 && saved.Height > 0
+            ? (saved.Width, saved.Height)
+            : (defaultWidth, defaultHeight);
+
+    /// <summary>Remembers the size the user dragged a dialog card to.</summary>
+    public void SetDialogSize(string key, double width, double height)
+    {
+        if (string.IsNullOrWhiteSpace(key) || width <= 0 || height <= 0) return;
+        if (DialogSizes.TryGetValue(key, out var existing)
+            && Math.Abs(existing.Width - width) < 0.5 && Math.Abs(existing.Height - height) < 0.5)
+            return;   // a click that moved the grip a sub-pixel is not a preference change
+
+        DialogSizes[key] = new DialogSizeEntry { Width = width, Height = height };
+        Save();
+    }
+
     /// <summary>Keyboard shortcut used by the Minecraft wrapper window to hide the time bar.</summary>
     public string MinecraftWindowToggleKey { get; set; } = "key.keyboard.f8";
 
@@ -450,7 +550,7 @@ public sealed class AppSettings
     public string MinecraftWindowFullscreenKey { get; set; } = "key.keyboard.f11";
 
     /// <summary>User-defined pack folders. Key = folder name; value = list of pack IDs.
-    /// Team folders are NOT stored here — they're computed from team membership at runtime.</summary>
+    /// Team folders aren't stored here; they are computed from team membership at runtime.</summary>
     public Dictionary<string, List<Guid>> PackFolders { get; set; } = new();
 
     /// <summary>Packs the user removed from their instance list (e.g. unsubscribed public packs).</summary>
@@ -513,7 +613,25 @@ public sealed class AppSettings
     public void DeleteWorldFolder(string name)
     {
         WorldFolders.Remove(name);
+        // Drop the rule too, or it would come back on a new folder with the same name.
+        WorldFolderRules.Remove(name);
     }
+
+    /// <summary>Renames a world folder, moving its members and its rule and keeping its position.</summary>
+    /// <remarks>Both maps are rebuilt in order, since position is the chip order. Doesn't save; the
+    /// caller does.</remarks>
+    /// <returns>False when there is no such folder or the new name is already taken, in which case
+    /// nothing was changed.</returns>
+    public bool RenameWorldFolder(string oldName, string newName) =>
+        RenameFolderPair(WorldFolders, WorldFolderRules, oldName, newName);
+
+    /// <summary>The rule on a world folder, or null when it has none.</summary>
+    public ContentFolderRule? GetWorldFolderRule(string folder) =>
+        WorldFolderRules.TryGetValue(folder, out var rule) ? rule : null;
+
+    /// <summary>Writes a world folder's rule. Doesn't save; the caller does.</summary>
+    public void SetWorldFolderRule(string folder, ContentFolderRule? rule) =>
+        StoreFolderRule(WorldFolderRules, folder, rule);
 
     public void AddWorldToFolder(string folder, string worldKey)
     {
@@ -540,7 +658,20 @@ public sealed class AppSettings
     public void DeleteResourcePackFolder(string name)
     {
         ResourcePackFolders.Remove(name);
+        ResourcePackFolderRules.Remove(name);
     }
+
+    /// <inheritdoc cref="RenameWorldFolder"/>
+    public bool RenameResourcePackFolder(string oldName, string newName) =>
+        RenameFolderPair(ResourcePackFolders, ResourcePackFolderRules, oldName, newName);
+
+    /// <summary>The rule on a resource pack folder, or null when it has none.</summary>
+    public ContentFolderRule? GetResourcePackFolderRule(string folder) =>
+        ResourcePackFolderRules.TryGetValue(folder, out var rule) ? rule : null;
+
+    /// <inheritdoc cref="SetWorldFolderRule"/>
+    public void SetResourcePackFolderRule(string folder, ContentFolderRule? rule) =>
+        StoreFolderRule(ResourcePackFolderRules, folder, rule);
 
     public void AddResourcePackToFolder(string folder, string packKey)
     {
@@ -557,6 +688,53 @@ public sealed class AppSettings
         if (ResourcePackFolders.TryGetValue(folder, out var list)) list.Remove(packKey);
     }
 
+    /// <summary>Rewrites the order of one resource pack folder's members, which is the order its chip
+    /// shows them in.</summary>
+    /// <param name="keysInOrder">The members, first shown first. Keys that are not members are
+    /// ignored, and members not listed are kept after the listed ones.</param>
+    /// <returns>False when there is no such folder, in which case nothing was changed.</returns>
+    /// <remarks>Doesn't save; the caller does.</remarks>
+    public bool ReorderResourcePackFolder(string folder, IReadOnlyList<string> keysInOrder)
+    {
+        if (string.IsNullOrWhiteSpace(folder)) return false;
+        if (!ResourcePackFolders.TryGetValue(folder, out var members)) return false;
+        ApplyKeyOrder(members, keysInOrder, membersOnly: true);
+        return true;
+    }
+
+    /// <summary>Rewrites <see cref="ResourcePackOrder"/>, the page-wide order behind the "All" and
+    /// "Defaults" chips.</summary>
+    /// <param name="keysInOrder">The rows, first shown first. Any key is accepted, since "All" has no
+    /// membership to check against.</param>
+    /// <remarks>Doesn't save; the caller does.</remarks>
+    public void ReorderResourcePacks(IReadOnlyList<string> keysInOrder) =>
+        ApplyKeyOrder(ResourcePackOrder, keysInOrder, membersOnly: false);
+
+    /// <summary>Puts <paramref name="wanted"/> at the front of <paramref name="stored"/>, keeping
+    /// everything it did not mention.</summary>
+    /// <remarks>Unmentioned keys are appended in their existing order, never dropped: the caller's list
+    /// may be filtered, and a hidden member must not fall out of the folder.</remarks>
+    private static void ApplyKeyOrder(
+        List<string> stored, IReadOnlyList<string>? wanted, bool membersOnly)
+    {
+        if (wanted is null || wanted.Count == 0) return;
+
+        var known = membersOnly ? new HashSet<string>(stored, StringComparer.Ordinal) : null;
+        var placed = new List<string>(stored.Count + wanted.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var key in wanted)
+        {
+            if (string.IsNullOrEmpty(key)) continue;
+            if (known is not null && !known.Contains(key)) continue;               if (seen.Add(key)) placed.Add(key);
+        }
+        foreach (var key in stored)
+            if (seen.Add(key)) placed.Add(key);
+
+        stored.Clear();
+        stored.AddRange(placed);
+    }
+
     public void CreateShaderFolder(string name)
     {
         var key = (name ?? "").Trim();
@@ -567,7 +745,20 @@ public sealed class AppSettings
     public void DeleteShaderFolder(string name)
     {
         ShaderFolders.Remove(name);
+        ShaderFolderRules.Remove(name);
     }
+
+    /// <inheritdoc cref="RenameWorldFolder"/>
+    public bool RenameShaderFolder(string oldName, string newName) =>
+        RenameFolderPair(ShaderFolders, ShaderFolderRules, oldName, newName);
+
+    /// <summary>The rule on a shader folder, or null when it has none.</summary>
+    public ContentFolderRule? GetShaderFolderRule(string folder) =>
+        ShaderFolderRules.TryGetValue(folder, out var rule) ? rule : null;
+
+    /// <inheritdoc cref="SetWorldFolderRule"/>
+    public void SetShaderFolderRule(string folder, ContentFolderRule? rule) =>
+        StoreFolderRule(ShaderFolderRules, folder, rule);
 
     public void AddShaderToFolder(string folder, string shaderKey)
     {
@@ -584,10 +775,56 @@ public sealed class AppSettings
         if (ShaderFolders.TryGetValue(folder, out var list)) list.Remove(shaderKey);
     }
 
+    /// <summary>Stores a folder rule, or drops the entry when there is nothing worth storing.</summary>
+    /// <remarks>An empty, disabled rule is removed so settings.json doesn't collect an entry for every
+    /// folder whose dialog was opened. A disabled rule that still has text is kept, so re-enabling it
+    /// doesn't mean retyping it.</remarks>
+    private static void StoreFolderRule(
+        Dictionary<string, ContentFolderRule> rules, string folder, ContentFolderRule? rule)
+    {
+        var key = (folder ?? "").Trim();
+        if (key.Length == 0) return;
+        if (rule is null || (!rule.Enabled && !rule.HasAnyRule)) { rules.Remove(key); return; }
+        rules[key] = rule;
+    }
+
+    /// <summary>Renames one entry in a members map and its sibling rules map together, keeping both in
+    /// order.</summary>
+    /// <remarks>Both maps are assigned only after both rebuilds succeed, so a refused rename changes
+    /// neither. A folder without a rule is normal.</remarks>
+    private static bool RenameFolderPair(
+        Dictionary<string, List<string>> members, Dictionary<string, ContentFolderRule> rules,
+        string oldName, string newName)
+    {
+        var fresh = (newName ?? "").Trim();
+        if (fresh.Length == 0 || !members.ContainsKey(oldName)) return false;
+        if (string.Equals(oldName, fresh, StringComparison.Ordinal)) return true;
+        if (members.ContainsKey(fresh)) return false;
+
+        var rebuiltMembers = new Dictionary<string, List<string>>(members.Count);
+        foreach (var (key, value) in members)
+            rebuiltMembers[string.Equals(key, oldName, StringComparison.Ordinal) ? fresh : key] = value;
+
+        var rebuiltRules = new Dictionary<string, ContentFolderRule>(rules.Count);
+        foreach (var (key, value) in rules)
+        {
+            // A rule already under the new name can't belong to a real folder (the members map refused that
+            // name), so the moved rule replaces it.
+            if (string.Equals(key, fresh, StringComparison.Ordinal)) continue;
+            rebuiltRules[string.Equals(key, oldName, StringComparison.Ordinal) ? fresh : key] = value;
+        }
+
+        members.Clear();
+        foreach (var (key, value) in rebuiltMembers) members[key] = value;
+        rules.Clear();
+        foreach (var (key, value) in rebuiltRules) rules[key] = value;
+        return true;
+    }
+
     // ── shader entries ──────────────────────────────────────────────────────
 
-    /// <summary>What is known about an installed shader, or null if it was never recorded — which is
-    /// the normal state for one the user dropped into the folder by hand.</summary>
+    /// <summary>What is known about an installed shader, or null if nothing was recorded (normal for one
+    /// dropped into the folder by hand).</summary>
     public ShaderPackEntry? GetShaderPack(string key) =>
         ShaderPacks.TryGetValue(key, out var e) ? e : null;
 
@@ -603,14 +840,11 @@ public sealed class AppSettings
         return e;
     }
 
-    /// <summary>
-    /// Records where a shader came from, so a later store visit can recognise the file on disk as this
-    /// project at this version and offer the update.
-    /// </summary>
-    /// <remarks>Written at install time: nothing in a shader zip identifies it afterwards, and matching
-    /// by name is how you end up offering someone a different author's shader as an "update". A null
-    /// <paramref name="source"/> clears the provenance, which is the right answer for a file the user
-    /// replaced by hand — better no match than a wrong one.</remarks>
+    /// <summary>Records where a shader came from, so a later store visit can recognise the file as this
+    /// project at this version and offer the update.</summary>
+    /// <remarks>Recorded at install time because nothing in a shader zip identifies it, and matching by
+    /// name can pick a different author's shader. A null <paramref name="source"/> clears it, for a file
+    /// replaced by hand.</remarks>
     public void SetShaderPackProvenance(
         string key, ModSource? source, string? projectId, string? versionId, string? versionNumber)
     {
@@ -639,20 +873,13 @@ public sealed class AppSettings
 
     private static int _recommendedRamMb;
 
-    /// <summary>
-    /// How much RAM to give a pack the user has never set a value for, chosen from the machine's
-    /// INSTALLED memory.
-    /// </summary>
+    /// <summary>How much RAM to give a pack with no value set, based on the machine's installed
+    /// memory.</summary>
     /// <remarks>
-    /// 8 GB machine gets 6 GB, 16 GB gets 10 GB, 32 GB or more gets 16 GB - the headroom deliberately
-    /// grows with the total, because Windows, the GPU driver and a browser need a roughly fixed slice
-    /// on a small machine but Minecraft itself stops benefiting past ~16 GB. Under 8 GB we take half
-    /// and leave the rest, which is the most that can be spared without swapping.
-    ///
-    /// GetPhysicallyInstalledSystemMemory is used rather than GlobalMemoryStatusEx because the latter
-    /// reports memory VISIBLE to the OS - hardware-reserved slices make an 8 GB machine read as ~7.9 GB
-    /// and fall through a naive >= 8 GB test. This reports the installed total, so the thresholds mean
-    /// what they say. If the call fails we fall back to the old fixed default rather than guess.
+    /// 8 GB gets 6 GB, 16 GB gets 10 GB, 32 GB or more gets 16 GB (Minecraft gains little past ~16 GB);
+    /// under 8 GB it takes half. Uses GetPhysicallyInstalledSystemMemory because GlobalMemoryStatusEx
+    /// leaves out hardware-reserved memory, so an 8 GB machine would read as ~7.9 GB. Falls back to
+    /// 4 GB if the call fails.
     /// </remarks>
     public static int RecommendedRamMb()
     {
@@ -693,10 +920,52 @@ public sealed class AppSettings
         else PackJvmArgs[packId] = args.Trim();
     }
 
-    /// <summary>
-    /// Shared Minecraft runtime — libraries, assets, version JARs.
-    /// Stored once globally (not per-profile) and reused across all packs.
-    /// </summary>
+    // ── dedicated server accessors ───────────────────────────────────────────
+
+    /// <summary>How much RAM this pack's server gets: its own value, else the client's, else the
+    /// machine-derived default.</summary>
+    public int GetServerMaxRamFor(Guid packId) =>
+        PackServerMaxRamMb.TryGetValue(packId, out var v) ? v : GetMaxRamFor(packId);
+
+    /// <summary>True when this pack's server RAM is set explicitly rather than inherited from the
+    /// client.</summary>
+    public bool HasServerMaxRamOverride(Guid packId) => PackServerMaxRamMb.ContainsKey(packId);
+
+    public void SetServerMaxRamFor(Guid packId, int? mb)
+    {
+        if (mb is null) PackServerMaxRamMb.Remove(packId);
+        else PackServerMaxRamMb[packId] = mb.Value;
+    }
+
+    public string GetServerJvmArgsFor(Guid packId) =>
+        PackServerJvmArgs.TryGetValue(packId, out var v) ? v : "";
+
+    public void SetServerJvmArgsFor(Guid packId, string? args)
+    {
+        if (string.IsNullOrWhiteSpace(args)) PackServerJvmArgs.Remove(packId);
+        else PackServerJvmArgs[packId] = args.Trim();
+    }
+
+    public bool GetServerEulaAccepted(Guid packId) =>
+        PackServerEulaAccepted.TryGetValue(packId, out var v) && v;
+
+    public void SetServerEulaAccepted(Guid packId, bool accepted)
+    {
+        if (accepted) PackServerEulaAccepted[packId] = true;
+        else PackServerEulaAccepted.Remove(packId);
+    }
+
+    public bool GetServerAutoRestart(Guid packId) =>
+        PackServerAutoRestart.TryGetValue(packId, out var v) && v;
+
+    public void SetServerAutoRestart(Guid packId, bool enabled)
+    {
+        if (enabled) PackServerAutoRestart[packId] = true;
+        else PackServerAutoRestart.Remove(packId);
+    }
+
+    /// <summary>Shared Minecraft runtime (libraries, assets, version JARs), stored once globally and
+    /// reused by all packs.</summary>
     public static string RuntimeRoot { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "CloudLauncher", "runtime");
@@ -728,13 +997,29 @@ public sealed class AppSettings
             if (File.Exists(SettingsPath))
             {
                 var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath), JsonOpts) ?? new();
+                // Secrets first: each step below may save, and a save must not run before the
+                // secret store has been read.
+                var plainTextSecrets = loaded.LoadSecrets();
                 loaded.MigrateServerUrl();
                 loaded.ApplyCustomGameWindowDefault();
+                loaded.ApplyLookAccentDefault();
+                loaded.LoadCurseForgeApiKey();
+                if (plainTextSecrets)
+                {
+                    try { loaded.Save(); }
+                    catch { /* read-only profile: moved again on the next start */ }
+                }
                 return loaded;
             }
         }
-        catch { /* corrupt — use defaults */ }
-        return new AppSettings();
+        catch { /* corrupt: use defaults */ }
+        // A fresh profile already has the current default accent. Without this, terracotta picked on
+        // the first day would be moved on the next start.
+        var fresh = new AppSettings { LookAccentDefaultApplied = true };
+        // The secrets have their own files, so they outlive a settings.json that was missing or unreadable.
+        fresh.LoadSecrets();
+        fresh.LoadCurseForgeApiKey();
+        return fresh;
     }
 
     private static readonly object SaveLock = new();
@@ -742,22 +1027,20 @@ public sealed class AppSettings
     public void Save()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-        // Save() is called from multiple threads (process-exit handlers, background sync).
-        // Serialize and write atomically under a lock so two concurrent writers can't collide
-        // (File.WriteAllText opens with no sharing → IOException) or leave a half-written,
-        // unparseable settings.json that Load() would then discard, wiping the user's tokens
-        // and preferences. Write to a temp file in the same directory, then atomically rename.
+        // Save() runs on several threads (process-exit handlers, background sync). Write under a lock to
+        // a temp file and rename it into place, so writers can't collide and a half-written file can't
+        // make Load() fall back to defaults and lose the tokens and preferences.
         lock (SaveLock)
         {
-            // Other mutable collections in this graph may be structurally modified on the UI or a
-            // background thread while we serialize, which makes JsonSerializer throw
-            // "collection was modified". Retry a couple of times so a transient race doesn't
-            // escape into a process-exit handler (crash) or skip persisting tokens/preferences.
+            PersistRconPasswords();
+
+            // Collections in this graph can be changed on other threads mid-serialize ("collection was
+            // modified"). Retry a couple of times rather than crash a process-exit handler.
             string? json = null;
             for (var attempt = 0; attempt < 3 && json is null; attempt++)
             {
                 try { json = JsonSerializer.Serialize(this, JsonOpts); }
-                catch (InvalidOperationException) when (attempt < 2) { /* concurrent mutation — retry */ }
+                catch (InvalidOperationException) when (attempt < 2) { /* concurrent mutation, retry */ }
             }
             if (json is null) return; // gave up rather than crash; a later Save() will persist state
 
@@ -767,12 +1050,9 @@ public sealed class AppSettings
         }
     }
 
-    /// <summary>
-    /// Moves a settings file that still names the old <c>http://IP:port</c> endpoint onto the HTTPS
-    /// name. Both reach the same server, so nothing else has to change — but an existing install
-    /// would otherwise keep sending its bearer token in clear text forever. A ServerUrl the user set
-    /// themselves is left exactly as it is.
-    /// </summary>
+    /// <summary>Moves a settings file still using the old <c>http://IP:port</c> endpoint onto the HTTPS
+    /// name, so the bearer token stops going out in clear text. A ServerUrl the user set themselves is
+    /// left alone.</summary>
     public void MigrateServerUrl()
     {
         var current = (ServerUrl ?? "").Trim();
@@ -820,6 +1100,12 @@ public enum PackSortMode
     TimePlayed = 3
 }
 
+public enum PackListLayout
+{
+    Cards = 0,
+    List = 1
+}
+
 public enum WorldSortMode
 {
     Modified = 0,
@@ -828,25 +1114,33 @@ public enum WorldSortMode
     Pack = 3
 }
 
+/// <summary>Resource pack list sort columns, in the order the Sort menu lists them.</summary>
+/// <remarks>Numbered explicitly: the numbers are stored in settings.json, so inserting a member
+/// without one would change how existing installs sort.</remarks>
 public enum ResourcePackSortMode
 {
     Modified = 0,
     Name = 1,
     Size = 2,
-    Pack = 3
+    Pack = 3,
+
+    /// <summary>The order the user dragged the rows into: <see cref="AppSettings.ResourcePackOrder"/>
+    /// for the "All" and "Defaults" chips, and the folder's own member order inside a folder.</summary>
+    /// <remarks>A drag switches to this mode and persists it; otherwise the next search keystroke would
+    /// re-sort and undo the drag.</remarks>
+    Manual = 4
 }
 
 /// <summary>Shader list sort columns, in the order the Sort box lists them.</summary>
-/// <remarks>Numbered explicitly, like every other stored enum here: the numbers are what sits in
-/// settings.json, so inserting a member in the middle without one would quietly change what an
-/// existing install is sorted by.</remarks>
+/// <remarks>Numbered explicitly: the numbers are stored in settings.json, so inserting a member
+/// without one would change how existing installs sort.</remarks>
 public enum ShaderSortMode
 {
     /// <summary>Alphabetical by display name.</summary>
     Name = 0,
     /// <summary>Grouped by the instance the shader is installed in.</summary>
     Instance = 1,
-    /// <summary>Newest file first — the default; see <see cref="AppSettings.ShaderSortMode"/>.</summary>
+    /// <summary>Newest file first (the default; see <see cref="AppSettings.ShaderSortMode"/>).</summary>
     RecentlyAdded = 2,
     /// <summary>Largest first. A shader folder is measured whole, not just its zip.</summary>
     Size = 3
@@ -860,12 +1154,18 @@ public sealed class PackUsageStats
     public DateTimeOffset? LastPlayedAt { get; set; }
 }
 
-/// <summary>
-/// The user's colours. Everything here is optional: a null field means "derive it", which is how a
-/// two-colour choice (accent + surface) produces a whole coherent palette — see
-/// <see cref="ThemeService"/>. Stored as <c>#RRGGBB</c> strings so a settings.json stays readable
-/// and a bad value degrades to the default instead of breaking the launcher.
-/// </summary>
+/// <summary>One in-window dialog card's remembered size, in device-independent pixels.</summary>
+/// <remarks>A class rather than a record struct so an older settings.json without
+/// <c>DialogSizes</c> deserialises to an empty dictionary instead of zero sizes.</remarks>
+public sealed class DialogSizeEntry
+{
+    public double Width { get; set; }
+    public double Height { get; set; }
+}
+
+/// <summary>The user's colours. A null field means "derive it", so an accent and a surface are
+/// enough for a whole palette (see <see cref="ThemeService"/>). Stored as <c>#RRGGBB</c> strings so a
+/// bad value falls back to the default instead of breaking the launcher.</summary>
 public sealed class ThemeSettings
 {
     /// <summary>Which preset the colours came from, for showing the right entry in the picker.
@@ -882,7 +1182,7 @@ public sealed class ThemeSettings
     public string? Success { get; set; }
     public string? Warning { get; set; }
 
-    // Log view — null means "derive from the surface/accent above".
+    // Log view. Null means "derive from the surface/accent above".
     public string? LogBackground { get; set; }
     public string? LogText { get; set; }
     public string? LogMuted { get; set; }
@@ -899,10 +1199,70 @@ public sealed class ThemeSettings
     public ThemeSettings Clone() => (ThemeSettings)MemberwiseClone();
 }
 
-/// <summary>
-/// Per-world preferences stored locally. A world "lives" in a single pack's
-/// game/saves folder but the user can declare which other packs may launch it.
-/// </summary>
+/// <summary>The launcher's style: <see cref="Style"/> picks Slate (the look of the Slate Minecraft
+/// mods) or Classic. The other fields customise Slate the way the mod's Interface page does.</summary>
+/// <remarks>A settings.json without <c>Look</c> gets these defaults and keeps
+/// <see cref="AppSettings.Theme"/>, so choosing Classic restores the old colours. The two choices are
+/// strings rather than enums, so an unknown value falls back to the default instead of failing the
+/// whole file (which would sign the user out).</remarks>
+public sealed class LookSettings
+{
+    public const string SlateStyle = "Slate", ClassicStyle = "Classic";
+    public const string DarkSkin = "Dark", VanillaSkin = "Vanilla";
+    public const string PixeloidFont = "Pixeloid Sans", MonocraftFont = "Monocraft", PixelifyFont = "Pixelify Sans";
+    /// <summary>Rust, the launcher's own accent (the website uses it too). The mod's terracotta is still
+    /// a preset.</summary>
+    public const string DefaultAccent = "#601B00";
+    public const int MaxRadius = 4;
+
+    /// <summary><c>Slate</c> (default) or <c>Classic</c>.</summary>
+    public string Style { get; set; } = SlateStyle;
+
+    /// <summary><c>Dark</c> (default) or <c>Vanilla</c>, the mod's two skins.</summary>
+    public string Skin { get; set; } = DarkSkin;
+
+    /// <summary>The one accent colour, <c>#RRGGBB</c>. Rust by default (<see cref="DefaultAccent"/>).</summary>
+    public string Accent { get; set; } = DefaultAccent;
+
+    /// <summary>Animation speed: 0 turns motion off, 1 is normal, 2 is half speed.</summary>
+    public double Motion { get; set; } = 1.0;
+
+    /// <summary>Corner radius in pixel steps, 0 (square) to <see cref="MaxRadius"/>.</summary>
+    public int Radius { get; set; } = 3;
+
+    /// <summary>The pixel font for titles and headings.</summary>
+    public bool PixelHeadings { get; set; } = true;
+
+    /// <summary>The pixel font for all text, not just headings.</summary>
+    public bool PixelText { get; set; }
+
+    /// <summary>Which pixel font: <see cref="PixeloidFont"/> (default), <see cref="MonocraftFont"/> or
+    /// <see cref="PixelifyFont"/>. Anything else falls back to the default.</summary>
+    public string PixelFont { get; set; } = PixeloidFont;
+
+    /// <summary>The Slate pixel icon set instead of the Windows icons.</summary>
+    public bool PixelIcons { get; set; } = true;
+
+    /// <summary>Hard two-pixel shadows under buttons, cards and menus.</summary>
+    public bool Shadows { get; set; } = true;
+
+    /// <summary>Pages and tabs slide in; off makes them appear at once.</summary>
+    public bool Transitions { get; set; } = true;
+
+    /// <summary>A soft click when a button is pressed.</summary>
+    public bool UiSounds { get; set; } = true;
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsSlate => !string.Equals(Style, ClassicStyle, StringComparison.OrdinalIgnoreCase);
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool IsVanilla => string.Equals(Skin, VanillaSkin, StringComparison.OrdinalIgnoreCase);
+
+    public LookSettings Clone() => (LookSettings)MemberwiseClone();
+}
+
+/// <summary>Per-world preferences stored locally. A world lives in one pack's game/saves folder,
+/// but the user can choose which other packs may launch it.</summary>
 public sealed class WorldEntry
 {
     /// <summary>Human-friendly name. Defaults to the folder name; can be customised.</summary>
@@ -946,11 +1306,9 @@ public sealed class ResourcePackEntry
     public List<Guid> CompatiblePackIds { get; set; } = new();
 
     // ── store provenance ────────────────────────────────────────────────────
-    // Where this zip came from, recorded at install time. A resource pack carries no id of its own, so
-    // without this the launcher can only match it back to a store listing by name - which is how you
-    // end up offering somebody a same-named pack by a different author as an "update". All four are
-    // null for a pack that was dragged in by hand, and that is a normal, permanent state: no
-    // provenance means no update check, not a broken entry.
+    // Where this zip came from, recorded at install time. A resource pack has no id of its own, and
+    // matching by name could offer a different author's pack as an update. All null for a pack added
+    // by hand, which just means no update check.
 
     /// <summary>The store this pack was installed from, or null if it did not come from one.</summary>
     public ModSource? Source { get; set; }
@@ -961,27 +1319,22 @@ public sealed class ResourcePackEntry
     /// <summary>Id of the exact file that was installed, which is what an update compares against.</summary>
     public string? VersionId { get; set; }
 
-    /// <summary>Human-readable version of the installed file ("v1.4.2"), for display only: stores let
-    /// authors write anything here, so it is never the thing an update decision is made on.</summary>
+    /// <summary>Human-readable version of the installed file ("v1.4.2"). Display only: authors can put
+    /// anything here, so updates never compare it.</summary>
     public string? VersionNumber { get; set; }
 }
 
-/// <summary>
-/// Per-shader preferences stored locally, keyed by <see cref="AppSettings.ShaderPacks"/>'s key.
-/// </summary>
-/// <remarks>
-/// Deliberately smaller than <see cref="ResourcePackEntry"/>: shaders are not shared through the
-/// launcher, so there is no visibility, no hosted id and no per-instance compatibility list to keep —
-/// a shader belongs to the instance whose folder it sits in. What is worth remembering is the name to
-/// show and, above all, which store listing the file corresponds to.
-/// </remarks>
+/// <summary>Per-shader preferences stored locally, keyed by <see cref="AppSettings.ShaderPacks"/>'s
+/// key.</summary>
+/// <remarks>Smaller than <see cref="ResourcePackEntry"/>: shaders aren't shared through the
+/// launcher, so there is no visibility, hosted id or compatibility list.</remarks>
 public sealed class ShaderPackEntry
 {
     /// <summary>Name to show instead of the file name. Empty means "use the file name".</summary>
     public string DisplayName { get; set; } = "";
 
-    /// <summary>The store this shader was installed from, or null if it did not come from one (dragged
-    /// in by hand, or installed before the launcher recorded this).</summary>
+    /// <summary>The store this shader was installed from, or null if it did not come from one (added
+    /// by hand, or installed before this was recorded).</summary>
     public ModSource? Source { get; set; }
 
     /// <summary>Project id on <see cref="Source"/> (Modrinth id/slug, CurseForge mod id).</summary>
@@ -990,8 +1343,8 @@ public sealed class ShaderPackEntry
     /// <summary>Id of the exact file that was installed, which is what an update compares against.</summary>
     public string? VersionId { get; set; }
 
-    /// <summary>Human-readable version of the installed file ("v1.4.2"), for display only: stores let
-    /// authors write anything here, so it is never the thing an update decision is made on.</summary>
+    /// <summary>Human-readable version of the installed file ("v1.4.2"). Display only: authors can put
+    /// anything here, so updates never compare it.</summary>
     public string? VersionNumber { get; set; }
 
     /// <summary>True once enough is known to look this shader up in the store it came from.</summary>
@@ -999,29 +1352,27 @@ public sealed class ShaderPackEntry
     public bool HasProvenance => Source is not null && !string.IsNullOrWhiteSpace(ProjectId);
 }
 
-/// <summary>
-/// User-editable defaults that map onto Minecraft's <c>options.txt</c>.
-/// Stored centrally so the launcher can stamp them into new packs.
-/// </summary>
+/// <summary>User-editable defaults that map onto Minecraft's <c>options.txt</c>, stored centrally
+/// so the launcher can stamp them into new packs.</summary>
 public sealed class McDefaults
 {
     // Video
-    public int    Fov               { get; set; } = 70;     // 30 – 110
-    public int    RenderDistance    { get; set; } = 12;     // 2 – 32
-    public int    SimulationDistance{ get; set; } = 10;     // 5 – 32
-    public double Brightness        { get; set; } = 0.5;    // 0.0 – 1.0
-    public int    GuiScale          { get; set; } = 0;      // 0 = Auto, 1 – 4
+    public int    Fov               { get; set; } = 70;     // 30-110
+    public int    RenderDistance    { get; set; } = 12;     // 2-32
+    public int    SimulationDistance{ get; set; } = 10;     // 5-32
+    public double Brightness        { get; set; } = 0.5;    // 0.0-1.0
+    public int    GuiScale          { get; set; } = 0;      // 0 = Auto, 1-4
     public bool   Fullscreen        { get; set; } = false;
     public bool   VSync             { get; set; } = true;
     public bool   ViewBobbing       { get; set; } = true;
     public bool   AutoJump          { get; set; } = false;
 
-    // Audio (0.0 – 1.0)
+    // Audio (0.0-1.0)
     public double MasterVolume      { get; set; } = 1.0;
     public double MusicVolume       { get; set; } = 1.0;
     public double SoundFxVolume     { get; set; } = 1.0;
 
-    // Common keybinds — values are Minecraft's key.* identifiers
+    // Common keybinds, as Minecraft key.* identifiers
     public string KeyForward   { get; set; } = "key.keyboard.w";
     public string KeyBack      { get; set; } = "key.keyboard.s";
     public string KeyLeft      { get; set; } = "key.keyboard.a";
@@ -1037,16 +1388,9 @@ public sealed class McDefaults
     public string KeyTogglePerspective { get; set; } = "key.keyboard.f5";
 }
 
-/// <summary>
-/// What the launcher needs to talk to a server's console, plus how the user labelled it.
-/// </summary>
-/// <remarks>
-/// <para>RCON is the only remote-console protocol vanilla Minecraft speaks, and it authenticates with
-/// a single shared password sent over an unencrypted socket. The password is therefore stored here in
-/// clear, exactly as <see cref="AppSettings.CurseForgeApiKey"/> and the account tokens beside it are —
-/// settings.json is already the trust boundary for this application. The UI says so where the
-/// password is entered, and the value is never logged or sent anywhere but the server it belongs to.</para>
-/// </remarks>
+/// <summary>What the launcher needs to talk to a server's console, plus how the user labelled it.</summary>
+/// <remarks>RCON authenticates with one shared password over an unencrypted socket. The password is
+/// kept in <see cref="SecretStore"/>, not settings.json, and only ever sent to its own server.</remarks>
 public sealed class ServerAdminEntry
 {
     /// <summary>What to call this server in the launcher. Empty falls back to the servers.dat name.</summary>
@@ -1059,7 +1403,24 @@ public sealed class ServerAdminEntry
     public int RconPort { get; set; } = 25575;
 
     /// <summary>RCON password, as configured in the server's server.properties.</summary>
+    /// <remarks>Kept in <see cref="SecretStore"/>: <see cref="AppSettings"/> reads it from there on load
+    /// and writes it there on save.</remarks>
+    [JsonIgnore]
     public string? RconPassword { get; set; }
+
+    /// <summary>The settings.json slot the password was kept in, in plain text, by older builds. Read
+    /// so an existing password moves into the secret store; written empty unless that store cannot be
+    /// written on this PC.</summary>
+    [JsonPropertyName("RconPassword")]
+    public string? LegacyRconPassword
+    {
+        get => PasswordInSettingsFile ? RconPassword : null;
+        set => RconPassword = value;
+    }
+
+    /// <summary>Set by <see cref="AppSettings"/> while the secret store cannot be written.</summary>
+    [JsonIgnore]
+    internal bool PasswordInSettingsFile { get; set; }
 
     /// <summary>Commands the user has run against this server, newest last, capped by the console UI.</summary>
     public List<string> CommandHistory { get; set; } = new();
