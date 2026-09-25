@@ -295,6 +295,8 @@ code, kbd {
 }
 .nav a:hover { color: var(--text); }
 .top .btn { margin-left: auto; }
+.top .btn + .btn { margin-left: 0; }
+.btn .svg-i { width: 16px; height: 16px; fill: currentColor; flex: none; }
 
 /* ------------------------------------------------------------------- hero */
 
@@ -990,6 +992,8 @@ code, kbd {
   .band .logo-big { display: none; }
 }
 @media (max-width: 760px) {
+  .top .btn-discord .lbl { display: none; }
+  .top .btn-discord { padding: 6px 10px; }
   .trio { grid-template-columns: minmax(0, 1fr); }
   .trio > figure + figure { margin-top: 32px; }
 }
@@ -1003,6 +1007,7 @@ code, kbd {
   .band h2 { font-size: 33px; line-height: 38px; }
 }
 @media (max-width: 600px) {
+  .top .btn-discord { display: none; }
   :root { --gutter: 16px; }
   body { font-size: 16px; line-height: 26px; }
   .top-in { height: 56px; gap: 12px; }

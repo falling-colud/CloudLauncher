@@ -70,4 +70,5 @@ public static class Legal
     public const string TermsPath = "/terms";
     public const string PrivacyPath = "/privacy";
     public const string ContactEmail = "leon.raineri@gmail.com";
+    public const string DiscordUrl = "https://discord.gg/PU6HpxzJwW";
 }

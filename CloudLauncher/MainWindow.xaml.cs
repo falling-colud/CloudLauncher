@@ -58,12 +58,12 @@ public partial class MainWindow : Window, IDialogHost
     // Keep this in step with the sidebar in MainWindow.xaml and with NavLabelNames below.
     private static readonly string[] NavButtonNames =
         { "NavPacks", "NavWorlds", "NavMods", "NavResourcePacks", "NavShaders", "NavServers", "NavConfigs",
-          "NavStorage", "NavSharing", "NavAccount", "NavSettings", "NavDev" };
+          "NavStorage", "NavSharing", "NavDiscord", "NavAccount", "NavSettings", "NavDev" };
 
     private static readonly string[] NavLabelNames =
         { "NavPacksLabel", "NavWorldsLabel", "NavModsLabel", "NavResourcePacksLabel", "NavShadersLabel",
           "NavServersLabel", "NavConfigsLabel", "NavStorageLabel",
-          "NavSharingLabel", "NavAccountLabel", "NavSettingsLabel", "NavDevLabel" };
+          "NavSharingLabel", "NavDiscordLabel", "NavAccountLabel", "NavSettingsLabel", "NavDevLabel" };
 
     public MainWindow()
     {
@@ -882,6 +882,13 @@ public partial class MainWindow : Window, IDialogHost
     // ── sidebar nav clicks ───────────────────────────────────────────────────
 
     private void OnNavSharing(object sender, RoutedEventArgs e) => NavigateToSharing();
+
+    private void OnNavDiscord(object sender, RoutedEventArgs e)
+    {
+        // A link rather than a page, so it must not stay lit the way the page buttons do.
+        NavDiscord.IsChecked = false;
+        SafeLaunch.OpenUrl(CloudLauncher.Shared.Legal.DiscordUrl);
+    }
     private void OnNavPacks(object sender, RoutedEventArgs e)  => NavigateToPacks();
     private void OnNavWorlds(object sender, RoutedEventArgs e) => NavigateToWorlds();
     private void OnNavMods(object sender, RoutedEventArgs e)           => NavigateToMods();

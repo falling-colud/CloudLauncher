@@ -151,7 +151,7 @@ public static class Scenarios
                 Program.Pump(2500);
                 if (((Frame)shell.FindName("SideFrame")).Content is Page page
                     && Program.Find<ScrollViewer>(page).FirstOrDefault() is { } scroller
-                    && page.FindName("PixelFontOptions") is FrameworkElement options)
+                    && page.FindName(Environment.GetEnvironmentVariable("CL_SETTINGS_TARGET") is { Length: > 0 } t ? t : "PixelFontOptions") is FrameworkElement options)
                 {
                     options.BringIntoView();
                     Program.Pump(800);

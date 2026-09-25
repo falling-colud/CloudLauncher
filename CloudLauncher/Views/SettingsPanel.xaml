@@ -664,6 +664,9 @@
                     <WrapPanel Margin="0,14,0,0">
                         <Button x:Name="AboutWebsiteButton" Content="Website" Style="{StaticResource LinkButton}"
                                 Click="OnOpenWebsite" Margin="0,0,16,8"/>
+                        <Button x:Name="AboutDiscordButton" Content="Discord" Style="{StaticResource LinkButton}"
+                                Click="OnOpenDiscord" Margin="0,0,16,8"
+                                ToolTip="Join the CloudLauncher Discord for help, news and feedback"/>
                         <Button x:Name="AboutPrivacyButton" Content="Privacy" Style="{StaticResource LinkButton}"
                                 Click="OnOpenPrivacy" Margin="0,0,16,8"/>
                         <Button x:Name="AboutTermsButton" Content="Terms" Style="{StaticResource LinkButton}"

@@ -967,6 +967,8 @@ public partial class SettingsPanel : Page
 
     private void OnOpenWebsite(object sender, RoutedEventArgs e) => OpenInBrowser(WebsiteUrl);
 
+    private void OnOpenDiscord(object sender, RoutedEventArgs e) => OpenInBrowser(Legal.DiscordUrl);
+
     private void OnOpenPrivacy(object sender, RoutedEventArgs e) =>
         OpenInBrowser(App.State.Api.LegalPageUrl(Legal.PrivacyPath));
 
