@@ -508,6 +508,7 @@ kbd {
 .note::after { content: "note"; order: -1; color: var(--accent-text); font: 400 18px/27px var(--pixel); }
 .note p { margin: 0; }
 .note.wide { margin-top: 36px; max-width: 46em; }
+.hero .note { margin-top: 22px; max-width: 46em; }
 .tabwrap { min-width: 0; }
 .tabwrap .tabs { margin-top: 0; }
 
