@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using CloudLauncher.Server.Storage;
 using CloudLauncher.Shared;
 using Microsoft.AspNetCore.Authorization;
@@ -84,10 +85,29 @@ public class LauncherController(LauncherStore store) : ControllerBase
         return File(stream, "application/zip", name, enableRangeProcessing: true);
     }
 
-    /// <summary>Serves the Windows setup .exe for the website's Download button, at the top-level
-    /// <c>/download</c> path. 404 if the latest release was published without an installer.</summary>
+    /// <summary>The website's Download button, at the top-level <c>/download</c> path. Serves the web
+    /// installer when one is in the launcher root (web-installer.bin: a small setup .exe that
+    /// downloads the current full installer, checks it against the feed's hash and runs it; the same
+    /// bytes for every release, so SmartScreen reputation carries over), otherwise the full installer
+    /// as before. The stub goes out as CloudLauncher-Setup.exe, since it has no version of its own,
+    /// and uncached, so replacing or removing the file takes effect at once.</summary>
     [AllowAnonymous]
     [HttpGet("/download")]
+    public IActionResult WebsiteDownload()
+    {
+        var stub = store.OpenWebInstaller();
+        if (stub is null) return Installer();
+
+        Response.Headers.CacheControl = "no-store";
+        return File(stub, "application/octet-stream", "CloudLauncher-Setup.exe", enableRangeProcessing: true);
+    }
+
+    /// <summary>Serves the current release's full Windows setup .exe: the website's "full offline
+    /// installer" link and what the web installer fetches (and checks against the feed's
+    /// installerSha256). 404 if the latest release was published without an installer.</summary>
+    [AllowAnonymous]
+    [HttpGet("installer")]
+    [HttpGet("/download/full")]
     public IActionResult Installer()
     {
         var info = store.GetLatest();
@@ -98,12 +118,39 @@ public class LauncherController(LauncherStore store) : ControllerBase
             return NotFound();
         }
 
-        var name = string.IsNullOrWhiteSpace(info.InstallerFileName)
+        // Content-Disposition: attachment so browsers download rather than try to run/preview it.
+        return File(stream, "application/octet-stream", InstallerFileName(info), enableRangeProcessing: true);
+    }
+
+    /// <summary>The full installer of one version at an address whose meaning never changes:
+    /// <c>/launcher/installer/0.9.2</c> is either 0.9.2's setup .exe or a 404, so it can be cached
+    /// for good. Only the current release's installer is kept (a publish replaces installer.bin and
+    /// keeps no older one), so every version but the latest is a 404, not a different file.</summary>
+    /// <remarks>The version is only ever compared with the release's; it never becomes a path.</remarks>
+    [AllowAnonymous]
+    [HttpGet("installer/{version}")]
+    public IActionResult InstallerByVersion(string version)
+    {
+        if (!VersionPattern.IsMatch(version)) return NotFound();
+
+        var info = store.GetLatest();
+        if (info is null || !string.Equals(info.Version, version, StringComparison.Ordinal)) return NotFound();
+
+        var stream = store.OpenInstaller();
+        if (stream is null) return NotFound();
+
+        Response.Headers.CacheControl = "public, max-age=31536000, immutable";
+        return File(stream, "application/octet-stream", InstallerFileName(info), enableRangeProcessing: true);
+    }
+
+    /// <summary>1.2, 1.2.3 or 1.2.3.4: the shape a published version has (publish-client.py checks
+    /// the same) and the only shape the versioned installer route looks at.</summary>
+    private static readonly Regex VersionPattern = new(@"^[0-9]+(\.[0-9]+){1,3}$", RegexOptions.CultureInvariant);
+
+    private static string InstallerFileName(LauncherReleaseInfo info) =>
+        string.IsNullOrWhiteSpace(info.InstallerFileName)
             ? $"CloudLauncher-Setup-{info.Version}.exe"
             : info.InstallerFileName;
-        // Content-Disposition: attachment so browsers download rather than try to run/preview it.
-        return File(stream, "application/octet-stream", name, enableRangeProcessing: true);
-    }
 
     /// <summary>Publishes a build from an upload. The route only exists while
     /// <c>Launcher:AllowUpload</c> is on; otherwise it is a 404 before sign-in or the body is

@@ -26,6 +26,11 @@ public class LauncherStore(LauncherStoreOptions opts)
     private string PackagePath => Path.Combine(opts.RootPath, "package.bin");
     private string InstallerPath => Path.Combine(opts.RootPath, "installer.bin");
 
+    /// <summary>The web installer: a small setup .exe that downloads the current installer.bin and
+    /// runs it. Copied here by hand (installer/README-web-installer.md); a publish never writes it,
+    /// because it must keep the same bytes across releases for SmartScreen's sake.</summary>
+    private string WebInstallerPath => Path.Combine(opts.RootPath, "web-installer.bin");
+
     /// <summary>Packages stored by content as packages/{sha256}.bin (lowercase hex), so a launcher
     /// can fetch the build it verified even after package.bin has changed.</summary>
     private string PackagesDir => Path.Combine(opts.RootPath, "packages");
@@ -146,6 +151,16 @@ public class LauncherStore(LauncherStoreOptions opts)
         lock (_lock)
         {
             return File.Exists(InstallerPath) ? File.OpenRead(InstallerPath) : null;
+        }
+    }
+
+    /// <summary>Opens the web installer served to human downloaders in place of the full setup .exe,
+    /// or null when none has been put in place.</summary>
+    public Stream? OpenWebInstaller()
+    {
+        lock (_lock)
+        {
+            return File.Exists(WebInstallerPath) ? File.OpenRead(WebInstallerPath) : null;
         }
     }
 

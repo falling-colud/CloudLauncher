@@ -19,12 +19,13 @@ public sealed class DirectHttpGate(RequestDelegate next, AppOptions options)
 {
     private static readonly string[] AllowedPaths =
     {
-        "/launcher/latest", "/launcher/releases", "/launcher/download", "/download", "/health",
+        "/launcher/latest", "/launcher/releases", "/launcher/download", "/download", "/download/full", "/health",
         "/", "/index.html", "/site.css", "/site.js", "/favicon.ico", "/robots.txt",
         "/privacy", "/terms", "/privacy.html", "/terms.html",
     };
 
-    private static readonly string[] AllowedPrefixes = { "/fonts", "/img", "/.well-known" };
+    // /launcher/installer and /launcher/installer/<version>: the full setup .exe, part of the website.
+    private static readonly string[] AllowedPrefixes = { "/fonts", "/img", "/.well-known", "/launcher/installer" };
 
     private readonly bool _off = string.Equals(options.DirectHttp, AppOptions.DirectHttpFull, StringComparison.OrdinalIgnoreCase);
 
