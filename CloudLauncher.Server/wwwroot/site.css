@@ -1128,8 +1128,8 @@ kbd {
   .band .logo-big { display: none; }
 }
 @media (max-width: 760px) {
-  .top .btn-discord .lbl { display: none; }
-  .top .btn-discord { padding: 6px 10px; }
+  .top .btn-discord .lbl, .top .btn-github .lbl { display: none; }
+  .top .btn-discord, .top .btn-github { padding: 6px 10px; }
   .trio { grid-template-columns: minmax(0, 1fr); }
   .trio > figure + figure { margin-top: 32px; }
 }
@@ -1142,7 +1142,7 @@ kbd {
   .band { padding: 40px 28px; margin-top: 88px; }
 }
 @media (max-width: 600px) {
-  .top .btn-discord { display: none; }
+  .top .btn-discord, .top .btn-github { display: none; }
   :root { --gutter: 16px; }
   body { font-size: 16px; line-height: 26px; }
   .top-in { height: 56px; gap: 12px; }
