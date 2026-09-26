@@ -144,6 +144,12 @@ public class AuthController(
             "text/html");
     }
 
+    /// <summary>What the sign-in screen can offer here. The launcher hides Google sign-in unless this
+    /// says the server has it, instead of letting the button fail.</summary>
+    [HttpGet("options")]
+    public ActionResult<AuthOptionsResponse> Options() =>
+        Ok(new AuthOptionsResponse(google.IsConfigured, Legal.TermsVersion));
+
     /// <param name="acceptTerms">True when the launcher showed the terms and the user accepted them.
     /// Recorded only if this sign-in creates the account; older launchers leave it out.</param>
     /// <param name="termsVersion">The <see cref="Legal.TermsVersion"/> the launcher showed.</param>

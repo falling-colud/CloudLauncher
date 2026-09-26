@@ -181,12 +181,29 @@ public sealed class UpstreamGuard
 
     private const string KeyCacheKey = "upstream:curseforge-key";
 
+    /// <summary>The key the database gave last time it answered, so a database that is restarting
+    /// does not take the CurseForge proxy down with it.</summary>
+    private volatile string? _lastKnownKey;
+    private volatile bool _keyEverLoaded;
+
     /// <summary>The admin-configured CurseForge key, read from the database at most once a minute
-    /// instead of on every proxied call. <see cref="InvalidateKeys"/> is called when an admin changes it.</summary>
+    /// instead of on every proxied call. <see cref="InvalidateKeys"/> is called when an admin changes it.
+    /// While the database is not answering, the key it gave last time is used and asked for again on
+    /// the next call; only a server that has never read it fails the call.</summary>
     public async Task<string?> GetCurseForgeKeyAsync(Func<Task<string?>> load)
     {
         if (_cache.TryGetValue(KeyCacheKey, out string? cached)) return cached;
-        var fresh = await load();
+        string? fresh;
+        try
+        {
+            fresh = await load();
+        }
+        catch (Exception) when (_keyEverLoaded)
+        {
+            return _lastKnownKey;
+        }
+        _lastKnownKey = fresh;
+        _keyEverLoaded = true;
         _cache.Set(KeyCacheKey, fresh, new MemoryCacheEntryOptions
         {
             AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(1),

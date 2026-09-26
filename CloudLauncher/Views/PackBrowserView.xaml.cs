@@ -417,8 +417,8 @@ public partial class PackBrowserView : Page
         }
         catch (Exception ex)
         {
-            // Name the catalog that failed.
-            _state.Error($"{_activeChip.Label} did not answer.", ex);
+            // Name the catalog that failed, with the store's own calm sentence when it gave one.
+            _state.Error(StoreRequestException.PlainFor(ex) ?? $"{_activeChip.Label} did not answer.", ex);
             _hasMore = false;
         }
         finally

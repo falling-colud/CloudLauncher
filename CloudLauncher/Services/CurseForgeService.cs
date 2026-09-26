@@ -352,6 +352,11 @@ public sealed class CurseForgeService
         }
     }
 
+    /// <summary>CurseForge's release type (1 release, 2 beta, 3 alpha) as the launcher's channel word.
+    /// Anything unknown counts as alpha, the least stable.</summary>
+    public static string ReleaseChannelOf(int releaseType) =>
+        releaseType == 1 ? ModUpdateChannel.Release : releaseType == 2 ? ModUpdateChannel.Beta : ModUpdateChannel.Alpha;
+
     /// <summary>The newest file per release type (anything but release and beta counts as alpha) for
     /// one Minecraft version and loader, out of a mod's <see cref="GetLatestFileIndexesAsync">index</see>.
     /// Empty when the index says nothing about that pairing; the caller then asks about the mod on its
@@ -374,12 +379,24 @@ public sealed class CurseForgeService
             .ToList();
     }
 
+    /// <summary>Fingerprints per request (<c>POST /fingerprints</c>). CurseForge publishes no limit; a
+    /// thousand keeps a request to a few KB and its answer, which carries every matched file whole, to
+    /// a few MB, so a 2,000-mod pack is two round trips.</summary>
+    public const int FingerprintsPerRequest = 1000;
+
     public async Task<Dictionary<long, (ModSummary mod, ModVersion version)>> MatchFingerprintsAsync(
         IEnumerable<long> fingerprints, CancellationToken ct = default)
     {
         var distinct = fingerprints.Distinct().ToList();
-        if (distinct.Count == 0) return new();
+        var result = new Dictionary<long, (ModSummary, ModVersion)>();
+        foreach (var chunk in distinct.Chunk(FingerprintsPerRequest))
+            await MatchFingerprintChunkAsync(chunk, result, ct);
+        return result;
+    }
 
+    private async Task MatchFingerprintChunkAsync(long[] distinct, Dictionary<long, (ModSummary, ModVersion)> result,
+        CancellationToken ct)
+    {
         var body = new { fingerprints = distinct };
         using var resp = await ProxyPostJsonAsync("fingerprints", body, ct);
         // Throw instead of returning "no matches": this call is how the launcher recognises which jars
@@ -389,7 +406,6 @@ public sealed class CurseForgeService
             throw await CurseForgeRequestExceptionAsync("fingerprint match", resp, ct);
 
         var payload = await resp.Content.ReadFromJsonAsync<CfFingerprintResponse>(Json, ct);
-        var result = new Dictionary<long, (ModSummary, ModVersion)>();
         var exactFingerprints = payload?.Data?.ExactFingerprints ?? new();
         var requestedFingerprints = distinct.ToHashSet();
         var exactMatches = payload?.Data?.ExactMatches ?? new List<CfFingerprintMatch>();
@@ -431,7 +447,6 @@ public sealed class CurseForgeService
             foreach (var fingerprint in matchedFingerprints)
                 result[fingerprint] = (mod, version);
         }
-        return result;
     }
 
     // ── cross-store counterpart ─────────────────────────────────────────────────
@@ -500,42 +515,83 @@ public sealed class CurseForgeService
 
     // ── download URL ──────────────────────────────────────────────────────────
 
-    public async Task<string?> GetDownloadUrlAsync(int modId, int fileId, CancellationToken ct = default)
+    /// <summary>
+    /// The CDN link for a file that was listed without one (<c>GET /mods/{id}/files/{id}/download-url</c>).
+    /// Never empty: when CurseForge will not hand one out, which is the author's third-party
+    /// distribution opt-out far more often than anything else, this throws with the file's own
+    /// sentence naming the project, its page and the CurseForge app, so the caller can show it as is.
+    /// </summary>
+    /// <remarks>Only for a file whose listing carried no URL. The listing's URL is the same CDN link
+    /// and needs no extra request; see <see cref="ResolveDownloadUrlAsync"/>.</remarks>
+    public async Task<string> GetDownloadUrlAsync(int modId, int fileId, CancellationToken ct = default)
     {
         using var response = await ProxyGetAsync($"mods/{modId}/files/{fileId}/download-url", ct);
         if (!response.IsSuccessStatusCode)
         {
-            if (response.StatusCode is System.Net.HttpStatusCode.Forbidden
-                                    or System.Net.HttpStatusCode.Unauthorized
-                && await DistributionOptOutAsync(modId, ct) is { } project)
-                throw new HttpRequestException(
-                    $"{project.Name} can't be downloaded through the launcher: its author has turned off " +
-                    "third-party distribution on CurseForge, so the API refuses a download URL for it - " +
-                    "with any key. Download the file from its project page and add it to the pack by hand" +
-                    (project.WebsiteUrl is null ? "." : $": {project.WebsiteUrl}"),
-                    null, response.StatusCode);
+            if (response.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.Unauthorized
+                && await DistributionAsync(modId, ct) is { OptedOut: true } project)
+                throw NotDistributable(project.Name, project.WebsiteUrl, fileId, optedOut: true);
             throw await CurseForgeRequestExceptionAsync("download URL", response, ct);
         }
 
         var resp = await response.Content.ReadFromJsonAsync<JsonElement>(Json, ct);
-        return resp.ValueKind != JsonValueKind.Undefined && resp.TryGetProperty("data", out var data)
-            ? data.GetString() : null;
+        var url = resp.ValueKind != JsonValueKind.Undefined && resp.TryGetProperty("data", out var data)
+                  && data.ValueKind == JsonValueKind.String ? data.GetString() : null;
+        if (!string.IsNullOrWhiteSpace(url)) return url;
+
+        // A 200 with no link is the same opt-out, answered politely.
+        var facts = await DistributionAsync(modId, ct);
+        throw NotDistributable(facts?.Name ?? $"CurseForge project {modId}", facts?.WebsiteUrl, fileId,
+            optedOut: facts?.OptedOut == true);
     }
 
-    /// <summary>Names the project when CurseForge refuses its downloads because the author opted out
-    /// of third-party distribution (<c>allowModDistribution: false</c>), otherwise null.
+    /// <summary>
+    /// The CDN link for <paramref name="file"/> of <paramref name="version"/>: the one the listing
+    /// carried, else the one <see cref="GetDownloadUrlAsync"/> fetches. Modrinth files always carry
+    /// theirs. Throws, with the file's own sentence, for a file CurseForge will not hand out.
+    /// </summary>
+    public async Task<string> ResolveDownloadUrlAsync(ModSummary mod, ModVersion version, ModVersionFile file,
+        CancellationToken ct = default)
+    {
+        if (!string.IsNullOrWhiteSpace(file.DownloadUrl)) return file.DownloadUrl;
+        if (version.Source != ModSource.CurseForge)
+            throw new StoreRequestException("Modrinth", "download", StoreFailure.NotDistributable,
+                $"{mod.Name} has no download link for {file.Filename}. Get the file from its project page and add it by hand.",
+                System.Net.HttpStatusCode.NotFound);
+        if (!TryParseFileIds(mod, version, out var modId, out var fileId))
+            throw new StoreRequestException("CurseForge", "download", StoreFailure.Other,
+                $"The CurseForge file for {mod.Name} could not be identified, so it cannot be downloaded.",
+                System.Net.HttpStatusCode.NotFound);
+        return await GetDownloadUrlAsync(modId, fileId, ct);
+    }
+
+    /// <summary>The per-file sentence for a download CurseForge will not hand out.</summary>
+    private static StoreRequestException NotDistributable(string name, string? websiteUrl, int fileId, bool optedOut)
+    {
+        var page = websiteUrl is null ? "." : $": {websiteUrl}";
+        var plain = optedOut
+            ? $"{name} can't be downloaded through the launcher: its author turned off third-party downloads on " +
+              $"CurseForge, so only the CurseForge app can fetch it. Download the file from its project page and " +
+              $"add it to the pack by hand{page}"
+            : $"CurseForge has no download link for {name} (file {fileId}). Download the file from its project page " +
+              $"and add it to the pack by hand{page}";
+        return new StoreRequestException("CurseForge", "download", StoreFailure.NotDistributable, plain,
+            System.Net.HttpStatusCode.Forbidden);
+    }
+
+    /// <summary>Whether the project's author opted out of third-party distribution
+    /// (<c>allowModDistribution: false</c>), with the project's name and page; null when CurseForge
+    /// could not say.
     ///
     /// The opt-out and a rejected key both get a bare 403 from the download-URL endpoint, but need
     /// different fixes: download the file by hand, or fix the key. Asking the mod endpoint tells them
-    /// apart; if the key is the problem this call fails too and the caller reports the key.</summary>
-    private async Task<(string Name, string? WebsiteUrl)?> DistributionOptOutAsync(int modId, CancellationToken ct)
+    /// apart; if the key is the problem this call fails too and the caller reports the request.</summary>
+    private async Task<(string Name, string? WebsiteUrl, bool OptedOut)?> DistributionAsync(int modId, CancellationToken ct)
     {
         try
         {
             var mod = (await ProxyGetJsonAsync<CfModResponse>($"mods/{modId}", ct))?.Data;
-            return mod is null || mod.AllowModDistribution != false
-                ? null
-                : (mod.Name, mod.Links?.WebsiteUrl);
+            return mod is null ? null : (mod.Name, mod.Links?.WebsiteUrl, mod.AllowModDistribution == false);
         }
         catch { return null; }
     }
@@ -547,7 +603,6 @@ public sealed class CurseForgeService
         // CurseForge modpack files reference their mods in the manifest.json inside the zip
         // This returns the file IDs listed in the manifest
         var url = await GetDownloadUrlAsync(modId, fileId, ct);
-        if (url is null) return new();
 
         using var zip = new System.IO.Compression.ZipArchive(await DownloadHttp.GetStreamAsync(url, ct), System.IO.Compression.ZipArchiveMode.Read);
         var manifest = zip.GetEntry("manifest.json");
@@ -671,7 +726,7 @@ public sealed class CurseForgeService
         f.GameVersions?.ToArray() ?? Array.Empty<string>(),
         // Loaders are the entries that are not version numbers: "26.3" is a Minecraft version too.
         f.GameVersions?.Where(v => v.Length > 0 && !char.IsDigit(v[0])).ToArray() ?? Array.Empty<string>(),
-        f.ReleaseType == 1 ? "release" : f.ReleaseType == 2 ? "beta" : "alpha",
+        ReleaseChannelOf(f.ReleaseType),
         f.FileDate,
         f.DownloadCount,
         null,
@@ -708,92 +763,81 @@ public sealed class CurseForgeService
     private static string ToQueryString(IEnumerable<(string Name, string Value)> parameters) =>
         string.Join("&", parameters.Select(p => $"{Uri.EscapeDataString(p.Name)}={Uri.EscapeDataString(p.Value)}"));
 
-    /// <summary>The launcher server's own explanation of a failure, when the body is one of its JSON
-    /// error payloads. The server knows more (whether a key is configured, which upstream routes it
-    /// tried and how each was refused), so its wording wins when it has one.</summary>
-    private static string? ServerMessage(string body)
-    {
-        var trimmed = body?.TrimStart();
-        if (string.IsNullOrEmpty(trimmed) || trimmed[0] != '{') return null;
-        try
-        {
-            using var doc = JsonDocument.Parse(trimmed);
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
-            if (!doc.RootElement.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.String)
-                return null;
-            var text = error.GetString();
-            if (string.IsNullOrWhiteSpace(text)) return null;
-            if (doc.RootElement.TryGetProperty("detail", out var detail) &&
-                detail.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrWhiteSpace(detail.GetString()))
-                text += $" ({detail.GetString()})";
-            return text;
-        }
-        catch (JsonException) { return null; }
-    }
-
-    /// <summary>A one-line gist of an upstream error body. The CloudFront block page is ~900 bytes of
-    /// HTML, and pasting it whole into a message box buries the sentence that matters.</summary>
-    private static string? Gist(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body)) return null;
-        var text = System.Text.RegularExpressions.Regex.Replace(body, "<[^>]*>", " ");
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
-        if (text.Length == 0) return null;
-        return text.Length > 180 ? text[..180].TrimEnd() + "..." : text;
-    }
-
-    private static async Task<HttpRequestException> CurseForgeRequestExceptionAsync(
+    /// <summary>
+    /// What to tell the user about a failed call, after the waits <see cref="ApiClient.ProxyAsync"/>
+    /// already made. The launcher server's own answers carry a code and say what happened (which key,
+    /// whether a route was blocked), so their wording wins; a CurseForge answer passed through is
+    /// read by status.
+    /// </summary>
+    /// <remarks>The only answer that names an API key is the server's <c>own_key_rejected</c>, about the
+    /// key the user set themselves. A 401 or 403 on the shared key is reported as CurseForge refusing
+    /// the server: after the retries it is a throttle most of the time, and when it is the key, only
+    /// the admin can act on it (the server log says which).</remarks>
+    private static async Task<StoreRequestException> CurseForgeRequestExceptionAsync(
         string operation,
         HttpResponseMessage response,
         CancellationToken ct)
     {
+        const string store = "CurseForge";
         var body = await response.Content.ReadAsStringAsync(ct);
-        string message;
+        var status = response.StatusCode;
+        var (serverMessage, code) = StoreRequestException.ReadServerError(body);
 
-        if (ServerMessage(body) is { Length: > 0 } explained)
+        StoreRequestException Fail(StoreFailure failure, string plain, string? detail = null) =>
+            new(store, operation, failure, plain, status, detail);
+
+        switch (code)
         {
-            message = $"CurseForge {operation} failed: {explained}";
+            case "own_key_rejected":
+                return Fail(StoreFailure.KeyRejected, serverMessage
+                    ?? "CurseForge rejected the API key you set in Settings > Mod stores. Check it, or clear the box to go back to the launcher's shared key.");
+            case "key_not_configured":
+                return Fail(StoreFailure.KeyMissing, serverMessage
+                    ?? "The launcher server has no CurseForge key configured yet. You can set your own in Settings > Mod stores.");
+            case "upstream_blocked":
+                return Fail(StoreFailure.Blocked, serverMessage
+                    ?? "CurseForge is refusing requests from the launcher server right now. Try again later.");
+            case "upstream_unreachable":
+                return Fail(StoreFailure.Unreachable, serverMessage ?? StoreRequestException.UnreachableSentence(store));
+            case "upstream_rate_limited" or "too_many_requests":
+                return Fail(StoreFailure.Busy, StoreRequestException.BusySentence(store), serverMessage);
+            case "db_unavailable":
+                return Fail(StoreFailure.Unreachable, "The launcher server is restarting. Try again in a moment.");
+            case "not_found":
+                return Fail(StoreFailure.Other, "The launcher server does not forward that request. Update the launcher, or the server.");
+            case not null:
+                return Fail(StoreFailure.Other, serverMessage ?? $"The launcher server refused the request (HTTP {(int)status}).");
         }
-        else if (UpstreamEdge.IsBlockPage(body))
+
+        if (UpstreamEdge.IsBlockPage(body))
         {
             // Only reached when a block page arrives unproxied (an older server, or bypassed routing).
             // Quote the CloudFront request id instead of the page: CurseForge support needs it to
             // unblock the address.
             var id = UpstreamEdge.RequestId(body);
-            message = $"CurseForge {operation} failed: CurseForge's CDN is blocking the launcher server's " +
-                      "address, so the request never reached the API. This is not the API key - an admin " +
-                      "needs that address unblocked, or CurseForge traffic routed via another host " +
-                      "(set Upstream:curseforge on the server; see deploy/UPSTREAM-ROUTING.md)." +
-                      (id is null ? "" : $" (CloudFront request {id})");
-        }
-        else
-        {
-            // CurseForge answers a burst of requests with a fast, bare 403 from its edge. A rejected key
-            // gets the same status but says so in the body. One needs a pause, the other an admin.
-            var keyRejected = body?.Contains("API Key", StringComparison.OrdinalIgnoreCase) == true
-                              || body?.Contains("api key", StringComparison.OrdinalIgnoreCase) == true;
-            message = response.StatusCode switch
-            {
-                System.Net.HttpStatusCode.ServiceUnavailable =>
-                    $"CurseForge {operation} failed: the server has no CurseForge API key configured.",
-                System.Net.HttpStatusCode.TooManyRequests =>
-                    $"CurseForge {operation} failed: CurseForge is rate-limiting the launcher server " +
-                    "(too many requests in a short time). Wait a minute and try again.",
-                System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden when keyRejected =>
-                    $"CurseForge {operation} failed: the server API key was rejected. An admin must update it in the dev menu.",
-                System.Net.HttpStatusCode.Forbidden =>
-                    $"CurseForge {operation} failed: CurseForge refused the request (HTTP 403). This is usually a " +
-                    "temporary rate limit after a burst of requests from the launcher server - wait a minute and try again.",
-                System.Net.HttpStatusCode.Unauthorized =>
-                    $"CurseForge {operation} failed: the server API key was rejected. An admin must update it in the dev menu.",
-                _ => $"CurseForge {operation} failed: {(int)response.StatusCode} {response.ReasonPhrase}"
-            };
-            if (Gist(body ?? "") is { } gist && response.StatusCode is not (System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests))
-                message += $" ({gist})";
+            return Fail(StoreFailure.Blocked,
+                "CurseForge's CDN is blocking the launcher server's address, so the request never reached the API. " +
+                "An admin needs that address unblocked, or CurseForge traffic routed via another host " +
+                "(set Upstream:curseforge on the server; see deploy/UPSTREAM-ROUTING.md).",
+                id is null ? null : $"CloudFront request {id}");
         }
 
-        return new HttpRequestException(message, null, response.StatusCode);
+        return status switch
+        {
+            System.Net.HttpStatusCode.TooManyRequests =>
+                Fail(StoreFailure.Busy, StoreRequestException.BusySentence(store)),
+            System.Net.HttpStatusCode.BadGateway or System.Net.HttpStatusCode.ServiceUnavailable
+                or System.Net.HttpStatusCode.GatewayTimeout =>
+                Fail(StoreFailure.Unreachable, StoreRequestException.UnreachableSentence(store)),
+            System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden =>
+                Fail(StoreFailure.Refused,
+                    $"CurseForge is refusing the launcher server's requests right now (HTTP {(int)status}). Try again " +
+                    "in a minute; if it keeps happening, tell whoever runs the launcher server."),
+            System.Net.HttpStatusCode.NotFound =>
+                Fail(StoreFailure.NotFound, "CurseForge does not have that any more."),
+            _ => Fail(StoreFailure.Other, $"CurseForge answered with an error (HTTP {(int)status}).",
+                serverMessage ?? StoreRequestException.Gist(body))
+        };
     }
 
     private static ModProjectDetail EmptyDetail(string? description = null) => new(

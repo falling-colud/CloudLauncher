@@ -40,9 +40,25 @@ public enum ProxyPacing
     Default,
 
     /// <summary>A one-mod-at-a-time request made by an update check, paced by
-    /// <see cref="AppSettings.ModUpdateChecksPerSecond"/> and read live, so moving the setting during
-    /// a check changes the pace of the rest of it. Searches, pages and downloads never use it.</summary>
+    /// <see cref="AppSettings.ModUpdateChecksPerSecond"/> as one budget across both stores and read
+    /// live, so moving the setting during a check changes the pace of the rest of it. Searches, pages
+    /// and downloads never use it.</summary>
     UpdateCheck
+}
+
+/// <summary>A store call is waiting to be retried: the store, or the launcher server in front of it,
+/// asked for a pause. Raised by <see cref="ApiClient.StoreWaiting"/> so a page can say so.</summary>
+/// <param name="Store">"CurseForge" or "Modrinth".</param>
+/// <param name="Delay">How long the call waits before its next attempt.</param>
+/// <param name="Attempt">The attempt that just failed, counted from one.</param>
+/// <param name="Attempts">How many attempts the call gets in all.</param>
+public readonly record struct StoreWait(string Store, TimeSpan Delay, int Attempt, int Attempts)
+{
+    /// <summary>"CurseForge is busy, trying again..." with the wait named when it is long enough to
+    /// notice.</summary>
+    public string Describe() => Delay < TimeSpan.FromSeconds(4)
+        ? $"{Store} is busy, trying again..."
+        : $"{Store} is busy, trying again in {(int)Math.Round(Delay.TotalSeconds)} s...";
 }
 
 public sealed partial class ApiClient
@@ -1248,10 +1264,11 @@ public sealed partial class ApiClient
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PlatformPace> _pace =
         new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The pace of the one-mod-at-a-time part of an update check, per platform. Rebuilt
-    /// whenever <see cref="AppSettings.ModUpdateChecksPerSecond"/> no longer matches it.</summary>
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PlatformPace> _updateCheckPace =
-        new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The pace of the one-mod-at-a-time part of an update check: one budget across both
+    /// stores, which is what <see cref="AppSettings.ModUpdateChecksPerSecond"/> promises and what
+    /// keeps a check under the launcher server's per-account rate. Rebuilt whenever the setting no
+    /// longer matches it.</summary>
+    private PlatformPace? _updateCheckPace;
 
     /// <summary>One pause per route, shared by every pace on it: the launcher server counts update
     /// checks and browsing against the same upstream limit. The direct CurseForge route has its own
@@ -1259,10 +1276,38 @@ public sealed partial class ApiClient
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, PlatformHold> _holds =
         new(StringComparer.OrdinalIgnoreCase);
 
+    private PlatformHold HoldFor(string route) => _holds.GetOrAdd(route, _ => new PlatformHold());
+
+    /// <summary>Retries for a store call that was told to wait (see <see cref="IsWorthRetrying"/>):
+    /// three, so a browse page answers within half a minute or so and then says the store is busy.</summary>
+    private const int DefaultRetries = 3;
+
     /// <summary>Retries for a paced update-check request after "too many". More than the usual three:
-    /// it's background work, so waiting out a few more pauses (at most 20 s each) beats reporting the
+    /// it's background work, so waiting out a few more pauses (at most 30 s each) beats reporting the
     /// mod as unchecked.</summary>
     private const int UpdateCheckRetries = 8;
+
+    /// <summary>Retries for a CurseForge 403 on the shared key, whatever the pacing. It is usually
+    /// CurseForge throttling the server for a while, which a few short waits ride out; when it is a
+    /// key that stopped working, no number of retries helps, so the count stays small.</summary>
+    private const int RefusedRetries = 3;
+
+    /// <summary>Longest pause a Retry-After header can ask for. Anything longer is the store or server
+    /// being cautious, and a page cannot sit on "trying again" for minutes.</summary>
+    private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
+
+    private static int RetriesFor(ProxyPacing pacing) => pacing == ProxyPacing.UpdateCheck ? UpdateCheckRetries : DefaultRetries;
+
+    /// <summary>
+    /// Raised whenever a store call is about to wait before another attempt, from whichever thread made
+    /// the call. Subscribe through <see cref="AppState.StoreWaiting"/> for a UI-thread version.
+    /// </summary>
+    public event Action<StoreWait>? StoreWaiting;
+
+    private static string DisplayName(string platform) =>
+        platform.Equals("modrinth", StringComparison.OrdinalIgnoreCase) ? "Modrinth"
+        : platform.Equals("curseforge", StringComparison.OrdinalIgnoreCase) ? "CurseForge"
+        : "The store";
 
     /// <summary>Minimum gap between two sends on a route from this client. Modrinth allows 300 a
     /// minute per address (shared by everyone behind the server), so ~4.5/s; CurseForge publishes no
@@ -1281,31 +1326,31 @@ public sealed partial class ApiClient
         route.Equals(DirectRouteKey, StringComparison.OrdinalIgnoreCase) ? DirectInFlight : MaxInFlightPerPlatform;
 
     /// <summary>How many update-check requests may be in flight at once at <paramref name="perSecond"/>
-    /// a second: enough that a slow answer does not stall the pace, never fewer than the route's
-    /// default pace allows, never more than sixteen.</summary>
-    private static int UpdateCheckInFlight(int perSecond, int floor) => Math.Clamp(perSecond / 5, floor, 16);
+    /// a second: enough that a slow answer does not stall the pace, never fewer than a route's default
+    /// pace allows, never more than eight. With the default pace's three, a route stays inside the
+    /// twelve places the launcher server lets one account hold in a store's queue.</summary>
+    private static int UpdateCheckInFlight(int perSecond) => Math.Clamp(perSecond / 5, MaxInFlightPerPlatform, 8);
 
     /// <summary>The pace a request of <paramref name="pacing"/> keeps on <paramref name="route"/>
-    /// (a platform through the proxy, or <see cref="DirectRouteKey"/>).</summary>
+    /// (a platform through the proxy, or <see cref="DirectRouteKey"/>). Pauses are kept apart, per
+    /// route, in <see cref="HoldFor"/>.</summary>
     /// <remarks>
     /// The update-check rate can change while a check runs, and a <see cref="SemaphoreSlim"/> can't be
     /// resized, so a changed rate gets a new pace object; requests already waiting finish on the old
-    /// one. Both share the route's <see cref="PlatformHold"/>, so a pause survives the swap.
+    /// one. The route's <see cref="PlatformHold"/> is separate, so a pause survives the swap.
     /// </remarks>
     private PlatformPace PaceFor(string route, ProxyPacing pacing)
     {
-        var hold = _holds.GetOrAdd(route, _ => new PlatformHold());
         if (pacing != ProxyPacing.UpdateCheck)
-            return _pace.GetOrAdd(route, r => new PlatformPace(SpacingFor(r), InFlightFor(r), hold));
+            return _pace.GetOrAdd(route, r => new PlatformPace(SpacingFor(r), InFlightFor(r)));
 
         var rate = _settings.EffectiveModUpdateChecksPerSecond;
         while (true)
         {
-            var found = _updateCheckPace.TryGetValue(route, out var current);
-            if (found && current!.Rate == rate) return current;
-            var fresh = new PlatformPace(TimeSpan.FromSeconds(1.0 / rate), UpdateCheckInFlight(rate, InFlightFor(route)), hold, rate);
-            if (found ? _updateCheckPace.TryUpdate(route, fresh, current!) : _updateCheckPace.TryAdd(route, fresh))
-                return fresh;
+            var current = Volatile.Read(ref _updateCheckPace);
+            if (current is not null && current.Rate == rate) return current;
+            var fresh = new PlatformPace(TimeSpan.FromSeconds(1.0 / rate), UpdateCheckInFlight(rate), rate);
+            if (Interlocked.CompareExchange(ref _updateCheckPace, fresh, current) == current) return fresh;
         }
     }
 
@@ -1327,22 +1372,22 @@ public sealed partial class ApiClient
         }
     }
 
-    private sealed class PlatformPace(TimeSpan spacing, int inFlight, PlatformHold hold, int rate = 0)
+    private sealed class PlatformPace(TimeSpan spacing, int inFlight, int rate = 0)
     {
         private TimeSpan MinSpacing { get; } = spacing;
 
         /// <summary>The update checks per second this pace was built for; 0 for the default pace.</summary>
         public int Rate { get; } = rate;
 
-        public PlatformHold Hold { get; } = hold;
         public readonly SemaphoreSlim Gate = new(inFlight, inFlight);
         private readonly object _lock = new();
         private DateTimeOffset _nextSlot = DateTimeOffset.MinValue;
 
-        /// <summary>Reserves the next send slot and returns how long to wait for it.</summary>
-        public TimeSpan Reserve()
+        /// <summary>Reserves the next send slot, no earlier than <paramref name="hold"/> allows, and
+        /// returns how long to wait for it.</summary>
+        public TimeSpan Reserve(PlatformHold hold)
         {
-            var held = Hold.Until;
+            var held = hold.Until;
             lock (_lock)
             {
                 var now = DateTimeOffset.UtcNow;
@@ -1356,16 +1401,16 @@ public sealed partial class ApiClient
 
     /// <summary>Waits for a send slot and an in-flight place, and returns holding the place (release
     /// <see cref="PlatformPace.Gate"/> after sending).</summary>
-    /// <remarks>The platform's pause is checked again after each wait. Otherwise every request queued
+    /// <remarks>The route's pause is checked again after each wait. Otherwise every request queued
     /// behind a "too many" would still go out on schedule, straight into the pause, and each refusal
     /// would start another one.</remarks>
-    private static async Task EnterAsync(PlatformPace pace, CancellationToken ct)
+    private static async Task EnterAsync(PlatformPace pace, PlatformHold hold, CancellationToken ct)
     {
         while (true)
         {
-            var wait = pace.Reserve();
+            var wait = pace.Reserve(hold);
             if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
-            var held = pace.Hold.Until - DateTimeOffset.UtcNow;
+            var held = hold.Until - DateTimeOffset.UtcNow;
             if (held > TimeSpan.Zero)
             {
                 await Task.Delay(held, ct);
@@ -1373,7 +1418,7 @@ public sealed partial class ApiClient
             }
 
             await pace.Gate.WaitAsync(ct);
-            if (pace.Hold.Until <= DateTimeOffset.UtcNow) return;
+            if (hold.Until <= DateTimeOffset.UtcNow) return;
             pace.Gate.Release(); // a pause began while this request waited for a place
         }
     }
@@ -1425,14 +1470,15 @@ public sealed partial class ApiClient
 
         await EnsureTokenAsync(ct);
         var url = $"proxy/{platform}/{pathAndQuery.TrimStart('/')}";
-        var retries = pacing == ProxyPacing.UpdateCheck ? UpdateCheckRetries : 3;
+        var retries = RetriesFor(pacing);
+        var hold = HoldFor(platform);
 
         for (var attempt = 0; ; attempt++)
         {
             // Looked up per attempt: the update-check rate is live, so a retry after a pause is sent
             // at whatever the setting says now.
             var pace = PaceFor(platform, pacing);
-            await EnterAsync(pace, ct);
+            await EnterAsync(pace, hold, ct);
             HttpResponseMessage resp;
             try
             {
@@ -1448,26 +1494,82 @@ public sealed partial class ApiClient
             }
             finally { pace.Gate.Release(); }
 
-            if (resp.StatusCode != HttpStatusCode.TooManyRequests || attempt >= retries)
+            if (resp.IsSuccessStatusCode) return resp;
+
+            // Answers worth waiting out: a "too many" from the server or the store, the store not
+            // answering, and a CurseForge 403 on the shared key. Anything else, and the last attempt,
+            // go back to the caller as they are.
+            var refused = resp.StatusCode == HttpStatusCode.Forbidden;
+            var allowed = refused ? Math.Min(retries, RefusedRetries) : retries;
+            if (attempt >= allowed || !await IsWorthRetryingAsync(resp, platform, pathAndQuery, ct))
                 return resp;
 
             var delay = BackoffFor(resp, attempt);
-            pace.Hold.Extend(delay);
+            hold.Extend(delay);
+            var status = (int)resp.StatusCode;
             resp.Dispose();
-            AppLog.Log("proxy", $"{platform} answered 429 for {pathAndQuery}; pausing {delay.TotalSeconds:0}s (attempt {attempt + 1}).");
+            AppLog.Log("proxy", $"{platform} answered {status} for {pathAndQuery}; trying again in {delay.TotalSeconds:0}s (attempt {attempt + 1} of {allowed + 1}).");
+            StoreWaiting?.Invoke(new StoreWait(DisplayName(platform), delay, attempt + 1, allowed + 1));
             await Task.Delay(delay, ct);
         }
     }
 
-    /// <summary>How long to wait after a 429: the store's Retry-After when it sends one, otherwise
-    /// 2, 4, 8 s by attempt; never under a second, never over twenty.</summary>
-    private static TimeSpan BackoffFor(HttpResponseMessage resp, int attempt)
+    /// <summary>
+    /// True for an answer that a short wait may change: a 429 from anyone; a 502, 503 or 504 that is
+    /// the launcher server's database restarting, the store not answering, or nginx between them
+    /// restarting (never the server saying it has no CurseForge key, or that the store's CDN blocks
+    /// it); and a bare CurseForge 403, which is its throttle far more often than a dead key. Not a
+    /// download-URL 403, which is the author's opt-out and is read by the caller.
+    /// </summary>
+    private static async Task<bool> IsWorthRetryingAsync(HttpResponseMessage resp, string platform, string pathAndQuery, CancellationToken ct)
     {
-        var delay = resp.Headers.RetryAfter?.Delta
-                    ?? (resp.Headers.RetryAfter?.Date is { } at ? at - DateTimeOffset.UtcNow : (TimeSpan?)null)
+        switch (resp.StatusCode)
+        {
+            case HttpStatusCode.TooManyRequests:
+                return true;
+            case HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout:
+                return await ServerCodeAsync(resp, ct) is not ("key_not_configured" or "upstream_blocked");
+            case HttpStatusCode.Forbidden:
+                // Only a CurseForge answer passed through as it came; the server's own refusals carry
+                // a code and mean what they say.
+                return platform.Equals("curseforge", StringComparison.OrdinalIgnoreCase)
+                       && !IsDownloadUrlRequest(pathAndQuery)
+                       && await ServerCodeAsync(resp, ct) is null;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>The <c>code</c> of the launcher server's JSON error shape, or null when the body is
+    /// something else (a store's own error, an HTML page from nginx, nothing). Reading it buffers
+    /// the body, so the caller can still read it afterwards.</summary>
+    private static async Task<string?> ServerCodeAsync(HttpResponseMessage resp, CancellationToken ct)
+    {
+        try
+        {
+            var body = await resp.Content.ReadAsStringAsync(ct);
+            var trimmed = body.AsSpan().TrimStart();
+            if (trimmed.Length == 0 || trimmed[0] != '{') return null;
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            return doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                   && doc.RootElement.TryGetProperty("code", out var code)
+                   && code.ValueKind == System.Text.Json.JsonValueKind.String
+                ? code.GetString()
+                : null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { return null; }
+    }
+
+    /// <summary>How long to wait before the next attempt: the Retry-After when the answer carries one,
+    /// otherwise 2, 4, 8 s by attempt; never under a second, never over <see cref="MaxBackoff"/>.</summary>
+    private static TimeSpan BackoffFor(HttpResponseMessage? resp, int attempt)
+    {
+        var delay = resp?.Headers.RetryAfter?.Delta
+                    ?? (resp?.Headers.RetryAfter?.Date is { } at ? at - DateTimeOffset.UtcNow : (TimeSpan?)null)
                     ?? TimeSpan.FromSeconds(2 * Math.Pow(2, attempt));
         if (delay < TimeSpan.FromSeconds(1)) delay = TimeSpan.FromSeconds(1);
-        if (delay > TimeSpan.FromSeconds(20)) delay = TimeSpan.FromSeconds(20);
+        if (delay > MaxBackoff) delay = MaxBackoff;
         return delay;
     }
 
@@ -1547,8 +1649,9 @@ public sealed partial class ApiClient
     /// <remarks>
     /// <para>The proxy passes CurseForge's body through except for four answers, reproduced here in its
     /// JSON shape (<c>{"error", "code"}</c>): a 429 that outlasts the retries, a throttling 403, a
-    /// rejected key, and CurseForge not answering. The last is a synthetic 502 rather than a throw,
-    /// since browse pages treat a throw with no status code as "you are offline".</para>
+    /// rejected key, and CurseForge not answering (a transport failure or a 502, 503 or 504 that
+    /// outlasts the retries). The last is a synthetic 502 rather than a throw, since browse pages
+    /// treat a throw with no status code as "you are offline".</para>
     /// <para>CurseForge throttles bursts with bare, fast 403s, the same status a rejected key gets. A 403
     /// within three minutes of a success on this route is treated as throttling (pause and retry);
     /// otherwise it's the key, which only the user can fix.</para>
@@ -1558,7 +1661,8 @@ public sealed partial class ApiClient
         System.Net.Http.Headers.MediaTypeHeaderValue? bodyType, CancellationToken ct, ProxyPacing pacing)
     {
         var url = $"{DirectCurseForgeBaseUrl}/{pathAndQuery.TrimStart('/')}";
-        var retries = pacing == ProxyPacing.UpdateCheck ? UpdateCheckRetries : 3;
+        var retries = RetriesFor(pacing);
+        var hold = HoldFor(DirectRouteKey);
         if (Interlocked.Exchange(ref _directAnnounced, 1) == 0)
             AppLog.Log("curseforge", "Talking to CurseForge directly with the key set in Settings > Mod stores; " +
                                      "the launcher server's queue is not used for CurseForge.");
@@ -1566,8 +1670,9 @@ public sealed partial class ApiClient
         for (var attempt = 0; ; attempt++)
         {
             var pace = PaceFor(DirectRouteKey, pacing);
-            await EnterAsync(pace, ct);
+            await EnterAsync(pace, hold, ct);
             HttpResponseMessage resp;
+            var held = true;
             try
             {
                 using var req = new HttpRequestMessage(method, url);
@@ -1583,11 +1688,24 @@ public sealed partial class ApiClient
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex) when (Connectivity.DescribeTransportFailure(ex, ct) is { } why)
             {
-                AppLog.Log("curseforge", $"CurseForge did not answer {method} {pathAndQuery}: {why}.");
-                return Synthetic(HttpStatusCode.BadGateway,
-                    $"{{\"error\":\"CurseForge did not answer ({JsonText(why)}).\",\"code\":\"upstream_unreachable\"}}");
+                // A blip on the way to CurseForge gets the same short waits as a 429 before it is
+                // reported, so a dropped connection mid-check does not fail the mod outright.
+                if (attempt >= retries)
+                {
+                    AppLog.Log("curseforge", $"CurseForge did not answer {method} {pathAndQuery}: {why}.");
+                    return Synthetic(HttpStatusCode.BadGateway,
+                        $"{{\"error\":\"CurseForge did not answer ({JsonText(why)}).\",\"code\":\"upstream_unreachable\"}}");
+                }
+                // The place goes back before the wait, so a pause does not hold one of the route's few.
+                pace.Gate.Release();
+                held = false;
+                await WaitBeforeRetryAsync(hold, BackoffFor(null, attempt), attempt, retries, $"did not answer ({why})", pathAndQuery, ct);
+                continue;
             }
-            finally { pace.Gate.Release(); }
+            finally
+            {
+                if (held) pace.Gate.Release();
+            }
 
             if (resp.IsSuccessStatusCode)
             {
@@ -1603,9 +1721,19 @@ public sealed partial class ApiClient
                     return RateLimited(delay,
                         "CurseForge is rate-limiting requests made with your API key (too many in a short time). " +
                         "Try again in a minute.");
-                pace.Hold.Extend(delay);
-                AppLog.Log("curseforge", $"CurseForge answered 429 for {pathAndQuery}; pausing {delay.TotalSeconds:0}s (attempt {attempt + 1}).");
-                await Task.Delay(delay, ct);
+                await WaitBeforeRetryAsync(hold, delay, attempt, retries, "answered 429", pathAndQuery, ct);
+                continue;
+            }
+
+            if (resp.StatusCode is HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+            {
+                var delay = BackoffFor(resp, attempt);
+                var status = (int)resp.StatusCode;
+                resp.Dispose();
+                if (attempt >= retries)
+                    return Synthetic(HttpStatusCode.BadGateway,
+                        $"{{\"error\":\"CurseForge is not answering right now (HTTP {status}). Try again in a minute.\",\"code\":\"upstream_unreachable\"}}");
+                await WaitBeforeRetryAsync(hold, delay, attempt, retries, $"answered {status}", pathAndQuery, ct);
                 continue;
             }
 
@@ -1616,10 +1744,8 @@ public sealed partial class ApiClient
                     return RateLimited(DirectThrottlePause,
                         "CurseForge is temporarily refusing requests made with your API key (too many in a short " +
                         "time). This is not the key itself. Try again in a minute.");
-                pace.Hold.Extend(DirectThrottlePause);
-                AppLog.Log("curseforge", $"CurseForge answered 403 for {pathAndQuery} while the key was working minutes ago; " +
-                                         $"treating it as throttling and pausing {DirectThrottlePause.TotalSeconds:0}s (attempt {attempt + 1}).");
-                await Task.Delay(DirectThrottlePause, ct);
+                await WaitBeforeRetryAsync(hold, DirectThrottlePause, attempt, retries,
+                    "answered 403 while the key was working minutes ago; treating it as throttling and", pathAndQuery, ct);
                 continue;
             }
 
@@ -1635,6 +1761,17 @@ public sealed partial class ApiClient
 
             return resp; // anything else CurseForge said (404, 400, 500...) is the caller's to read, as through the proxy
         }
+    }
+
+    /// <summary>Pauses the direct route for <paramref name="delay"/>, says so in the log and to any
+    /// page listening, and waits it out.</summary>
+    private async Task WaitBeforeRetryAsync(PlatformHold hold, TimeSpan delay, int attempt, int retries,
+        string what, string pathAndQuery, CancellationToken ct)
+    {
+        hold.Extend(delay);
+        AppLog.Log("curseforge", $"CurseForge {what} for {pathAndQuery}; trying again in {delay.TotalSeconds:0}s (attempt {attempt + 1} of {retries + 1}).");
+        StoreWaiting?.Invoke(new StoreWait("CurseForge", delay, attempt + 1, retries + 1));
+        await Task.Delay(delay, ct);
     }
 
     /// <summary>A 429 in the proxy's JSON error shape, with the Retry-After the client honours.</summary>

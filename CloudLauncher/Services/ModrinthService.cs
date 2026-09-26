@@ -287,8 +287,7 @@ public sealed class ModrinthService
         using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Post, "version_files/update",
             JsonContent.Create(body, options: Json), ct);
         if (!resp.IsSuccessStatusCode)
-            throw new HttpRequestException(
-                $"Modrinth update lookup failed: {await DescribeFailureAsync(resp, ct)}", null, resp.StatusCode);
+            throw await ModrinthRequestExceptionAsync("update lookup", resp, ct);
 
         await using var stream = await resp.Content.ReadAsStreamAsync(ct);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
@@ -329,39 +328,54 @@ public sealed class ModrinthService
     {
         using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Get, pathAndQuery, null, ct, pacing);
         if (!resp.IsSuccessStatusCode)
-            throw new HttpRequestException(
-                $"Modrinth {operation} failed: {await DescribeFailureAsync(resp, ct)}", null, resp.StatusCode);
+            throw await ModrinthRequestExceptionAsync(operation, resp, ct);
         return await resp.Content.ReadFromJsonAsync<T>(Json, ct);
     }
 
-    /// <summary>A readable reason for a failed Modrinth call. The launcher server explains its own
-    /// refusals (rate limiting) as <c>{"error": sentence, "code": ...}</c>; Modrinth itself answers
-    /// <c>{"error": code, "description": sentence}</c>.</summary>
-    private static async Task<string> DescribeFailureAsync(HttpResponseMessage resp, CancellationToken ct)
+    /// <summary>
+    /// What to tell the user about a failed call, after the waits <see cref="ApiClient.ProxyAsync"/>
+    /// already made. The launcher server explains its own refusals as <c>{"error": sentence, "code":
+    /// ...}</c>; Modrinth itself answers <c>{"error": code, "description": sentence}</c>, which goes
+    /// into the log line, not the status line.
+    /// </summary>
+    private static async Task<StoreRequestException> ModrinthRequestExceptionAsync(string operation,
+        HttpResponseMessage resp, CancellationToken ct)
     {
-        try
-        {
-            var body = (await resp.Content.ReadAsStringAsync(ct)).TrimStart();
-            if (body.StartsWith('{'))
-            {
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-                if (root.TryGetProperty("code", out _) && root.TryGetProperty("error", out var serverError)
-                    && serverError.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(serverError.GetString()))
-                    return serverError.GetString()!;
-                if (root.TryGetProperty("description", out var description)
-                    && description.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(description.GetString()))
-                    return description.GetString()!;
-            }
-        }
-        catch { /* fall through to the status */ }
+        const string store = "Modrinth";
+        string? body = null;
+        try { body = await resp.Content.ReadAsStringAsync(ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch { /* the status still says enough */ }
+        var status = resp.StatusCode;
+        var (serverMessage, code) = StoreRequestException.ReadServerError(body);
 
-        return resp.StatusCode switch
+        StoreRequestException Fail(StoreFailure failure, string plain, string? detail = null) =>
+            new(store, operation, failure, plain, status, detail);
+
+        switch (code)
         {
-            HttpStatusCode.TooManyRequests =>
-                "Modrinth is rate-limiting the launcher server (too many requests). Wait a minute and try again.",
-            HttpStatusCode.NotFound => "the project no longer exists on Modrinth.",
-            _ => $"{(int)resp.StatusCode} {resp.ReasonPhrase}"
+            case "upstream_rate_limited" or "too_many_requests":
+                return Fail(StoreFailure.Busy, StoreRequestException.BusySentence(store), serverMessage);
+            case "upstream_blocked":
+                return Fail(StoreFailure.Blocked, serverMessage ?? "Modrinth is refusing requests from the launcher server right now. Try again later.");
+            case "upstream_unreachable":
+                return Fail(StoreFailure.Unreachable, serverMessage ?? StoreRequestException.UnreachableSentence(store));
+            case "db_unavailable":
+                return Fail(StoreFailure.Unreachable, "The launcher server is restarting. Try again in a moment.");
+            case "not_found":
+                return Fail(StoreFailure.Other, "The launcher server does not forward that request. Update the launcher, or the server.");
+            case not null:
+                return Fail(StoreFailure.Other, serverMessage ?? $"The launcher server refused the request (HTTP {(int)status}).");
+        }
+
+        return status switch
+        {
+            HttpStatusCode.TooManyRequests => Fail(StoreFailure.Busy, StoreRequestException.BusySentence(store), serverMessage),
+            HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout =>
+                Fail(StoreFailure.Unreachable, StoreRequestException.UnreachableSentence(store), serverMessage),
+            HttpStatusCode.NotFound => Fail(StoreFailure.NotFound, "The project no longer exists on Modrinth.", serverMessage),
+            _ => Fail(StoreFailure.Other, $"Modrinth answered with an error (HTTP {(int)status}).",
+                serverMessage ?? StoreRequestException.Gist(body))
         };
     }
 
@@ -396,21 +410,34 @@ public sealed class ModrinthService
 
     // ── fingerprint matching ──────────────────────────────────────────────────
 
+    /// <summary>Installed files per bulk request (<c>POST /version_files</c> and
+    /// <c>/version_files/update</c>). 400 SHA-512s make a 55 KB request and, for the update lookup,
+    /// an answer under a megabyte, well inside the launcher server's 1 MB limit on a POST body it can
+    /// replay on another route.</summary>
+    public const int HashesPerRequest = 400;
+
     public async Task<Dictionary<string, (ModSummary mod, ModVersion version)>> MatchHashesAsync(
         IEnumerable<string> sha512Hashes, CancellationToken ct = default)
     {
         var hashes = sha512Hashes.Select(h => h.ToLowerInvariant()).Distinct().ToList();
-        if (hashes.Count == 0) return new();
+        var result = new Dictionary<string, (ModSummary, ModVersion)>();
+        foreach (var chunk in hashes.Chunk(HashesPerRequest))
+            await MatchHashChunkAsync(chunk, result, ct);
+        return result;
+    }
 
+    private async Task MatchHashChunkAsync(string[] hashes, Dictionary<string, (ModSummary, ModVersion)> result,
+        CancellationToken ct)
+    {
         var body = new { hashes, algorithm = "sha512" };
         var content = JsonContent.Create(body, options: Json);
         using var resp = await _api.ProxyAsync("modrinth", HttpMethod.Post, "version_files", content, ct);
         // Throw rather than return "no matches" (see the note on CurseForge's fingerprint match): a
         // failed lookup must not look like an unmatched hash, or installed mods show up as not
         // installed.
-        resp.EnsureSuccessStatusCode();
+        if (!resp.IsSuccessStatusCode)
+            throw await ModrinthRequestExceptionAsync("hash match", resp, ct);
 
-        var result = new Dictionary<string, (ModSummary, ModVersion)>();
         var matched = new List<(string Hash, VersionResponse Version)>();
         using (var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync(ct), cancellationToken: ct))
         {
@@ -436,10 +463,15 @@ public sealed class ModrinthService
             }
             result[hash] = (project, ToVersion(ver));
         }
-        return result;
     }
 
     // ── cross-store counterpart ─────────────────────────────────────────────────
+
+    /// <summary>The ids and slugs the project endpoint takes, and the only ones the launcher server
+    /// forwards. A CurseForge summary without a slug carries the mod's name in that slot, which is
+    /// no use as a path.</summary>
+    private static readonly System.Text.RegularExpressions.Regex PlausibleSlug =
+        new("^[A-Za-z0-9_-]{1,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>Finds the Modrinth project for a mod known on CurseForge, to recognise it as
     /// installed when the two stores' jars differ and hash matching misses it. Tries the slug first
@@ -447,7 +479,7 @@ public sealed class ModrinthService
     /// candidate whose slug or name lines up (see <see cref="ModMatching"/>).</summary>
     public async Task<ModSummary?> FindCounterpartAsync(string? slug, string? name, CancellationToken ct = default)
     {
-        if (!string.IsNullOrWhiteSpace(slug))
+        if (!string.IsNullOrWhiteSpace(slug) && PlausibleSlug.IsMatch(slug))
         {
             var bySlug = await GetProjectAsync(slug, ct);
             if (bySlug is not null && ModMatching.IsLikelySameMod(bySlug, slug, name))

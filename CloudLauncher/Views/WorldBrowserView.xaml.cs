@@ -382,7 +382,8 @@ public partial class WorldBrowserView : Page
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            SetStatus("Error: " + ex.Message, danger: true);
+            // A store that is busy or unreachable gets its calm sentence; anything else the raw message.
+            SetStatus(StoreRequestException.PlainFor(ex) ?? "Error: " + ex.Message, danger: true);
             _hasMore = false;
             // Show the failure in the list too, not only in the status bar.
             _isLoading = false;

@@ -273,8 +273,9 @@
   //
   // The same derivation as ThemeService.ApplySlateAccent: hover is 12 % lighter, pressed 12 %
   // darker, and accent-coloured text uses Readable(accent, bg) (step toward white until the
-  // brightness gap is 0.34). One difference: the text on an accent fill is whichever of the two
-  // Slate text colours has more contrast, where the launcher uses a luminance threshold.
+  // brightness gap is 0.34). Text on an accent fill is whichever of the two Slate text colours
+  // has more contrast, as in the launcher. The page then nudges link text on to 4.5:1, which
+  // the launcher does not need.
 
   var ACCENTS = [
     ["Rust", "#601B00"], ["Terracotta", "#D9805E"], ["Ember", "#E06C4B"], ["Amber", "#E0A458"],

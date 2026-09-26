@@ -71,7 +71,8 @@
                         Content="Resend verification email" Click="OnResendVerification"
                         HorizontalAlignment="Center" Margin="0,8,0,0" Visibility="Collapsed"/>
 
-                <Grid Margin="0,14,0,0">
+                <!-- The Google block stays hidden until the server says it offers Google sign-in. -->
+                <Grid x:Name="GoogleDivider" Margin="0,14,0,0" Visibility="Collapsed">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
@@ -87,9 +88,9 @@
 
                 <Button x:Name="GoogleButton" Content="Continue with Google"
                         Click="OnGoogleSignIn" Margin="0,14,0,0"
-                        HorizontalAlignment="Stretch"/>
-                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" TextAlignment="Center"
-                           Margin="0,6,0,0">
+                        HorizontalAlignment="Stretch" Visibility="Collapsed"/>
+                <TextBlock x:Name="GoogleCaption" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                           TextAlignment="Center" Margin="0,6,0,0" Visibility="Collapsed">
                     Continuing with Google means you accept the
                     <Hyperlink Click="OnOpenTerms" Foreground="{DynamicResource AccentTextBrush}">Terms</Hyperlink>
                     and the

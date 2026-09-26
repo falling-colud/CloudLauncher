@@ -669,7 +669,10 @@ public partial class ResourcePackExplorerPage : Page
             return;
         }
 
-        file = await ResolveDownloadFileAsync(mod, version, file) ?? file;
+        // A CurseForge file the store will not hand out throws with its own sentence (the author's
+        // opt-out, naming the project page), which is the whole answer here.
+        try { file = await ResolveDownloadFileAsync(mod, version, file) ?? file; }
+        catch (Exception ex) { DownloadStatus.Text = StoreRequestException.PlainFor(ex) ?? "Download failed: " + ex.Message; return; }
         if (string.IsNullOrWhiteSpace(file.DownloadUrl))
         {
             DownloadStatus.Text = "No download URL available.";

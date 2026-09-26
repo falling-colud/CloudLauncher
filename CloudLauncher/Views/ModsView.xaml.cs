@@ -2374,7 +2374,7 @@ public partial class ModsView : Page, IReusablePage, IRefreshablePage
 
         if (why is null)
         {
-            _browseState.Error("The store answered with an error.", ex);
+            _browseState.Error(StoreRequestException.PlainFor(ex) ?? "The store answered with an error.", ex);
             return;
         }
 

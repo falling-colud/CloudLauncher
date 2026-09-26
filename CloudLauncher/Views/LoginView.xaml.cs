@@ -23,6 +23,19 @@ public partial class LoginView : Page
                         || App.State.Settings.UserId is not null;
         OfflineButton.Visibility = _knownMachine ? Visibility.Visible : Visibility.Collapsed;
         UpdateModeUi();
+        _ = ShowGoogleIfOfferedAsync();
+    }
+
+    /// <summary>Shows the Google button once the server says it offers Google sign-in. A server
+    /// without it, or one that cannot be reached, keeps the button hidden rather than letting it
+    /// fail after a trip to the browser.</summary>
+    private async Task ShowGoogleIfOfferedAsync()
+    {
+        var options = await App.State.Api.GetAuthOptionsAsync();
+        if (options?.GoogleSignIn != true) return;
+        GoogleDivider.Visibility = Visibility.Visible;
+        GoogleButton.Visibility = Visibility.Visible;
+        GoogleCaption.Visibility = Visibility.Visible;
     }
 
     /// <summary>

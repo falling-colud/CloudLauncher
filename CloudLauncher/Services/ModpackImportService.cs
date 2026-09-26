@@ -43,6 +43,18 @@ public sealed class ModpackImportService(
     public void SetPackAssets(PackAssetService assets) => _assets = assets;
     public void SetModMetadata(ModMetadataService metadata) => _metadata = metadata;
 
+    /// <summary>The file written next to a CurseForge import's mods when some could not be
+    /// downloaded, listing each with its project page.</summary>
+    public const string ManualDownloadsFileName = "manual-downloads.txt";
+
+    /// <summary>A warning for the import log, or for the launcher log when nobody is reading the
+    /// import log (a modpack installed from the browse page runs in the background).</summary>
+    private static void Warn(IProgress<string>? log, string text)
+    {
+        if (log is not null) log.Report("  WARNING: " + text);
+        else AppLog.Log("import", text);
+    }
+
     /// <summary>Records which store a modpack came from as the pack-wide default, so a mod that is
     /// listed on both stores keeps that store's identity (label, page link, update checks) instead of
     /// flipping to Modrinth. Only fills a blank: a preference the user already set is kept.</summary>
@@ -168,7 +180,7 @@ public sealed class ModpackImportService(
             // it needs to resume.
             if (job is not null) await job.Gate.WaitAsync(ct);
             var dest = PathSafety.ResolveInside(gameDir, WithoutDotPrefix(f.Path));
-            if (dest is null) { log?.Report($"  WARNING: skipping file with an unsafe path: {f.Path}"); return; }
+            if (dest is null) { Warn(log, $"skipping file with an unsafe path: {f.Path}"); return; }
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
             var fileName = Path.GetFileName(f.Path);
             if (File.Exists(dest))
@@ -188,7 +200,7 @@ public sealed class ModpackImportService(
                 {
                     if (!SafeLaunch.IsWebUrl(url, out _))
                     {
-                        log?.Report($"  WARNING: skipping a download link for {f.Path} that is not http or https");
+                        Warn(log, $"skipping a download link for {f.Path} that is not http or https");
                         continue;
                     }
                     try
@@ -214,7 +226,7 @@ public sealed class ModpackImportService(
                     catch (OperationCanceledException) { throw; }
                     catch { /* try next URL */ }
                 }
-                if (!downloaded) log?.Report($"  WARNING: could not download {f.Path}");
+                if (!downloaded) Warn(log, $"could not download {f.Path}");
             }
             finally
             {
@@ -289,7 +301,7 @@ public sealed class ModpackImportService(
         }
         else
         {
-            log?.Report($"  WARNING: skipping the overrides, their folder name is not a plain path: {overridesFolder}");
+            Warn(log, $"skipping the overrides, their folder name is not a plain path: {overridesFolder}");
             overrides = [];
         }
         if (SafeZip.CheckLimits(overrides) is { } tooBig)
@@ -347,17 +359,20 @@ public sealed class ModpackImportService(
         Dictionary<int, ModVersion> knownFiles;
         Dictionary<int, ModSummary> knownMods;
         try { knownFiles = await curseforge.GetFilesAsync(files.Select(f => f.FileId), ct); }
-        catch (Exception ex) { log?.Report($"  WARNING: batch file lookup failed ({ex.Message}); resolving one by one."); knownFiles = new(); }
+        catch (Exception ex) { Warn(log, $"batch file lookup failed ({ex.Message}); resolving one by one."); knownFiles = new(); }
         try { knownMods = await curseforge.GetModsAsync(files.Select(f => f.ProjectId), ct); }
-        catch (Exception ex) { log?.Report($"  WARNING: batch mod lookup failed ({ex.Message}); resolving one by one."); knownMods = new(); }
+        catch (Exception ex) { Warn(log, $"batch mod lookup failed ({ex.Message}); resolving one by one."); knownMods = new(); }
         // Each file goes to the folder its project class says, as the CurseForge app and Prism do.
         // CurseForge packs list resource packs and shaders alongside mods, and a shader in mods/ is never
         // loaded.
         Dictionary<int, CurseForgeProjectFacts> projects;
         try { projects = await curseforge.GetProjectFactsAsync(files.Select(f => f.ProjectId), ct); }
-        catch (Exception ex) { log?.Report($"  WARNING: could not ask what each file is ({ex.Message}); everything goes into mods."); projects = new(); }
+        catch (Exception ex) { Warn(log, $"could not ask what each file is ({ex.Message}); everything goes into mods."); projects = new(); }
 
         var cfCompleted = 0;
+        // Files CurseForge would not hand out (an author's opt-out, mostly), with the sentence that
+        // says where to get each one, for the note written next to the mods at the end.
+        var missing = new System.Collections.Concurrent.ConcurrentBag<string>();
         using var cfGate = new SemaphoreSlim(DownloadConcurrency, DownloadConcurrency);
         await Task.WhenAll(files.Select(async (f, i) =>
         {
@@ -375,18 +390,27 @@ public sealed class ModpackImportService(
                 knownFiles.TryGetValue(f.FileId, out var knownVersion);
                 var url = knownVersion?.Files.FirstOrDefault()?.DownloadUrl;
                 if (string.IsNullOrWhiteSpace(url))
-                    url = await curseforge.GetDownloadUrlAsync(f.ProjectId, f.FileId, ct);
-                if (url is null) { log?.Report($"  WARNING: no download URL for {f.ProjectId}:{f.FileId}"); return; }
+                {
+                    // The listing had no link: ask for one. A file CurseForge will not hand out throws
+                    // with its own sentence (project, page, "only the CurseForge app"), noted below.
+                    try { url = await curseforge.GetDownloadUrlAsync(f.ProjectId, f.FileId, ct); }
+                    catch (StoreRequestException ex) when (ex.Failure == StoreFailure.NotDistributable)
+                    {
+                        missing.Add(ex.Plain);
+                        Warn(log, ex.Plain);
+                        return;
+                    }
+                }
                 if (!SafeLaunch.IsWebUrl(url, out var uri))
                 {
-                    log?.Report($"  WARNING: skipping {f.ProjectId}:{f.FileId}, its download link is not http or https");
+                    Warn(log, $"skipping {f.ProjectId}:{f.FileId}, its download link is not http or https");
                     return;
                 }
                 // Saved under the link's last segment, so that must be one plain name.
                 var filename = Path.GetFileName(uri!.LocalPath);
                 if (!PathSafety.IsSafeFileName(filename))
                 {
-                    log?.Report($"  WARNING: skipping {f.ProjectId}:{f.FileId}, its file name is not usable: {filename}");
+                    Warn(log, $"skipping {f.ProjectId}:{f.FileId}, its file name is not usable: {filename}");
                     return;
                 }
                 var folder = projects.GetValueOrDefault(f.ProjectId).ClassId switch
@@ -402,7 +426,7 @@ public sealed class ModpackImportService(
                 var dest = PathSafety.ResolveFileName(targetDir, filename);
                 if (dest is null)
                 {
-                    log?.Report($"  WARNING: skipping {f.ProjectId}:{f.FileId}, its file name is not usable: {filename}");
+                    Warn(log, $"skipping {f.ProjectId}:{f.FileId}, its file name is not usable: {filename}");
                     return;
                 }
                 Directory.CreateDirectory(targetDir);
@@ -426,7 +450,11 @@ public sealed class ModpackImportService(
             // Rethrow: swallowing the cancellation would leave a stopped import looking finished, with an
             // empty instance.
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { log?.Report($"  WARNING: {ex.Message}"); }
+            catch (Exception ex)
+            {
+                missing.Add($"{f.ProjectId}:{f.FileId}: {StoreRequestException.PlainFor(ex) ?? ex.Message}");
+                Warn(log, $"could not download {f.ProjectId}:{f.FileId}: {ex.Message}");
+            }
             finally
             {
                 cfGate.Release();
@@ -437,10 +465,41 @@ public sealed class ModpackImportService(
         await CopyOverridesAsync(overrides, prefix, gameDir, log, progress, ct, job);
 
         RecordPackSource(pack.Id, ModSource.CurseForge, log);
-        log?.Report($"Import complete: {pack.Name}");
-        progress?.Report(new ImportProgress(1, $"Import complete: {pack.Name}"));
+        var note = missing.IsEmpty ? "" : WriteManualDownloadsNote(gameDir, missing, job);
+        log?.Report($"Import complete: {pack.Name}{note}");
+        if (note.Length > 0) AppLog.Log("import", $"{pack.Name}{note}");
+        progress?.Report(new ImportProgress(1, $"Import complete: {pack.Name}{note}"));
         await SaveImportAssetsAsync(pack.Id, metadata, ct);
         return pack;
+    }
+
+    /// <summary>
+    /// Writes <see cref="ManualDownloadsFileName"/> into the game folder, one file per line with where
+    /// to get it, and returns the sentence to append to the completion line. The pack still opens
+    /// without those files, so this is a note rather than a failure.
+    /// </summary>
+    private static string WriteManualDownloadsNote(string gameDir, IEnumerable<string> missing, PackJob? job)
+    {
+        var lines = missing.OrderBy(m => m, StringComparer.OrdinalIgnoreCase).ToList();
+        try
+        {
+            var path = Path.Combine(gameDir, ManualDownloadsFileName);
+            var isNew = !File.Exists(path);
+            File.WriteAllLines(path,
+            [
+                $"{lines.Count} file(s) in this pack could not be downloaded by the launcher.",
+                "Most are mods whose authors allow downloads through the CurseForge app only: get each from",
+                "its project page (or the CurseForge app) and drop it into the mods folder.",
+                "",
+                .. lines
+            ]);
+            if (isNew) job?.TrackCreatedFile(path);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Log("import", $"Could not write {ManualDownloadsFileName}: {ex.Message}");
+        }
+        return $". {lines.Count} file(s) could not be downloaded (see {ManualDownloadsFileName} in the instance folder)";
     }
 
     /// <summary>Unpacks a modpack's override files into the game folder. An entry whose path is not a
@@ -463,10 +522,10 @@ public sealed class ModpackImportService(
             ct.ThrowIfCancellationRequested();
             if (job is not null) await job.Gate.WaitAsync(ct);
             var dest = PathSafety.ResolveInside(gameDir, WithoutDotPrefix(entry.FullName[prefix.Length..]));
-            if (dest is null) { log?.Report($"  WARNING: skipping override with an unsafe path: {entry.FullName}"); continue; }
+            if (dest is null) { Warn(log, $"skipping override with an unsafe path: {entry.FullName}"); continue; }
             if (SafeZip.CheckEntry(entry) is { } implausible)
             {
-                log?.Report($"  WARNING: skipping override {entry.FullName}: {implausible}");
+                Warn(log, $"skipping override {entry.FullName}: {implausible}");
                 continue;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
@@ -478,7 +537,7 @@ public sealed class ModpackImportService(
             }
             catch (InvalidDataException ex)
             {
-                log?.Report($"  WARNING: skipping override {entry.FullName}: {ex.Message}");
+                Warn(log, $"skipping override {entry.FullName}: {ex.Message}");
                 continue;
             }
             if (isNew) job?.TrackCreatedFile(dest);

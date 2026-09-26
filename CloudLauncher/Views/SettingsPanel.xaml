@@ -459,13 +459,13 @@
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <TextBlock x:Name="UpdateRateLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
                                    VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
-                        <Slider x:Name="UpdateRateSlider" Minimum="1" Maximum="100"
+                        <Slider x:Name="UpdateRateSlider" Minimum="1" Maximum="20"
                                 TickFrequency="1" IsSnapToTickEnabled="True"
                                 ValueChanged="OnUpdateRateChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
                     </DockPanel>
                     <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
                                Margin="150,8,0,0" TextWrapping="Wrap"
-                               Text="How fast the launcher asks about mods one at a time during an update check. Most mods are checked together in a few requests and do not wait on this. If the stores ask the launcher to slow down, the check pauses and carries on."/>
+                               Text="How fast the launcher asks about mods one at a time during an update check, across both stores. Most mods are checked together in a few requests and do not wait on this. If the stores ask the launcher to slow down, the check pauses and carries on."/>
 
                     <DockPanel Margin="0,16,0,0">
                         <TextBlock DockPanel.Dock="Left" Text="Row text width" Width="150"

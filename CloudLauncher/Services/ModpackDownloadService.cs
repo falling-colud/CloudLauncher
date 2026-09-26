@@ -393,18 +393,12 @@ public sealed class ModpackDownloadService(
 
         // Only call /download-url when the version listing had no URL. That extra request can fail on
         // its own (a CDN block, or an author who opted out of third-party downloads) even though the
-        // listed URL works.
+        // listed URL works. A pack CurseForge will not hand out throws with its own sentence, which
+        // becomes the instance's "Import failed" note.
         if (!string.IsNullOrWhiteSpace(named.DownloadUrl))
             return named;
 
-        if (!CurseForgeService.TryParseFileIds(mod, version, out var modId, out var fileId))
-            throw new InvalidOperationException("Could not determine the CurseForge file to download.");
-
-        var url = await curseforge.GetDownloadUrlAsync(modId, fileId, ct);
-        if (string.IsNullOrWhiteSpace(url))
-            throw new InvalidOperationException("CurseForge did not return a download URL.");
-
-        return named with { DownloadUrl = url };
+        return named with { DownloadUrl = await curseforge.ResolveDownloadUrlAsync(mod, version, named, ct) };
     }
 
     private static void ValidateDownloadedArchive(string path)

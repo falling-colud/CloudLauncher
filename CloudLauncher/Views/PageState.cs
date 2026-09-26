@@ -112,6 +112,9 @@ public sealed class PageState
     /// <summary>The latest <see cref="Progress"/> line held back during a quiet refresh.</summary>
     private string? _heldProgress;
 
+    /// <summary>True while this page listens for store waits (see <see cref="WatchStores"/>).</summary>
+    private bool _watchingStores;
+
     /// <param name="content">The list, grid or card panel the overlay shares a cell with. Hidden
     /// while a full-area panel is up and always visible while Refreshing. May be null when the
     /// overlay has the cell to itself.</param>
@@ -272,7 +275,28 @@ public sealed class PageState
             _view.ShowRefreshing();
             onReveal?.Invoke();
         }
+        WatchStores(true);
         Paint();
+    }
+
+    /// <summary>
+    /// Listens for store calls being told to wait while work is in flight, so the line under the bar
+    /// can say "CurseForge is busy, trying again..." instead of sitting on "Searching" for half a
+    /// minute. Only while busy: the subscription is on a static-lifetime event, and a page that is
+    /// done must not be kept alive by it.
+    /// </summary>
+    private void WatchStores(bool on)
+    {
+        if (on == _watchingStores) return;
+        _watchingStores = on;
+        if (on) App.State.StoreWaiting += OnStoreWaiting;
+        else App.State.StoreWaiting -= OnStoreWaiting;
+    }
+
+    private void OnStoreWaiting(StoreWait wait)
+    {
+        if (Kind is not (PageStateKind.Loading or PageStateKind.Refreshing)) return;
+        Progress(wait.Describe());
     }
 
     private System.Windows.Threading.DispatcherTimer CreateRevealTimer()
@@ -333,6 +357,7 @@ public sealed class PageState
     public void Content(int count, string? noun = null, string? note = null, string? countText = null)
     {
         StopQuiet();
+        WatchStores(false);
         HasData = count > 0;
         _lastCountText = count == 0 ? "" : countText ?? $"{count:N0} {noun ?? _copy.Noun}";
 
@@ -362,6 +387,7 @@ public sealed class PageState
     public void Error(string plain, Exception? ex = null, string? title = null)
     {
         StopQuiet();
+        WatchStores(false);
         if (ex is not null) AppLog.LogError(_logName, ex);
         Kind = PageStateKind.Error;
         var headline = title ?? _copy.ErrorTitle;
@@ -388,6 +414,7 @@ public sealed class PageState
     public void Offline(string why, string? age = null)
     {
         StopQuiet();
+        WatchStores(false);
         Kind = PageStateKind.Offline;
         var body = string.Format(_copy.OfflineBody, why);
         var line = _copy.OfflineTitle + " - " + body;
@@ -413,6 +440,7 @@ public sealed class PageState
     public void Cancelled(string? note = null)
     {
         StopQuiet();
+        WatchStores(false);
         if (HasData)
         {
             Kind = PageStateKind.Content;

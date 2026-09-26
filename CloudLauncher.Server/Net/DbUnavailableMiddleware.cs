@@ -44,8 +44,13 @@ public sealed class DbUnavailableMiddleware(RequestDelegate next, ILogger<DbUnav
     /// True when <paramref name="ex"/> means the database could not be reached or is still starting,
     /// as opposed to the query being wrong. Only these are worth answering with "try again".
     /// </summary>
+    /// <remarks>A socket or timeout failure only counts when Npgsql or EF raised it. The same
+    /// exception types come out of a launcher that dropped its connection mid-upload or a store the
+    /// proxy could not read from, and answering those with "the database is restarting" sent the
+    /// launcher and the log looking in the wrong place.</remarks>
     public static bool IsUnavailable(Exception? ex)
     {
+        var viaDatabase = false;
         for (var e = ex; e is not null; e = e.InnerException)
         {
             switch (e)
@@ -55,10 +60,17 @@ public sealed class DbUnavailableMiddleware(RequestDelegate next, ILogger<DbUnav
                 case PostgresException pg when pg.SqlState is "57P03" or "57P01" or "57P02" or "53300"
                                                || pg.SqlState.StartsWith("08", StringComparison.Ordinal):
                     return true;
-                // Socket-level refusals, and Npgsql's own "transient" classification.
+                // Npgsql's own "transient" classification.
                 case NpgsqlException { IsTransient: true }:
-                case System.Net.Sockets.SocketException:
-                case TimeoutException:
+                    return true;
+                case NpgsqlException:
+                case System.Data.Common.DbException:
+                case Microsoft.EntityFrameworkCore.Storage.RetryLimitExceededException:
+                    viaDatabase = true;
+                    break;
+                // Socket-level refusals and timeouts, when they came up through the database layer.
+                case System.Net.Sockets.SocketException when viaDatabase:
+                case TimeoutException when viaDatabase:
                     return true;
             }
         }

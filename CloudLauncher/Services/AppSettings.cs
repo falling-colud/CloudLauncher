@@ -266,12 +266,15 @@ public sealed partial class AppSettings
     public int EffectiveModUpdateCheckConcurrency =>
         Math.Clamp(ModUpdateCheckConcurrency, MinModUpdateCheckConcurrency, MaxModUpdateCheckConcurrency);
 
-    /// <summary>How many per-mod store requests an update check may make per second.</summary>
-    /// <remarks>Most mods are answered by a few bulk requests first, so this only paces the rest. Set too
-    /// high, the stores ask to slow down, which the check then waits out.</remarks>
+    /// <summary>How many per-mod store requests an update check may make per second, across both
+    /// stores.</summary>
+    /// <remarks>Most mods are answered by a few bulk requests first, so this only paces the rest. The
+    /// launcher server allows an account about 40 requests a second (see <c>ProxyUserLimits</c>), so
+    /// the ceiling keeps a check plus browsing under that; set higher than the stores like, they ask
+    /// to slow down, which the check then waits out.</remarks>
     public int ModUpdateChecksPerSecond { get; set; } = 10;
 
-    public const int MinModUpdateChecksPerSecond = 1, MaxModUpdateChecksPerSecond = 100;
+    public const int MinModUpdateChecksPerSecond = 1, MaxModUpdateChecksPerSecond = 20;
 
     public int EffectiveModUpdateChecksPerSecond =>
         Math.Clamp(ModUpdateChecksPerSecond, MinModUpdateChecksPerSecond, MaxModUpdateChecksPerSecond);

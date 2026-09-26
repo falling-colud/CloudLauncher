@@ -486,7 +486,7 @@ public partial class ModExplorerPage : Page
             : Connectivity.DescribeTransportFailure(ex, ct);
 
         if (why is not null) _state.Offline(why);
-        else _state.Error("The store answered with an error.", ex);
+        else _state.Error(StoreRequestException.PlainFor(ex) ?? "The store answered with an error.", ex);
     }
 
     private async Task<int> LoadCurseForgeAsync(CancellationToken ct)
@@ -1459,20 +1459,36 @@ public partial class ModExplorerPage : Page
     // or null if none) so re-running the index after each download doesn't re-query the same mods.
     private readonly Dictionary<string, string?> _counterpartKeyCache = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>How many counterparts one pass asks the stores about. Each miss costs up to two
+    /// searches, so a big pack opened for the first time would otherwise fire hundreds of requests
+    /// in the background; the rest are looked up on later opens, and the on-disk cache keeps every
+    /// answer for days, so the set fills in over a few visits.</summary>
+    private const int CounterpartLookupsPerPass = 40;
+
     private async Task AddCrossStoreCounterpartKeysAsync(
         IReadOnlyList<InstalledModIdentity> identities, int generation)
     {
         var added = false;
+        var lookups = 0;
+        var deferred = 0;
         foreach (var identity in identities)
         {
             if (generation != _indexGeneration) return;
 
-            var counterpartKey = identity switch
+            var source = identity switch
             {
-                { Modrinth: null, CurseForge: { } cf } => await ResolveCounterpartKeyAsync(ModSource.Modrinth, cf.Mod),
-                { CurseForge: null, Modrinth: { } mr } => await ResolveCounterpartKeyAsync(ModSource.CurseForge, mr.Mod),
-                _ => null
+                { Modrinth: null, CurseForge: { } cf } => (Target: ModSource.Modrinth, Mod: cf.Mod),
+                { CurseForge: null, Modrinth: { } mr } => (Target: ModSource.CurseForge, Mod: mr.Mod),
+                _ => (Target: ModSource.External, Mod: (ModSummary?)null)
             };
+            if (source.Mod is null) continue;
+
+            if (!HasCounterpartAnswer(source.Target, source.Mod))
+            {
+                if (lookups >= CounterpartLookupsPerPass) { deferred++; continue; }
+                lookups++;
+            }
+            var counterpartKey = await ResolveCounterpartKeyAsync(source.Target, source.Mod);
 
             if (generation != _indexGeneration) return;
             if (counterpartKey is not null && _installedModKeys.Add(counterpartKey))
@@ -1480,9 +1496,16 @@ public partial class ModExplorerPage : Page
         }
 
         App.State.ModCounterparts.Flush();
+        if (deferred > 0)
+            AppLog.Log(nameof(ModExplorerPage), $"Looked up {lookups} cross-store counterpart(s); {deferred} left for a later visit.");
         if (added && generation == _indexGeneration)
             RefreshDownloadedState();
     }
+
+    /// <summary>True when the counterpart is already known here or on disk, so asking costs nothing.</summary>
+    private bool HasCounterpartAnswer(ModSource targetStore, ModSummary sourceMod) =>
+        _counterpartKeyCache.ContainsKey($"{targetStore}:{ModKey(sourceMod)}")
+        || App.State.ModCounterparts.TryGet(targetStore, sourceMod, out _);
 
     private async Task<string?> ResolveCounterpartKeyAsync(ModSource targetStore, ModSummary sourceMod)
     {

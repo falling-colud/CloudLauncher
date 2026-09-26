@@ -5,7 +5,10 @@ namespace CloudLauncher.Services;
 
 /// <summary>One installed mod an update check asks about: its store identity, the installed version
 /// and, for Modrinth, the SHA-512 of a file of that version, which the bulk lookup is keyed by.</summary>
-public readonly record struct UpdateCheckItem(ModSummary Mod, ModVersion Installed, string? Sha512);
+/// <param name="Channel">The release channel the mod's updates come from (see
+/// <see cref="ModUpdateChannel"/>), or null for "not known": a bulk answer then has to cover every
+/// channel before it counts.</param>
+public readonly record struct UpdateCheckItem(ModSummary Mod, ModVersion Installed, string? Sha512, string? Channel = null);
 
 /// <summary>What one bulk pass of an update check (<see cref="ModVersionCatalog.PrefetchLatestAsync"/>)
 /// did: which mods it answered, what it cost, and why a store's part of it failed, if one did.</summary>
@@ -76,10 +79,8 @@ public sealed class ModVersionCatalog
 {
     private static readonly TimeSpan Ttl = TimeSpan.FromMinutes(15);
 
-    /// <summary>Installed files per Modrinth bulk request. 382 hashes make a 50 KB request and a 770 KB
-    /// answer, well inside the launcher server's 1 MB limit on a POST body it can replay on another
-    /// route.</summary>
-    private const int HashesPerRequest = 400;
+    /// <summary>Installed files per Modrinth bulk request (see <see cref="ModrinthService.HashesPerRequest"/>).</summary>
+    private const int HashesPerRequest = ModrinthService.HashesPerRequest;
 
     /// <summary>Fewer mods than this on a store are asked about one at a time: a bulk pass costs up to
     /// three requests the server never caches, a single list request often comes from its cache.</summary>
@@ -102,9 +103,17 @@ public sealed class ModVersionCatalog
         public bool IsFresh => !Task.IsFaulted && !Task.IsCanceled && DateTimeOffset.UtcNow - FetchedAt < Ttl;
     }
 
-    private sealed record Candidates(IReadOnlyList<ModVersion> Versions, DateTimeOffset FetchedAt)
+    /// <param name="CompleteUpToRank">The strictest channel this answer holds the newest version for,
+    /// as a <see cref="ModUpdateChannel.Rank"/>: 2 when it has the newest of every channel, 1 when the
+    /// newest overall is a beta (so it answers beta and alpha, but not release), 0 when it is an alpha.</param>
+    private sealed record Candidates(IReadOnlyList<ModVersion> Versions, DateTimeOffset FetchedAt, int CompleteUpToRank)
     {
         public bool IsFresh => DateTimeOffset.UtcNow - FetchedAt < Ttl;
+
+        /// <summary>True when the answer holds the newest version <paramref name="channel"/> admits.
+        /// Null, an unknown channel, needs the whole answer.</summary>
+        public bool Answers(string? channel) =>
+            CompleteUpToRank >= (channel is null ? 2 : ModUpdateChannel.Rank(channel));
     }
 
     public ModVersionCatalog(ModrinthService modrinth, CurseForgeService curseForge)
@@ -197,28 +206,31 @@ public sealed class ModVersionCatalog
 
     /// <summary>
     /// The versions an update check chooses from: the bulk pass's newest-per-channel answer when there
-    /// is a fresh one, otherwise <see cref="GetLatestVersionsAsync"/>'s list, fetched if needed at the
-    /// update-check pace (<see cref="AppSettings.ModUpdateChecksPerSecond"/>).
+    /// is a fresh one that covers <paramref name="channel"/>, otherwise <see cref="GetLatestVersionsAsync"/>'s
+    /// list, fetched if needed at the update-check pace (<see cref="AppSettings.ModUpdateChecksPerSecond"/>).
     /// </summary>
+    /// <param name="channel">The mod's update channel (see <see cref="ModUpdateChannel"/>); null when
+    /// not known, which only accepts a bulk answer that covers every channel.</param>
     /// <remarks>Either answer picks the same update: the newest version a channel admits is the newest
     /// of the channels it admits, and the bulk answer holds those.</remarks>
     public async Task<IReadOnlyList<ModVersion>> GetUpdateCandidatesAsync(ModSummary mod, string? mcVersion,
-        string? loader, bool forceRefresh = false, CancellationToken ct = default)
+        string? loader, bool forceRefresh = false, CancellationToken ct = default, string? channel = null)
     {
-        if (!forceRefresh && TryGetCachedCandidates(mod, mcVersion, loader, out var known)) return known;
+        if (!forceRefresh && TryGetCachedCandidates(mod, mcVersion, loader, out var known, channel)) return known;
         return await GetLatestCoreAsync(mod, mcVersion, loader, forceRefresh, ProxyPacing.UpdateCheck, ct);
     }
 
     /// <summary>What <see cref="GetUpdateCandidatesAsync"/> would answer without the network, if it
-    /// can: a fresh bulk answer, or a fresh list that has already arrived.</summary>
+    /// can: a fresh bulk answer that covers <paramref name="channel"/>, or a fresh list that has
+    /// already arrived.</summary>
     public bool TryGetCachedCandidates(ModSummary mod, string? mcVersion, string? loader,
-        out IReadOnlyList<ModVersion> versions)
+        out IReadOnlyList<ModVersion> versions, string? channel = null)
     {
         mcVersion = Clean(mcVersion);
         loader = Clean(loader);
         var key = KeyFor(mod, mcVersion, loader);
 
-        if (_candidates.TryGetValue(key, out var bulk) && bulk.IsFresh)
+        if (_candidates.TryGetValue(key, out var bulk) && bulk.IsFresh && bulk.Answers(channel))
         {
             versions = bulk.Versions;
             return true;
@@ -255,7 +267,8 @@ public sealed class ModVersionCatalog
     /// release. Files missing from the unfiltered answer are left to the one-by-one pass.</para>
     /// <para>CurseForge: <c>latestFilesIndexes</c> from <c>POST /mods</c>, and details of files that
     /// aren't installed from <c>POST /mods/files</c>, fifty at a time. Mods whose index doesn't cover
-    /// this pack, or has no release for it, are left to the one-by-one pass.</para>
+    /// this pack, or whose newest file for it is on a channel the mod does not follow, are left to
+    /// the one-by-one pass.</para>
     /// <para>Only cancellation throws; a failed store leaves its mods unanswered and the report says why.
     /// Mods with a fresh answer are skipped unless <paramref name="forceRefresh"/> is set.</para>
     /// </remarks>
@@ -283,7 +296,7 @@ public sealed class ModVersionCatalog
         foreach (var (key, group) in byMod)
         {
             var mod = group[0].Mod;
-            if (!forceRefresh && TryGetCachedCandidates(mod, mcVersion, loader, out _))
+            if (!forceRefresh && TryGetCachedCandidates(mod, mcVersion, loader, out _, group[0].Channel))
             {
                 report.AlreadyKnown++;
                 continue;
@@ -361,7 +374,7 @@ public sealed class ModVersionCatalog
                     if (releases is null) continue;
                     if (releases.TryGetValue(hash, out var r) && r.ProjectId == top.ProjectId) candidates.Add(r.Version);
                 }
-                StoreCandidates(key, candidates);
+                StoreCandidates(key, candidates, completeUpToRank: 2);
                 report.MarkAnswered(item.Mod);
             }
         }
@@ -397,18 +410,24 @@ public sealed class ModVersionCatalog
             })));
 
         // The newest file of each release type for this pack, per mod. A mod whose index doesn't cover
-        // the pack's version and loader, or names no release for it, is left to the one-by-one pass.
+        // the pack's version and loader is left to the one-by-one pass.
         // CurseForge doesn't document whether the index keeps the newest file per release type or only
-        // the newest file overall. Both readings agree when the index lists a release, so only then is it
-        // taken as the whole answer.
-        var plans = new List<(string Key, UpdateCheckItem Item, IReadOnlyList<int> FileIds, int Installed)>();
+        // the newest file overall. Both readings agree when the index lists a release, so then it is
+        // the whole answer. Otherwise the newest file it does list is, on either reading, the newest
+        // overall, which answers every channel that admits it: a mod following alpha (the launcher's
+        // default) is done, a mod pinned to release is left to the one-by-one pass.
+        var plans = new List<(string Key, UpdateCheckItem Item, IReadOnlyList<int> FileIds, int Installed, int CompleteUpToRank)>();
         foreach (var (key, item, modId) in work)
         {
             if (!indexes.TryGetValue(modId, out var index)) continue;
             var newest = CurseForgeService.NewestFilesFor(index, mcVersion, loader);
-            if (!newest.Any(e => e.ReleaseType == 1)) continue;
+            if (newest.Count == 0) continue;
+            var completeUpToRank = newest.Any(e => e.ReleaseType == 1)
+                ? 2
+                : ModUpdateChannel.Rank(CurseForgeService.ReleaseChannelOf(newest.MaxBy(e => e.FileId)!.ReleaseType));
+            if (completeUpToRank < ModUpdateChannel.Rank(item.Channel ?? ModUpdateChannel.Release)) continue;
             CurseForgeService.TryParseFileIds(item.Mod, item.Installed, out _, out var installedFileId);
-            plans.Add((key, item, newest.Select(e => e.FileId).Distinct().ToList(), installedFileId));
+            plans.Add((key, item, newest.Select(e => e.FileId).Distinct().ToList(), installedFileId, completeUpToRank));
         }
 
         // Details for the ones that are not already installed, fifty to a request.
@@ -423,7 +442,7 @@ public sealed class ModVersionCatalog
                     files[id] = version;
             })));
 
-        foreach (var (key, item, fileIds, installed) in plans)
+        foreach (var (key, item, fileIds, installed, completeUpToRank) in plans)
         {
             var candidates = new List<ModVersion>(fileIds.Count);
             foreach (var id in fileIds)
@@ -434,7 +453,7 @@ public sealed class ModVersionCatalog
                 else break; // a file whose details did not arrive: the answer would be incomplete
             }
             if (candidates.Count != fileIds.Count) continue;
-            StoreCandidates(key, candidates);
+            StoreCandidates(key, candidates, completeUpToRank);
             report.MarkAnswered(item.Mod);
         }
 
@@ -451,10 +470,15 @@ public sealed class ModVersionCatalog
         }
     }
 
-    private void StoreCandidates(string key, List<ModVersion> candidates) =>
-        _candidates[key] = new Candidates(
+    private void StoreCandidates(string key, List<ModVersion> candidates, int completeUpToRank)
+    {
+        var fresh = new Candidates(
             candidates.GroupBy(v => v.Id).Select(g => g.First()).OrderByDescending(v => v.DatePublished).ToList(),
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow, completeUpToRank);
+        // A fuller answer that is still fresh is not replaced by a narrower one.
+        _candidates.AddOrUpdate(key, fresh,
+            (_, existing) => existing.IsFresh && existing.CompleteUpToRank > fresh.CompleteUpToRank ? existing : fresh);
+    }
 
     private static int Rank(ModVersion version) => ModUpdateChannel.Rank(version.ReleaseChannel);
 

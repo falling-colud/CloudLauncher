@@ -23,4 +23,4 @@ Please read this before installing.
 6. CloudLauncher includes components made by others under their own licenses. Their
    notices are in THIRD-PARTY-NOTICES.txt in the installation folder.
 
-Questions: leon.raineri@gmail.com
+Questions: contact@cloudlauncher.co

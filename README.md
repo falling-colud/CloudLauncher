@@ -6,6 +6,9 @@ once, download it on any PC, or share it with friends with a link.
 ![The Instances page](CloudLauncher.Server/wwwroot/img/instances.png)
 
 **Download:** [cloudlauncher.co](https://cloudlauncher.co)
+**Discord:** [discord.gg/PU6HpxzJwW](https://discord.gg/PU6HpxzJwW)
+**Bugs and ideas:** [GitHub issues](https://github.com/falling-colud/CloudLauncher/issues), or
+Settings > About > Report a problem inside the launcher.
 
 ## Features
 

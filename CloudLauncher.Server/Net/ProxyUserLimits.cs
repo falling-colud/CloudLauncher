@@ -7,20 +7,25 @@ namespace CloudLauncher.Server.Net;
 /// token-bucket request rate and a cap on the places it holds in each bucket's queue.
 /// </summary>
 /// <remarks>
-/// Accounts with a full allowance and nothing queued are swept, so only recently active accounts
-/// stay in memory.
+/// <para>Sized so nothing a launcher does on its own trips them: a bulk update check of a 2,000-mod
+/// pack is about 80 batched POSTs, a modpack install about 120, and the launcher paces itself to
+/// roughly 30 a second across both stores at the highest update-check rate it offers. Answers served
+/// from the response cache are not counted (see <c>ProxyController</c>).</para>
+/// <para>Accounts with a full allowance and nothing queued are swept, so only recently active accounts
+/// stay in memory.</para>
 /// </remarks>
 public sealed class ProxyUserLimits
 {
-    /// <summary>Sustained proxy requests per second per account, cache hits included.</summary>
-    public const double RequestsPerSecond = 15;
+    /// <summary>Sustained proxy requests per second per account, for calls that go upstream.</summary>
+    public const double RequestsPerSecond = 40;
 
     /// <summary>Requests an account that has been quiet may send at once.</summary>
-    public const double Burst = 60;
+    public const double Burst = 200;
 
     /// <summary>Places one account may hold in one bucket's queue, waiting or in flight. The launcher
-    /// keeps at most six per store by itself: three for pages and three for an update check.</summary>
-    public const int MaxQueuedPerBucket = 6;
+    /// keeps at most eleven per store by itself: three for pages and up to eight for an update check
+    /// (see <c>ApiClient.UpdateCheckInFlight</c>).</summary>
+    public const int MaxQueuedPerBucket = 12;
 
     /// <summary>Wait suggested to an account over the queue cap. Its own requests free places as
     /// they finish, so this is short.</summary>
@@ -41,7 +46,7 @@ public sealed class ProxyUserLimits
     private long _nextSweep = Environment.TickCount64 + SweepIntervalMs;
 
     /// <summary>Takes one request from the account's allowance. Null when it may go ahead; otherwise
-    /// how long until it could.</summary>
+    /// how long until it could (under a second at this rate; the proxy rounds it up to one).</summary>
     public TimeSpan? TryTake(Guid user)
     {
         var now = Environment.TickCount64;

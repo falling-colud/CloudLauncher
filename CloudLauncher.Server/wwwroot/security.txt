@@ -1,4 +1,4 @@
-Contact: mailto:leon.raineri@gmail.com
+Contact: mailto:contact@cloudlauncher.co
 Expires: 2027-09-25T00:00:00.000Z
 Preferred-Languages: en, it
 Canonical: https://cloudlauncher.co/.well-known/security.txt

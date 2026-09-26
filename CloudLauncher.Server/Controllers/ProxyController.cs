@@ -51,26 +51,9 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
         if (query.Length > ProxyAllowlist.MaxQueryLength)
             return StatusCode(StatusCodes.Status414UriTooLong, new { error = "Request too long.", code = "request_too_large" });
 
-        if (guard.Users.TryTake(user) is { } rateWait)
-        {
-            log.LogDebug("Proxy rate limit reached for user {User}.", user);
-            return RateLimited(name, rateWait,
-                "Too many store requests from this account. Try again in a moment.", "too_many_requests");
-        }
-
-        var (keyValue, ownKey) = await ResolveKeyAsync(name, ct);
-        if (name == "curseforge" && string.IsNullOrWhiteSpace(keyValue))
-            return StatusCode(StatusCodes.Status503ServiceUnavailable,
-                new { error = "CurseForge API key not configured. An admin must set it in the dev menu. " +
-                              "You can also set your own key in Settings > Mod stores." });
-
-        // Pacing, pauses and success windows are per bucket: the server's key has one per platform,
-        // a caller's own key one of its own once CurseForge has accepted it (until then it shares
-        // the untested-key bucket). The response cache stays keyed by platform: the data is the same.
-        var bucket = ownKey ? guard.BucketForOwnKey(keyValue!) : guard.SharedBucket(name);
-
         // Identical GETs from many launchers (the same mod's version list during everyone's update
-        // check) are answered from a short cache instead of each going upstream.
+        // check) are answered from a short cache instead of each going upstream. A hit costs nothing
+        // upstream, so it is served before the account's allowance is touched.
         var isPost = HttpMethods.IsPost(Request.Method);
         var cacheTtl = isPost ? null : UpstreamGuard.CacheTtl(name, path + query);
         var cacheKey = UpstreamGuard.CacheKey(name, path + query);
@@ -83,10 +66,42 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
             return new EmptyResult();
         }
 
+        if (guard.Users.TryTake(user) is { } rateWait)
+        {
+            log.LogDebug("Proxy rate limit reached for user {User}.", user);
+            return RateLimited(name, rateWait,
+                "Too many store requests from this account. Try again in a moment.", "too_many_requests");
+        }
+
+        var (keyValue, ownKey) = await ResolveKeyAsync(name, ct);
+        if (name == "curseforge" && string.IsNullOrWhiteSpace(keyValue))
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new
+            {
+                error = "CurseForge API key not configured. An admin must set it in the dev menu. " +
+                        "You can also set your own key in Settings > Mod stores.",
+                code = "key_not_configured"
+            });
+
+        // Pacing, pauses and success windows are per bucket: the server's key has one per platform,
+        // a caller's own key one of its own once CurseForge has accepted it (until then it shares
+        // the untested-key bucket). The response cache stays keyed by platform: the data is the same.
+        var bucket = ownKey ? guard.BucketForOwnKey(keyValue!) : guard.SharedBucket(name);
+
         byte[]? body = null;
         if (isPost)
         {
-            body = await ReadBodyAsync(ct);
+            try
+            {
+                body = await ReadBodyAsync(ct);
+            }
+            catch (IOException ex) when (!ct.IsCancellationRequested)
+            {
+                // The launcher went away mid-upload (a hash list is a few hundred KB). Nothing to
+                // forward, and nothing wrong on this side, so it is not an error worth a stack.
+                log.LogDebug("Proxy request body for {Method} {Platform}/{Path} was cut short: {Message}",
+                    Request.Method, platform, path, ex.Message);
+                return StatusCode(StatusCodes.Status400BadRequest, new { error = "Request body was cut short.", code = "bad_request" });
+            }
             if (body is null)
                 return StatusCode(StatusCodes.Status413PayloadTooLarge, new { error = "Request too large.", code = "request_too_large" });
         }
@@ -157,14 +172,31 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
             // has been streamed through. Without this the message leaks under proxy load.
             try
             {
-                var upstream = await resp.Content.ReadAsStreamAsync(ct);
+                Stream upstream;
                 var head = Array.Empty<byte>();
+                try
+                {
+                    upstream = await resp.Content.ReadAsStreamAsync(ct);
+                    if (!resp.IsSuccessStatusCode)
+                        head = await ReadHeadAsync(upstream, ErrorSniffBytes, ct);
+                }
+                catch (Exception ex) when (ex is IOException or HttpRequestException && !ct.IsCancellationRequested)
+                {
+                    // The store dropped the connection after its headers. Nothing has been sent to the
+                    // launcher yet, so it gets the same answer as a store that never picked up and
+                    // tries again shortly.
+                    log.LogWarning("{Platform} dropped the connection on route '{Route}' before its body arrived: {Message}",
+                        DisplayName(name), route.Name, ex.Message);
+                    return Unreachable(name);
+                }
 
                 if (!resp.IsSuccessStatusCode)
                 {
-                    head = await ReadHeadAsync(upstream, ErrorSniffBytes, ct);
                     var text = Encoding.UTF8.GetString(head);
-                    if (UpstreamEdge.IsBlockPage(text))
+                    // The CDN's WAF blocks with a 403 page. An HTML page on a 502, 503 or 504 is the
+                    // store's edge during an outage, which passes through for the launcher to wait
+                    // out rather than taking the route out of rotation for minutes.
+                    if (resp.StatusCode == HttpStatusCode.Forbidden && UpstreamEdge.IsBlockPage(text))
                     {
                         router.MarkBlocked(route, $"CDN block page, HTTP {(int)resp.StatusCode}");
                         if (canRetry)
@@ -213,7 +245,7 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
                         route.Name, (int)UpstreamGuard.ThrottlePause.TotalSeconds);
                     return RateLimited(name, UpstreamGuard.ThrottlePause,
                         "CurseForge is temporarily refusing requests from the launcher server (too many in a short " +
-                        "time). This is not the API key. Try again in a minute.");
+                        "time). Try again in a minute.");
                 }
 
                 // A 401/403 on the user's own key is the key, and they are the only one who can fix it,
@@ -226,6 +258,16 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
                                 "the box to go back to the launcher's shared key.",
                         code = "own_key_rejected"
                     });
+
+                // The same statuses on the shared key with no success in the last minutes are passed
+                // through as they are. The launcher waits and retries them, then says CurseForge is
+                // refusing the server; only the admin can tell a revoked key from a long throttle, so
+                // the log says which key it was.
+                if (!ownKey && name == "curseforge" && !IsDownloadUrl(path)
+                    && resp.StatusCode is (HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized))
+                    log.LogWarning("CurseForge answered {Status} to the shared key on route '{Route}' for {Path} with no " +
+                                   "success in the last {Window} minutes: throttled for a while, or the key is no longer valid.",
+                        (int)resp.StatusCode, route.Name, path, (int)UpstreamGuard.RecentSuccessWindow.TotalMinutes);
 
                 if (resp.IsSuccessStatusCode)
                 {

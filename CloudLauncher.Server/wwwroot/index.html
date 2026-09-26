@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CloudLauncher - a Minecraft launcher that keeps your packs on a server</title>
-<meta name="description" content="A free Windows launcher for modded Minecraft. Your instances live on a server: set a pack up once, download it on any PC, or give it to a friend with a link.">
+<meta name="description" content="A free Windows launcher for modded Minecraft, made by one person. Your instances live on a server: set a pack up once, download it on any PC, or give it to a friend with a link.">
 <meta name="theme-color" content="#141413">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="CloudLauncher">
 <meta property="og:title" content="CloudLauncher">
-<meta property="og:description" content="Your packs, on every PC you play on. A free Windows launcher for modded Minecraft.">
+<meta property="og:description" content="Your packs, on every PC you play on. A free Windows launcher for modded Minecraft, made by one person.">
 <meta property="og:url" content="https://cloudlauncher.co/">
 <meta property="og:image" content="https://cloudlauncher.co/img/og.png">
 <meta property="og:image:width" content="1200">
@@ -20,11 +20,17 @@
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <link rel="preload" href="/fonts/pixelify-sans-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/slate-icons.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/site.css?v=0.9.0">
-<script src="/site.js?v=0.9.0" defer></script>
+<link rel="stylesheet" href="/site.css?v=0.9.2">
+<script src="/site.js?v=0.9.2" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
+
+<!-- Pixel glyphs drawn for this page on a 16x16 grid, used with <use> below. -->
+<svg class="defs" aria-hidden="true" focusable="false">
+  <symbol id="cloud-mini" viewBox="0 0 16 16"><path d="M6 5h4v1h-4zM5 6h7v1h-7zM4 7h9v1h-9zM3 8h10v1h-10zM3 9h10v1h-10zM3 10h10v1h-10zM3 11h10v1h-10z"/></symbol>
+  <symbol id="gh-cat" viewBox="0 0 16 16"><path d="M3 1h1v1h-1zM12 1h1v1h-1zM3 2h2v1h-2zM11 2h2v1h-2zM3 3h3v1h-3zM10 3h3v1h-3zM3 4h10v1h-10zM2 5h12v1h-12zM2 6h12v1h-12zM2 7h3v1h-3zM7 7h2v1h-2zM11 7h3v1h-3zM2 8h3v1h-3zM7 8h2v1h-2zM11 8h3v1h-3zM2 9h12v1h-12zM3 10h10v1h-10zM4 11h8v1h-8zM5 12h6v1h-6zM6 13h4v1h-4z"/></symbol>
+</svg>
 
 <header class="top">
   <div class="wrap top-in">
@@ -33,11 +39,9 @@
       <span>CloudLauncher</span>
     </a>
     <nav class="nav" aria-label="On this page">
-      <a class="px p1 quiet" href="#sync">Sync</a>
-      <a class="px p1 quiet" href="#sharing">Sharing</a>
-      <a class="px p1 quiet" href="#mods">Mods</a>
-      <a class="px p1 quiet" href="#servers">Servers</a>
-      <a class="px p1 quiet" href="#look">Appearance</a>
+      <a class="px p1 quiet" href="#tour">The tour</a>
+      <a class="px p1 quiet" href="#why">Why</a>
+      <a class="px p1 quiet" href="#honest">Does and doesn't</a>
       <a class="px p1 quiet" href="#changes" data-if-releases hidden>What's new</a>
     </nav>
     <a class="btn btn-sm btn-discord px sh" href="https://discord.gg/PU6HpxzJwW" target="_blank" rel="noopener noreferrer" title="Join the CloudLauncher Discord"><svg class="svg-i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.317 4.3698a19.7913 19.7913 0 00-4.8851-1.5152.0741.0741 0 00-.0785.0371c-.211.3753-.4447.8648-.6083 1.2495-1.8447-.2762-3.68-.2762-5.4868 0-.1636-.3933-.4058-.8742-.6177-1.2495a.077.077 0 00-.0785-.037 19.7363 19.7363 0 00-4.8852 1.515.0699.0699 0 00-.0321.0277C.5334 9.0458-.319 13.5799.0992 18.0578a.0824.0824 0 00.0312.0561c2.0528 1.5076 4.0413 2.4228 5.9929 3.0294a.0777.0777 0 00.0842-.0276c.4616-.6304.8731-1.2952 1.226-1.9942a.076.076 0 00-.0416-.1057c-.6528-.2476-1.2743-.5495-1.8722-.8923a.077.077 0 01-.0076-.1277c.1258-.0943.2517-.1923.3718-.2914a.0743.0743 0 01.0776-.0105c3.9278 1.7933 8.18 1.7933 12.0614 0a.0739.0739 0 01.0785.0095c.1202.099.246.1981.3728.2924a.077.077 0 01-.0066.1276 12.2986 12.2986 0 01-1.873.8914.0766.0766 0 00-.0407.1067c.3604.698.7719 1.3628 1.225 1.9932a.076.076 0 00.0842.0286c1.961-.6067 3.9495-1.5219 6.0023-3.0294a.077.077 0 00.0313-.0552c.5004-5.177-.8382-9.6739-3.5485-13.6604a.061.061 0 00-.0312-.0286zM8.02 15.3312c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9555-2.4189 2.157-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.9555 2.4189-2.1569 2.4189zm7.9748 0c-1.1825 0-2.1569-1.0857-2.1569-2.419 0-1.3332.9554-2.4189 2.1569-2.4189 1.2108 0 2.1757 1.0952 2.1568 2.419 0 1.3332-.946 2.4189-2.1568 2.4189Z"/></svg><span class="lbl">Discord</span></a>
@@ -51,12 +55,22 @@
   <section class="hero" aria-labelledby="hero-title">
     <div class="wrap">
       <div class="hero-in">
-        <p class="kicker"><span class="i" aria-hidden="true">&#xE753;</span>A Minecraft launcher for Windows</p>
-        <h1 id="hero-title">Your packs,<br> on every PC you play on.</h1>
-        <p class="lead">CloudLauncher keeps your modded instances on a server. Set a pack up once, then download it on the laptop, or give it to a friend with a link. Upload a change and the people you share with get it the next time they press Play.</p>
+        <p class="kicker">
+          <svg class="mascot" viewBox="4 8 24 17" shape-rendering="crispEdges" aria-hidden="true">
+            <path class="m-body" d="M14 9h3v1h-3zM12 10h7v1h-7zM11 11h9v1h-9zM10 12h14v1h-14zM10 13h15v1h-15zM10 14h16v1h-16zM7 15h19v1h-19zM6 16h21v1h-21zM6 17h20v1h-20zM5 18h21v1h-21zM5 19h22v1h-22zM5 20h22v1h-22zM5 21h22v1h-22zM6 22h20v1h-20zM8 23h16v1h-16z"/>
+            <path class="m-shade" d="M26 16h1v1h-1zM5 20h1v1h-1zM26 20h1v1h-1zM5 21h3v1h-3zM24 21h3v1h-3zM6 22h20v1h-20zM8 23h16v1h-16z"/>
+            <path class="m-cheeks" d="M9 19h2v1h-2zM20 19h2v1h-2z"/>
+            <path class="m-eyes" d="M11 16h2v2h-2zM18 16h2v2h-2z"/>
+            <path class="m-lids" d="M11 17h2v1h-2zM18 17h2v1h-2z"/>
+          </svg>
+          <span>A Minecraft launcher for Windows, made by one person</span>
+        </p>
+        <h1 id="hero-title">Your packs live on a server.<br> Any PC you sit at can have them.</h1>
+        <p class="lead">I built CloudLauncher because I was tired of setting up the same modpack three times: on my desktop, on my laptop, and on a friend's laptop over Discord at 2 a.m. Now I set it up once and press Upload. Everyone else presses Download.</p>
         <div class="cta">
           <a class="btn btn-accent btn-lg px sh" href="/download"><span class="i" aria-hidden="true">&#xE896;</span>Download for Windows</a>
-          <a class="btn btn-lg px sh" href="#sync">What it does</a>
+          <a class="btn btn-lg px sh" href="#tour">Take the tour</a>
+          <a class="gh" href="https://github.com/falling-colud/CloudLauncher" target="_blank" rel="noopener noreferrer"><svg class="gh-i" shape-rendering="crispEdges" aria-hidden="true"><use href="#gh-cat"/></svg>Source on GitHub</a>
         </div>
         <p class="dl-meta">
           <span>Free</span>
@@ -128,16 +142,48 @@
           <img src="/img/instances.png" width="1280" height="800" fetchpriority="high" decoding="async" data-optional alt="The Instances page: a grid of instance cards, each with its cover, Minecraft version, loader, owner and a Play button, and folder chips above them.">
         </div>
       </figure>
+      <p class="stamp"><span>CloudLauncher <span data-version-line hidden><b data-version></b> </span>/ win-x64</span><span data-date-line hidden>released <b data-date></b></span></p>
     </div>
   </section>
 
-  <!-- ============================================================ sync -->
-  <section class="sec" id="sync" aria-labelledby="sync-title">
+  <!-- ======================================================== the tour -->
+  <section class="tour-head" id="tour" aria-labelledby="tour-title">
     <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow"><span class="i" aria-hidden="true">&#xE895;</span>Sync</p>
-        <h2 id="sync-title">Set it up once. Download it anywhere.</h2>
-        <p class="lead">Publish an instance and its files live on the server. On another PC, sign in and press Download: same mods, same configs, same scripts. Your worlds and your keybinds stay on the PC they belong to.</p>
+      <div class="divider" aria-hidden="true"><svg class="minicloud" shape-rendering="crispEdges"><use href="#cloud-mini"/></svg></div>
+      <p class="eyebrow"><span class="i" aria-hidden="true">&#xE753;</span>The tour</p>
+      <h2 id="tour-title">Eight screens, one note each.</h2>
+      <p class="lead">Real screenshots from a test account; the first is the one you just scrolled past. mara, sol, ivy, jun and tobi are not real people, but everything they are doing is. Click a screenshot to see it full size.</p>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------ 01 instances -->
+  <section class="ch" id="instances" aria-labelledby="instances-title">
+    <div class="wrap">
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xE7C3;</span>01<span class="of">/ 08</span></p>
+        <h2 id="instances-title">Every pack is a card. The button says Play.</h2>
+        <p class="lead">Instances are the packs you own, the ones people shared with you, and the ones you fetched from someone's link. Each card says which Minecraft and which loader it runs, who made it, and whether it is yours, shared, public or only on this PC. The chips above the grid are folders, and you name them yourself. It is the screen at the top of this page.</p>
+      </div>
+      <div class="ch-body solo">
+        <ul class="ticks">
+          <li>Create an instance from scratch, browse the packs other people made public, or import a CurseForge <code>.zip</code> or a Modrinth <code>.mrpack</code>.</li>
+          <li>Cards or a compact list. The toggle sits at the right of the folder strip, for the day you pass twenty instances.</li>
+          <li>Search, sort, open the instances folder, refresh. Nothing on this page needs a menu.</li>
+        </ul>
+        <aside class="side">
+          <div class="note"><p>In the screenshot the folders are Build Team and Friday Crew. On my own PC one of them is called Testing, which is where packs go to die.</p></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------- 02 sync -->
+  <section class="ch" id="sync" aria-labelledby="sync-title">
+    <div class="wrap">
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xE895;</span>02<span class="of">/ 08</span></p>
+        <h2 id="sync-title">Upload here. Download there. Nothing else moves.</h2>
+        <p class="lead">Publish an instance and its files go to the server. Sign in on another PC and press Download: same mods, same configs, same scripts. What travels is decided by rules, per folder or per file, and the most specific rule wins. <code>saves/</code> and <code>options.txt</code> are ignored on purpose, so your worlds and your keybinds stay on the PC they belong to.</p>
       </div>
 
       <div class="trio">
@@ -151,7 +197,7 @@
               <li><span class="cover c1">R</span><span class="name">Redstone Lab</span><span class="state off">Not published</span></li>
             </ul>
           </div>
-          <figcaption><b>Every instance says where it stands</b>In sync, an update waiting, changes of yours to upload, or not published at all. The two buttons that move files are Upload and Download.</figcaption>
+          <figcaption><b>Every instance knows where it stands.</b>In sync, an update waiting, changes of yours to upload, or not published at all. The two buttons that move files are called Upload and Download. There is no third.</figcaption>
         </figure>
 
         <figure>
@@ -166,7 +212,7 @@
               <tr class="yours"><td>config/sodium-options.json</td><td><span class="rule to-local">→ local</span></td></tr>
             </table>
           </div>
-          <figcaption><b>Rules decide what travels</b>By folder or by file, and the most specific rule wins. Anything on your private list never leaves this PC, whatever the rules say, and a download never overwrites it.</figcaption>
+          <figcaption><b>Rules decide what travels.</b>By folder or by file. Anything on your private list never leaves this PC whatever the rules say, and a download never overwrites it. My <code>sodium-options.json</code> is on that list, because my laptop's GPU has opinions.</figcaption>
         </figure>
 
         <figure>
@@ -188,38 +234,22 @@
               <span class="btn px sh">Dismiss</span>
             </div>
           </div>
-          <figcaption><b>Nobody overwrites anybody</b>If someone uploaded while you were working, the server turns your upload down instead of replacing their work, and the launcher shows who, when, and which files differ.</figcaption>
+          <figcaption><b>Nobody overwrites anybody.</b>If someone uploaded while you were working, the server turns your upload down instead of replacing their work, and the launcher shows who, when, and which files differ. This exists because two of us once uploaded the same pack ten minutes apart.</figcaption>
         </figure>
       </div>
+      <div class="note wide"><p>Rules are part of the instance, so they travel with it. The private list is part of your PC, so it does not. That split took me three tries to get right, and the third one is the one you get.</p></div>
     </div>
   </section>
 
-  <!-- ========================================================= sharing -->
-  <section class="sec" id="sharing" aria-labelledby="sharing-title">
+  <!-- -------------------------------------------------------- 03 sharing -->
+  <section class="ch flip" id="sharing" aria-labelledby="sharing-title">
     <div class="wrap">
-      <div class="split">
-        <div class="body">
-          <p class="eyebrow"><span class="i" aria-hidden="true">&#xE72D;</span>Sharing</p>
-          <h2 id="sharing-title">Give a pack to a friend with a link.</h2>
-          <p class="lead">Invite someone by username and the instance waits in their launcher until they accept or decline. Or copy a share link and paste it in a chat: it works until you revoke it, or until the expiry you gave it.</p>
-          <ul class="ticks">
-            <li>Pick what they can do: view, download, upload changes, or manage who else has it.</li>
-            <li>Share with a team instead of one person at a time. Teams have members, admins and an owner.</li>
-            <li>An invitation only ever adds. Redeeming a read-only link never takes away access someone already had.</li>
-            <li>The same server hosts your own mods, worlds, resource packs, shader packs, config sets, KubeJS scripts and data packs, shared the same way, each with its own versions and changelogs.</li>
-          </ul>
-          <div class="invite px" aria-hidden="true">
-            <span class="cover c0">T</span>
-            <div>
-              <b>mira invited you to Tech Tree</b>
-              <p class="small">Can view, download · MC 1.20.1 · Forge</p>
-            </div>
-            <div class="acts">
-              <span class="btn btn-accent px sh">Accept</span>
-              <span class="btn px sh">Decline</span>
-            </div>
-          </div>
-        </div>
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xE72D;</span>03<span class="of">/ 08</span></p>
+        <h2 id="sharing-title">Give a pack to a friend with a link.</h2>
+        <p class="lead">Invite someone by username and the invitation waits in their launcher until they accept or decline. Or copy a share link and paste it in a chat: it works until you revoke it, or for as many days as you gave it. You pick what they can do: view, download, upload changes, or manage who else has it. Teams are for the group that plays on Fridays.</p>
+      </div>
+      <div class="ch-body">
         <figure class="win px sh">
           <div class="shot">
             <div class="vg" aria-hidden="true">
@@ -255,226 +285,226 @@
             <img src="/img/sharing.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="The Sharing page: instances you share and with whom, and invitations waiting for an answer.">
           </div>
         </figure>
-      </div>
-    </div>
-  </section>
-
-  <!-- ======================================================== instance -->
-  <section class="sec" id="instance" aria-labelledby="instance-title">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow"><span class="i" aria-hidden="true">&#xE7C3;</span>Instances</p>
-        <h2 id="instance-title">Everything about one instance, on one page.</h2>
-        <p class="lead">Play, update, export, open the folder. Logs sit next to crash reports, with find and a filter by level, and you can copy or save one for a bug report. Mods, resource packs, screenshots, worlds and files each have a tab.</p>
-      </div>
-      <figure class="win px sh wide">
-        <div class="shot">
-          <div class="vg" aria-hidden="true">
-            <div class="vg-bar"><span class="vg-dot"></span><span class="vg-brand">CloudLauncher</span><span class="vg-acct"><span class="av"><span class="i">&#xE77B;</span></span>juno</span><span class="vg-caps"><span class="i">&#xE921;</span><span class="i">&#xE922;</span><span class="i">&#xE8BB;</span></span></div>
-            <div class="vg-body rail">
-              <div class="vg-side"><div class="hdr"><span class="i">&#xE700;</span></div><div class="vg-nav on"><span class="i">&#xE7C3;</span></div><div class="vg-nav"><span class="i">&#xEC4A;</span></div><div class="vg-nav"><span class="i">&#xE909;</span></div><div class="vg-nav"><span class="i">&#xE7C9;</span></div><div class="vg-nav"><span class="i">&#xE706;</span></div><div class="vg-nav"><span class="i">&#xE968;</span></div><div class="vg-nav"><span class="i">&#xE943;</span></div><div class="grow"></div><div class="rule"></div><div class="vg-nav"><span class="i">&#xEDA2;</span></div><div class="vg-nav"><span class="i">&#xE72D;</span></div><div class="vg-nav"><span class="i">&#xE77B;</span></div><div class="vg-nav"><span class="i">&#xE713;</span></div></div>
-              <div class="vg-page vg-inst-page">
-                <div class="vg-hero">
-                  <span class="big c3">C</span>
-                  <div>
-                    <div class="vg-h1">Cottage Survival</div>
-                    <div class="vg-ver">MC 1.21.1 · NeoForge 21.1.72</div>
-                    <div class="vg-sub">Shared by juno · 214 mods · played 2 hours ago</div>
-                    <div class="vg-sub">A slow survival pack for four friends: farming, cooking, trains, no bosses.</div>
-                  </div>
-                  <div class="vg-side-btns">
-                    <span class="vg-btn">Export</span>
-                    <span class="vg-btn">Open folder</span>
-                    <span class="vg-btn">Manage files</span>
-                  </div>
-                </div>
-                <div class="vg-acts"><span class="vg-btn acc big"><span class="i">&#xE768;</span>Play</span><span class="vg-btn acc">Manage modpack</span><span class="vg-pill shared">SHARED</span></div>
-                <div class="vg-tabs"><span class="on">Overview</span><span>Mods</span><span>Resources</span><span>Screenshots</span><span>Worlds</span><span>Files</span></div>
-                <div class="vg-cols">
-                  <div class="vg-card vg-pad"><div class="vg-h3">Description</div><div class="vg-bars"><span class="vg-line" style="width:92%"></span><span class="vg-line" style="width:84%"></span><span class="vg-line" style="width:88%"></span><span class="vg-line" style="width:60%"></span><span class="vg-line" style="width:0;height:calc(var(--u)*6)"></span><span class="vg-line" style="width:90%"></span><span class="vg-line" style="width:76%"></span><span class="vg-line" style="width:84%"></span><span class="vg-line" style="width:0;height:calc(var(--u)*6)"></span><span class="vg-line" style="width:88%"></span><span class="vg-line" style="width:70%"></span><span class="vg-line" style="width:80%"></span><span class="vg-line" style="width:52%"></span></div></div>
-                  <div class="vg-card vg-pad vg-log">
-                    <div class="vg-h3">Logs</div>
-                    <div class="vg-chips"><span class="vg-chip on">latest.log</span><span class="vg-chip">crash-2026-09-24.txt</span></div>
-                    <div class="lg"><span>[12:04:11] [Render thread/INFO]: Loaded 214 mods</span><span class="w">[12:04:12] [Worker-Main-3/WARN]: Missing texture ...</span><span>[12:04:15] [Server thread/INFO]: Preparing spawn area: 84%</span><span class="e">[12:04:19] [Render thread/ERROR]: Failed to load model ...</span><span>[12:04:20] [Server thread/INFO]: Done (8.4s)!</span><span>[12:04:31] [Server thread/INFO]: juno joined the game</span><span>[12:05:02] [Render thread/INFO]: Saved screenshot as 2026-09-24_12.05.02.png</span><span class="w">[12:06:40] [Server thread/WARN]: Can't keep up! Is the server overloaded?</span><span>[12:07:13] [Server thread/INFO]: Saving chunks for level 'ServerLevel[world]'</span><span>[12:07:14] [Server thread/INFO]: All chunks are saved</span></div>
-                    <div class="vg-foot"><span class="vg-muted">All levels</span><span class="vg-btn">Copy</span><span class="vg-btn">Save…</span></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <img src="/img/instance.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="An instance's own page: its name, Minecraft version and loader, the Play and Manage modpack buttons, Export, Open folder and Manage files, and tabs for mods, resources, screenshots, worlds and files.">
-        </div>
-      </figure>
-      <div class="facts">
-        <div class="fact px">
-          <span class="i" aria-hidden="true">&#xE8B7;</span>
-          <h3>A file manager per instance</h3>
-          <p>Browse and drag files in, edit configs and scripts in place (encoding and line endings are kept as they were), see where the disk went, and diff the whole thing against another instance.</p>
-        </div>
-        <div class="fact px">
-          <span class="i" aria-hidden="true">&#xE769;</span>
-          <h3>Downloads you can pause</h3>
-          <p>A big modpack can be paused mid-file or stopped. Stopping takes the instance back to how it was before, and never touches files that were already there.</p>
-        </div>
-        <div class="fact px">
-          <span class="i" aria-hidden="true">&#xE7F4;</span>
-          <h3>The right Java, and your own flags</h3>
-          <p>The launcher picks the Java your Minecraft version wants and downloads it if needed. Memory and JVM arguments are per instance, and so is the Java if you want to choose.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============================================================ mods -->
-  <section class="sec" id="mods" aria-labelledby="mods-title">
-    <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow"><span class="i" aria-hidden="true">&#xEC4A;</span>Mods</p>
-        <h2 id="mods-title">Built for packs that got out of hand.</h2>
-        <p class="lead">CurseForge and Modrinth in one browser, searched for the Minecraft version and loader of the instance you picked. Installing a mod brings its required dependencies. Then there's everything you need once a pack has a few hundred of them.</p>
-      </div>
-
-      <div class="tabs" role="tablist" aria-label="Mod management views" data-tabs>
-        <button class="tab px rs" role="tab" id="tab-graph" aria-controls="panel-graph" aria-selected="true"><span class="i" aria-hidden="true">&#xE9D9;</span>Dependency graph</button>
-        <button class="tab px rs" role="tab" id="tab-plan" aria-controls="panel-plan" aria-selected="false" tabindex="-1"><span class="i" aria-hidden="true">&#xE70B;</span>Planning board</button>
-      </div>
-
-      <div class="tabpanel" id="panel-graph" role="tabpanel" aria-labelledby="tab-graph">
-        <figure class="win px sh">
-          <div class="shot">
-            <div class="vg" aria-hidden="true">
-              <div class="vg-bar"><span class="vg-dot"></span><span class="vg-brand">CloudLauncher</span><span class="vg-acct"><span class="av"><span class="i">&#xE77B;</span></span>juno</span><span class="vg-caps"><span class="i">&#xE921;</span><span class="i">&#xE922;</span><span class="i">&#xE8BB;</span></span></div>
-              <div class="vg-body rail">
-                <div class="vg-side"><div class="hdr"><span class="i">&#xE700;</span></div><div class="vg-nav"><span class="i">&#xE7C3;</span></div><div class="vg-nav on"><span class="i">&#xEC4A;</span></div><div class="vg-nav"><span class="i">&#xE909;</span></div><div class="vg-nav"><span class="i">&#xE7C9;</span></div><div class="vg-nav"><span class="i">&#xE706;</span></div><div class="vg-nav"><span class="i">&#xE968;</span></div><div class="vg-nav"><span class="i">&#xE943;</span></div><div class="grow"></div><div class="rule"></div><div class="vg-nav"><span class="i">&#xEDA2;</span></div><div class="vg-nav"><span class="i">&#xE72D;</span></div><div class="vg-nav"><span class="i">&#xE77B;</span></div><div class="vg-nav"><span class="i">&#xE713;</span></div></div>
-                <div class="vg-page">
-                  <div class="vg-h1">Cottage Survival</div>
-                  <div class="vg-tabs"><span>List view</span><span>Mod browsing</span><span class="on">Graph view</span><span>Categories</span><span>Modpack planning</span><span>Advanced</span></div>
-                  <div class="vg-acts"><span class="vg-search" style="margin-left:0;color:var(--text)"><span class="i">&#xE721;</span>ars</span><span class="vg-btn">Collapse all</span><span class="vg-btn">Expand all</span><span class="vg-muted" style="margin-left:auto">Showing Magic, Library, Quality of life and Tech</span></div>
-                  <svg class="vg-canvas" viewBox="0 0 1164 470" preserveAspectRatio="xMinYMin meet">
-                    <defs>
-                      <marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="#86847d"/></marker>
-                    </defs>
-                    <g class="cat"><rect x="0" y="8" width="250" height="28"/><text x="14" y="27">Magic · 2</text></g>
-                    <g class="cat"><rect x="290" y="8" width="250" height="28"/><text x="304" y="27">Library · 5</text></g>
-                    <g class="cat"><rect x="580" y="8" width="250" height="28"/><text x="594" y="27">Quality of life · 5</text></g>
-                    <g class="cat"><rect x="870" y="8" width="250" height="28"/><text x="884" y="27">Tech · 4</text></g>
-                    <g class="edges" marker-end="url(#ah)">
-                      <path d="M250 223 C272 223 268 75 288 75"/>
-                      <path d="M250 223 C272 223 268 149 288 149"/>
-                      <path d="M580 75 C558 75 562 223 542 223"/>
-                      <path d="M580 149 C558 149 562 297 542 297"/>
-                      <path d="M580 223 C558 223 562 371 542 371"/>
-                      <path d="M995 146 L995 118"/>
-                      <path d="M995 334 L995 290"/>
-                    </g>
-                    <g class="edges" marker-end="url(#ah)">
-                      <path d="M250 112 C270 112 268 75 288 75"/>
-                      <path d="M250 112 C270 112 268 149 288 149"/>
-                    </g>
-                    <g class="node sel"><rect x="0" y="89" width="250" height="46"/><text x="14" y="109">Ars Nouveau</text><text class="s" x="14" y="126">needs GeckoLib, Curios API</text></g>
-                    <g class="node"><rect x="0" y="200" width="250" height="46"/><text x="14" y="220">Iron's Spells 'n Spellbooks</text><text class="s" x="14" y="237">needs GeckoLib, Curios API</text></g>
-                    <g class="node"><rect x="290" y="52" width="250" height="46"/><text x="304" y="72">GeckoLib</text><text class="s" x="304" y="89">library · 12 dependents</text></g>
-                    <g class="node"><rect x="290" y="126" width="250" height="46"/><text x="304" y="146">Curios API</text><text class="s" x="304" y="163">library · 9 dependents</text></g>
-                    <g class="node"><rect x="290" y="200" width="250" height="46"/><text x="304" y="220">Balm</text><text class="s" x="304" y="237">library · 4 dependents</text></g>
-                    <g class="node"><rect x="290" y="274" width="250" height="46"/><text x="304" y="294">Moonlight Lib</text><text class="s" x="304" y="311">library · 3 dependents</text></g>
-                    <g class="node"><rect x="290" y="348" width="250" height="46"/><text x="304" y="368">Sophisticated Core</text><text class="s" x="304" y="385">library · 2 dependents</text></g>
-                    <g class="node"><rect x="580" y="52" width="250" height="46"/><text x="594" y="72">Waystones</text><text class="s" x="594" y="89">needs Balm</text></g>
-                    <g class="node"><rect x="580" y="126" width="250" height="46"/><text x="594" y="146">Supplementaries</text><text class="s" x="594" y="163">needs Moonlight Lib</text></g>
-                    <g class="node"><rect x="580" y="200" width="250" height="46"/><text x="594" y="220">Sophisticated Backpacks</text><text class="s" x="594" y="237">needs Sophisticated Core</text></g>
-                    <g class="node"><rect x="580" y="274" width="250" height="46"/><text x="594" y="294">Jade</text><text class="s" x="594" y="311">no dependencies</text></g>
-                    <g class="node"><rect x="580" y="348" width="250" height="46"/><text x="594" y="368">Just Enough Items</text><text class="s" x="594" y="385">no dependencies</text></g>
-                    <g class="node"><rect x="870" y="52" width="250" height="64"/><text x="884" y="72">Create</text><text class="s" x="884" y="89">big · 1 dependent</text><rect class="meter" x="884" y="100" width="150" height="6"/></g>
-                    <g class="node"><rect x="870" y="146" width="250" height="46"/><text x="884" y="166">Create: Steam 'n' Rails</text><text class="s" x="884" y="183">needs Create</text></g>
-                    <g class="node"><rect x="870" y="240" width="250" height="48"/><text x="884" y="260">Mekanism</text><text class="s" x="884" y="277">big · 1 dependent</text></g>
-                    <g class="node"><rect x="870" y="334" width="250" height="46"/><text x="884" y="354">Mekanism Generators</text><text class="s" x="884" y="371">needs Mekanism</text></g>
-                    <text class="s" x="0" y="440">Arrows point at what a mod needs. A match for the find box gets an outline.</text>
-                  </svg>
-                </div>
-              </div>
-            </div>
-            <img src="/img/mods-graph.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="The dependency graph of a modpack: mods as boxes grouped by category, with arrows from each mod to the mods it needs.">
-          </div>
-        </figure>
-        <p class="cap">The graph draws up to 3,000 mods and every line between them. Categories fold away, and a find box jumps to one mod.</p>
-      </div>
-
-      <div class="tabpanel" id="panel-plan" role="tabpanel" aria-labelledby="tab-plan">
-        <figure class="win px sh">
-          <div class="shot">
-            <div class="vg" aria-hidden="true">
-              <div class="vg-bar"><span class="vg-dot"></span><span class="vg-brand">CloudLauncher</span><span class="vg-acct"><span class="av"><span class="i">&#xE77B;</span></span>juno</span><span class="vg-caps"><span class="i">&#xE921;</span><span class="i">&#xE922;</span><span class="i">&#xE8BB;</span></span></div>
-              <div class="vg-body rail">
-                <div class="vg-side"><div class="hdr"><span class="i">&#xE700;</span></div><div class="vg-nav"><span class="i">&#xE7C3;</span></div><div class="vg-nav on"><span class="i">&#xEC4A;</span></div><div class="vg-nav"><span class="i">&#xE909;</span></div><div class="vg-nav"><span class="i">&#xE7C9;</span></div><div class="vg-nav"><span class="i">&#xE706;</span></div><div class="vg-nav"><span class="i">&#xE968;</span></div><div class="vg-nav"><span class="i">&#xE943;</span></div><div class="grow"></div><div class="rule"></div><div class="vg-nav"><span class="i">&#xEDA2;</span></div><div class="vg-nav"><span class="i">&#xE72D;</span></div><div class="vg-nav"><span class="i">&#xE77B;</span></div><div class="vg-nav"><span class="i">&#xE713;</span></div></div>
-                <div class="vg-page">
-                  <div class="vg-h1">Cottage Survival</div>
-                  <div class="vg-tabs"><span>List view</span><span>Mod browsing</span><span>Graph view</span><span>Categories</span><span class="on">Modpack planning</span><span>Advanced</span></div>
-                  <svg class="vg-canvas" viewBox="0 0 1164 620" preserveAspectRatio="xMinYMin meet">
-                    <defs><marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path class="acc-fill" d="M0 0L8 4L0 8z"/></marker></defs>
-                    <g class="rail-l"><rect x="0" y="0" width="200" height="620"/>
-                      <text class="h" x="16" y="30">BOARDS</text>
-                      <text x="16" y="58">Pack plans</text><text class="on" x="30" y="84">Main board</text><text x="30" y="108">Progression</text>
-                      <text x="16" y="136">Ideas</text><text x="30" y="160">Maybe later</text>
-                      <text class="h" x="16" y="204">SECTIONS</text><text x="30" y="230">Early game</text><text x="30" y="254">Magic</text><text x="30" y="278">Release</text>
-                      <text class="h" x="16" y="322">MODS</text><text x="30" y="348">Farmer's Delight</text><text x="30" y="372">Waystones</text><text x="30" y="396">Create</text><text x="30" y="420">Ars Nouveau</text><text x="30" y="444">Supplementaries</text>
-                      <text class="s" x="16" y="596">+ New board</text></g>
-                    <g class="section"><rect x="222" y="10" width="446" height="330"/><text x="240" y="38">Early game</text></g>
-                    <g class="section"><rect x="690" y="10" width="462" height="232"/><text x="708" y="38">Magic</text></g>
-                    <g class="section"><rect x="690" y="262" width="462" height="348"/><text x="708" y="290">Release</text></g>
-                    <g class="edges" marker-end="url(#ah2)">
-                      <path class="acc" d="M650 118 C678 118 680 136 706 136"/>
-                      <path class="acc dash" d="M920 218 L920 318"/>
-                    </g>
-                    <g class="node"><rect x="240" y="56" width="190" height="54"/><text x="254" y="79">Farmer's Delight</text><text class="s" x="254" y="97">food · priority 2</text></g>
-                    <g class="node"><rect x="240" y="126" width="190" height="54"/><text x="254" y="149">Waystones</text><text class="s" x="254" y="167">travel · priority 1</text></g>
-                    <g class="note"><rect x="450" y="56" width="200" height="124"/><text class="t" x="464" y="79">Starter kit</text><text class="s" x="464" y="102">&#x2611; Backpack</text><text class="s" x="464" y="122">&#x2611; Map</text><text class="s" x="464" y="142">&#x2610; Waystone recipe</text><text class="s" x="464" y="162">&#x2610; Bread tweak</text></g>
-                    <g class="note"><rect x="240" y="200" width="410" height="120"/><text class="t" x="254" y="223">Why no bosses</text><rect class="ln" x="254" y="240" width="370" height="7"/><rect class="ln" x="254" y="256" width="340" height="7"/><rect class="ln" x="254" y="272" width="360" height="7"/><rect class="ln" x="254" y="288" width="210" height="7"/></g>
-                    <g class="group"><rect x="708" y="56" width="426" height="162"/><text class="t" x="724" y="80">Magic</text><text class="s" x="724" y="99">Category · 12 mods, updates itself</text><rect class="chip" x="724" y="114" width="104" height="24"/><text class="c" x="734" y="130">Ars Nouveau</text><rect class="chip" x="836" y="114" width="96" height="24"/><text class="c" x="846" y="130">Iron's Spells</text><rect class="chip" x="940" y="114" width="84" height="24"/><text class="c" x="950" y="130">Occultism</text><rect class="chip" x="724" y="146" width="96" height="24"/><text class="c" x="734" y="162">Blood Magic</text><rect class="chip" x="828" y="146" width="112" height="24"/><text class="c" x="838" y="162">Hexerei</text><text class="s" x="950" y="162">+ 7 more</text></g>
-                    <g class="note"><rect x="708" y="320" width="426" height="100"/><text class="t" x="724" y="344">Balance pass</text><text class="s" x="724" y="366">Recipes, loot, spawn rates</text><text class="s" x="1090" y="366">62%</text><rect class="bar" x="724" y="386" width="394" height="10"/><rect class="acc-fill" x="724" y="386" width="244" height="10"/></g>
-                    <g class="note"><rect x="708" y="436" width="426" height="156"/><text class="t" x="724" y="460">Before 1.0</text><text class="s" x="724" y="486">&#x2611; Export .mrpack for the Modrinth crowd</text><text class="s" x="724" y="510">&#x2610; Update check on the whole pack</text><text class="s" x="724" y="534">&#x2610; Write the changelog</text><text class="s" x="724" y="558">&#x2610; Share link for the server group</text></g>
-                  </svg>
-                </div>
-              </div>
-            </div>
-            <img src="/img/planning.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="A modpack planning board: sections of mod cards, note cards with task lists and a progress bar, a live group of every mod in the Magic category, and arrows between them.">
-          </div>
-        </figure>
-        <p class="cap">Mod cards, live groups like "everything tagged Magic" that update themselves, notes with task lists or a progress bar, sections that carry their cards when you drag them, and arrows between any of it.</p>
-      </div>
-
-      <div class="facts">
-        <div class="fact px">
-          <span class="i" aria-hidden="true">&#xE895;</span>
-          <h3>Update checks in bulk</h3>
-          <p>The stores are asked about the whole pack in a few requests, even for 1,900 mods. Only the leftovers go one at a time, at a pace you set.</p>
-        </div>
-        <div class="fact px">
-          <span class="i" aria-hidden="true">&#xE81C;</span>
-          <h3>Every changelog in the jump</h3>
-          <p>Updating a mod that's three versions behind shows all three changelogs, newest first. Right-click any version row to read that version's changelog.</p>
-        </div>
-        <div class="fact px">
-          <span class="i" aria-hidden="true">&#xE8EC;</span>
-          <h3>Notes, categories, priorities</h3>
-          <p>Tag mods with categories and priorities, leave a note on one, lock a version, mark it client-only. Conflicts are flagged, and every mod name links to its store page.</p>
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ========================================================= servers -->
-  <section class="sec" id="servers" aria-labelledby="servers-title">
-    <div class="wrap">
-      <div class="split flip">
-        <div class="body">
-          <p class="eyebrow"><span class="i" aria-hidden="true">&#xE968;</span>Servers</p>
-          <h2 id="servers-title">Every server from every instance, in one list.</h2>
-          <p class="lead">Live status, players, MOTD and ping, checked in the background. Join straight from the launcher, and copy a server into another instance without opening the game.</p>
+        <aside class="side">
           <ul class="ticks">
-            <li>An RCON console for the servers you run, with command history and buttons for the commands you actually type.</li>
-            <li>Or run one yourself: the launcher installs the matching NeoForge, Forge or Fabric server for an instance, starts and stops it, and shows its console.</li>
-            <li>Edit <code>server.properties</code>, ops, the whitelist and bans in a form, and see which of the pack's mods actually reach the server, so a client-only mod doesn't quietly break it.</li>
+            <li>An invitation only ever adds. Redeeming a read-only link never takes away access someone already had.</li>
+            <li>Mods, worlds, resource packs, shader packs, config sets and KubeJS scripts are shared the same way, each with its own versions and changelog.</li>
+            <li>Nobody is added to anything without answering. There is no auto-accept, and I am not adding one.</li>
           </ul>
+          <div class="invite px" aria-hidden="true">
+            <span class="cover c0">T</span>
+            <div>
+              <b>mira invited you to Tech Tree</b>
+              <p class="small">Can view, download · MC 1.20.1 · Forge</p>
+            </div>
+            <div class="acts">
+              <span class="btn btn-accent px sh">Accept</span>
+              <span class="btn px sh">Decline</span>
+            </div>
+          </div>
+          <div class="note"><p>A share link opens a page on this site first, because the person you send it to has usually never heard of CloudLauncher. The page tells them what to install and where to paste the link.</p></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ------------------------------------------------------- 04 instance -->
+  <section class="ch" id="instance" aria-labelledby="instance-title">
+    <div class="wrap">
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xE8B7;</span>04<span class="of">/ 08</span></p>
+        <h2 id="instance-title">One page per instance, with the boring parts done properly.</h2>
+        <p class="lead">Play, update, export, open the folder. Memory and JVM arguments are per instance, and so is the Java if you want to choose one; otherwise the launcher fetches the one your Minecraft version wants. Logs sit next to crash reports with find and a level filter, and Copy puts one on the clipboard for a bug report. Mods, resource packs, screenshots, worlds and files each get a tab.</p>
+      </div>
+      <div class="ch-body">
+        <figure class="win px sh">
+          <div class="shot">
+            <div class="vg" aria-hidden="true">
+              <div class="vg-bar"><span class="vg-dot"></span><span class="vg-brand">CloudLauncher</span><span class="vg-acct"><span class="av"><span class="i">&#xE77B;</span></span>juno</span><span class="vg-caps"><span class="i">&#xE921;</span><span class="i">&#xE922;</span><span class="i">&#xE8BB;</span></span></div>
+              <div class="vg-body rail">
+                <div class="vg-side"><div class="hdr"><span class="i">&#xE700;</span></div><div class="vg-nav on"><span class="i">&#xE7C3;</span></div><div class="vg-nav"><span class="i">&#xEC4A;</span></div><div class="vg-nav"><span class="i">&#xE909;</span></div><div class="vg-nav"><span class="i">&#xE7C9;</span></div><div class="vg-nav"><span class="i">&#xE706;</span></div><div class="vg-nav"><span class="i">&#xE968;</span></div><div class="vg-nav"><span class="i">&#xE943;</span></div><div class="grow"></div><div class="rule"></div><div class="vg-nav"><span class="i">&#xEDA2;</span></div><div class="vg-nav"><span class="i">&#xE72D;</span></div><div class="vg-nav"><span class="i">&#xE77B;</span></div><div class="vg-nav"><span class="i">&#xE713;</span></div></div>
+                <div class="vg-page vg-inst-page">
+                  <div class="vg-hero">
+                    <span class="big c3">C</span>
+                    <div>
+                      <div class="vg-h1">Cottage Survival</div>
+                      <div class="vg-ver">MC 1.21.1 · NeoForge 21.1.72</div>
+                      <div class="vg-sub">Shared by juno · 214 mods · played 2 hours ago</div>
+                      <div class="vg-sub">A slow survival pack for four friends: farming, cooking, trains, no bosses.</div>
+                    </div>
+                    <div class="vg-side-btns">
+                      <span class="vg-btn">Export</span>
+                      <span class="vg-btn">Open folder</span>
+                      <span class="vg-btn">Manage files</span>
+                    </div>
+                  </div>
+                  <div class="vg-acts"><span class="vg-btn acc big"><span class="i">&#xE768;</span>Play</span><span class="vg-btn acc">Manage modpack</span><span class="vg-pill shared">SHARED</span></div>
+                  <div class="vg-tabs"><span class="on">Overview</span><span>Mods</span><span>Resources</span><span>Screenshots</span><span>Worlds</span><span>Files</span></div>
+                  <div class="vg-cols">
+                    <div class="vg-card vg-pad"><div class="vg-h3">Description</div><div class="vg-bars"><span class="vg-line" style="width:92%"></span><span class="vg-line" style="width:84%"></span><span class="vg-line" style="width:88%"></span><span class="vg-line" style="width:60%"></span><span class="vg-line" style="width:0;height:calc(var(--u)*6)"></span><span class="vg-line" style="width:90%"></span><span class="vg-line" style="width:76%"></span><span class="vg-line" style="width:84%"></span><span class="vg-line" style="width:0;height:calc(var(--u)*6)"></span><span class="vg-line" style="width:88%"></span><span class="vg-line" style="width:70%"></span><span class="vg-line" style="width:80%"></span><span class="vg-line" style="width:52%"></span></div></div>
+                    <div class="vg-card vg-pad vg-log">
+                      <div class="vg-h3">Logs</div>
+                      <div class="vg-chips"><span class="vg-chip on">latest.log</span><span class="vg-chip">crash-2026-09-24.txt</span></div>
+                      <div class="lg"><span>[12:04:11] [Render thread/INFO]: Loaded 214 mods</span><span class="w">[12:04:12] [Worker-Main-3/WARN]: Missing texture ...</span><span>[12:04:15] [Server thread/INFO]: Preparing spawn area: 84%</span><span class="e">[12:04:19] [Render thread/ERROR]: Failed to load model ...</span><span>[12:04:20] [Server thread/INFO]: Done (8.4s)!</span><span>[12:04:31] [Server thread/INFO]: juno joined the game</span><span>[12:05:02] [Render thread/INFO]: Saved screenshot as 2026-09-24_12.05.02.png</span><span class="w">[12:06:40] [Server thread/WARN]: Can't keep up! Is the server overloaded?</span><span>[12:07:13] [Server thread/INFO]: Saving chunks for level 'ServerLevel[world]'</span><span>[12:07:14] [Server thread/INFO]: All chunks are saved</span></div>
+                      <div class="vg-foot"><span class="vg-muted">All levels</span><span class="vg-btn">Copy</span><span class="vg-btn">Save...</span></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <img src="/img/instance.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="An instance's own page: its name, Minecraft version and loader, the Play and Manage modpack buttons, Export, Open folder and Manage files, and tabs for mods, resources, screenshots, worlds and files.">
+          </div>
+        </figure>
+        <aside class="side">
+          <ul class="ticks">
+            <li>A file manager per instance. Drag files in, edit configs and scripts in place. Encoding and line endings are kept as they were, because a CRLF flip once cost me an evening.</li>
+            <li>Downloads you can pause mid-file or stop. Stopping removes what the download added; anything it had already replaced keeps the new copy.</li>
+            <li>Diff the whole instance against another one, and see where the disk went.</li>
+          </ul>
+          <div class="note"><p>Keys I actually use: <kbd>F5</kbd> refreshes most pages, <kbd>Ctrl</kbd>+<kbd>F</kbd> filters a log or finds in a file, <kbd>Ctrl</kbd>+<kbd>S</kbd> saves the file you are editing, <kbd>F3</kbd> jumps to the next match in the editor.</p></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------- 05 mods -->
+  <section class="ch" id="mods" aria-labelledby="mods-title">
+    <div class="wrap">
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xEC4A;</span>05<span class="of">/ 08</span></p>
+        <h2 id="mods-title">Built for packs that got out of hand.</h2>
+        <p class="lead">CurseForge and Modrinth in one browser, filtered to the version and loader of the instance you picked. Installing a mod brings its required dependencies. Then there is the part I actually wanted: a graph of what needs what, a board for planning a pack before it exists, and update checks that ask the stores about the whole pack in a few requests instead of one per mod.</p>
+      </div>
+      <div class="ch-body">
+        <div class="tabwrap">
+          <div class="tabs" role="tablist" aria-label="Mod management views" data-tabs>
+            <button class="tab px rs" role="tab" id="tab-graph" aria-controls="panel-graph" aria-selected="true"><span class="i" aria-hidden="true">&#xE9D9;</span>Dependency graph</button>
+            <button class="tab px rs" role="tab" id="tab-plan" aria-controls="panel-plan" aria-selected="false" tabindex="-1"><span class="i" aria-hidden="true">&#xE70B;</span>Planning board</button>
+          </div>
+
+          <div class="tabpanel" id="panel-graph" role="tabpanel" aria-labelledby="tab-graph">
+            <figure class="win px sh">
+              <div class="shot">
+                <div class="vg" aria-hidden="true">
+                  <div class="vg-bar"><span class="vg-dot"></span><span class="vg-brand">CloudLauncher</span><span class="vg-acct"><span class="av"><span class="i">&#xE77B;</span></span>juno</span><span class="vg-caps"><span class="i">&#xE921;</span><span class="i">&#xE922;</span><span class="i">&#xE8BB;</span></span></div>
+                  <div class="vg-body rail">
+                    <div class="vg-side"><div class="hdr"><span class="i">&#xE700;</span></div><div class="vg-nav"><span class="i">&#xE7C3;</span></div><div class="vg-nav on"><span class="i">&#xEC4A;</span></div><div class="vg-nav"><span class="i">&#xE909;</span></div><div class="vg-nav"><span class="i">&#xE7C9;</span></div><div class="vg-nav"><span class="i">&#xE706;</span></div><div class="vg-nav"><span class="i">&#xE968;</span></div><div class="vg-nav"><span class="i">&#xE943;</span></div><div class="grow"></div><div class="rule"></div><div class="vg-nav"><span class="i">&#xEDA2;</span></div><div class="vg-nav"><span class="i">&#xE72D;</span></div><div class="vg-nav"><span class="i">&#xE77B;</span></div><div class="vg-nav"><span class="i">&#xE713;</span></div></div>
+                    <div class="vg-page">
+                      <div class="vg-h1">Cottage Survival</div>
+                      <div class="vg-tabs"><span>List view</span><span>Mod browsing</span><span class="on">Graph view</span><span>Categories</span><span>Modpack planning</span><span>Advanced</span></div>
+                      <div class="vg-acts"><span class="vg-search" style="margin-left:0;color:var(--text)"><span class="i">&#xE721;</span>ars</span><span class="vg-btn">Collapse all</span><span class="vg-btn">Expand all</span><span class="vg-muted" style="margin-left:auto">Showing Magic, Library, Quality of life and Tech</span></div>
+                      <svg class="vg-canvas" viewBox="0 0 1164 470" preserveAspectRatio="xMinYMin meet">
+                        <defs>
+                          <marker id="ah" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L8 4L0 8z" fill="#86847d"/></marker>
+                        </defs>
+                        <g class="cat"><rect x="0" y="8" width="250" height="28"/><text x="14" y="27">Magic · 2</text></g>
+                        <g class="cat"><rect x="290" y="8" width="250" height="28"/><text x="304" y="27">Library · 5</text></g>
+                        <g class="cat"><rect x="580" y="8" width="250" height="28"/><text x="594" y="27">Quality of life · 5</text></g>
+                        <g class="cat"><rect x="870" y="8" width="250" height="28"/><text x="884" y="27">Tech · 4</text></g>
+                        <g class="edges" marker-end="url(#ah)">
+                          <path d="M250 223 C272 223 268 75 288 75"/>
+                          <path d="M250 223 C272 223 268 149 288 149"/>
+                          <path d="M580 75 C558 75 562 223 542 223"/>
+                          <path d="M580 149 C558 149 562 297 542 297"/>
+                          <path d="M580 223 C558 223 562 371 542 371"/>
+                          <path d="M995 146 L995 118"/>
+                          <path d="M995 334 L995 290"/>
+                        </g>
+                        <g class="edges" marker-end="url(#ah)">
+                          <path d="M250 112 C270 112 268 75 288 75"/>
+                          <path d="M250 112 C270 112 268 149 288 149"/>
+                        </g>
+                        <g class="node sel"><rect x="0" y="89" width="250" height="46"/><text x="14" y="109">Ars Nouveau</text><text class="s" x="14" y="126">needs GeckoLib, Curios API</text></g>
+                        <g class="node"><rect x="0" y="200" width="250" height="46"/><text x="14" y="220">Iron's Spells 'n Spellbooks</text><text class="s" x="14" y="237">needs GeckoLib, Curios API</text></g>
+                        <g class="node"><rect x="290" y="52" width="250" height="46"/><text x="304" y="72">GeckoLib</text><text class="s" x="304" y="89">library · 12 dependents</text></g>
+                        <g class="node"><rect x="290" y="126" width="250" height="46"/><text x="304" y="146">Curios API</text><text class="s" x="304" y="163">library · 9 dependents</text></g>
+                        <g class="node"><rect x="290" y="200" width="250" height="46"/><text x="304" y="220">Balm</text><text class="s" x="304" y="237">library · 4 dependents</text></g>
+                        <g class="node"><rect x="290" y="274" width="250" height="46"/><text x="304" y="294">Moonlight Lib</text><text class="s" x="304" y="311">library · 3 dependents</text></g>
+                        <g class="node"><rect x="290" y="348" width="250" height="46"/><text x="304" y="368">Sophisticated Core</text><text class="s" x="304" y="385">library · 2 dependents</text></g>
+                        <g class="node"><rect x="580" y="52" width="250" height="46"/><text x="594" y="72">Waystones</text><text class="s" x="594" y="89">needs Balm</text></g>
+                        <g class="node"><rect x="580" y="126" width="250" height="46"/><text x="594" y="146">Supplementaries</text><text class="s" x="594" y="163">needs Moonlight Lib</text></g>
+                        <g class="node"><rect x="580" y="200" width="250" height="46"/><text x="594" y="220">Sophisticated Backpacks</text><text class="s" x="594" y="237">needs Sophisticated Core</text></g>
+                        <g class="node"><rect x="580" y="274" width="250" height="46"/><text x="594" y="294">Jade</text><text class="s" x="594" y="311">no dependencies</text></g>
+                        <g class="node"><rect x="580" y="348" width="250" height="46"/><text x="594" y="368">Just Enough Items</text><text class="s" x="594" y="385">no dependencies</text></g>
+                        <g class="node"><rect x="870" y="52" width="250" height="64"/><text x="884" y="72">Create</text><text class="s" x="884" y="89">big · 1 dependent</text><rect class="meter" x="884" y="100" width="150" height="6"/></g>
+                        <g class="node"><rect x="870" y="146" width="250" height="46"/><text x="884" y="166">Create: Steam 'n' Rails</text><text class="s" x="884" y="183">needs Create</text></g>
+                        <g class="node"><rect x="870" y="240" width="250" height="48"/><text x="884" y="260">Mekanism</text><text class="s" x="884" y="277">big · 1 dependent</text></g>
+                        <g class="node"><rect x="870" y="334" width="250" height="46"/><text x="884" y="354">Mekanism Generators</text><text class="s" x="884" y="371">needs Mekanism</text></g>
+                        <text class="s" x="0" y="440">Arrows point at what a mod needs. A match for the find box gets an outline.</text>
+                      </svg>
+                    </div>
+                  </div>
+                </div>
+                <img src="/img/mods-graph.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="The dependency graph of a modpack: mods as boxes grouped by category, with arrows from each mod to the mods it needs.">
+              </div>
+            </figure>
+            <p class="cap">Arrows point at what a mod needs. Drag nodes, scroll to zoom, type in the find box and the match gets an outline. It draws up to 3,000 mods and every line between them.</p>
+          </div>
+
+          <div class="tabpanel" id="panel-plan" role="tabpanel" aria-labelledby="tab-plan">
+            <figure class="win px sh">
+              <div class="shot">
+                <div class="vg" aria-hidden="true">
+                  <div class="vg-bar"><span class="vg-dot"></span><span class="vg-brand">CloudLauncher</span><span class="vg-acct"><span class="av"><span class="i">&#xE77B;</span></span>juno</span><span class="vg-caps"><span class="i">&#xE921;</span><span class="i">&#xE922;</span><span class="i">&#xE8BB;</span></span></div>
+                  <div class="vg-body rail">
+                    <div class="vg-side"><div class="hdr"><span class="i">&#xE700;</span></div><div class="vg-nav"><span class="i">&#xE7C3;</span></div><div class="vg-nav on"><span class="i">&#xEC4A;</span></div><div class="vg-nav"><span class="i">&#xE909;</span></div><div class="vg-nav"><span class="i">&#xE7C9;</span></div><div class="vg-nav"><span class="i">&#xE706;</span></div><div class="vg-nav"><span class="i">&#xE968;</span></div><div class="vg-nav"><span class="i">&#xE943;</span></div><div class="grow"></div><div class="rule"></div><div class="vg-nav"><span class="i">&#xEDA2;</span></div><div class="vg-nav"><span class="i">&#xE72D;</span></div><div class="vg-nav"><span class="i">&#xE77B;</span></div><div class="vg-nav"><span class="i">&#xE713;</span></div></div>
+                    <div class="vg-page">
+                      <div class="vg-h1">Cottage Survival</div>
+                      <div class="vg-tabs"><span>List view</span><span>Mod browsing</span><span>Graph view</span><span>Categories</span><span class="on">Modpack planning</span><span>Advanced</span></div>
+                      <svg class="vg-canvas" viewBox="0 0 1164 620" preserveAspectRatio="xMinYMin meet">
+                        <defs><marker id="ah2" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path class="acc-fill" d="M0 0L8 4L0 8z"/></marker></defs>
+                        <g class="rail-l"><rect x="0" y="0" width="200" height="620"/>
+                          <text class="h" x="16" y="30">BOARDS</text>
+                          <text x="16" y="58">Pack plans</text><text class="on" x="30" y="84">Main board</text><text x="30" y="108">Progression</text>
+                          <text x="16" y="136">Ideas</text><text x="30" y="160">Maybe later</text>
+                          <text class="h" x="16" y="204">SECTIONS</text><text x="30" y="230">Early game</text><text x="30" y="254">Magic</text><text x="30" y="278">Release</text>
+                          <text class="h" x="16" y="322">MODS</text><text x="30" y="348">Farmer's Delight</text><text x="30" y="372">Waystones</text><text x="30" y="396">Create</text><text x="30" y="420">Ars Nouveau</text><text x="30" y="444">Supplementaries</text>
+                          <text class="s" x="16" y="596">+ New board</text></g>
+                        <g class="section"><rect x="222" y="10" width="446" height="330"/><text x="240" y="38">Early game</text></g>
+                        <g class="section"><rect x="690" y="10" width="462" height="232"/><text x="708" y="38">Magic</text></g>
+                        <g class="section"><rect x="690" y="262" width="462" height="348"/><text x="708" y="290">Release</text></g>
+                        <g class="edges" marker-end="url(#ah2)">
+                          <path class="acc" d="M650 118 C678 118 680 136 706 136"/>
+                          <path class="acc dash" d="M920 218 L920 318"/>
+                        </g>
+                        <g class="node"><rect x="240" y="56" width="190" height="54"/><text x="254" y="79">Farmer's Delight</text><text class="s" x="254" y="97">food · priority 2</text></g>
+                        <g class="node"><rect x="240" y="126" width="190" height="54"/><text x="254" y="149">Waystones</text><text class="s" x="254" y="167">travel · priority 1</text></g>
+                        <g class="note"><rect x="450" y="56" width="200" height="124"/><text class="t" x="464" y="79">Starter kit</text><text class="s" x="464" y="102">&#x2611; Backpack</text><text class="s" x="464" y="122">&#x2611; Map</text><text class="s" x="464" y="142">&#x2610; Waystone recipe</text><text class="s" x="464" y="162">&#x2610; Bread tweak</text></g>
+                        <g class="note"><rect x="240" y="200" width="410" height="120"/><text class="t" x="254" y="223">Why no bosses</text><rect class="ln" x="254" y="240" width="370" height="7"/><rect class="ln" x="254" y="256" width="340" height="7"/><rect class="ln" x="254" y="272" width="360" height="7"/><rect class="ln" x="254" y="288" width="210" height="7"/></g>
+                        <g class="group"><rect x="708" y="56" width="426" height="162"/><text class="t" x="724" y="80">Magic</text><text class="s" x="724" y="99">Category · 12 mods, updates itself</text><rect class="chip" x="724" y="114" width="104" height="24"/><text class="c" x="734" y="130">Ars Nouveau</text><rect class="chip" x="836" y="114" width="96" height="24"/><text class="c" x="846" y="130">Iron's Spells</text><rect class="chip" x="940" y="114" width="84" height="24"/><text class="c" x="950" y="130">Occultism</text><rect class="chip" x="724" y="146" width="96" height="24"/><text class="c" x="734" y="162">Blood Magic</text><rect class="chip" x="828" y="146" width="112" height="24"/><text class="c" x="838" y="162">Hexerei</text><text class="s" x="950" y="162">+ 7 more</text></g>
+                        <g class="note"><rect x="708" y="320" width="426" height="100"/><text class="t" x="724" y="344">Balance pass</text><text class="s" x="724" y="366">Recipes, loot, spawn rates</text><text class="s" x="1090" y="366">62%</text><rect class="bar" x="724" y="386" width="394" height="10"/><rect class="acc-fill" x="724" y="386" width="244" height="10"/></g>
+                        <g class="note"><rect x="708" y="436" width="426" height="156"/><text class="t" x="724" y="460">Before 1.0</text><text class="s" x="724" y="486">&#x2611; Export .mrpack for the Modrinth crowd</text><text class="s" x="724" y="510">&#x2610; Update check on the whole pack</text><text class="s" x="724" y="534">&#x2610; Write the changelog</text><text class="s" x="724" y="558">&#x2610; Share link for the server group</text></g>
+                      </svg>
+                    </div>
+                  </div>
+                </div>
+                <img src="/img/planning.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="A modpack planning board: sections of mod cards, note cards with task lists and a progress bar, a live group of every mod in the Magic category, and arrows between them.">
+              </div>
+            </figure>
+            <p class="cap">Mod cards, notes with task lists and a progress bar, live groups like "everything tagged Tech" that update themselves, sections that carry their cards when you drag them, and arrows between any of it. It snaps to a 24 px grid; there is a checkbox to turn that off.</p>
+          </div>
         </div>
+        <aside class="side">
+          <ul class="ticks">
+            <li>Update checks in bulk: the stores are asked about the whole pack in a few requests, even for a pack with a couple of thousand mods. Only the leftovers go one at a time, at a pace you set.</li>
+            <li>Updating a mod that is three versions behind shows the notes of all three, newest first, one at a time. Right-click any version to read its notes.</li>
+            <li>Categories, priorities, a note on a mod, a lock on a version, a client-only mark. Conflicts are flagged, and every mod that came from a store links to its page.</li>
+          </ul>
+          <div class="note"><p>CurseForge says "slow down" with a 403, not a 429. It took me an evening to believe that. The launcher backs off on its own now, and if you paste in your own CurseForge key, requests go straight from your PC with it.</p></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- -------------------------------------------------------- 06 servers -->
+  <section class="ch flip" id="servers" aria-labelledby="servers-title">
+    <div class="wrap">
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xE968;</span>06<span class="of">/ 08</span></p>
+        <h2 id="servers-title">Every server from every instance, in one list.</h2>
+        <p class="lead">Live status, players, MOTD and ping, checked when you open the page. Join straight from the launcher, or copy a server into another instance without opening the game. If you run the server, there is an RCON console with command history and buttons for <code>list</code>, <code>save-all</code>, <code>tps</code> and <code>whitelist</code>, which are the four I type.</p>
+      </div>
+      <div class="ch-body">
         <figure class="win px sh">
           <div class="shot">
             <div class="vg" aria-hidden="true">
@@ -498,7 +528,7 @@
                     <div class="vg-card vg-console">
                       <div class="vg-h3">Console · Cottage SMP</div>
                       <div class="lg"><span>&gt; list</span><span>There are 3 of a max of 20 players online: juno, mira, ash</span><span>&gt; time set day</span><span>Set the time to 1000</span><span>&gt; save-all</span><span>Saving the game (this may take a moment!)</span><span>Saved the game</span><span>&gt; whitelist add kit</span><span>Added kit to the whitelist</span><span>&gt; say restart in 5 minutes</span><span>[Server] restart in 5 minutes</span></div>
-                      <div class="vg-quick"><span class="vg-btn">list</span><span class="vg-btn">save-all</span><span class="vg-btn">time set day</span><span class="vg-btn">weather clear</span></div>
+                      <div class="vg-quick"><span class="vg-btn">list</span><span class="vg-btn">save-all</span><span class="vg-btn">tps</span><span class="vg-btn">whitelist</span></div>
                       <div class="vg-cmd"><span>Type a command</span><span class="vg-btn">Send</span></div>
                     </div>
                   </div>
@@ -508,25 +538,27 @@
             <img src="/img/servers.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="The Servers page: servers from every instance with player counts and ping, and an RCON console for one of them.">
           </div>
         </figure>
+        <aside class="side">
+          <ul class="ticks">
+            <li>Or let the launcher run one: it installs the matching NeoForge, Forge or Fabric server for an instance, starts and stops it, and shows its console.</li>
+            <li><code>server.properties</code>, ops, the whitelist and bans in a form, so nobody edits JSON by hand at midnight.</li>
+            <li>Mark a mod client-only and it stays off the server, so a shader mod on your side does not take the server down.</li>
+          </ul>
+          <div class="note"><p>The console in the screenshot belongs to a test server on the same PC. That is why it pings at 0 ms: the server is in the same room as the launcher.</p></div>
+        </aside>
       </div>
     </div>
   </section>
 
-  <!-- ========================================================== export -->
-  <section class="sec" id="export" aria-labelledby="export-title">
+  <!-- --------------------------------------------------------- 07 export -->
+  <section class="ch" id="export" aria-labelledby="export-title">
     <div class="wrap">
-      <div class="split">
-        <div class="body">
-          <p class="eyebrow"><span class="i" aria-hidden="true">&#xEDE1;</span>Export</p>
-          <h2 id="export-title">Hand the pack to people who use something else.</h2>
-          <p class="lead">Export writes a CurseForge <code>.zip</code> or a Modrinth <code>.mrpack</code>. Mods from the stores go in as links, everything else is packed in, and disabled mods stay disabled.</p>
-          <ul class="ticks">
-            <li>Choose what goes in down to a single file: one mod's config left out, one world out of <code>saves</code>, or <code>kubejs</code> minus one script.</li>
-            <li>CurseForge exports carry <code>modlist.html</code>, the same file the CurseForge app writes.</li>
-            <li>Files marked private are shown as such and never leave your PC.</li>
-            <li>Import works the other way round: a <code>.mrpack</code> or a CurseForge <code>.zip</code> becomes an instance.</li>
-          </ul>
-        </div>
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xEDE1;</span>07<span class="of">/ 08</span></p>
+        <h2 id="export-title">Hand the pack to people who use something else.</h2>
+        <p class="lead">Export writes a CurseForge <code>.zip</code> or a Modrinth <code>.mrpack</code>. Mods from the stores go in as links, everything else is packed in, and disabled mods stay disabled. You choose what else goes in down to a single file: one mod's config left out, one world out of <code>saves</code>, <code>kubejs</code> minus one script. Worlds, logs, caches, map data and your own settings start unticked, on purpose.</p>
+      </div>
+      <div class="ch-body">
         <figure class="win px sh">
           <div class="shot">
             <div class="vg vg-dim" aria-hidden="true">
@@ -556,37 +588,33 @@
                   <div class="r"><span class="ar">&#xE76C;</span><span class="cb"></span>screenshots<small>61 files · 88 MB</small></div>
                   <div class="r pv"><span class="ar"></span><span class="cb"></span>config/voice/<small>private · stays on this PC</small></div>
                 </div>
-                <div class="vg-foot"><span class="vg-muted">Adds 156 files, 2.1 MB</span><span class="vg-btn">Cancel</span><span class="vg-btn acc">Export…</span></div>
+                <div class="vg-foot"><span class="vg-muted">Adds 156 files, 2.1 MB</span><span class="vg-btn">Cancel</span><span class="vg-btn acc">Export...</span></div>
               </div>
             </div>
             <img src="/img/export.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="The export dialog: CurseForge or Modrinth format, and a file tree for choosing exactly which configs, scripts and worlds go into the pack.">
           </div>
         </figure>
+        <aside class="side">
+          <ul class="ticks">
+            <li>CurseForge exports carry <code>modlist.html</code>, the same file the CurseForge app writes.</li>
+            <li>Files marked private are shown as such and never leave your PC.</li>
+            <li>Import works the other way round: a <code>.mrpack</code> or a CurseForge <code>.zip</code> becomes an instance, and its resource packs and shaders land in the right folders.</li>
+          </ul>
+          <div class="note"><p>Packed-in mods are other people's work. The dialog says so, and so do I: check the licences before you post a pack in public.</p></div>
+        </aside>
       </div>
     </div>
   </section>
 
-  <!-- ============================================================ look -->
-  <section class="sec" id="look" aria-labelledby="look-title">
+  <!-- ----------------------------------------------------- 08 appearance -->
+  <section class="ch demo" id="look" aria-labelledby="look-title">
     <div class="wrap">
-      <div class="split flip">
-        <div class="body">
-          <p class="eyebrow"><span class="i" aria-hidden="true">&#xE8E1;</span>Appearance</p>
-          <h2 id="look-title">It looks like this page. Or like you want it to.</h2>
-          <p class="lead">The launcher uses the design of the Slate Minecraft mods: warm near-black, one accent colour, pixel-stepped corners, hard two-pixel shadows, pixel headings (Pixeloid Sans by default) and pixel icons.</p>
-          <p>The Appearance settings change it as you go: the accent (thirteen presets or any colour), corners from square to four steps, motion speed and the pixel font (Pixeloid Sans, Monocraft or Pixelify Sans). Pixel headings, pixel text, pixel icons, shadows, page transitions and click sounds each switch on and off. There's a Vanilla skin in Minecraft's grey stone, and the Classic look if you'd rather have the old launcher back.</p>
-          <div class="lookbox px" id="look-demo" hidden>
-            <div class="look-row">
-              <span id="acc-label">Accent</span>
-              <div class="swatches" role="radiogroup" aria-labelledby="acc-label" data-accents></div>
-            </div>
-            <div class="look-row">
-              <span id="cor-label">Corners</span>
-              <div class="seg" role="radiogroup" aria-labelledby="cor-label" data-corners></div>
-            </div>
-            <p class="look-note">Try them: this page recolours itself the same way the launcher does. Nothing is saved.</p>
-          </div>
-        </div>
+      <div class="ch-head">
+        <p class="ch-num"><span class="i" aria-hidden="true">&#xE8E1;</span>08<span class="of">/ 08</span></p>
+        <h2 id="look-title">It looks like this page. Or like you want it to.</h2>
+        <p class="lead">The launcher uses the design of the Slate Minecraft mods, which are also mine: warm near-black, one accent, pixel-stepped corners, hard two-pixel shadows, pixel headings and pixel icons. Thirteen accents or any colour, corners from square to four steps, motion speed, and three pixel fonts. Pixel headings, pixel text, pixel icons, shadows, page transitions and click sounds each switch on and off. There is a Vanilla skin in Minecraft's grey stone, and Classic if you want the old launcher back.</p>
+      </div>
+      <div class="ch-body">
         <figure class="win px sh">
           <div class="shot">
             <div class="vg" aria-hidden="true">
@@ -600,15 +628,15 @@
                     <div class="vg-sub">Slate is the look of the Slate Minecraft mods: warm near-black, pixel corners, pixel headings and pixel icons. Classic is the launcher's earlier look, with your own colours. Changes apply as you make them.</div>
                     <div class="vg-set"><span>Style</span><span class="vg-seg"><b class="on">Slate</b><b>Classic</b></span></div>
                     <div class="vg-set"><span>Skin</span><span class="vg-seg"><b class="on">Dark</b><b>Vanilla</b></span></div>
-                    <div class="vg-set"><span>Accent</span><span class="vg-sw"><i style="background:#601B00" class="on"></i><i style="background:#D9805E"></i><i style="background:#E06C4B"></i><i style="background:#E0A458"></i><i style="background:#7BB36A"></i><i style="background:#5CC8A8"></i><i style="background:#5BA8E0"></i><i style="background:#5C7CFA"></i><i style="background:#9B86E0"></i><i style="background:#D076C9"></i><i style="background:#E5698A"></i><i style="background:#9AA5B4"></i><i style="background:#D8D2C4"></i><em>Custom colour…</em></span></div>
+                    <div class="vg-set"><span>Accent</span><span class="vg-sw"><i style="background:#601B00" class="on"></i><i style="background:#D9805E"></i><i style="background:#E06C4B"></i><i style="background:#E0A458"></i><i style="background:#7BB36A"></i><i style="background:#5CC8A8"></i><i style="background:#5BA8E0"></i><i style="background:#5C7CFA"></i><i style="background:#9B86E0"></i><i style="background:#D076C9"></i><i style="background:#E5698A"></i><i style="background:#9AA5B4"></i><i style="background:#D8D2C4"></i><em>Custom colour...</em></span></div>
                     <div class="vg-set"><span>Corners</span><span class="vg-slider"><i></i><b></b></span></div>
                     <div class="vg-set"><span>Motion</span><span class="vg-seg"><b>Off</b><b>Fast</b><b class="on">Normal</b><b>Slow</b></span></div>
                     <div class="vg-checks"><span class="on">Pixel headings</span><span>Pixel text everywhere</span><span class="on">Pixel icons</span><span class="on">Hard shadows</span><span class="on">Page transitions</span><span class="on">Click sounds</span></div>
                   </div>
                   <div class="vg-card vg-pad vg-settings">
                     <div class="vg-h3">Mods</div>
-                    <div class="vg-set"><span>Update checks</span><span class="vg-slider"><i style="width:20%"></i><b style="left:20%"></b></span><span class="vg-muted">20 a second</span></div>
-                    <div class="vg-set"><span>Downloads</span><span class="vg-slider"><i style="width:40%"></i><b style="left:40%"></b></span><span class="vg-muted">4 at a time</span></div>
+                    <div class="vg-set"><span>Update checks</span><span class="vg-slider"><i style="width:50%"></i><b style="left:50%"></b></span><span class="vg-muted">10 a second</span></div>
+                    <div class="vg-set"><span>Downloads</span><span class="vg-slider"><i style="width:30%"></i><b style="left:30%"></b></span><span class="vg-muted">3 at a time</span></div>
                   </div>
                 </div>
               </div>
@@ -616,49 +644,87 @@
             <img src="/img/look.png" width="1280" height="800" loading="lazy" decoding="async" data-optional alt="Settings, Appearance: Slate or Classic style, Dark or Vanilla skin, accent swatches, corner steps, motion speed and the pixel options.">
           </div>
         </figure>
+        <aside class="side">
+          <div class="lookbox px" id="look-demo" hidden>
+            <div class="look-row">
+              <span id="acc-label">Accent</span>
+              <div class="swatches" role="radiogroup" aria-labelledby="acc-label" data-accents></div>
+            </div>
+            <div class="look-row">
+              <span id="cor-label">Corners</span>
+              <div class="seg" role="radiogroup" aria-labelledby="cor-label" data-corners></div>
+            </div>
+            <p class="look-note">Try them: this page recolours itself the same way the launcher does. Nothing is saved.</p>
+          </div>
+          <div class="note"><p>The swatches use the launcher's own arithmetic: hover is 12% lighter, pressed is 12% darker, and accent-coloured text steps toward white until it can be read on this background. I wrote it once in C# and once in JavaScript, and they agree on the swatches; this page pushes link text a touch further so it stays readable.</p></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================= why -->
+  <section class="story" id="why" aria-labelledby="why-title">
+    <div class="wrap">
+      <div class="divider" aria-hidden="true"><svg class="minicloud" shape-rendering="crispEdges"><use href="#cloud-mini"/></svg></div>
+      <p class="eyebrow"><span class="i" aria-hidden="true">&#xE753;</span>Why I made this</p>
+      <h2 id="why-title">It was always a config file.</h2>
+      <div class="story-body">
+        <p>I play modded Minecraft on a desktop and a laptop, with a few friends who play on whatever they have. For years the ritual was the same: build a pack, zip it, send it, then spend the evening finding out why it ran on my PC and not on theirs. It was always a config file. Once it was <code>options.txt</code>. Once it was a mod I had disabled and forgotten about. Once it was a laptop that could not take the shaders I had left switched on.</p>
+        <p>So I wrote a launcher that keeps the pack on a server and knows which files are the pack and which files are you. It started as a sync tool for four people. Then it needed a mod browser, and the browser needed a graph of what depends on what, and the graph needed somewhere to plan the next pack, and at some point there was an RCON console and a design system. This is how these things go.</p>
+        <p>It is written in C# and WPF. The server is ASP.NET Core and PostgreSQL on one small box in Frankfurt that I pay for. The whole thing is one person, evenings and weekends, and the changelog at the bottom of this page is the honest record of how that is going.</p>
+      </div>
+      <p class="sig"><svg class="sig-cloud" shape-rendering="crispEdges" aria-hidden="true"><use href="#cloud-mini"/></svg>falling_colud, somewhere in Italy</p>
+    </div>
+  </section>
+
+  <!-- ====================================================== does / not -->
+  <section class="honest" id="honest" aria-labelledby="honest-title">
+    <div class="wrap">
+      <div class="divider" aria-hidden="true"><svg class="minicloud" shape-rendering="crispEdges"><use href="#cloud-mini"/></svg></div>
+      <p class="eyebrow"><span class="i" aria-hidden="true">&#xE8EC;</span>Does and doesn't</p>
+      <h2 id="honest-title">What it does, and what it does not.</h2>
+      <div class="yesno">
+        <div class="yn yes px">
+          <h3>It does</h3>
+          <ul>
+            <li>Keep your instances on a server and download them wherever you sign in.</li>
+            <li>Share them by invitation, by link or with a team, with permissions you pick.</li>
+            <li>Browse CurseForge and Modrinth, check updates in bulk, draw the dependency graph, plan the next pack.</li>
+            <li>Import and export CurseForge zips and Modrinth mrpacks.</li>
+            <li>Ping your servers, join them, and give you an RCON console.</li>
+            <li>Update itself, and check the signature of every update before installing it. It installs into your profile with no admin prompt.</li>
+            <li>Cost nothing. No ads, no analytics, no trackers. The privacy page is short because there is not much to say.</li>
+          </ul>
+        </div>
+        <div class="yn no px">
+          <h3>It does not</h3>
+          <ul>
+            <li>Run on macOS or Linux. It is a WPF app: Windows 10 and 11, 64-bit.</li>
+            <li>Replace your Microsoft account. You need to own Minecraft: Java Edition.</li>
+            <li>Sync your worlds behind your back. <code>saves/</code> never travels with an instance. A world goes to the server only when you upload that world, on purpose.</li>
+            <li>Give you unlimited space. Each account starts with 1 GB on the server, because the server is one small box in Frankfurt. Ask on Discord if you need more.</li>
+            <li>Make the game run faster. It is a launcher, not a mod.</li>
+            <li>Call itself open source. The code is on GitHub for you to read and build for yourself; the licence does not allow redistributing it or running your own copy for other people.</li>
+            <li>Promise five nines. When the box is down, the launcher opens with the library you had and a line that says whether the server refused or nothing answered at all.</li>
+          </ul>
+        </div>
       </div>
     </div>
   </section>
 
   <!-- ======================================================== the rest -->
-  <section class="sec" id="more" aria-labelledby="more-title">
+  <section class="also" id="more" aria-labelledby="more-title">
     <div class="wrap">
-      <div class="sec-head">
-        <p class="eyebrow"><span class="i" aria-hidden="true">&#xE8F1;</span>And the rest</p>
-        <h2 id="more-title">The parts that don't need a screenshot.</h2>
-      </div>
-      <div class="grid">
-        <div class="tile px">
-          <span class="i" aria-hidden="true">&#xE909;</span>
-          <h3>Worlds</h3>
-          <p>Seed with a copy button, game mode, difficulty, version and size, read from the save itself. Back up and restore, duplicate, copy to another instance, import or export a <code>.zip</code>.</p>
-        </div>
-        <div class="tile px">
-          <span class="i" aria-hidden="true">&#xE7C9;</span>
-          <h3>Packs stored once</h3>
-          <p>Resource packs and shaders are kept once and linked into every instance that uses them: twenty instances with the same 400 MB pack cost 400 MB. When two packs replace the same files, the launcher says which one you actually see.</p>
-        </div>
-        <div class="tile px">
-          <span class="i" aria-hidden="true">&#xE943;</span>
-          <h3>Config &amp; scripts</h3>
-          <p>Search inside every instance's config and KubeJS files at once, compare one file between two instances, and copy it into several; what it replaces is backed up first. KubeJS errors from the logs point at the script that caused them.</p>
-        </div>
-        <div class="tile px">
-          <span class="i" aria-hidden="true">&#xEDA2;</span>
-          <h3>Storage that adds up</h3>
-          <p>Where your disk went, by category and by instance. Linked files are counted once, and each instance shows what deleting it would actually give back.</p>
-        </div>
-        <div class="tile px">
-          <span class="i" aria-hidden="true">&#xE753;</span>
-          <h3>Works when the server doesn't</h3>
-          <p>If the server can't be reached you get the library you had, not an empty page, and a line that says whether the server refused or nothing answered at all.</p>
-        </div>
-        <div class="tile px">
-          <span class="i" aria-hidden="true">&#xE72E;</span>
-          <h3>Your own CurseForge key</h3>
-          <p>Optional. Paste one in and CurseForge requests go straight from your PC with your key instead of queueing behind everyone else's on the server. It's stored encrypted for your Windows account.</p>
-        </div>
-      </div>
+      <p class="eyebrow"><span class="i" aria-hidden="true">&#xE8F1;</span>Also in the box</p>
+      <h2 id="more-title">Smaller things I am fond of.</h2>
+      <dl class="also-list">
+        <div><dt>Worlds</dt><dd>Seed with a copy button, game mode, difficulty, version and size, read from the save itself. Back up and restore, duplicate, copy to another instance, import or export a <code>.zip</code>.</dd></div>
+        <div><dt>Packs stored once</dt><dd>Resource packs and shaders are kept once and linked into every instance that uses them: twenty instances with the same 400 MB pack cost 400 MB. When two packs replace the same file, the launcher says which one you actually see.</dd></div>
+        <div><dt>Config and scripts</dt><dd>Search inside every instance's config and KubeJS files at once, compare one file between two instances, copy it into several. What it replaces is backed up first. KubeJS errors in the logs point at the script that caused them.</dd></div>
+        <div><dt>Storage that adds up</dt><dd>Where your disk went, by category and by instance. Linked files are counted once, and each instance shows what deleting it would actually give back.</dd></div>
+        <div><dt>Your own CurseForge key</dt><dd>Optional. Paste one in and CurseForge requests go straight from your PC instead of queueing behind everyone else's on the server. It is stored encrypted for your Windows account.</dd></div>
+        <div><dt>Logs that stick around</dt><dd>The launcher keeps a log file of its own, and Settings, About has Report a problem and Open logs. A bug report is one click and one paste.</dd></div>
+      </dl>
     </div>
   </section>
 
@@ -667,8 +733,8 @@
     <div class="wrap">
       <div class="sec-head">
         <p class="eyebrow"><span class="i" aria-hidden="true">&#xE81C;</span>Changelog</p>
-        <h2 id="changes-title">What changed lately</h2>
-        <p class="lead">The same release notes the launcher shows under What's new in Settings.</p>
+        <h2 id="changes-title">What I changed lately</h2>
+        <p class="lead">The same release notes the launcher shows under What's new in Settings. I write them the night I ship, so they read like it.</p>
       </div>
       <div class="changes" data-releases></div>
     </div>
@@ -681,11 +747,12 @@
         <div>
           <h2 id="download-title">Download CloudLauncher</h2>
           <div class="body">
-            <p>Free, for Windows 10 and 11 (64-bit). It installs into your user profile, so there's no admin prompt, and it keeps itself up to date.</p>
-            <p class="muted">You'll need Minecraft: Java Edition on a Microsoft account, and a CloudLauncher account, which you make in the launcher with a username and password or with Google.</p>
+            <p>Free, for 64-bit Windows 10 (version 1809 or later) and Windows 11. It installs into your user profile, so there is no admin prompt, and it keeps itself up to date with updates it checks the signature of before installing.</p>
+            <p class="muted">You need Minecraft: Java Edition on a Microsoft account, and a CloudLauncher account, which you make in the launcher with a username and a password.</p>
           </div>
           <div class="cta">
             <a class="btn btn-accent btn-lg px sh" href="/download"><span class="i" aria-hidden="true">&#xE896;</span>Download for Windows</a>
+            <a class="gh" href="https://github.com/falling-colud/CloudLauncher" target="_blank" rel="noopener noreferrer"><svg class="gh-i" shape-rendering="crispEdges" aria-hidden="true"><use href="#gh-cat"/></svg>Source on GitHub</a>
           </div>
           <p class="dl-meta">
             <span data-version-line hidden>Version <b data-version></b></span>
@@ -709,12 +776,14 @@
     <nav aria-label="Footer">
       <a href="/download">Download</a>
       <a href="https://discord.gg/PU6HpxzJwW" target="_blank" rel="noopener noreferrer">Discord</a>
+      <a href="https://github.com/falling-colud/CloudLauncher" target="_blank" rel="noopener noreferrer">GitHub</a>
       <a href="#changes" data-if-releases hidden>What's new</a>
       <a href="/privacy">Privacy</a>
       <a href="/terms">Terms</a>
-      <a href="mailto:leon.raineri@gmail.com">Contact</a>
+      <a href="mailto:contact@cloudlauncher.co">Contact</a>
       <a href="/fonts/PixelifySans-OFL.txt">Font licences</a>
     </nav>
+    <p class="made">Made in Italy by falling_colud. Mods, worlds and bad ideas welcome on Discord.</p>
     <p class="fine">Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft. Headings are set in Pixelify Sans (SIL Open Font License); icons are the Slate pixel icon set (MIT).</p>
   </div>
 </footer>

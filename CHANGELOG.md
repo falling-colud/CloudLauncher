@@ -3,6 +3,20 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.2 - 2026-09-26
+
+- CurseForge and Modrinth: when a store, or the launcher server in front of it, asks for a
+  pause, the launcher waits and tries again by itself and says "CurseForge is busy, trying
+  again..." instead of failing. "API key" only ever comes up when it is about your own key.
+- Files whose authors turned off third-party downloads are named, with a link to the project
+  page. A CurseForge import lists them in manual-downloads.txt in the instance folder.
+- Update checks answer more mods in bulk. The checks-per-second setting now covers both stores.
+- Server: higher per-user limits, cached answers no longer count against them, and a short
+  database hiccup no longer turns store requests away.
+- Google sign-in is only offered when the server has it set up.
+- The contact address is contact@cloudlauncher.co.
+- The website was rewritten, with the source on GitHub linked from it.
+
 ## 0.9.1 - 2026-09-26
 
 - The launcher and website moved to cloudlauncher.co. Existing installs switch to the new

@@ -48,7 +48,8 @@ public static class ModUpdater
         if (mod.PrimaryMod is null || mod.PrimaryVersion is null) return default;
         try
         {
-            var versions = await App.State.ModVersions.GetUpdateCandidatesAsync(mod.PrimaryMod, mcVersion, loader, forceRefresh, ct);
+            var versions = await App.State.ModVersions.GetUpdateCandidatesAsync(mod.PrimaryMod, mcVersion, loader, forceRefresh, ct,
+                mod.EffectiveUpdateChannel);
             return new ModUpdateCheckResult(PickUpdate(mod, versions, mcVersion, loader), false);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
@@ -100,7 +101,7 @@ public static class ModUpdater
 
             var items = identified
                 .Select(m => new UpdateCheckItem(m.PrimaryMod!, m.PrimaryVersion!,
-                    m.PrimarySource == ModSource.Modrinth ? ModrinthHash(m) : null))
+                    m.PrimarySource == ModSource.Modrinth ? ModrinthHash(m) : null, m.EffectiveUpdateChannel))
                 .ToList();
             BulkCheckReport bulk;
             try { bulk = await catalog.PrefetchLatestAsync(items, mcVersion, loader, forceRefresh, ct); }
@@ -122,7 +123,7 @@ public static class ModUpdater
                 try
                 {
                     var force = forceRefresh && !bulk.IsAnswered(mod.PrimaryMod!);
-                    if (!force && catalog.TryGetCachedCandidates(mod.PrimaryMod!, mcVersion, loader, out var known))
+                    if (!force && catalog.TryGetCachedCandidates(mod.PrimaryMod!, mcVersion, loader, out var known, mod.EffectiveUpdateChannel))
                     {
                         Answer(mod, PickUpdate(mod, known, mcVersion, loader));
                         return;

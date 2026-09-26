@@ -405,7 +405,12 @@ public partial class ResourcePackBrowserView : Page
             UpdateEmpty();
         }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { StatusLabel.Text = "Error: " + ex.Message; _hasMore = false; }
+        catch (Exception ex)
+        {
+            // A store that is busy or unreachable gets its calm sentence; anything else the raw message.
+            StatusLabel.Text = StoreRequestException.PlainFor(ex) ?? "Error: " + ex.Message;
+            _hasMore = false;
+        }
         finally { _isLoading = false; }
     }
 

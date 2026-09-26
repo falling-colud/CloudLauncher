@@ -23,6 +23,11 @@ public sealed record RegisterPendingResponse(bool RequiresEmailVerification, str
 
 public sealed record GoogleAuthStartResponse(string AuthUrl, string State);
 
+/// <summary>What the sign-in screen can offer on this server, read before anyone is signed in.</summary>
+/// <param name="GoogleSignIn">True when the server has Google sign-in configured.</param>
+/// <param name="TermsVersion">The <see cref="Legal.TermsVersion"/> the server currently asks for.</param>
+public sealed record AuthOptionsResponse(bool GoogleSignIn, string TermsVersion);
+
 public sealed record GoogleAuthPollResponse(
     bool Complete,
     TokenResponse? Tokens = null,
@@ -69,6 +74,6 @@ public static class Legal
     public const string TermsVersion = "2026-09-25";
     public const string TermsPath = "/terms";
     public const string PrivacyPath = "/privacy";
-    public const string ContactEmail = "leon.raineri@gmail.com";
+    public const string ContactEmail = "contact@cloudlauncher.co";
     public const string DiscordUrl = "https://discord.gg/PU6HpxzJwW";
 }

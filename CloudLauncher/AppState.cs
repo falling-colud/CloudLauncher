@@ -69,12 +69,20 @@ public sealed class AppState
     /// </remarks>
     public event Action? ConnectivityChanged;
 
+    /// <summary>
+    /// Raised on the UI thread whenever a store call is waiting to be retried because CurseForge,
+    /// Modrinth or the launcher server asked for a pause. Pages show it as "CurseForge is busy, trying
+    /// again..." while they load (see <see cref="Views.PageState"/>).
+    /// </summary>
+    public event Action<StoreWait>? StoreWaiting;
+
     public AppState()
     {
         Settings = AppSettings.Load();
         Api = new ApiClient(Settings);
         Api.SessionExpired += () => SessionExpired?.Invoke();
         Api.ConnectivityChanged += _ => OnUi(() => ConnectivityChanged?.Invoke());
+        Api.StoreWaiting += wait => OnUi(() => StoreWaiting?.Invoke(wait));
         Packs = new PackFolderService(Settings, Api);
         MinecraftAccounts = new MinecraftAccountService(Settings);
         Versions = new VersionService();

@@ -114,6 +114,21 @@ code, kbd {
   color: var(--text-soft);
   white-space: nowrap;
 }
+/* A key cap: a small pixel box with a hard shadow and a heavier bottom edge, like a key. */
+kbd {
+  display: inline-block;
+  min-width: 24px;
+  margin: 0 1px;
+  padding: 0 6px;
+  color: var(--text);
+  font: 600 12px/20px var(--mono);
+  text-align: center;
+  vertical-align: 1px;
+  box-shadow: inset 0 -2px 0 var(--line-strong), 2px 2px 0 var(--shadow);
+  clip-path: polygon(2px 0,calc(100% - 2px) 0,calc(100% - 2px) 1px,calc(100% - 1px) 1px,calc(100% - 1px) 2px,100% 2px,100% calc(100% - 2px),calc(100% - 1px) calc(100% - 2px),calc(100% - 1px) calc(100% - 1px),calc(100% - 2px) calc(100% - 1px),calc(100% - 2px) 100%,2px 100%,2px calc(100% - 1px),1px calc(100% - 1px),1px calc(100% - 2px),0 calc(100% - 2px),0 2px,1px 2px,1px 1px,2px 1px);
+}
+/* The symbol sheet at the top of the page: present for <use>, never painted itself. */
+.defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 ::selection { background: var(--accent); color: var(--on-accent); }
 
 /* Keyboard focus: a square two-pixel ring in the readable accent. .px shapes draw a stepped one. */
@@ -310,7 +325,7 @@ code, kbd {
 }
 .hero h1 {
   margin-top: 20px;
-  max-width: 15em;
+  max-width: 17em;
   font-size: 55px;
   line-height: 60px;
   color: var(--text);
@@ -341,6 +356,50 @@ code, kbd {
 .dl-meta b { color: var(--text-2); font-weight: 600; }
 .win.hero-shot { margin-top: 56px; }
 
+/* The GitHub link: plain pixel text with a 16 px pixel cat drawn for this page (symbol #gh-cat). */
+.gh {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 0 4px;
+  color: var(--text-2);
+  text-decoration: none;
+  font: 400 16.5px/24px var(--pixel);
+  white-space: nowrap;
+}
+.gh:hover { color: var(--text); }
+.gh-i { width: 16px; height: 16px; fill: currentColor; flex: none; }
+
+/* The version stamp under the hero screenshot, set like the version string in a game's corner. */
+.stamp {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 24px;
+  margin-top: 10px;
+  color: var(--text-3);
+  font: 400 15px/22px var(--pixel);
+}
+.stamp b { color: var(--text-2); font-weight: 400; }
+
+/* The mascot: the logo's cloud on the same 32-grid, with eyes. It bobs two pixels at a time and
+   blinks now and then; both stop under prefers-reduced-motion (see the end of this file). */
+.mascot { width: 48px; height: 34px; flex: none; }
+.mascot .m-body { fill: var(--text); }
+.mascot .m-shade { fill: #000; fill-opacity: .12; }
+.mascot .m-cheeks { fill: var(--accent); fill-opacity: .55; }
+.mascot .m-eyes { fill: var(--bg); }
+.mascot .m-lids { fill: var(--bg); opacity: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .mascot { animation: bob 2.8s steps(4, jump-none) infinite alternate; }
+  .mascot .m-eyes { animation: blink-eyes 7s step-end infinite; }
+  .mascot .m-lids { animation: blink-lids 7s step-end infinite; }
+}
+@keyframes bob { from { transform: translateY(0); } to { transform: translateY(-6px); } }
+@keyframes blink-eyes { 0%, 92% { opacity: 1; } 92.5%, 94.5% { opacity: 0; } 95%, 100% { opacity: 1; } }
+@keyframes blink-lids { 0%, 92% { opacity: 0; } 92.5%, 94.5% { opacity: 1; } 95%, 100% { opacity: 0; } }
+
 @media (prefers-reduced-motion: no-preference) {
   .hero-in > * { animation: rise 260ms var(--ease) both; }
   .hero-in > :nth-child(2) { animation-delay: 20ms; }
@@ -368,19 +427,78 @@ code, kbd {
 .body > * + * { margin-top: 16px; }
 .muted { color: var(--text-2); }
 
-/* Two columns: words and a picture. .flip puts the picture first on wide screens. */
-/* The text column has a fixed width so the picture column starts and ends on whole pixels. */
-.split {
-  display: grid;
-  grid-template-columns: 440px minmax(0, 1fr);
-  gap: 56px;
-  align-items: start;
-  margin-top: 48px;
+/* ------------------------------------------------------------ dividers
+
+  A pixel-dashed rule with the 16 px cloud in the middle, between the parts of the page. */
+
+.divider { display: flex; align-items: center; gap: 14px; margin-bottom: 40px; color: var(--line-strong); }
+.divider::before, .divider::after {
+  content: "";
+  flex: 1;
+  height: 2px;
+  background: repeating-linear-gradient(90deg, currentColor 0 2px, transparent 2px 8px);
 }
-.split.flip { grid-template-columns: minmax(0, 1fr) 440px; }
-.split.flip > :first-child { order: 2; }
-.split > .body { padding-top: 8px; }
-@media (min-width: 1101px) { .split > .win { position: sticky; top: 92px; } }
+.minicloud { width: 16px; height: 16px; flex: none; fill: var(--text-4); }
+
+/* ---------------------------------------------------------------- the tour
+
+  Chapters. Each has a numbered head, then a screenshot with a narrow column beside it: a few
+  details with pixel bullets and a note in the margin. .flip puts the column on the left. The
+  column has a fixed width so the picture starts and ends on whole pixels. */
+
+.tour-head { padding-top: 112px; }
+.tour-head h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.tour-head .lead { margin-top: 18px; max-width: 46em; font-size: 18px; line-height: 30px; }
+.ch { padding-top: 96px; }
+.ch-num { display: flex; align-items: center; gap: 10px; color: var(--accent-text); font: 400 16.5px/24px var(--pixel); }
+.ch-num .of { color: var(--text-4); margin-left: -4px; }
+.ch-head { max-width: 46em; }
+.ch-head h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; color: var(--text); text-wrap: balance; }
+.ch-head .lead { margin-top: 18px; font-size: 18px; line-height: 30px; }
+.ch-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 272px;
+  gap: 40px;
+  align-items: start;
+  margin-top: 40px;
+}
+.ch.flip .ch-body { grid-template-columns: 272px minmax(0, 1fr); }
+.ch.flip .ch-body > .win { order: 2; }
+.ch.demo .ch-body { grid-template-columns: minmax(0, 1fr) 400px; }
+/* A chapter whose picture is elsewhere (the hero): details on the left, the note in the margin. */
+.ch-body.solo { grid-template-columns: minmax(0, 40em) 272px; justify-content: space-between; margin-top: 28px; }
+.ch-body.solo > .ticks { margin: 0; }
+.side { display: grid; gap: 24px; }
+.side .ticks { margin: 0; color: var(--text-soft); font-size: 15px; line-height: 24px; }
+.side .ticks li::before { top: 9px; }
+.side .invite { margin-top: 0; }
+@media (min-width: 1101px) { .ch-body > .side { position: sticky; top: 84px; } }
+
+/* A note in the margin: a pixel-dashed rule down its left, a small pixel label, quieter text. */
+.note {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 0 0 18px;
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 24px;
+}
+.note::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 2px;
+  background: repeating-linear-gradient(180deg, var(--accent-text) 0 4px, transparent 4px 8px);
+}
+.note::after { content: "note"; order: -1; color: var(--accent-text); font: 400 15px/20px var(--pixel); }
+.note p { margin: 0; }
+.note.wide { margin-top: 36px; max-width: 46em; }
+.tabwrap { min-width: 0; }
+.tabwrap .tabs { margin-top: 0; }
 
 /* Lists with square pixel bullets */
 .ticks { list-style: none; margin: 20px 0 0; padding: 0; }
@@ -395,19 +513,6 @@ code, kbd {
   height: 6px;
   background: var(--accent-text);
 }
-
-/* Small facts in a row: a pixel icon, a line of heading, a line or two of text */
-.facts {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 16px;
-  margin-top: 40px;
-}
-.fact { --face: var(--s1); --edge: var(--line-subtle); padding: 22px 22px 24px; }
-.fact .i { color: var(--accent-text); font-size: 32px; }
-.fact h3 { margin-top: 16px; font-size: 22px; line-height: 28px; color: var(--text); }
-.fact p { margin-top: 8px; color: var(--text-2); font-size: 16px; line-height: 26px; }
-.fact .num { color: var(--text); font-weight: 600; }
 
 /* ------------------------------------------------------------- windows
 
@@ -435,7 +540,6 @@ code, kbd {
   object-fit: cover;
   object-position: top left;
 }
-.win.wide { margin-top: 40px; }
 .win.zoomable { cursor: zoom-in; transition: transform 120ms var(--ease); }
 .win.zoomable:hover { transform: translateY(calc(var(--p) * -1)); }
 .cap { margin-top: 14px; color: var(--text-3); font-size: 14px; line-height: 22px; }
@@ -586,18 +690,37 @@ code, kbd {
 .seg button[aria-checked="true"] { --face: var(--accent); --edge: var(--accent); color: var(--on-accent); }
 .look-note { margin-top: 18px; color: var(--text-3); font-size: 14px; line-height: 22px; }
 
+/* ------------------------------------------------------------- the story */
+
+.story { padding-top: 112px; }
+.story h2 { margin-top: 14px; max-width: 18em; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.story-body { max-width: 40em; margin-top: 22px; color: var(--text-soft); font-size: 18px; line-height: 30px; }
+.story-body p + p { margin-top: 18px; }
+.sig { display: flex; align-items: center; gap: 10px; margin-top: 28px; color: var(--accent-text); font: 400 18px/26px var(--pixel); }
+.sig-cloud { width: 16px; height: 16px; flex: none; fill: var(--accent-text); }
+
+/* ---------------------------------------------------- does and doesn't */
+
+.honest { padding-top: 112px; }
+.honest h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.yesno { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 40px; align-items: start; }
+.yn { --face: var(--s1); --edge: var(--line-subtle); padding: 24px 26px 26px; }
+.yn h3 { font-size: 22px; line-height: 28px; color: var(--text); }
+.yn ul { list-style: none; margin: 14px 0 0; padding: 0; }
+.yn li { position: relative; padding-left: 22px; color: var(--text-soft); font-size: 15.5px; line-height: 25px; }
+.yn li + li { margin-top: 10px; }
+.yn li::before { content: ""; position: absolute; left: 2px; top: 10px; width: 6px; height: 6px; }
+.yn.yes li::before { background: var(--success); }
+.yn.no li::before { background: var(--warning); }
+
 /* ------------------------------------------------------------ the rest */
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 48px;
-}
-.tile { --face: var(--s1); --edge: var(--line-subtle); padding: 22px; }
-.tile .i { color: var(--accent-text); font-size: 32px; }
-.tile h3 { margin-top: 14px; font-size: 22px; line-height: 28px; }
-.tile p { margin-top: 8px; color: var(--text-2); font-size: 15.5px; line-height: 25px; }
+.also { padding-top: 112px; }
+.also h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.also-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 48px; margin: 36px 0 0; }
+.also-list > div { padding-top: 14px; border-top: 1px solid var(--line-subtle); }
+.also-list dt { color: var(--text); font: 400 18px/26px var(--pixel); }
+.also-list dd { margin: 6px 0 0; color: var(--text-2); font-size: 15.5px; line-height: 25px; }
 
 /* ----------------------------------------------------------- what's new */
 
@@ -645,6 +768,7 @@ code, kbd {
 .foot nav { display: flex; flex-wrap: wrap; gap: 6px 22px; }
 .foot nav a { color: var(--text-2); text-decoration: none; font-size: 14px; }
 .foot nav a:hover { color: var(--text); }
+.foot .made { flex-basis: 100%; margin-top: 6px; color: var(--text-soft); font: 400 16.5px/24px var(--pixel); }
 .foot .fine { flex-basis: 100%; color: var(--text-3); font-size: 13px; line-height: 20px; }
 
 /* ------------------------------------------------------ invitation page */
@@ -983,11 +1107,12 @@ code, kbd {
 /* ----------------------------------------------------------- responsive */
 
 @media (max-width: 1100px) {
-  .split, .split.flip { grid-template-columns: minmax(0, 1fr); gap: 32px; }
-  .split.flip > :first-child { order: 0; }
+  .ch-body, .ch.flip .ch-body, .ch.demo .ch-body, .ch-body.solo { grid-template-columns: minmax(0, 1fr); gap: 28px; margin-top: 32px; }
+  .ch.flip .ch-body > .win { order: 0; }
+  .side .invite { max-width: 460px; }
   .trio { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .trio > figure:nth-child(3) { grid-column: 1 / -1; margin-top: 32px; }
-  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .yesno, .also-list { grid-template-columns: minmax(0, 1fr); }
   .band { grid-template-columns: minmax(0, 1fr); }
   .band .logo-big { display: none; }
 }
@@ -1001,8 +1126,9 @@ code, kbd {
   .nav { display: none; }
   .hero { padding-top: 56px; }
   .hero h1 { font-size: 44px; line-height: 50px; }
-  .sec { padding-top: 88px; }
-  .sec h2 { font-size: 33px; line-height: 38px; }
+  .sec, .tour-head, .story, .honest, .also { padding-top: 88px; }
+  .ch { padding-top: 72px; }
+  .sec h2, .tour-head h2, .ch-head h2, .story h2, .honest h2, .also h2 { font-size: 33px; line-height: 38px; }
   .band { padding: 40px 28px; margin-top: 88px; }
   .band h2 { font-size: 33px; line-height: 38px; }
 }
@@ -1019,16 +1145,18 @@ code, kbd {
   .hero-shot { margin-top: 40px; }
   .btn-lg { min-height: 48px; padding: 10px 18px; font-size: 16.5px; }
   .cta .btn { flex: 1 1 auto; }
-  .sec { padding-top: 72px; }
-  .sec h2 { font-size: 27.5px; line-height: 32px; }
-  .sec-head .lead { font-size: 17px; line-height: 28px; }
-  .split { margin-top: 32px; }
-  .tabs { margin-top: 32px; }
+  .cta .gh { flex-basis: 100%; justify-content: center; min-height: 40px; }
+  .stamp { font-size: 14px; }
+  .sec, .tour-head, .story, .honest, .also { padding-top: 72px; }
+  .ch { padding-top: 60px; }
+  .sec h2, .tour-head h2, .ch-head h2, .story h2, .honest h2, .also h2 { font-size: 27.5px; line-height: 32px; }
+  .sec-head .lead, .tour-head .lead, .ch-head .lead, .story-body { font-size: 17px; line-height: 28px; }
+  .divider { margin-bottom: 28px; }
   .tab { padding: 6px 12px; font-size: 15px; }
   .band { padding: 32px 20px; margin-top: 72px; }
   .band h2 { font-size: 27.5px; line-height: 32px; }
   .look-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
-  .grid { grid-template-columns: minmax(0, 1fr); }
+  .yn { padding: 20px 18px 22px; }
   .rel { padding: 20px; }
   .rel-head h3 { font-size: 22px; line-height: 28px; }
   .warnbox li span { margin-left: 0; width: 100%; font-size: 12px; line-height: 18px; }

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Checks the launcher's store path against a fake launcher server on this machine: every path the
+       real CurseForgeService and ModrinthService build is fed through the server's ProxyAllowlist, the
+       per-account limits are checked at their numbers, and the client's wait-and-retry handling of
+       429, 503, 502 and CurseForge 403 answers is exercised end to end. Nothing here talks to the real
+       stores or the real server. See README.md. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>cl-proxy-check</AssemblyName>
+    <RootNamespace>CloudLauncher.ProxyCheck</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\CloudLauncher\CloudLauncher.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The server's allowlist and per-account limits, compiled in as they are: both are plain classes
+         with no server dependencies, so the check runs the exact code the server runs. -->
+    <Compile Include="..\..\CloudLauncher.Server\Net\ProxyAllowlist.cs" Link="Server\ProxyAllowlist.cs" />
+    <Compile Include="..\..\CloudLauncher.Server\Net\ProxyUserLimits.cs" Link="Server\ProxyUserLimits.cs" />
+  </ItemGroup>
+
+</Project>

@@ -1,7 +1,7 @@
 # Security
 
 If you find a security problem in CloudLauncher, the launcher or the service at
-cloudlauncher.co, please report it privately by e-mail to leon.raineri@gmail.com rather than
+cloudlauncher.co, please report it privately by e-mail to contact@cloudlauncher.co rather than
 in a public issue.
 
 Please include:
