@@ -614,7 +614,7 @@ public class AuthController(
 
     /// <summary>
     /// The small pages a browser lands on after an e-mail confirmation link or Google sign-in, styled
-    /// like the website (wwwroot/site.css) with Pixelify Sans from /fonts on this host. Everything else
+    /// like the website (wwwroot/site.css) with Pixeloid Sans from /fonts on this host. Everything else
     /// is inline so the page stands on its own.
     /// </summary>
     private static string HtmlPage(string title, string message)
@@ -631,7 +631,7 @@ public class AuthController(
             <title>{{t}} · CloudLauncher</title>
             <link rel="icon" href="/favicon.ico">
             <style>
-            @font-face{font-family:"Pixelify Sans";src:url("/fonts/pixelify-sans-400.woff2") format("woff2");font-display:swap}
+            @font-face{font-family:"Pixeloid Sans";src:url("/fonts/pixeloid-sans-400.woff2") format("woff2");font-display:swap}
             :root{color-scheme:dark}
             *{box-sizing:border-box}
             body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:#161615;color:#eceae4;font:400 17px/28px "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;font-variant-ligatures:no-common-ligatures}
@@ -639,9 +639,9 @@ public class AuthController(
             main::before,main::after{content:"";position:absolute;inset:0;clip-path:polygon(6px 0,calc(100% - 6px) 0,calc(100% - 6px) 2px,calc(100% - 4px) 2px,calc(100% - 4px) 4px,calc(100% - 2px) 4px,calc(100% - 2px) 6px,100% 6px,100% calc(100% - 6px),calc(100% - 2px) calc(100% - 6px),calc(100% - 2px) calc(100% - 4px),calc(100% - 4px) calc(100% - 4px),calc(100% - 4px) calc(100% - 2px),calc(100% - 6px) calc(100% - 2px),calc(100% - 6px) 100%,6px 100%,6px calc(100% - 2px),4px calc(100% - 2px),4px calc(100% - 4px),2px calc(100% - 4px),2px calc(100% - 6px),0 calc(100% - 6px),0 6px,2px 6px,2px 4px,4px 4px,4px 2px,6px 2px)}
             main::before{z-index:-1;background:linear-gradient(#191918 0 0) 6px 2px/calc(100% - 12px) calc(100% - 4px) no-repeat,linear-gradient(#191918 0 0) 4px 4px/calc(100% - 8px) calc(100% - 8px) no-repeat,linear-gradient(#191918 0 0) 2px 6px/calc(100% - 4px) calc(100% - 12px) no-repeat,#45443f}
             main::after{z-index:-2;background:rgb(0 0 0/.45);transform:translate(4px,4px)}
-            .brand{display:inline-flex;align-items:center;gap:10px;color:#eceae4;text-decoration:none;font:400 19px/1 "Pixelify Sans","Segoe UI",sans-serif}
+            .brand{display:inline-flex;align-items:center;gap:10px;color:#eceae4;text-decoration:none;font:400 18px/1 "Pixeloid Sans","Segoe UI",sans-serif}
             .brand svg{width:24px;height:24px;display:block}
-            h1{margin:22px 0 0;font:400 33px/38px "Pixelify Sans","Segoe UI",sans-serif}
+            h1{margin:22px 0 0;font:400 36px/45px "Pixeloid Sans","Segoe UI",sans-serif}
             p{margin:12px 0 0;color:#c9c6be}
             a{color:#a07868}
             a:focus-visible{outline:2px solid #a07868;outline-offset:3px}

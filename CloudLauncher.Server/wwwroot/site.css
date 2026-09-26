@@ -2,25 +2,29 @@
   CloudLauncher website. The look is the launcher's own "Slate" style (CloudLauncher/Services/
   ThemeService.cs + Controls/SlateBorder.cs), which is the design of the Slate Minecraft mods:
   warm near-black surfaces, one accent, pixel-stepped corners, hard two-pixel shadows, a pixel font
-  for headings (Pixelify Sans here) and the Slate pixel icons. The accent is Rust, #601B00, the
-  launcher's default.
+  for headings (Pixeloid Sans, the launcher's default) and the Slate pixel icons. The accent is Rust,
+  #601B00, the launcher's default.
 
   No frameworks, no external requests. Fonts are self-hosted in /fonts (licences beside them).
 */
 
 /* ---------------------------------------------------------------- fonts */
 
+/* Pixeloid Sans is drawn on a nine-pixel em: at 18, 27, 36, 45, 54 and 63 px every glyph pixel is a
+   whole number of CSS pixels, at any other size it blurs. So the pixel font is only ever set at
+   those sizes, fixed per breakpoint, never in em, rem or clamp(). Regular is the everyday face;
+   Bold is two pixels thick and only draws the cover letters. */
 @font-face {
-  font-family: "Pixelify Sans";
-  src: url("/fonts/pixelify-sans-400.woff2") format("woff2");
+  font-family: "Pixeloid Sans";
+  src: url("/fonts/pixeloid-sans-400.woff2") format("woff2");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
 }
 @font-face {
-  font-family: "Pixelify Sans";
-  src: url("/fonts/pixelify-sans-600.woff2") format("woff2");
-  font-weight: 600;
+  font-family: "Pixeloid Sans";
+  src: url("/fonts/pixeloid-sans-700.woff2") format("woff2");
+  font-weight: 700;
   font-style: normal;
   font-display: swap;
 }
@@ -73,7 +77,7 @@
   --accent-glow: color-mix(in srgb, var(--accent) 9.4%, transparent);  /* 0x18 alpha */
 
   --ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Roboto, Arial, sans-serif;
-  --pixel: "Pixelify Sans", "Segoe UI", system-ui, sans-serif;
+  --pixel: "Pixeloid Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", Consolas, "SF Mono", Menlo, ui-monospace, monospace;
   --icon: "Slate Icons";
 
@@ -96,7 +100,6 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 400 17px/28px var(--ui);
-  font-variant-ligatures: no-common-ligatures;   /* Pixelify's fi and fl ligatures read as "A" */
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
 }
@@ -106,6 +109,14 @@ a { color: var(--accent-text); text-decoration-thickness: 1px; text-underline-of
 a:hover { color: var(--accent-text-hover); }
 p { margin: 0; }
 h1, h2, h3, h4 { margin: 0; font-family: var(--pixel); font-weight: 400; letter-spacing: 0; }
+/* Chrome on Windows draws text up to 48 px with ClearType, which puts colour fringes on every stem
+   of a pixel font. On a compositing layer of its own it uses plain grayscale instead, and it snaps
+   the layer to whole device pixels, so the glyphs stay on the pixel grid at odd viewport widths
+   too. Everything set in --pixel gets a layer; the scaled drawings (.vg) are never pixel-exact and
+   are left alone. */
+h1, h2, h3, h4, .btn, .brand, .kicker, .eyebrow, .ch-num, .gh, .stamp, .note::after, .tab, .card-title,
+.trio figcaption b, .cover, .seg button, .sig, .also-list dt, .rel summary, .foot .made,
+.steps li::before { will-change: transform; }
 b, strong { font-weight: 600; color: var(--text); }
 code, kbd {
   font: 400 .86em/1 var(--mono);
@@ -234,7 +245,7 @@ kbd {
   min-height: 44px;
   padding: 8px 18px;
   color: var(--text);
-  font: 600 16.5px/24px var(--pixel);
+  font: 400 18px/24px var(--pixel);
   text-decoration: none;
   white-space: nowrap;
   cursor: pointer;
@@ -252,7 +263,7 @@ kbd {
 .btn-accent:hover { --face: var(--accent-hover); --edge: var(--accent-hover); color: var(--on-accent); }
 .btn-accent:active { --face: var(--accent-pressed); --edge: var(--accent-pressed); }
 .btn-lg { min-height: 52px; padding: 12px 24px; font-size: 18px; }
-.btn-sm { min-height: 36px; padding: 6px 14px; font-size: 16px; gap: 8px; }
+.btn-sm { min-height: 36px; padding: 6px 14px; font-size: 18px; gap: 8px; }
 .btn[disabled], .btn[aria-disabled="true"] { --face: var(--s2); --edge: var(--line-subtle); color: var(--text-4); cursor: default; transform: none; }
 
 /* A quiet control: no fill until hovered (the launcher's IconButton / nav rows). */
@@ -294,7 +305,7 @@ kbd {
   gap: 12px;
   color: var(--text);
   text-decoration: none;
-  font: 400 22px/1 var(--pixel);
+  font: 400 18px/27px var(--pixel);
   white-space: nowrap;
 }
 .brand:hover { color: var(--text); }
@@ -321,13 +332,13 @@ kbd {
   align-items: center;
   gap: 10px;
   color: var(--accent-text);
-  font: 400 16.5px/24px var(--pixel);
+  font: 400 18px/27px var(--pixel);
 }
 .hero h1 {
   margin-top: 20px;
-  max-width: 17em;
-  font-size: 55px;
-  line-height: 60px;
+  max-width: 22em;
+  font-size: 54px;
+  line-height: 63px;
   color: var(--text);
   text-wrap: balance;
 }
@@ -365,7 +376,7 @@ kbd {
   padding: 0 4px;
   color: var(--text-2);
   text-decoration: none;
-  font: 400 16.5px/24px var(--pixel);
+  font: 400 18px/27px var(--pixel);
   white-space: nowrap;
 }
 .gh:hover { color: var(--text); }
@@ -379,7 +390,7 @@ kbd {
   gap: 2px 24px;
   margin-top: 10px;
   color: var(--text-3);
-  font: 400 15px/22px var(--pixel);
+  font: 400 18px/27px var(--pixel);
 }
 .stamp b { color: var(--text-2); font-weight: 400; }
 
@@ -419,9 +430,9 @@ kbd {
   align-items: center;
   gap: 10px;
   color: var(--accent-text);
-  font: 400 16.5px/24px var(--pixel);
+  font: 400 18px/27px var(--pixel);
 }
-.sec h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; color: var(--text); text-wrap: balance; }
+.sec h2 { margin-top: 14px; font-size: 36px; line-height: 45px; color: var(--text); text-wrap: balance; }
 .sec-head .lead { margin-top: 18px; font-size: 18px; line-height: 30px; }
 .body { color: var(--text-soft); }
 .body > * + * { margin-top: 16px; }
@@ -447,13 +458,13 @@ kbd {
   column has a fixed width so the picture starts and ends on whole pixels. */
 
 .tour-head { padding-top: 112px; }
-.tour-head h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.tour-head h2 { margin-top: 14px; font-size: 36px; line-height: 45px; text-wrap: balance; }
 .tour-head .lead { margin-top: 18px; max-width: 46em; font-size: 18px; line-height: 30px; }
 .ch { padding-top: 96px; }
-.ch-num { display: flex; align-items: center; gap: 10px; color: var(--accent-text); font: 400 16.5px/24px var(--pixel); }
+.ch-num { display: flex; align-items: center; gap: 10px; color: var(--accent-text); font: 400 18px/27px var(--pixel); }
 .ch-num .of { color: var(--text-4); margin-left: -4px; }
 .ch-head { max-width: 46em; }
-.ch-head h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; color: var(--text); text-wrap: balance; }
+.ch-head h2 { margin-top: 14px; font-size: 36px; line-height: 45px; color: var(--text); text-wrap: balance; }
 .ch-head .lead { margin-top: 18px; font-size: 18px; line-height: 30px; }
 .ch-body {
   display: grid;
@@ -494,7 +505,7 @@ kbd {
   width: 2px;
   background: repeating-linear-gradient(180deg, var(--accent-text) 0 4px, transparent 4px 8px);
 }
-.note::after { content: "note"; order: -1; color: var(--accent-text); font: 400 15px/20px var(--pixel); }
+.note::after { content: "note"; order: -1; color: var(--accent-text); font: 400 18px/27px var(--pixel); }
 .note p { margin: 0; }
 .note.wide { margin-top: 36px; max-width: 46em; }
 .tabwrap { min-width: 0; }
@@ -556,7 +567,7 @@ kbd {
   border: 0;
   background: none;
   color: var(--text-2);
-  font: 400 16.5px/24px var(--pixel);
+  font: 400 18px/27px var(--pixel);
   cursor: pointer;
 }
 .tab:hover { --face: var(--hover); color: var(--text); }
@@ -573,14 +584,14 @@ kbd {
   display: flex;
   align-items: center;
   gap: 10px;
-  font: 400 16.5px/24px var(--pixel);
+  font: 400 18px/27px var(--pixel);
   color: var(--text);
 }
 .card-title .i { color: var(--accent-text); }
 .trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: auto auto; gap: 0 16px; margin-top: 48px; }
 .trio > figure { margin: 0; display: grid; grid-row: span 2; grid-template-rows: subgrid; }
 .trio figcaption { margin-top: 14px; color: var(--text-2); font-size: 15px; line-height: 24px; }
-.trio figcaption b { display: block; color: var(--text); font: 400 18px/26px var(--pixel); margin-bottom: 4px; }
+.trio figcaption b { display: block; color: var(--text); font: 400 18px/27px var(--pixel); margin-bottom: 4px; }
 
 /* sync states, as the Sharing hub lists them */
 .rows { list-style: none; margin: 16px 0 0; padding: 0; }
@@ -602,7 +613,7 @@ kbd {
   height: 32px;
   flex: none;
   color: #fff;
-  font: 600 18px/1 var(--pixel);
+  font: 700 18px/1 var(--pixel);
   clip-path: polygon(2px 0,calc(100% - 2px) 0,calc(100% - 2px) 1px,calc(100% - 1px) 1px,calc(100% - 1px) 2px,100% 2px,100% calc(100% - 2px),calc(100% - 1px) calc(100% - 2px),calc(100% - 1px) calc(100% - 1px),calc(100% - 2px) calc(100% - 1px),calc(100% - 2px) 100%,2px 100%,2px calc(100% - 1px),1px calc(100% - 1px),1px calc(100% - 2px),0 calc(100% - 2px),0 2px,1px 2px,1px 1px,2px 1px);
 }
 .rows .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
@@ -640,7 +651,7 @@ kbd {
 
 /* an invitation, as the Sharing hub shows one */
 .invite { --face: var(--s2); --edge: var(--line); display: grid; grid-template-columns: auto 1fr; gap: 14px; padding: 16px; margin-top: 28px; max-width: 460px; }
-.invite .cover { width: 44px; height: 44px; font-size: 22px; }
+.invite .cover { width: 44px; height: 44px; font-size: 27px; }
 .invite b { display: block; font-size: 15px; line-height: 22px; }
 .invite .small { color: var(--text-2); font-size: 13.5px; line-height: 20px; }
 .invite .acts { grid-column: 2; display: flex; gap: 8px; }
@@ -683,7 +694,7 @@ kbd {
   border: 0;
   background: none;
   color: var(--text-2);
-  font: 400 16.5px/24px var(--pixel);
+  font: 400 18px/27px var(--pixel);
   cursor: pointer;
 }
 .seg button:hover { --face: var(--hover); color: var(--text); }
@@ -693,19 +704,19 @@ kbd {
 /* ------------------------------------------------------------- the story */
 
 .story { padding-top: 112px; }
-.story h2 { margin-top: 14px; max-width: 18em; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.story h2 { margin-top: 14px; max-width: 20em; font-size: 36px; line-height: 45px; text-wrap: balance; }
 .story-body { max-width: 40em; margin-top: 22px; color: var(--text-soft); font-size: 18px; line-height: 30px; }
 .story-body p + p { margin-top: 18px; }
-.sig { display: flex; align-items: center; gap: 10px; margin-top: 28px; color: var(--accent-text); font: 400 18px/26px var(--pixel); }
+.sig { display: flex; align-items: center; gap: 10px; margin-top: 28px; color: var(--accent-text); font: 400 18px/27px var(--pixel); }
 .sig-cloud { width: 16px; height: 16px; flex: none; fill: var(--accent-text); }
 
 /* ---------------------------------------------------- does and doesn't */
 
 .honest { padding-top: 112px; }
-.honest h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.honest h2 { margin-top: 14px; font-size: 36px; line-height: 45px; text-wrap: balance; }
 .yesno { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 40px; align-items: start; }
 .yn { --face: var(--s1); --edge: var(--line-subtle); padding: 24px 26px 26px; }
-.yn h3 { font-size: 22px; line-height: 28px; color: var(--text); }
+.yn h3 { font-size: 27px; line-height: 36px; color: var(--text); }
 .yn ul { list-style: none; margin: 14px 0 0; padding: 0; }
 .yn li { position: relative; padding-left: 22px; color: var(--text-soft); font-size: 15.5px; line-height: 25px; }
 .yn li + li { margin-top: 10px; }
@@ -716,10 +727,10 @@ kbd {
 /* ------------------------------------------------------------ the rest */
 
 .also { padding-top: 112px; }
-.also h2 { margin-top: 14px; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.also h2 { margin-top: 14px; font-size: 36px; line-height: 45px; text-wrap: balance; }
 .also-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 48px; margin: 36px 0 0; }
 .also-list > div { padding-top: 14px; border-top: 1px solid var(--line-subtle); }
-.also-list dt { color: var(--text); font: 400 18px/26px var(--pixel); }
+.also-list dt { color: var(--text); font: 400 18px/27px var(--pixel); }
 .also-list dd { margin: 6px 0 0; color: var(--text-2); font-size: 15.5px; line-height: 25px; }
 
 /* ----------------------------------------------------------- what's new */
@@ -727,7 +738,7 @@ kbd {
 .changes { display: grid; gap: 16px; margin-top: 40px; }
 .rel { --face: var(--s1); --edge: var(--line-subtle); padding: 22px 24px; }
 .rel-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
-.rel-head h3 { font-size: 27.5px; line-height: 32px; color: var(--text); }
+.rel-head h3 { font-size: 27px; line-height: 36px; color: var(--text); }
 .rel-head time { color: var(--text-3); font-size: 14px; }
 .rel-head .pill { align-self: center; }
 .rel p { margin-top: 10px; max-width: 80ch; color: var(--text-soft); font-size: 16px; line-height: 26px; }
@@ -738,7 +749,7 @@ kbd {
   gap: 8px;
   cursor: pointer;
   color: var(--accent-text);
-  font: 400 15px/24px var(--pixel);
+  font: 400 18px/27px var(--pixel);
   list-style: none;
 }
 .rel summary::-webkit-details-marker { display: none; }
@@ -754,7 +765,7 @@ kbd {
 /* ------------------------------------------------------------ download */
 
 .band { --face: var(--s1); --edge: var(--line); padding: 56px 48px; margin-top: 112px; text-align: left; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 32px 48px; align-items: center; }
-.band h2 { font-size: 38.5px; line-height: 44px; }
+.band h2 { font-size: 36px; line-height: 45px; }
 .band .body { margin-top: 14px; max-width: 38em; }
 .band .dl-meta { margin-top: 16px; }
 .band .logo-big { width: 128px; height: 128px; }
@@ -763,19 +774,19 @@ kbd {
 
 .foot { margin-top: 96px; border-top: 1px solid var(--line); background: var(--title); }
 .foot-in { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 28px; padding: 28px var(--gutter) 32px; }
-.foot .brand { font-size: 16.5px; gap: 10px; }
+.foot .brand { gap: 10px; }
 .foot .brand .logo { width: 16px; height: 16px; }
 .foot nav { display: flex; flex-wrap: wrap; gap: 6px 22px; }
 .foot nav a { color: var(--text-2); text-decoration: none; font-size: 14px; }
 .foot nav a:hover { color: var(--text); }
-.foot .made { flex-basis: 100%; margin-top: 6px; color: var(--text-soft); font: 400 16.5px/24px var(--pixel); }
+.foot .made { flex-basis: 100%; margin-top: 6px; color: var(--text-soft); font: 400 18px/27px var(--pixel); }
 .foot .fine { flex-basis: 100%; color: var(--text-3); font-size: 13px; line-height: 20px; }
 
 /* ------------------------------------------------------ invitation page */
 
 .inv { padding: 72px 0 24px; }
 .inv-card { --face: var(--s1); --edge: var(--line-strong); max-width: 760px; margin: 0 auto; padding: 40px 44px 36px; }
-.inv-card h1 { margin-top: 14px; font-size: 38.5px; line-height: 44px; text-wrap: balance; }
+.inv-card h1 { margin-top: 14px; font-size: 36px; line-height: 45px; text-wrap: balance; }
 .inv-card .lead { font-size: 18px; line-height: 30px; }
 .inv-link-block { margin-top: 28px; }
 .inv-label { margin-top: 28px; color: var(--text-2); font-size: 14px; line-height: 22px; }
@@ -808,9 +819,9 @@ kbd {
 /* Privacy policy and terms */
 .doc { padding: 56px 0 24px; }
 .doc-card { --face: var(--s1); --edge: var(--line-strong); max-width: 760px; margin: 0 auto; padding: 40px 44px 40px; }
-.doc-card h1 { margin-top: 14px; font-size: 34px; line-height: 40px; }
+.doc-card h1 { margin-top: 14px; font-size: 36px; line-height: 45px; }
 .doc-card .updated { margin-top: 10px; color: var(--text-2); font-size: 14px; line-height: 22px; }
-.doc-card h2 { margin-top: 36px; font-size: 21px; line-height: 28px; }
+.doc-card h2 { margin-top: 36px; font-size: 27px; line-height: 36px; }
 .doc-card p, .doc-card li { color: var(--text-soft); font-size: 15.5px; line-height: 26px; }
 .doc-card p { margin: 12px 0 0; }
 .doc-card ul { margin: 12px 0 0; padding-left: 22px; }
@@ -819,7 +830,7 @@ kbd {
 @media (max-width: 640px) {
   .doc { padding-top: 32px; }
   .doc-card { padding: 28px 20px 30px; }
-  .doc-card h1 { font-size: 28px; line-height: 34px; }
+  .doc-card h1 { font-size: 27px; line-height: 36px; }
 }
 
 /* --------------------------------------------------------------- viewer */
@@ -1125,44 +1136,40 @@ kbd {
 @media (max-width: 900px) {
   .nav { display: none; }
   .hero { padding-top: 56px; }
-  .hero h1 { font-size: 44px; line-height: 50px; }
+  .hero h1 { font-size: 45px; line-height: 54px; }
   .sec, .tour-head, .story, .honest, .also { padding-top: 88px; }
   .ch { padding-top: 72px; }
-  .sec h2, .tour-head h2, .ch-head h2, .story h2, .honest h2, .also h2 { font-size: 33px; line-height: 38px; }
   .band { padding: 40px 28px; margin-top: 88px; }
-  .band h2 { font-size: 33px; line-height: 38px; }
 }
 @media (max-width: 600px) {
   .top .btn-discord { display: none; }
   :root { --gutter: 16px; }
   body { font-size: 16px; line-height: 26px; }
   .top-in { height: 56px; gap: 12px; }
-  .brand { font-size: 19px; gap: 10px; }
+  .brand { gap: 10px; }
   .brand .logo { width: 28px; height: 28px; }
   .hero { padding-top: 40px; }
-  .hero h1 { font-size: 33px; line-height: 38px; }
+  .hero h1 { font-size: 27px; line-height: 36px; }
   .lead { font-size: 17px; line-height: 28px; }
   .hero-shot { margin-top: 40px; }
-  .btn-lg { min-height: 48px; padding: 10px 18px; font-size: 16.5px; }
+  .btn-lg { min-height: 48px; padding: 10px 18px; }
   .cta .btn { flex: 1 1 auto; }
   .cta .gh { flex-basis: 100%; justify-content: center; min-height: 40px; }
-  .stamp { font-size: 14px; }
   .sec, .tour-head, .story, .honest, .also { padding-top: 72px; }
   .ch { padding-top: 60px; }
-  .sec h2, .tour-head h2, .ch-head h2, .story h2, .honest h2, .also h2 { font-size: 27.5px; line-height: 32px; }
+  .sec h2, .tour-head h2, .ch-head h2, .story h2, .honest h2, .also h2 { font-size: 27px; line-height: 36px; }
   .sec-head .lead, .tour-head .lead, .ch-head .lead, .story-body { font-size: 17px; line-height: 28px; }
   .divider { margin-bottom: 28px; }
-  .tab { padding: 6px 12px; font-size: 15px; }
+  .tab { padding: 6px 12px; }
   .band { padding: 32px 20px; margin-top: 72px; }
-  .band h2 { font-size: 27.5px; line-height: 32px; }
+  .band h2 { font-size: 27px; line-height: 36px; }
   .look-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .yn { padding: 20px 18px 22px; }
   .rel { padding: 20px; }
-  .rel-head h3 { font-size: 22px; line-height: 28px; }
   .warnbox li span { margin-left: 0; width: 100%; font-size: 12px; line-height: 18px; }
   .inv { padding-top: 32px; }
   .inv-card { padding: 28px 20px 24px; }
-  .inv-card h1 { font-size: 27.5px; line-height: 32px; }
+  .inv-card h1 { font-size: 27px; line-height: 36px; }
   .inv-card .lead { font-size: 17px; line-height: 28px; }
   .inv-link { flex-wrap: wrap; }
   .inv-link .btn { width: 100%; }
