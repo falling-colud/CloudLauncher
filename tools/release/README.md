@@ -71,6 +71,23 @@ the file.
 To check a package by hand:
 `dotnet run --project tools/release/signer -- verify --zip <zip> --json <latest.json or sign output>`.
 
+## Authenticode (Windows SmartScreen)
+
+Update signing above is the launcher checking its own updates. Authenticode is what Windows checks,
+and without it SmartScreen warns about the installer. `publish-release.ps1` and `build-installer.ps1`
+sign `CloudLauncher.exe` and the installer when one of these is configured:
+
+- `CL_SIGN_THUMBPRINT`, or `CL_SIGN_PFX` + `CL_SIGN_PFX_PASSWORD`: a classic code-signing certificate.
+- Azure Trusted Signing (the portal calls it Artifact Signing): `CL_SIGN_TS_ENDPOINT` (the account's
+  region endpoint, e.g. `https://neu.codesigning.azure.net/`), `CL_SIGN_TS_ACCOUNT` and
+  `CL_SIGN_TS_PROFILE` (the certificate profile), or the same three under `trustedSigning` in
+  `release.local.json`. It needs signtool from the Windows SDK, the `Microsoft.Trusted.Signing.Client`
+  NuGet package unzipped to `%USERPROFILE%\.cloudlauncher-release\trusted-signing\pkg` (or
+  `CL_SIGN_TS_DLIB` pointing at its `bin\x64\Azure.CodeSigning.Dlib.dll`), and an Azure CLI
+  sign-in (`az login`) by someone with the "Certificate Profile Signer" role on the account. The
+  timestamp comes from `http://timestamp.acs.microsoft.com`; the certificates themselves live only a
+  few days, so the timestamp is what keeps a signature valid.
+
 ## If k1 is lost
 
 Launchers in the field trust k1 and k2, so a release signed with k2 still reaches them:

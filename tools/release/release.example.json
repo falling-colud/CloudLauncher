@@ -4,5 +4,11 @@
   "remoteDir": "/path/to/cloudlauncher/data/launcher",
   "publicUrl": "https://launcher.example.com",
   "signKey": "k1",
-  "signPem": ""
+  "signPem": "",
+  "trustedSigning": {
+    "endpoint": "https://neu.codesigning.azure.net/",
+    "account": "your-signing-account",
+    "profile": "your-certificate-profile",
+    "dlib": ""
+  }
 }
