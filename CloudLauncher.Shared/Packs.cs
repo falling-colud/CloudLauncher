@@ -36,7 +36,11 @@ public sealed record CreatePackRequest(
     string? MinecraftVersion,
     LoaderKind Loader,
     string? LoaderVersion,
-    string? Summary = null);
+    string? Summary = null,
+    // The id to create it under, or null for a new one. Set when an instance made on a PC without an
+    // account is added to one, so it keeps the id everything on that PC files it under. Servers that
+    // predate it ignore it and make a new id.
+    Guid? Id = null);
 
 public sealed record UpdatePackRequest(
     string? Name,

@@ -101,12 +101,14 @@
                         Content="Need an account? Create one" Click="OnSwitchMode"
                         HorizontalAlignment="Center" Margin="0,12,0,0"/>
 
-                <!--  Only on a PC that has signed in before: downloaded instances work offline.  -->
+                <!--  Signing in is optional: everything that needs no account works without one.  -->
                 <Button x:Name="OfflineButton" Style="{StaticResource LinkButton}"
-                        Content="Continue offline" Click="OnContinueOffline"
+                        Content="Continue without signing in" Click="OnContinueOffline"
                         HorizontalAlignment="Center" Margin="0,6,0,0"
-                        Visibility="Collapsed"
-                        ToolTip="Open your library from this PC. Anything on the server stays unavailable until you sign in."/>
+                        ToolTip="Use the launcher on this PC. Sharing, syncing and hosting wait until you sign in."/>
+                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" TextAlignment="Center"
+                           Margin="0,10,0,0" Foreground="{DynamicResource TextTertiaryBrush}"
+                           Text="An account is for sharing instances, syncing them between PCs and hosting content. Everything else works without one."/>
             </StackPanel>
         </slate:SlateBorder>
     </Grid>

@@ -192,16 +192,19 @@ internal static class Program
         var limits = new ProxyUserLimits();
         var user = Guid.NewGuid();
 
+        // The allowance refills every few milliseconds at this rate, and TickCount64 moves in ~16 ms
+        // steps, so a step landing mid-loop can add a token or two: the counts allow for that.
+        var slack = (int)Math.Ceiling(ProxyUserLimits.RequestsPerSecond * 0.05);
         var burst = 0;
-        while (limits.TryTake(user) is null && burst < 10_000) burst++;
-        Check($"a quiet account may send {ProxyUserLimits.Burst:0} at once", burst == (int)ProxyUserLimits.Burst, $"{burst}");
-        var wait = limits.TryTake(user);
+        TimeSpan? wait;
+        while ((wait = limits.TryTake(user)) is null && burst < 10_000) burst++;
+        Check($"a quiet account may send {ProxyUserLimits.Burst:0} at once", burst >= (int)ProxyUserLimits.Burst && burst <= (int)ProxyUserLimits.Burst + slack, $"{burst}");
         Check("the next one is told to wait under a second", wait is { } w && w > TimeSpan.Zero && w < TimeSpan.FromSeconds(1), $"{wait}");
 
         await Task.Delay(1050);
         var refilled = 0;
         while (limits.TryTake(user) is null && refilled < 10_000) refilled++;
-        Check($"about {ProxyUserLimits.RequestsPerSecond:0} refill each second", refilled >= ProxyUserLimits.RequestsPerSecond - 2 && refilled <= ProxyUserLimits.RequestsPerSecond + 6, $"{refilled}");
+        Check($"about {ProxyUserLimits.RequestsPerSecond:0} refill each second", refilled >= ProxyUserLimits.RequestsPerSecond - 2 && refilled <= ProxyUserLimits.RequestsPerSecond + 6 + slack, $"{refilled}");
 
         var places = 0;
         while (limits.TryEnterQueue(user, "curseforge") is null && places < 1000) places++;
@@ -209,8 +212,8 @@ internal static class Program
         Check("the other store's queue is separate", limits.TryEnterQueue(user, "modrinth") is null);
         limits.LeaveQueue(user, "curseforge");
         Check("a place given back can be taken again", limits.TryEnterQueue(user, "curseforge") is null);
-        Check("the launcher's own in-flight ceiling fits under the queue places (3 pages + 8 update check)",
-            3 + 8 <= ProxyUserLimits.MaxQueuedPerBucket);
+        Check($"the launcher's own in-flight ceiling fits under the queue places (3 pages + {ApiClient.MaxUpdateCheckInFlight} update check)",
+            3 + ApiClient.MaxUpdateCheckInFlight <= ProxyUserLimits.MaxQueuedPerBucket);
         // Browsing is about 6/s to CurseForge and 4.5/s to Modrinth; the update-check rate is one
         // budget across both stores.
         Check("an update check at the top rate plus browsing stays under the sustained rate",

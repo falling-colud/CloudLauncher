@@ -60,7 +60,12 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
             .DisableWhileBusy(RefreshButton, SortButton);
         // The empty panel offers one action, "create", which is what someone with no instances needs.
         // Import stays in the header.
-        _state.EmptyCopy(PageCopy.Instances.EmptyTitle, PageCopy.Instances.EmptyBody,
+        // Signed out, an account's instances are not listed, so say where they went. The page is rebuilt
+        // on every sign-in and sign-out (MainWindow.OnSignedIn/OnSignedOut), so this is read once.
+        var emptyBody = App.State.Api.IsSignedIn
+            ? PageCopy.Instances.EmptyBody
+            : PageCopy.Instances.EmptyBody + " Instances on a CloudLauncher account show here once you sign in.";
+        _state.EmptyCopy(PageCopy.Instances.EmptyTitle, emptyBody,
                          "Create instance", () => _ = CreatePackAsync());
         _state.RetryRequested += () => _ = RefreshAsync();
 
@@ -76,6 +81,7 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
             PackJobs.Changed += OnPackJobChanged;
             App.State.Instances.StateChanged += OnInstanceStateChanged;
             App.State.ModpackDownload.PackAdded += OnPackAdded;
+            App.State.Duplicates.Finished += OnDuplicateFinished;
             Window.GetWindow(this)!.PreviewKeyDown += OnShellKeyDown;
 
             // Opening or reopening the page: nobody asked, so the refresh stays quiet unless it
@@ -89,6 +95,7 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
             PackJobs.Changed -= OnPackJobChanged;
             App.State.Instances.StateChanged -= OnInstanceStateChanged;
             App.State.ModpackDownload.PackAdded -= OnPackAdded;
+            App.State.Duplicates.Finished -= OnDuplicateFinished;
             if (Window.GetWindow(this) is Window w) w.PreviewKeyDown -= OnShellKeyDown;
         };
     }
@@ -309,10 +316,6 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
         _state.Begin(null, null, quiet);
         try
         {
-            // First launch on a fresh install: join the pack this launcher ships for, so the list is
-            // never empty for someone who has just installed it. No-op on every later start.
-            await App.State.ModpackDownload.EnsureDefaultPackAsync();
-
             var packs = await App.State.Api.ListPacksAsync();
 
             // Reconciled, not rebuilt: there must be one PackRow per instance for the page's lifetime.
@@ -384,7 +387,7 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
     /// so one account's instances are never shown to another.</remarks>
     private void PaintRemembered()
     {
-        var remembered = PackListCache.Load();
+        var remembered = App.State.Api.PeekPacks();
         if (remembered is not { Count: > 0 }) return;
 
         var rows = remembered
@@ -943,7 +946,9 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
         if (sender is not Button { Tag: Guid id }) return;
         var job = PackJobs.For(id);
         if (job is null) return;
-        SetStatus($"Stopping the {job.KindLabel} - the files it downloaded are being removed...");
+        SetStatus(job.Kind == PackJobKind.Copy
+            ? "Stopping the copy - the unfinished instance is being removed..."
+            : $"Stopping the {job.KindLabel} - the files it downloaded are being removed...");
         job.Stop();
     }
 
@@ -1173,6 +1178,59 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
         }
     }
 
+    /// <summary>Copies the instance into a new one (see <see cref="InstanceDuplicateService"/>). The
+    /// new card appears at once and fills in as the files are copied.</summary>
+    private async void OnCtxDuplicate(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender) is not { } row) return;
+        var id = row.Source.Id;
+        if (App.State.Instances.GetStatus(id) != MinecraftInstanceStatus.Idle)
+        {
+            SetStatus("Minecraft is running from that instance. Close it first, so its worlds and configs are copied as they are on disk.", error: true);
+            return;
+        }
+        if (PackJobs.For(id) is { } running)
+        {
+            SetStatus($"That instance is busy ({running.KindLabel}). Duplicate it once that has finished.", error: true);
+            return;
+        }
+
+        var dlg = new DuplicateInstanceDialog(row.Name, row.Source.IsShared) { Owner = _shell };
+        if (dlg.ShowDialog() != true || dlg.Result is not { } options) return;
+
+        SetStatus($"Duplicating '{row.Name}'...");
+        try
+        {
+            var detail = await App.State.Api.GetPackAsync(id);
+            var copy = await App.State.Duplicates.StartAsync(detail, options);
+            AddOrUpdatePack(copy);
+            SetStatus($"Copying '{row.Name}' into '{copy.Name}'. Hover its bar to pause or stop.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            SetStatus(ex.Message, error: true);
+        }
+        catch (ApiException ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus($"'{row.Name}' could not be duplicated: {ApiClient.ServerSentence(ex) ?? ex.Message}", error: true);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus($"'{row.Name}' could not be duplicated. The full error is in the launcher log.", error: true);
+        }
+    }
+
+    /// <summary>A copy finished, or was stopped and taken back.</summary>
+    private async void OnDuplicateFinished(Guid packId, bool ok)
+    {
+        if (!IsLoaded) return;
+        var name = _rows.FirstOrDefault(r => r.Source.Id == packId)?.Name ?? "The copy";
+        await RefreshAsync();
+        SetStatus(ok ? $"'{name}' is ready." : "The copy did not finish, so the unfinished instance was removed. The launcher log says why.", error: !ok);
+    }
+
     /// <summary>The card menu's route to <see cref="ExportPackDialog"/>, the same card the instance
     /// page's Export button opens.</summary>
     /// <remarks>Fetches the full record rather than trusting the cached one: both formats are written
@@ -1211,16 +1269,92 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
         }
     }
 
+    /// <summary>Moves an instance made without an account onto the signed-in one (see
+    /// <see cref="ApiClient.AddLocalPackToAccountAsync"/>). Its files stay where they are.</summary>
+    private async void OnCtxAddToAccount(object sender, RoutedEventArgs e)
+    {
+        if (RowFromMenuSender(sender) is not { } row) return;
+        var ok = await AppDialog.ConfirmAsync(_shell, "Add to my account",
+            $"Add '{row.Name}' to your CloudLauncher account ({App.State.Settings.Username})?\n\n"
+            + "It is listed on every PC you sign in on, and can be shared from its Share tab. Its files stay "
+            + "on this PC until you choose to host them.",
+            "Add to my account", "Cancel");
+        if (!ok) return;
+
+        SetStatus($"Adding '{row.Name}' to your account...");
+        try
+        {
+            var added = await App.State.Api.AddLocalPackToAccountAsync(row.Source.Id);
+            await RefreshAsync();
+            SetStatus($"'{added.Name}' is on your account now.");
+        }
+        catch (ApiException ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus($"'{row.Name}' could not be added to your account: {ApiClient.ServerSentence(ex) ?? ex.Message}", error: true);
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(PackListView), ex);
+            SetStatus($"'{row.Name}' could not be added to your account. The full error is in the launcher log.", error: true);
+        }
+    }
+
     private async void OnCtxDelete(object sender, RoutedEventArgs e)
     {
         if (RowFromMenuSender(sender) is not { } row) return;
-        var me = App.State.Settings.UserId;
-        var isOwner = me.HasValue && row.Source.OwnerId == me.Value;
-        var confirm = new ConfirmDeleteDialog(row.Name, isOwner) { Owner = _shell };
+        var packId = row.Source.Id;
+        var isLocal = App.State.Api.IsLocalPack(packId);
+        var isOwner = App.State.OwnsPack(packId, row.Source.OwnerId);
+
+        // Minecraft holds the instance's files open, and deleting under it would pull files out of a
+        // running game. Stopping it is a decision for the player, not a side effect of a delete.
+        if (App.State.Instances.GetStatus(packId) == MinecraftInstanceStatus.Running)
+        {
+            SetStatus("Minecraft is running from that instance. Close the game first, then delete it.", error: true);
+            return;
+        }
+
+        var confirm = new ConfirmDeleteDialog(row.Name, isOwner, isLocal) { Owner = _shell };
         if (confirm.ShowDialog() != true) return;
 
-        var packId = row.Source.Id;
-        foreach (var f in App.State.Settings.PackFolders.Values) f.Remove(packId);
+        // Stop anything still downloading into it (a modpack install, an update, a launch fetching the
+        // game) before it goes, and wait for the stop to roll its files back. Otherwise the transfer
+        // keeps writing into a folder that is no longer listed.
+        // A copy that is stopped takes its unfinished instance back by itself, which is the delete.
+        if (PackJobs.For(packId) is { Kind: PackJobKind.Copy })
+        {
+            SetStatus($"Stopping the copy into '{row.Name}'...");
+            if (!await PackJobs.StopAndWaitAsync(packId, TimeSpan.FromSeconds(30)))
+            {
+                SetStatus($"The copy into '{row.Name}' has not stopped yet. Try again in a moment.", error: true);
+                return;
+            }
+            _shell.CloseSidePanelForPack(packId);
+            await RefreshAsync();
+            SetStatus($"Stopped the copy; '{row.Name}' was removed.");
+            return;
+        }
+
+        if (PackJobs.IsRunning(packId) || App.State.Instances.IsBusy(packId))
+        {
+            SetStatus($"Stopping what '{row.Name}' was downloading...");
+            App.State.Instances.Stop(packId);
+            if (!await PackJobs.StopAndWaitAsync(packId, TimeSpan.FromSeconds(30)))
+            {
+                SetStatus($"The download into '{row.Name}' has not stopped yet, so it was not deleted. Try again in a moment.", error: true);
+                return;
+            }
+            ProgressHub.Clear(packId);
+        }
+
+        // A local delete takes the folder with it, so the instance's own page (file watchers, the
+        // description view) is closed first and given a turn to let go of its files.
+        if (isLocal)
+        {
+            _shell.CloseSidePanelForPack(packId);
+            await Dispatcher.Yield(DispatcherPriority.Background);
+        }
 
         // Set when the local hide worked but the server was not told: a partial success with its own
         // message.
@@ -1246,20 +1380,28 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
                 }
             }
 
+            // Only once it is really gone: a delete that failed keeps its place in the user's folders.
+            foreach (var f in App.State.Settings.PackFolders.Values) f.Remove(packId);
             App.State.Settings.Save();
             _shell.CloseSidePanelForPack(packId);
             await RefreshAsync();
 
             SetStatus(syncWarning
                 ? "Removed from your list, but the server was not told - it may come back on the next refresh."
+                : isLocal ? "Instance deleted. Its folder is in the Recycle Bin."
                 : isOwner ? "Instance deleted." : "Instance removed.",
                 error: syncWarning);
+        }
+        catch (OperationCanceledException)
+        {
+            // Windows asked whether to delete a folder too big for the Recycle Bin, and the answer was no.
+            SetStatus("The instance was not deleted.");
         }
         catch (Exception ex)
         {
             AppLog.LogError(nameof(PackListView), ex);
-            SetStatus(isOwner
-                ? "That instance could not be deleted. The full error is in the launcher log."
+            SetStatus(ex is System.IO.IOException && isLocal ? ex.Message
+                : isOwner ? "That instance could not be deleted. The full error is in the launcher log."
                 : "That instance could not be removed. The full error is in the launcher log.",
                 error: true);
         }
@@ -1382,8 +1524,14 @@ public sealed class PackRow : INotifyPropertyChanged
     public string Name => Source.Name;
     public string? Summary => Source.Summary;
     public string? Description => Source.Description;
-    public string OwnerLabel => $"by {Source.OwnerUsername} · updated {Source.UpdatedAt.LocalDateTime:g}";
-    public string OwnerShortLabel => $"by {Source.OwnerUsername}";
+    /// <summary>True when the instance is on this PC only, not on a CloudLauncher account.</summary>
+    public bool IsLocal => App.State.Api.IsLocalPack(Source.Id);
+    public string OwnerLabel => $"{OwnerShortLabel} · updated {Source.UpdatedAt.LocalDateTime:g}";
+    public string OwnerShortLabel => IsLocal ? "on this PC" : $"by {Source.OwnerUsername}";
+
+    /// <summary>The card menu's "Add to my account": a local instance, with someone signed in.</summary>
+    public Visibility AddToAccountVisibility =>
+        IsLocal && App.State.Api.IsSignedIn ? Visibility.Visible : Visibility.Collapsed;
     public bool IsPlayable => !Source.IsEmpty;
     public bool IsShared => Source.IsShared;
     public bool IsPinned => Usage.IsPinned;

@@ -15,9 +15,12 @@ namespace CloudLauncher.Server.Controllers;
 /// the payload they'd send upstream; only calls in <see cref="ProxyAllowlist"/> are forwarded.</summary>
 /// <remarks>Each configured route is tried in turn (see <see cref="UpstreamRouter"/>), so if a CDN
 /// refuses this server's address the request goes through a relay or outbound proxy instead. Routes
-/// are configured under "Upstream"; with none there is one direct route.</remarks>
+/// are configured under "Upstream"; with none there is one direct route.
+/// Open to launchers that are not signed in, so browsing and installing mods needs no account. They
+/// get the same allowance as an account, counted per network address (see
+/// <see cref="ProxyUserLimits.AnonymousKey"/>).</remarks>
 [ApiController]
-[Authorize]
+[AllowAnonymous]
 [Route("proxy/{platform}/{**relativePath}")]
 public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbContext db, ILogger<ProxyController> log) : ControllerBase
 {
@@ -36,7 +39,7 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
     [AcceptVerbs("GET", "POST")]
     public async Task<IActionResult> Forward(string platform, string? relativePath, CancellationToken ct)
     {
-        if (this.UserIdOrNull() is not { } user) return Unauthorized();
+        var user = this.UserIdOrNull() ?? ProxyUserLimits.AnonymousKey(HttpContext.Connection.RemoteIpAddress);
 
         var name = ProxyAllowlist.Platform(platform);
         var path = relativePath ?? "";
@@ -70,7 +73,7 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
         {
             log.LogDebug("Proxy rate limit reached for user {User}.", user);
             return RateLimited(name, rateWait,
-                "Too many store requests from this account. Try again in a moment.", "too_many_requests");
+                "Too many store requests from this launcher. Try again in a moment.", "too_many_requests");
         }
 
         var (keyValue, ownKey) = await ResolveKeyAsync(name, ct);
@@ -129,7 +132,7 @@ public class ProxyController(UpstreamRouter router, UpstreamGuard guard, AppDbCo
             {
                 log.LogDebug("Proxy queue cap reached for user {User} on {Bucket}.", user, bucket.Name);
                 return RateLimited(name, busy,
-                    "Too many store requests from this account at once. Try again in a moment.", "too_many_requests");
+                    "Too many store requests from this launcher at once. Try again in a moment.", "too_many_requests");
             }
 
             HttpResponseMessage resp;

@@ -21,7 +21,6 @@ public partial class LoginView : Page
         _shell = shell;
         _knownMachine = !string.IsNullOrWhiteSpace(App.State.Settings.Username)
                         || App.State.Settings.UserId is not null;
-        OfflineButton.Visibility = _knownMachine ? Visibility.Visible : Visibility.Collapsed;
         UpdateModeUi();
         _ = ShowGoogleIfOfferedAsync();
     }
@@ -39,15 +38,15 @@ public partial class LoginView : Page
     }
 
     /// <summary>
-    /// Opens the library straight from disk and cache.
+    /// Goes on without an account: the instances on this PC and everything that needs no server.
     /// </summary>
     /// <remarks>
-    /// For users who signed out or whose refresh token expired. They still own every instance in the
-    /// folder, and this screen can't sign them in while offline.
+    /// Always offered, since signing in is only needed for the online features. Also the way out for
+    /// someone whose session expired while offline, when this screen can't sign them in.
     /// </remarks>
     private void OnContinueOffline(object sender, RoutedEventArgs e)
     {
-        AppLog.Log("auth", "Continuing offline - signed out, opening the local library.");
+        AppLog.Log("auth", "Continuing without signing in.");
         _shell.NavigateToPacks();
     }
 
@@ -61,8 +60,8 @@ public partial class LoginView : Page
             ? $"CloudLauncher could not reach the server: {reason}."
             : "CloudLauncher could not reach the server.";
         InfoLabel.Text = _knownMachine
-            ? "Signing in is the one thing that needs the server. Everything already on this PC still opens - use Continue offline below."
-            : "Signing in needs the server. Try again once you are back online.";
+            ? "Signing in is the one thing that needs the server. Everything already on this PC still opens - use Continue without signing in below."
+            : "Signing in needs the server. Try again once you are back online, or continue without signing in.";
         InfoLabel.Visibility = Visibility.Visible;
     }
 
@@ -194,7 +193,7 @@ public partial class LoginView : Page
     {
         App.State.Settings.PasswordAccountId = tokens.UserId;
         App.State.Api.SetTokens(tokens);
-        _shell.NavigateToPacks();
+        _shell.OnSignedIn();
     }
 
     private async void OnResendVerification(object sender, RoutedEventArgs e)
@@ -279,7 +278,7 @@ public partial class LoginView : Page
                 if (poll.Tokens is not null)
                 {
                     App.State.Api.SetTokens(poll.Tokens);
-                    _shell.NavigateToPacks();
+                    _shell.OnSignedIn();
                     return;
                 }
 

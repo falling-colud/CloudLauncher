@@ -153,13 +153,6 @@ public sealed partial class AppSettings
         try { Save(); } catch { /* read-only profile: the in-memory value is still right */ }
     }
 
-    /// <summary>Id of the pack every new install starts subscribed to, and whether that has been done.</summary>
-    /// <remarks>Seeded once: the flag is set even when the subscribe fails, and leaving the pack later
-    /// sticks.</remarks>
-    public static readonly Guid DefaultPackId = Guid.Parse("9dc74fcc-8baf-4a33-8eec-8e985ca309f3");
-
-    public bool DefaultPackSeeded { get; set; }
-
     /// <summary>Default state for the pack page inside the custom Minecraft window.</summary>
     public bool MinecraftWindowPackPageCollapsedByDefault { get; set; } = false;
 
@@ -269,12 +262,12 @@ public sealed partial class AppSettings
     /// <summary>How many per-mod store requests an update check may make per second, across both
     /// stores.</summary>
     /// <remarks>Most mods are answered by a few bulk requests first, so this only paces the rest. The
-    /// launcher server allows an account about 40 requests a second (see <c>ProxyUserLimits</c>), so
+    /// launcher server allows an account about 120 requests a second (see <c>ProxyUserLimits</c>), so
     /// the ceiling keeps a check plus browsing under that; set higher than the stores like, they ask
     /// to slow down, which the check then waits out.</remarks>
     public int ModUpdateChecksPerSecond { get; set; } = 10;
 
-    public const int MinModUpdateChecksPerSecond = 1, MaxModUpdateChecksPerSecond = 20;
+    public const int MinModUpdateChecksPerSecond = 1, MaxModUpdateChecksPerSecond = 100;
 
     public int EffectiveModUpdateChecksPerSecond =>
         Math.Clamp(ModUpdateChecksPerSecond, MinModUpdateChecksPerSecond, MaxModUpdateChecksPerSecond);

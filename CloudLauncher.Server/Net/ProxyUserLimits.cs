@@ -9,23 +9,25 @@ namespace CloudLauncher.Server.Net;
 /// <remarks>
 /// <para>Sized so nothing a launcher does on its own trips them: a bulk update check of a 2,000-mod
 /// pack is about 80 batched POSTs, a modpack install about 120, and the launcher paces itself to
-/// roughly 30 a second across both stores at the highest update-check rate it offers. Answers served
+/// roughly 110 a second across both stores at the highest update-check rate it offers. Answers served
 /// from the response cache are not counted (see <c>ProxyController</c>).</para>
+/// <para>A launcher that is not signed in is counted by its network address instead of an account
+/// (see <see cref="AnonymousKey"/>).</para>
 /// <para>Accounts with a full allowance and nothing queued are swept, so only recently active accounts
 /// stay in memory.</para>
 /// </remarks>
 public sealed class ProxyUserLimits
 {
     /// <summary>Sustained proxy requests per second per account, for calls that go upstream.</summary>
-    public const double RequestsPerSecond = 40;
+    public const double RequestsPerSecond = 120;
 
     /// <summary>Requests an account that has been quiet may send at once.</summary>
     public const double Burst = 200;
 
     /// <summary>Places one account may hold in one bucket's queue, waiting or in flight. The launcher
-    /// keeps at most eleven per store by itself: three for pages and up to eight for an update check
-    /// (see <c>ApiClient.UpdateCheckInFlight</c>).</summary>
-    public const int MaxQueuedPerBucket = 12;
+    /// keeps at most twenty-three per store by itself: three for pages and up to twenty for an update
+    /// check (see <c>ApiClient.UpdateCheckInFlight</c>).</summary>
+    public const int MaxQueuedPerBucket = 24;
 
     /// <summary>Wait suggested to an account over the queue cap. Its own requests free places as
     /// they finish, so this is short.</summary>
@@ -43,6 +45,20 @@ public sealed class ProxyUserLimits
     }
 
     private readonly ConcurrentDictionary<Guid, Account> _accounts = new();
+
+    /// <summary>The key a caller without an account is counted under: a hash of its address, so it can
+    /// never equal a real account id. IPv6 callers are grouped by their /64, which is what one home
+    /// connection is usually given.</summary>
+    public static Guid AnonymousKey(System.Net.IPAddress? address)
+    {
+        var ip = address ?? System.Net.IPAddress.None;
+        if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+        var bytes = ip.GetAddressBytes();
+        if (ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6) bytes = bytes[..8];
+        var hash = System.Security.Cryptography.SHA256.HashData(
+            [.. System.Text.Encoding.ASCII.GetBytes("proxy-anonymous:"), .. bytes]);
+        return new Guid(hash.AsSpan(0, 16));
+    }
     private long _nextSweep = Environment.TickCount64 + SweepIntervalMs;
 
     /// <summary>Takes one request from the account's allowance. Null when it may go ahead; otherwise

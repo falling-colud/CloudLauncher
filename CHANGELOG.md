@@ -3,6 +3,23 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.3 - 2026-09-27
+
+- Instances can be duplicated: right-click one and pick Duplicate. The copy gets the same Minecraft
+  version, loader, mods, configs and settings, and its worlds if you want them.
+- Signing in is optional. The launcher opens straight to Instances, and everything that needs no
+  account works without one: making, importing and playing instances, browsing and installing
+  mods and modpacks, worlds, resource packs, shaders, servers and configs. An account is for
+  sharing, syncing and hosting.
+- Instances made without an account stay on this PC. Once signed in, right-click one (or open its
+  Options) and pick Add to my account to share it; it keeps its settings and files. Deleting one
+  sends its folder to the Recycle Bin.
+- A new install no longer downloads Create Ultimate Selection 2 by itself, and opening a shared
+  instance that was never downloaded offers a Download button instead of starting straight away.
+- Deleting an instance while it downloads stops the download first and removes what it fetched.
+- Update checks can run at up to 100 per second (was 20). Server: per-user store limits raised to
+  match, and launchers that are not signed in can use the store proxy.
+
 ## 0.9.2 - 2026-09-26
 
 - CurseForge and Modrinth: when a store, or the launcher server in front of it, asks for a

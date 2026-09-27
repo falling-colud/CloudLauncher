@@ -129,6 +129,8 @@ public sealed class TeamsApi
     private async Task<HttpResponseMessage> RawAsync(
         HttpMethod method, string route, object? body, CancellationToken ct)
     {
+        // Teams belong to accounts; say so rather than asking the server for a 401.
+        if (!_api.IsSignedIn) throw new ApiException(ApiClient.SignInRequiredMessage, HttpStatusCode.Unauthorized);
         await EnsureTokenAsync(ct);
         var resp = await SendOnceAsync(method, route, body, ct);
         if (resp.StatusCode != HttpStatusCode.Unauthorized) return resp;

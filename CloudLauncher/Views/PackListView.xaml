@@ -25,12 +25,17 @@
             <MenuItem Header="Open game folder" Click="OnCtxOpenGameFolder"/>
             <MenuItem Header="Instance management" Click="OnCtxPackManagement"/>
             <MenuItem Header="Mod browser" Click="OnCtxBrowseMods"/>
+            <MenuItem Header="Duplicate..." Click="OnCtxDuplicate"
+                      ToolTip="Make a new instance with the same mods, configs and settings"/>
             <MenuItem Header="Export..." Click="OnCtxExport"
                       ToolTip="Save this instance as a CurseForge .zip or Modrinth .mrpack"/>
             <Separator/>
             <MenuItem Header="Add to folder"
                       SubmenuOpened="OnCtxAddToFolderOpened"/>
             <Separator/>
+            <MenuItem Header="Add to my account..." Click="OnCtxAddToAccount"
+                      ToolTip="Keep this instance on your CloudLauncher account, so it can be shared and synced"
+                      Visibility="{Binding PlacementTarget.DataContext.AddToAccountVisibility, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
             <MenuItem Header="Copy instance ID" Click="OnCtxCopyId"/>
             <MenuItem Header="Delete..." Click="OnCtxDelete"/>
         </ContextMenu>

@@ -56,7 +56,7 @@ public partial class FileComparePanel : UserControl
         _shell = shell;
         _pack = pack;
 
-        _canWriteHere = pack.OwnerId == App.State.Settings.UserId
+        _canWriteHere = App.State.OwnsPack(pack.Id, pack.OwnerId)
                         || pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
         _readOnlyHere = "You have read-only access to " + pack.Name +
                         ", so the launcher will not write files into it.";
@@ -536,7 +536,7 @@ public partial class FileComparePanel : UserControl
         var other = _other;
 
         var canWriteThere = other is not null
-            && (other.OwnerId == App.State.Settings.UserId
+            && (App.State.OwnsPack(other.Id, other.OwnerId)
                 || other.EffectivePermissions.HasFlag(PackPermissions.UploadShared));
 
         var toCount = selected.Count(r => r.Here is not null);

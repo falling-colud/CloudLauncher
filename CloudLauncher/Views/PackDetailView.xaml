@@ -904,6 +904,11 @@
                             </StackPanel>
                         </slate:SlateBorder>
 
+                        <!-- An instance on this PC only has no sharing options; this says why and offers the
+                             step that brings them (see LocalInstanceNote). -->
+                        <ContentControl x:Name="LocalInstanceHost" Focusable="False" IsTabStop="False"
+                                        Visibility="Collapsed"/>
+
                         <StackPanel x:Name="SharingOptionsPanel">
                             <slate:SlateBorder Style="{StaticResource Card}" Margin="0,0,0,14" Padding="22,18">
                                 <StackPanel>

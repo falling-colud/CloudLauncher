@@ -231,8 +231,28 @@ public class PacksController(
             Loader = req.IsEmpty ? LoaderKind.None : req.Loader,
             LoaderVersion = req.IsEmpty ? null : req.LoaderVersion
         };
+
+        // A launcher adding an instance it made while signed out keeps that instance's id, which its
+        // folder and per-instance settings are filed under. Random ids from the launcher, so a taken
+        // one is a conflict rather than something to hand over.
+        if (req.Id is { } wanted)
+        {
+            if (wanted == Guid.Empty) return BadRequest(new { error = "That instance id is not valid." });
+            if (await db.Packs.AnyAsync(p => p.Id == wanted, ct))
+                return Conflict(new { error = "An instance with this id already exists." });
+            pack.Id = wanted;
+        }
+
         db.Packs.Add(pack);
-        await db.SaveChangesAsync(ct);
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException) when (req.Id is not null)
+        {
+            // The same id arrived twice at once and the other request won.
+            return Conflict(new { error = "An instance with this id already exists." });
+        }
         await db.Entry(pack).Reference(p => p.Owner).LoadAsync(ct);
         return Ok(ToSummary(pack, PackPermissions.Full));
     }

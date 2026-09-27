@@ -27,6 +27,12 @@ public partial class PackDetailView : Page
 
     private PackDetail? _pack;
     private bool _isOwner;
+
+    /// <summary>The instance's shared files have never been downloaded to this PC, so the header
+    /// button offers Download rather than an update. Nothing starts until it is pressed.</summary>
+    private bool _neverDownloaded;
+
+    private string UpdateButtonIdleText => _neverDownloaded ? "Download" : "Update available";
     private bool _suppressEvents;
     private bool _fileTransferInProgress;
 
@@ -197,7 +203,7 @@ public partial class PackDetailView : Page
         try
         {
             _pack = remembered;
-            _isOwner = remembered.OwnerId == App.State.Settings.UserId;
+            _isOwner = App.State.OwnsPack(_packId, remembered.OwnerId);
             // The server path does this first too: opening the instance page creates its folder.
             App.State.Packs.EnsurePackFolder(_packId, remembered.Name, remembered.IsShared);
             ApplyPack(remembered);
@@ -429,7 +435,7 @@ public partial class PackDetailView : Page
             LaunchButton.Visibility = Visibility.Visible;
             if (_pack is not null)
             {
-                UpdateButtonText.Text = "Update available";
+                UpdateButtonText.Text = UpdateButtonIdleText;
                 UpdateButton.IsEnabled = false;
                 UpdateButton.ToolTip = "An export is reading this instance. Update it once that has finished.";
             }
@@ -448,9 +454,11 @@ public partial class PackDetailView : Page
             // Offer the update again, unless an upload is running (tracked by _syncCts, not a job).
             if (_pack is not null)
             {
-                UpdateButtonText.Text = "Update available";
+                UpdateButtonText.Text = UpdateButtonIdleText;
                 UpdateButton.IsEnabled = _syncCts is null;
-                UpdateButton.ToolTip = "Download the latest version from the server";
+                UpdateButton.ToolTip = _neverDownloaded
+                    ? "Download this instance's files from the server"
+                    : "Download the latest version from the server";
             }
             return;
         }
@@ -719,7 +727,7 @@ public partial class PackDetailView : Page
         try
         {
             _pack = await App.State.Api.GetPackAsync(_packId);
-            _isOwner = _pack.OwnerId == App.State.Settings.UserId;
+            _isOwner = App.State.OwnsPack(_packId, _pack.OwnerId);
             App.State.Packs.EnsurePackFolder(_packId, _pack.Name, _pack.IsShared);
 
             if (_pack.IsShared && _pack.Rules.Count > 0)
@@ -811,6 +819,10 @@ public partial class PackDetailView : Page
 
             var locallySynced = App.State.Settings.PackSyncedVersion.TryGetValue(_pack.Id, out var v) ? v : 0;
             if (manifest.Version <= locallySynced) return;
+            // Never downloaded here: that is for the user to start (CheckForUpdateAsync offers the
+            // button). An instance can be many gigabytes, and one listed for every account was never
+            // asked for. Once it has been downloaded, opening it keeps it up to date as before.
+            if (locallySynced == 0) return;
 
             StatusLabel.Text = "Syncing shared files...";
             if (!await RunSharedDownloadAsync(null)) return;
@@ -1647,7 +1659,8 @@ public partial class PackDetailView : Page
                     : $"Minecraft {pack.MinecraftVersion} · {pack.Loader} {pack.LoaderVersion}";
             var summary = pack.Summary ?? "";
             var description = pack.Description ?? "";
-            PackMetaLabel.Text = $"by {pack.OwnerUsername} · updated {pack.UpdatedAt.LocalDateTime:g}";
+            var isLocal = App.State.Api.IsLocalPack(pack.Id);
+            PackMetaLabel.Text = $"{(isLocal ? "on this PC" : "by " + pack.OwnerUsername)} · updated {pack.UpdatedAt.LocalDateTime:g}";
             SetPackSummary(summary);
             ApplyHeroIcon(pack);
             ApplyDescriptionDisplay(pack.Id, description);
@@ -1657,9 +1670,9 @@ public partial class PackDetailView : Page
             OverviewSummaryBox.Text = summary;
             OverviewSummaryBox.IsReadOnly = !_isOwner;
             OverviewSummaryBox.ToolTip = _isOwner
-                ? "Summary changes auto-save to the server."
+                ? isLocal ? "Summary changes save automatically." : "Summary changes auto-save to the server."
                 : "Only the instance owner can edit this summary.";
-            OverviewSaveStatusLabel.Text = _isOwner ? "Auto-saves to server" : "Read-only";
+            OverviewSaveStatusLabel.Text = !_isOwner ? "Read-only" : isLocal ? "Auto-saves" : "Auto-saves to server";
             // Importing replaces the editable description, so it's owner-only and not offered
             // in the read-only hosted-Minecraft view. Export is always available.
             ImportDescriptionButton.Visibility = _isOwner && !_hostedInMinecraftWindow
@@ -1683,7 +1696,12 @@ public partial class PackDetailView : Page
             // Always shown: most of this tab is the local instance folder, which every collaborator and
             // purely local instance has, and which works with the server down.
             FilesTab.Visibility   = Visibility.Visible;
-            SharingOptionsPanel.Visibility = _isOwner ? Visibility.Visible : Visibility.Collapsed;
+            SharingOptionsPanel.Visibility = _isOwner && !isLocal ? Visibility.Visible : Visibility.Collapsed;
+            // Built fresh each time: whether it offers Sign in or Add to my account depends on the moment.
+            LocalInstanceHost.Content = isLocal
+                ? new LocalInstanceNote(_shell, pack.Id, onAdded: _ => ReloadAsync())
+                : null;
+            LocalInstanceHost.Visibility = isLocal ? Visibility.Visible : Visibility.Collapsed;
             ApplyHostedTabChrome();
 
             // RAM + auto-update
@@ -1695,7 +1713,7 @@ public partial class PackDetailView : Page
             AutoUpdateBox.IsChecked = App.State.Settings.GetAutoUpdateFor(pack.Id, pack.IsShared, pack.OwnerId);
             // Auto-update is only for copies you consume: for the owner or uploaders, pulling the
             // server copy before each launch would overwrite local work.
-            var canEditPack = pack.OwnerId == App.State.Settings.UserId
+            var canEditPack = App.State.OwnsPack(pack.Id, pack.OwnerId)
                               || pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
             AutoUpdateCard.Visibility = canEditPack ? Visibility.Collapsed : Visibility.Visible;
             PackPageCollapsedBox.SelectedIndex =
@@ -2444,23 +2462,22 @@ public partial class PackDetailView : Page
             var locallySynced = App.State.Settings.PackSyncedVersion.TryGetValue(_pack.Id, out var v) ? v : 0;
             var updateAvailable = manifest.Version > locallySynced;
 
+            _neverDownloaded = locallySynced == 0 && manifest.Entries.Count > 0;
             if (!updateAvailable)
             {
                 UpdateButton.Visibility = Visibility.Collapsed;
                 return;
             }
 
-            // First-ever download: pull server content automatically instead of surfacing the button.
-            if (locallySynced == 0 && manifest.Entries.Count > 0)
+            // First-ever download: offer it, never start it on its own. Opening an instance to look at
+            // it is not asking for its files.
+            if (_neverDownloaded)
             {
-                StatusLabel.Text = "Downloading server content...";
-                if (!await RunSharedDownloadAsync(null)) return;
-                ApplyHeroIcon(_pack);
-                ApplyDescriptionDisplay(_pack.Id, _pack.Description ?? "");
-                UpdateStatsLabel(_pack.Id);
-                UpdateButton.Visibility = Visibility.Collapsed;
-                _ = RefreshFileListsAsync();
-                StatusLabel.Text = "Ready.";
+                var bytes = manifest.Entries.Sum(en => en.Size);
+                UpdateButtonText.Text = UpdateButtonIdleText;
+                UpdateButton.ToolTip = $"Download this instance's files from the server ({manifest.Entries.Count:N0} files, {FormatInstanceSize(bytes)})";
+                UpdateButton.Visibility = Visibility.Visible;
+                StatusLabel.Text = "Not downloaded to this PC yet. Press Download to get its files.";
                 return;
             }
 

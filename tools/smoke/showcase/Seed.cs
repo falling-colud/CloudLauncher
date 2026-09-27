@@ -9,6 +9,14 @@ namespace Showcase;
 /// every run, so a run never depends on what the last one left behind.</summary>
 public static class Seed
 {
+    /// <summary>True when <c>CL_SMOKE_SIGNED_OUT=1</c>: the profile has no CloudLauncher session, and
+    /// the instances folder holds one instance made without an account next to mara's folders (which a
+    /// signed-out launcher must not list).</summary>
+    public static bool SignedOut => Environment.GetEnvironmentVariable("CL_SMOKE_SIGNED_OUT") == "1";
+
+    /// <summary>The instance a signed-out profile starts with.</summary>
+    public static readonly Guid LocalInstance = Guid.Parse("5a5a5a5a-0000-4000-8000-00000000c10d");
+
     public static void Profile(string profileDir, string packsRoot, int port)
     {
         if (Directory.Exists(profileDir)) Directory.Delete(profileDir, recursive: true);
@@ -27,7 +35,6 @@ public static class Seed
             ["IsLoggedIn"] = true,
             ["PacksRoot"] = packsRoot,
             ["UseSidePanel"] = true,
-            ["DefaultPackSeeded"] = true,
             ["CustomGameWindowDefaultApplied"] = true,
             ["LookAccentDefaultApplied"] = true,
             ["UseCustomGameWindow"] = false,
@@ -38,6 +45,23 @@ public static class Seed
                 ["Transitions"] = true, ["UiSounds"] = false   // the harness must never make a sound
             }
         };
+        if (SignedOut)
+        {
+            foreach (var key in new[] { "AccessToken", "RefreshToken", "AccessTokenExpiresAt", "Username", "UserId", "IsLoggedIn" })
+                settings.Remove(key);
+
+            var local = Path.Combine(packsRoot, "weekend-survival");
+            Directory.CreateDirectory(Path.Combine(local, "game", "mods"));
+            Directory.CreateDirectory(Path.Combine(local, ".cloudlauncher"));
+            File.WriteAllText(Path.Combine(local, ".packid"), LocalInstance.ToString());
+            File.WriteAllText(Path.Combine(local, ".cloudlauncher", "local-instance.json"), JsonSerializer.Serialize(new
+            {
+                format = 1, name = "Weekend Survival", summary = "Made without an account", isEmpty = false,
+                minecraftVersion = "1.21.1", loader = "NeoForge", loaderVersion = "21.1.200",
+                createdAt = "2026-09-20T10:00:00+00:00", updatedAt = "2026-09-26T18:00:00+00:00"
+            }));
+        }
+
         File.WriteAllText(Path.Combine(profileDir, "settings.json"),
             JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
 

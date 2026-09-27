@@ -180,7 +180,10 @@ public sealed partial class ApiClient
         // Signed in, but the server address is plain http: the session stays stored and unused, and
         // the call says why instead of going out without it.
         if (!_credentialsAllowed && _settings.HasStoredSession) throw InsecureTransport();
-        if (string.IsNullOrEmpty(_settings.AccessToken)) return; // not logged in; let the request fail naturally
+        // Nobody signed in: the call needs an account, so it fails here instead of as a server 401.
+        // The store proxy and the launcher's own update calls need none and don't come through here.
+        if (!_settings.HasStoredSession) throw SignInRequired();
+        if (string.IsNullOrEmpty(_settings.AccessToken)) return; // a refresh token alone; the request says what the server thinks
         if (!IsNearExpiry()) return; // token is fresh, nothing to do (fast path, no lock)
 
         await _refreshLock.WaitAsync(ct);
@@ -347,38 +350,59 @@ public sealed partial class ApiClient
     /// <see cref="PackListStale"/> set so the UI can say so. An expired session still throws, since it
     /// needs the login screen, not stale data.
     /// </summary>
+    /// <remarks>The instances on this PC only (<see cref="LocalPackStore"/>) are always part of the
+    /// answer, after the account's; signed out, they are the whole of it.</remarks>
     public async Task<List<PackSummary>> ListPacksAsync(CancellationToken ct = default)
     {
+        // Taken before anything is read: a change made while this is in flight must win over the answer
+        // it brings back (see RememberPacks).
+        var generation = Volatile.Read(ref _packsGeneration);
+        var local = LocalPackList();
+        if (!IsSignedIn)
+        {
+            PackListStale = null;
+            RememberPacks(local, generation);
+            return local;
+        }
+
         try { await EnsureTokenAsync(ct); }
         catch (OfflineException ex)
         {
             // The token couldn't be refreshed because nothing answered, and asking for the list would
             // fail the same way, so go straight to what we can show without a server.
-            var offline = CachedOrLocalPacks(ex.Reason ?? "the server is unreachable");
+            var offline = OfflineList(ex.Reason ?? "the server is unreachable", local);
             if (offline is null) throw;
             return offline;
         }
 
-        // Taken before the request goes out: a change made while this GET is in flight must win over
-        // the answer it brings back (see RememberPacks).
-        var generation = Volatile.Read(ref _packsGeneration);
         try
         {
             var packs = await ReadAsync<List<PackSummary>>(await _http.GetAsync("packs", ct), ct);
             PackListCache.Save(packs);
             PackListStale = null;
-            RememberPacks(packs, generation);
-            return packs;
+            var all = WithLocal(packs, local);
+            RememberPacks(all, generation);
+            return all;
         }
         catch (SessionExpiredException) { throw; }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            var fallback = CachedOrLocalPacks(
-                Connectivity.DescribeTransportFailure(ex, ct) ?? ex.Message);
+            var fallback = OfflineList(Connectivity.DescribeTransportFailure(ex, ct) ?? ex.Message, local);
             if (fallback is null) throw;
             return fallback;
         }
+    }
+
+    /// <summary><see cref="CachedOrLocalPacks"/> plus this PC's own instances. Null when there is
+    /// nothing at all to show.</summary>
+    private List<PackSummary>? OfflineList(string why, List<PackSummary> local)
+    {
+        var fallback = CachedOrLocalPacks(why);
+        if (fallback is null && local.Count == 0) return null;
+        // Only local instances to show still means the account's list is missing: say so.
+        if (fallback is null) PackListStale = why;
+        return WithLocal(fallback ?? [], local);
     }
 
     /// <summary>Why the last instance list came from the cache, or null when it came from the server.</summary>
@@ -1009,8 +1033,16 @@ public sealed partial class ApiClient
         return await resp.Content.ReadAsStreamAsync(ct);
     }
 
+    /// <remarks>Signed out, the instance is made on this PC (<see cref="LocalPackStore"/>) and can be
+    /// added to an account later.</remarks>
     public async Task<PackSummary> CreatePackAsync(CreatePackRequest req, CancellationToken ct = default)
     {
+        if (!IsSignedIn && _local is { } store)
+        {
+            var created = store.Create(req);
+            ForgetRecentPacks();
+            return created;
+        }
         await EnsureTokenAsync(ct);
         return await ReadAsync<PackSummary>(await _http.PostAsJsonAsync("packs", req, JsonOpts, ct), ct);
     }
@@ -1027,6 +1059,7 @@ public sealed partial class ApiClient
     /// </remarks>
     public async Task<PackDetail> GetPackAsync(Guid id, CancellationToken ct = default)
     {
+        if (LocalPackDetail(id) is { } local) return local;
         try { await EnsureTokenAsync(ct); }
         catch (OfflineException)
         {
@@ -1074,6 +1107,7 @@ public sealed partial class ApiClient
     /// <summary>The best detail available without the server, or null when there is none.</summary>
     private PackDetail? OfflinePackDetail(Guid id)
     {
+        if (LocalPackDetail(id) is { } local) return local;
         if (PackDetailCache.Load(id) is { } cached) return cached;
 
         // Never opened, so never cached, but the list entry has every summary field. PackDetail only
@@ -1097,12 +1131,20 @@ public sealed partial class ApiClient
 
     public async Task<PackSummary> UpdatePackAsync(Guid id, UpdatePackRequest req, CancellationToken ct = default)
     {
+        if (IsLocalPack(id))
+        {
+            var updated = _local!.Update(id, req);
+            ForgetRecentPacks();
+            return updated;
+        }
         await EnsureTokenAsync(ct);
         return await ReadAsync<PackSummary>(await _http.PatchAsJsonAsync($"packs/{id}", req, JsonOpts, ct), ct);
     }
 
     public async Task PushPackRulesAsync(Guid packId, List<PackFileRule> rules, CancellationToken ct = default)
     {
+        // A local instance's rules are its own .rules.json, which the caller has already written.
+        if (IsLocalPack(packId)) return;
         await EnsureTokenAsync(ct);
         var req = new UpdatePackRequest(Name: null, Description: null, Visibility: null, IsShared: null,
             IsEmpty: null, MinecraftVersion: null, Loader: null, LoaderVersion: null, Rules: rules);
@@ -1110,8 +1152,17 @@ public sealed partial class ApiClient
     }
 
 
+    /// <remarks>An instance on this PC only goes to the Recycle Bin, folder and all (see
+    /// <see cref="LocalPackStore.DeleteAsync"/>); one on the account leaves its local files.</remarks>
     public async Task DeletePackAsync(Guid id, CancellationToken ct = default)
     {
+        if (IsLocalPack(id))
+        {
+            await _local!.DeleteAsync(id);
+            ForgetRecentPacks();
+            PackDetailCache.Remove(id);
+            return;
+        }
         await EnsureTokenAsync(ct);
         await EnsureSuccess(await _http.DeleteAsync($"packs/{id}", ct));
         PackDetailCache.Remove(id); // a deleted pack must not come back from the offline cache
@@ -1155,8 +1206,11 @@ public sealed partial class ApiClient
 
     // ── teams ────────────────────────────────────────────────────────────────
 
+    /// <remarks>None while signed out: teams belong to accounts, and pages list them only to file
+    /// instances under them.</remarks>
     public async Task<List<TeamSummary>> ListTeamsAsync(CancellationToken ct = default)
     {
+        if (!IsSignedIn) return [];
         await EnsureTokenAsync(ct);
         return await ReadAsync<List<TeamSummary>>(await _http.GetAsync("teams", ct), ct);
     }
@@ -1327,9 +1381,13 @@ public sealed partial class ApiClient
 
     /// <summary>How many update-check requests may be in flight at once at <paramref name="perSecond"/>
     /// a second: enough that a slow answer does not stall the pace, never fewer than a route's default
-    /// pace allows, never more than eight. With the default pace's three, a route stays inside the
-    /// twelve places the launcher server lets one account hold in a store's queue.</summary>
-    private static int UpdateCheckInFlight(int perSecond) => Math.Clamp(perSecond / 5, MaxInFlightPerPlatform, 8);
+    /// pace allows, never more than twenty. With the default pace's three, a route stays inside the
+    /// places the launcher server lets one account hold in a store's queue.</summary>
+    private static int UpdateCheckInFlight(int perSecond) => Math.Clamp(perSecond / 5, MaxInFlightPerPlatform, MaxUpdateCheckInFlight);
+
+    /// <summary>The most update-check requests one route keeps in flight (see
+    /// <see cref="UpdateCheckInFlight"/>): 100 a second at a fifth of a second each.</summary>
+    public const int MaxUpdateCheckInFlight = 20;
 
     /// <summary>The pace a request of <paramref name="pacing"/> keeps on <paramref name="route"/>
     /// (a platform through the proxy, or <see cref="DirectRouteKey"/>). Pauses are kept apart, per
@@ -1468,7 +1526,8 @@ public sealed partial class ApiClient
         if (DirectCurseForgeKey(platform) is { } ownKey)
             return await SendDirectCurseForgeAsync(ownKey, method, pathAndQuery, bodyBytes, bodyType, ct, pacing);
 
-        await EnsureTokenAsync(ct);
+        // The proxy takes launchers that are not signed in (counted by address), so no session is fine.
+        if (IsSignedIn) await EnsureTokenAsync(ct);
         var url = $"proxy/{platform}/{pathAndQuery.TrimStart('/')}";
         var retries = RetriesFor(pacing);
         var hold = HoldFor(platform);
@@ -1797,18 +1856,21 @@ public sealed partial class ApiClient
 
     public async Task<PackManifest> GetManifestAsync(Guid packId, CancellationToken ct = default)
     {
+        RefuseIfLocal(packId);
         await EnsureTokenAsync(ct);
         return await ReadAsync<PackManifest>(await _http.GetAsync($"packs/{packId}/sync/manifest", ct), ct);
     }
 
     public async Task<BeginUploadResponse> BeginUploadAsync(Guid packId, BeginUploadRequest req, CancellationToken ct = default)
     {
+        RefuseIfLocal(packId);
         await EnsureTokenAsync(ct);
         return await ReadAsync<BeginUploadResponse>(await _http.PostAsJsonAsync($"packs/{packId}/sync/upload/begin", req, JsonOpts, ct), ct);
     }
 
     public async Task UploadBlobAsync(Guid packId, string hash, Stream content, CancellationToken ct = default)
     {
+        RefuseIfLocal(packId);
         await EnsureTokenAsync(ct);
         using var req = new HttpRequestMessage(HttpMethod.Put, $"packs/{packId}/sync/blob/{hash}")
             { Content = new StreamContent(content) };
@@ -1817,12 +1879,14 @@ public sealed partial class ApiClient
 
     public async Task<CommitUploadResponse> CommitUploadAsync(Guid packId, BeginUploadRequest req, CancellationToken ct = default)
     {
+        RefuseIfLocal(packId);
         await EnsureTokenAsync(ct);
         return await ReadAsync<CommitUploadResponse>(await _http.PostAsJsonAsync($"packs/{packId}/sync/upload/commit", req, JsonOpts, ct), ct);
     }
 
     public async Task<Stream> DownloadBlobAsync(Guid packId, string hash, CancellationToken ct = default)
     {
+        RefuseIfLocal(packId);
         await EnsureTokenAsync(ct);
         var resp = await _http.GetAsync($"packs/{packId}/sync/blob/{hash}", HttpCompletionOption.ResponseHeadersRead, ct);
         await EnsureSuccessKeepBody(resp, ct);

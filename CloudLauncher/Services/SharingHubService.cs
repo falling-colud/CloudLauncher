@@ -480,7 +480,8 @@ public sealed class SharingHubService
         List<PackSummary> packs;
         try
         {
-            packs = await _api.ListPacksAsync(ct);
+            // Instances on this PC only have nothing to share until they are on the account.
+            packs = (await _api.ListPacksAsync(ct)).Where(p => !_api.IsLocalPack(p.Id)).ToList();
             // A cached list isn't a failed section. FromCache already says so on the status line, and
             // repeating it would crowd out the parts that did fail.
             if (_api.PackListStale is { Length: > 0 }) snap.FromCache = true;
@@ -1436,6 +1437,8 @@ public sealed class SharingHubService
     /// was withdrawn, since the server never cleans those up.</summary>
     public async Task RemoveFromLibraryAsync(Guid packId, CancellationToken ct)
     {
+        // A download still running into it would carry on into a folder nothing lists.
+        await PackJobs.StopAndWaitAsync(packId, TimeSpan.FromSeconds(30));
         try { await _api.UnsubscribePackAsync(packId, ct); }
         catch (ApiException ex) when (ex.Status is HttpStatusCode.NotFound or HttpStatusCode.Forbidden)
         {
@@ -1633,6 +1636,9 @@ internal static class SharingApi
     private static async Task<T> SendAsync<T>(
         HttpMethod method, string path, object? body, CancellationToken ct, bool wantBody = true)
     {
+        // Every sharing route needs an account; say so rather than asking the server for a 401.
+        if (!App.State.Api.IsSignedIn)
+            throw new ApiException(ApiClient.SignInRequiredMessage, HttpStatusCode.Unauthorized);
         var resp = await SendOnceAsync(method, path, body, ct);
 
         if (resp.StatusCode == HttpStatusCode.Unauthorized)

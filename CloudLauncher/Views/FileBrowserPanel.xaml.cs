@@ -102,7 +102,7 @@ public partial class FileBrowserPanel : UserControl
         _shell = shell;
         _pack = pack;
         _packId = pack.Id;
-        _isOwner = pack.OwnerId == App.State.Settings.UserId;
+        _isOwner = App.State.OwnsPack(pack.Id, pack.OwnerId);
         _canWrite = _isOwner || pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
         _activePane = GameView;
 

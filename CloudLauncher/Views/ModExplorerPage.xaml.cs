@@ -207,6 +207,13 @@ public partial class ModExplorerPage : Page
         _chips.Add(NewDividerChip());
         _chips.Add(NewChip("", "CurseForge", ModBrowseSourceKind.CurseForge));
         _chips.Add(NewChip("", "Modrinth",   ModBrowseSourceKind.Modrinth));
+        // Hosted mods are only for accounts: signed out, the stores are the catalog.
+        if (!App.State.Api.IsSignedIn)
+        {
+            ApplyChipStyles();
+            return;
+        }
+
         _chips.Add(NewDividerChip());
         _chips.Add(NewChip("", "Personal", ModBrowseSourceKind.CloudLauncherPersonal));
         _chips.Add(NewChip("", "Shared",   ModBrowseSourceKind.CloudLauncherShared));

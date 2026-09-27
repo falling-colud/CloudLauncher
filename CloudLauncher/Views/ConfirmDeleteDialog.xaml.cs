@@ -4,10 +4,19 @@ namespace CloudLauncher.Views;
 
 public partial class ConfirmDeleteDialog : Window
 {
-    public ConfirmDeleteDialog(string packName, bool isOwner)
+    /// <param name="isLocal">The instance is on this PC only, so deleting it removes its files too.</param>
+    public ConfirmDeleteDialog(string packName, bool isOwner, bool isLocal = false)
     {
         InitializeComponent();
         PackNameLabel.Text = packName;
+
+        if (isLocal)
+        {
+            BodyLabel.Text = "This instance is only on this PC, so deleting it deletes its files: mods, worlds, "
+                             + "settings and everything else in its folder.";
+            FilesNote.Text = "The folder goes to the Recycle Bin, so it can be restored from there.";
+            return;
+        }
 
         if (isOwner) return;
 

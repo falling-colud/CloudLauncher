@@ -459,7 +459,7 @@
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
                         <TextBlock x:Name="UpdateRateLabel" DockPanel.Dock="Right" MinWidth="56" TextAlignment="Right"
                                    VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
-                        <Slider x:Name="UpdateRateSlider" Minimum="1" Maximum="20"
+                        <Slider x:Name="UpdateRateSlider" Minimum="1" Maximum="100"
                                 TickFrequency="1" IsSnapToTickEnabled="True"
                                 ValueChanged="OnUpdateRateChanged" VerticalAlignment="Center" Margin="0,0,16,0"/>
                     </DockPanel>

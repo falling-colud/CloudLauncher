@@ -101,7 +101,8 @@ public partial class MainWindow : Window, IDialogHost
         App.State.SessionExpired += () => Dispatcher.Invoke(() =>
         {
             MessageBox.Show(this,
-                "Your session has expired. Please sign in again.",
+                "Your CloudLauncher session has expired. Sign in again for your account's instances, "
+                + "sharing and sync, or continue without signing in.",
                 "CloudLauncher", MessageBoxButton.OK, MessageBoxImage.Information);
             NavigateToLogin();
         });
@@ -125,10 +126,9 @@ public partial class MainWindow : Window, IDialogHost
         // Sync now rather than on the next change: a call may already have failed during startup.
         OfflineBar.Sync();
 
-        if (App.State.Settings.IsLoggedIn)
-            NavigateToPacks();
-        else
-            NavigateToLogin();
+        // Signed in or not: an account is only needed for its online features (sharing, hosting,
+        // syncing), and the Account button offers the sign-in page.
+        NavigateToPacks();
 
         _ = CheckForLauncherUpdateAsync();
     }
@@ -293,28 +293,51 @@ public partial class MainWindow : Window, IDialogHost
     /// keep showing the old folder.</remarks>
     public void OnInstancesRootMoved()
     {
+        App.State.LocalPacks.Invalidate();
         EvictAllMasters();
         RebuildCurrentMaster();
     }
 
+    /// <summary>The sign-in page, in place of the current page.</summary>
+    /// <remarks>The sidebar stays usable: signing in is optional, so the rest of the launcher is one
+    /// click away from here.</remarks>
     public void NavigateToLogin()
     {
         ResetSidePanel();
-        Sidebar.IsEnabled = false;
-        // Signing out must not leave the previous account's instances, worlds or teams cached where
-        // the next sign-in would navigate straight back into them.
+        Sidebar.IsEnabled = true;
+        // Signing in or out must not leave the previous account's instances, worlds or teams cached
+        // where the next page would navigate straight back into them.
         EvictAllMasters();
         MainFrame.Navigate(new LoginView(this));
         _currentMaster = MasterPage.None;
         UpdateChrome();
     }
 
+    /// <summary>After a sign-in: every page is rebuilt for the account, starting at Instances.</summary>
+    public void OnSignedIn()
+    {
+        EvictAllMasters();
+        _accountReadFor = null;
+        NavigateToPacks();
+    }
+
+    /// <summary>After a sign-out (or a deleted account): back to Instances, which now lists what is on
+    /// this PC only.</summary>
+    public void OnSignedOut()
+    {
+        ResetSidePanel();
+        EvictAllMasters();
+        _accountReadFor = null;
+        NavigateToPacks();
+    }
+
     public void NavigateToPacks()
     {
         ShowMaster(MasterPage.Packs, () => new PackListView(this));
         // Pull the admin-managed global default rules so new packs get the same routing as on every
-        // other launcher. Fire and forget; failures fall back to the local cache.
-        _ = App.State.Rules.SyncGlobalDefaultsFromServerAsync();
+        // other launcher. Fire and forget; failures fall back to the local cache. The route needs an
+        // account, and signed out the cached copy is what applies.
+        if (App.State.Api.IsSignedIn) _ = App.State.Rules.SyncGlobalDefaultsFromServerAsync();
     }
 
     /// <summary>Rebuilds the Instances screen from scratch, discarding whatever is on it.</summary>
@@ -898,7 +921,13 @@ public partial class MainWindow : Window, IDialogHost
     private void OnNavConfigs(object sender, RoutedEventArgs e) => NavigateToConfigs();
     private void OnNavStorage(object sender, RoutedEventArgs e) => NavigateToStorage();
 
-    private void OnNavAccount(object sender, RoutedEventArgs e)  => ToggleTopLevel(SidePanelKind.Account,  OpenAccount);
+    /// <summary>The account panel while signed in, the sign-in page otherwise.</summary>
+    private void OnNavAccount(object sender, RoutedEventArgs e)
+    {
+        if (App.State.Settings.IsLoggedIn) ToggleTopLevel(SidePanelKind.Account, OpenAccount);
+        else if (_currentMaster == MasterPage.None) NavigateToPacks();   // pressed again on the sign-in page
+        else NavigateToLogin();
+    }
     private void OnNavSettings(object sender, RoutedEventArgs e) => ToggleTopLevel(SidePanelKind.Settings, OpenSettings);
 
     private void OnNavDev(object sender, RoutedEventArgs e)
@@ -970,7 +999,8 @@ public partial class MainWindow : Window, IDialogHost
         NavConfigs.IsChecked       = _currentMaster == MasterPage.Configs;
         NavStorage.IsChecked       = _currentMaster == MasterPage.Storage;
         NavAccount.IsChecked  = _currentSidePanel == SidePanelKind.Account
-                             || _currentSidePanel == SidePanelKind.McAccount;
+                             || _currentSidePanel == SidePanelKind.McAccount
+                             || _currentMaster == MasterPage.None;   // the sign-in page
         NavSettings.IsChecked = _currentSidePanel == SidePanelKind.Settings;
     }
 

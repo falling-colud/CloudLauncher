@@ -34,7 +34,9 @@ param(
     # Defaults to artifacts\installer-build\CloudLauncher.exe.
     [string]$Exe,
     # Defaults to %TEMP%\cloudlauncher-smoke.
-    [string]$Work
+    [string]$Work,
+    # Start with no CloudLauncher session: one instance made without an account, mara's folders unlisted.
+    [switch]$SignedOut
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,6 +58,8 @@ foreach ($d in $out, $serve) {
     New-Item -ItemType Directory -Force $d | Out-Null
 }
 
+# The fake server seeds the profile, so it is the process that has to see this.
+$env:CL_SMOKE_SIGNED_OUT = if ($SignedOut) { "1" } else { $null }
 $server = Start-Process (Join-Path $build "bin\showcase\debug\ClShowcase.exe") -ArgumentList "`"$serve`"", "serve" -PassThru
 try {
     $up = $false

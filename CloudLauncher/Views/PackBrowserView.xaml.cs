@@ -215,6 +215,14 @@ public partial class PackBrowserView : Page
         _chips.Clear();
         _chips.Add(NewChip("", "CurseForge", SourceKind.CurseForge));
         _chips.Add(NewChip("", "Modrinth", SourceKind.Modrinth));
+
+        // This server's packs are only for accounts: signed out, the stores are the catalog.
+        if (!App.State.Api.IsSignedIn)
+        {
+            ApplyChipStyles();
+            return;
+        }
+
         _chips.Add(NewChip("", "CloudLauncher Public", SourceKind.CloudLauncherPublic,
             toolTip: "Packs anyone on this server can find, yours included"));
         _chips.Add(NewDividerChip());
@@ -931,6 +939,8 @@ public partial class PackBrowserView : Page
     /// <summary>Unsubscribes from a hosted pack and stops listing it locally.</summary>
     private async Task RemoveFromMyListAsync(PackSummary pack)
     {
+        // A download still running into it would carry on into a folder nothing lists.
+        await PackJobs.StopAndWaitAsync(pack.Id, TimeSpan.FromSeconds(30));
         try
         {
             await App.State.Api.UnsubscribePackAsync(pack.Id);

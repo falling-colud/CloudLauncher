@@ -64,7 +64,7 @@ public partial class FileCleanupPanel : UserControl
         _shell = shell;
         _pack = pack;
 
-        _canWrite = pack.OwnerId == App.State.Settings.UserId
+        _canWrite = App.State.OwnsPack(pack.Id, pack.OwnerId)
                     || pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
         _readOnlyReason = "You have read-only access to " + pack.Name +
                           ", so the launcher will not delete or restore files in it.";

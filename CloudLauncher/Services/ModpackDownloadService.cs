@@ -100,34 +100,6 @@ public sealed class ModpackDownloadService(
         return pack;
     }
 
-    /// <summary>
-    /// Subscribes a new install to the pack it ships for, once.
-    /// </summary>
-    /// <remarks>
-    /// The done flag is written even if the subscribe fails, so a player who leaves the pack doesn't
-    /// get it back on every launch. Failures are swallowed so they can't stop the pack list loading.
-    /// </remarks>
-    public async Task<PackSummary?> EnsureDefaultPackAsync(CancellationToken ct = default)
-    {
-        if (settings.DefaultPackSeeded) return null;
-        settings.DefaultPackSeeded = true;
-        settings.Save();
-        try
-        {
-            var pack = await api.SubscribePackAsync(AppSettings.DefaultPackId, ct);
-            settings.UnhidePack(pack.Id);
-            packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
-            NotifyPackAdded(pack);
-            if (pack.IsShared && pack.EffectivePermissions.HasFlag(PackPermissions.Download))
-                await TryDownloadSharedContentAsync(pack.Id, ct);
-            return pack;
-        }
-        catch
-        {
-            return null;   // already subscribed, offline, or no access - not worth surfacing
-        }
-    }
-
     private async Task TryDownloadSharedContentAsync(Guid packId, CancellationToken ct)
     {
         try

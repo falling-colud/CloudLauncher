@@ -119,7 +119,7 @@ public sealed partial class ServerHostingPanel : UserControl
         // Read-only collaborators on someone else's shared instance may not write to it. Your own
         // instances, including local never-uploaded ones, are always yours to host.
         _canManage = !pack.IsShared
-                     || pack.OwnerId == App.State.Settings.UserId
+                     || App.State.OwnsPack(pack.Id, pack.OwnerId)
                      || pack.EffectivePermissions.HasFlag(PackPermissions.UploadShared);
 
         _runDir = App.State.Packs.ServerRunDir(pack.Id);

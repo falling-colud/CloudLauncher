@@ -42,7 +42,7 @@
                     <TextBlock DockPanel.Dock="Left" Text="&#xE946;" FontFamily="{DynamicResource IconFont}"
                                FontSize="14" Foreground="{DynamicResource InfoBlueBrush}"
                                VerticalAlignment="Top" Margin="0,2,10,0"/>
-                    <TextBlock TextWrapping="Wrap" Style="{StaticResource Caption}"
+                    <TextBlock x:Name="FilesNote" TextWrapping="Wrap" Style="{StaticResource Caption}"
                                Foreground="{DynamicResource TextSecondaryBrush}">
                         Local files inside the instance folder on your machine are <Run FontWeight="SemiBold">kept</Run>.
                         Delete them yourself if you no longer need them.

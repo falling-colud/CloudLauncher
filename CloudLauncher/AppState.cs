@@ -7,6 +7,13 @@ public sealed class AppState
     public AppSettings Settings { get; }
     public ApiClient Api { get; }
     public PackFolderService Packs { get; }
+
+    /// <summary>Instances on this PC that no account holds: what a launcher that is not signed in
+    /// makes. <see cref="Api"/> answers its instance calls for them from here.</summary>
+    public LocalPackStore LocalPacks { get; }
+
+    /// <summary>Copies an instance into a new one (the card menu's Duplicate).</summary>
+    public InstanceDuplicateService Duplicates { get; }
     public MinecraftAccountService MinecraftAccounts { get; }
     public VersionService Versions { get; }
     public MinecraftInstanceService Instances { get; }
@@ -84,6 +91,9 @@ public sealed class AppState
         Api.ConnectivityChanged += _ => OnUi(() => ConnectivityChanged?.Invoke());
         Api.StoreWaiting += wait => OnUi(() => StoreWaiting?.Invoke(wait));
         Packs = new PackFolderService(Settings, Api);
+        LocalPacks = new LocalPackStore(Settings, Packs);
+        Api.AttachLocalPacks(LocalPacks);
+        Duplicates = new InstanceDuplicateService(Api, Packs, LocalPacks, Settings);
         MinecraftAccounts = new MinecraftAccountService(Settings);
         Versions = new VersionService();
         Instances = new MinecraftInstanceService();
@@ -122,6 +132,11 @@ public sealed class AppState
         Launcher.SetContentDefaults(ContentDefaults);
         Update = new UpdateService(Api);
     }
+
+    /// <summary>True when the person at this PC owns the instance: it is on this PC only, or the
+    /// signed-in account owns it.</summary>
+    public bool OwnsPack(Guid packId, Guid ownerId) =>
+        LocalPacks.Contains(packId) || Settings.UserId is { } me && ownerId == me;
 
     /// <summary>
     /// Runs <paramref name="raise"/> on the UI thread, the way <see cref="ProgressHub"/> does.

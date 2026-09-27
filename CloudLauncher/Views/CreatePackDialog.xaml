@@ -37,7 +37,7 @@
                      TextChanged="OnSummaryChanged"
                      ToolTip="One or two lines describing the instance. This is the subtitle people see in the pack browser."/>
 
-            <Label Content="Who can see it"/>
+            <Label x:Name="VisibilityLabel" Content="Who can see it"/>
             <ComboBox x:Name="VisibilityBox" Margin="0,0,0,4"
                       SelectionChanged="OnVisibilityChanged"
                       ToolTip="You can change this later in the instance's Options">
@@ -49,6 +49,10 @@
                        TextWrapping="Wrap" Margin="0,0,0,12"
                        Visibility="Collapsed"
                        Text="Publishing also turns on server hosting, so the files you put in this instance are uploaded for the people who add it."/>
+            <!-- Signed out, in place of the visibility choice: nobody else can see a local instance. -->
+            <TextBlock x:Name="LocalNote" Style="{StaticResource Caption}"
+                       TextWrapping="Wrap" Margin="0,0,0,12" Visibility="Collapsed"
+                       Text="It is kept on this PC. Sign in later to add it to an account and share it."/>
         </StackPanel>
 
         <slate:SlateBorder Grid.Row="2" Style="{StaticResource Card}" Margin="0,0,0,12">

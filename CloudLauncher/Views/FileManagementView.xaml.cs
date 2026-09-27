@@ -174,6 +174,20 @@ public partial class FileManagementView : Page, ISidePanelBackHandler
             case FileManagementTab.Editor:
                 return new FileEditorPanel(Pack.Id, Pack.Name);
 
+            case FileManagementTab.Share when App.State.Api.IsLocalPack(Pack.Id):
+                // Nothing to share from until it is on an account; once it is, the real panel takes over.
+                return new ScrollViewer
+                {
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Padding = new Thickness(20),
+                    Content = new LocalInstanceNote(_shell, Pack.Id, onAdded: async added =>
+                    {
+                        var share = new PackSharePanel();
+                        share.Load(_shell, await App.State.Api.GetPackAsync(added.Id));
+                        SetTabContent(FileManagementTab.Share, share);
+                    })
+                };
+
             case FileManagementTab.Share:
                 var share = new PackSharePanel();
                 share.Load(_shell, Pack);

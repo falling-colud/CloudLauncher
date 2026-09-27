@@ -55,7 +55,10 @@ public enum PackJobKind
     /// <remarks>Registered so nothing that checks <see cref="PackJobs.IsRunning"/> rewrites
     /// the instance mid-export. It only reads, so it doesn't invalidate scans or replace Play
     /// on the instance page.</remarks>
-    Export
+    Export,
+    /// <summary>Filling a new instance with a copy of another one's files (see
+    /// <see cref="InstanceDuplicateService"/>). Registered against the new instance.</summary>
+    Copy
 }
 
 /// <summary>A pausable, stoppable operation running against one instance. The worker holds
@@ -64,6 +67,10 @@ public enum PackJobKind
 public sealed class PackJob
 {
     private readonly CancellationTokenSource _cts = new();
+
+    /// <summary>Completed by <see cref="PackJobs.Finish"/>, once the worker has stopped touching the
+    /// instance (a stopped job has rolled back by then).</summary>
+    private readonly TaskCompletionSource _finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>Files this job created (not there before it started). A stop deletes them.</summary>
     private readonly List<string> _created = new();
@@ -90,11 +97,17 @@ public sealed class PackJob
     /// <summary>Set the moment Stop is pressed, so the UI stops offering Pause on a dying job.</summary>
     public bool IsStopping { get; private set; }
 
+    /// <summary>Completes when the job has finished, however it ended.</summary>
+    public Task Finished => _finished.Task;
+
+    internal void MarkFinished() => _finished.TrySetResult();
+
     public string KindLabel => Kind switch
     {
         PackJobKind.Download => "download",
         PackJobKind.Sync => "update",
         PackJobKind.Export => "export",
+        PackJobKind.Copy => "copy",
         _ => "upload"
     };
 
@@ -214,10 +227,33 @@ public static class PackJobs
                 Running.Remove(job.PackId);
         }
 
-        if (job.Kind is PackJobKind.Download or PackJobKind.Sync)
+        if (job.Kind is PackJobKind.Download or PackJobKind.Sync or PackJobKind.Copy)
             ScanCaches.InvalidatePack(job.PackId, ScanScope.All);
 
+        job.MarkFinished();
         NotifyChanged(job.PackId);
+    }
+
+    /// <summary>Stops whatever is running against the instance and waits for it to wind down, for
+    /// when the instance itself is going away.</summary>
+    /// <returns>False when the job was still running after <paramref name="timeout"/>.</returns>
+    /// <remarks>Without this, deleting an instance mid-download left the download going: files kept
+    /// arriving in a folder nothing listed any more, and the finished import wrote the instance's
+    /// details back afterwards.</remarks>
+    public static async Task<bool> StopAndWaitAsync(Guid packId, TimeSpan timeout)
+    {
+        // A job that finishes may be replaced by a newer one for the same instance, so keep going
+        // until nothing is registered (or the time is up).
+        var deadline = DateTime.UtcNow + timeout;
+        while (For(packId) is { } job)
+        {
+            job.Stop();
+            var left = deadline - DateTime.UtcNow;
+            if (left <= TimeSpan.Zero) return false;
+            try { await job.Finished.WaitAsync(left); }
+            catch (TimeoutException) { return false; }
+        }
+        return true;
     }
 
     public static void Pause(Guid packId) => For(packId)?.Pause();

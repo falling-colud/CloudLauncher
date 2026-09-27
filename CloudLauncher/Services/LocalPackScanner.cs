@@ -112,7 +112,7 @@ public static class LocalPackScanner
     /// <see cref="PackFolderService.CreateNamedFolder"/> appends the first eight hex digits of the pack
     /// id on a name collision, so that suffix is stripped when it matches this pack.
     /// </remarks>
-    private static string NameFromFolder(string folder, Guid id)
+    internal static string NameFromFolder(string folder, Guid id)
     {
         var slug = folder;
         var suffix = "-" + id.ToString("N")[..8];

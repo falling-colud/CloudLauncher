@@ -122,6 +122,8 @@ public static class Program
                          ("NavWorlds", "05-worlds"), ("NavResourcePacks", "06-resourcepacks"), ("NavShaders", "07-shaders"),
                          ("NavServers", "08-servers"), ("NavConfigs", "09-configs"), ("NavStorage", "10-storage"),
                          ("NavSettings", "11-settings"), ("NavSharing", "12-sharing-again"),
+                         // Signed in, the account panel; signed out, the sign-in page, and then back out of it.
+                         ("NavAccount", "13-account"), ("NavPacks", "14-instances-again"),
                      })
             {
                 if (!Alive(pid)) { Log("LAUNCHER EXITED before " + label); return 6; }

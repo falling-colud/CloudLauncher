@@ -15,6 +15,14 @@ public partial class CreatePackDialog : Window
     {
         InitializeComponent();
         UpdateSummaryCounter();
+        // Signed out, the instance is made on this PC, where nobody else can see it: there is nothing
+        // to choose.
+        if (!App.State.Api.IsSignedIn)
+        {
+            VisibilityLabel.Visibility = Visibility.Collapsed;
+            VisibilityBox.Visibility = Visibility.Collapsed;
+            LocalNote.Visibility = Visibility.Visible;
+        }
         Loaded += async (_, _) => await LoadMinecraftVersionsAsync();
     }
 

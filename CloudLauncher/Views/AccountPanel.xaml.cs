@@ -285,7 +285,7 @@ public partial class AccountPanel : Page
 
     /// <summary>
     /// Deletes the account on the server, then signs this PC out the way Sign out does and goes back
-    /// to the login screen. The card itself asks for the password and the typed confirmation.
+    /// to Instances. The card itself asks for the password and the typed confirmation.
     /// </summary>
     private async void OnDeleteAccount(object sender, RoutedEventArgs e)
     {
@@ -297,9 +297,10 @@ public partial class AccountPanel : Page
 
             // The card's call has already forgotten the tokens and the account's cached data.
             AppLog.Log("account", "Account deleted; signed out on this PC.");
-            _shell.NavigateToLogin();
+            _shell.OnSignedOut();
             await AppDialog.MessageAsync(_shell, "Account deleted",
-                "Your CloudLauncher account has been deleted. Instances on this PC are still here.");
+                "Your CloudLauncher account has been deleted. The instance folders on this PC were left alone, "
+                + "and the launcher keeps working without an account.");
         }
         catch (Exception ex) { Fail(ex.Message); }
     }
@@ -314,14 +315,15 @@ public partial class AccountPanel : Page
         {
             if (!await AppDialog.ConfirmAsync(_shell, "Sign out",
                     "Sign out of CloudLauncher on this device?\n\n"
-                    + "Your instances stay on this PC; you will need to sign in again to sync or share them.",
+                    + "Your account's instances are hidden until you sign in again (their files stay on this PC). "
+                    + "Instances that are only on this PC stay, and so does everything that needs no account.",
                     "Sign out", "Cancel", danger: true))
                 return;
 
             SignOutButton.IsEnabled = false;
             try { await App.State.Api.LogoutAsync(); }
             catch (Exception ex) { AppLog.LogError("SignOut", ex); }
-            _shell.NavigateToLogin();
+            _shell.OnSignedOut();
         }
         catch (Exception ex)
         {
@@ -351,7 +353,7 @@ public partial class AccountPanel : Page
                     + "\n\nThis device has been signed out. Try again once you are back online.");
                 App.State.Api.ClearTokens();
             }
-            _shell.NavigateToLogin();
+            _shell.OnSignedOut();
         }
         catch (Exception ex)
         {
