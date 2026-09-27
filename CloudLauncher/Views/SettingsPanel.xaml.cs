@@ -107,7 +107,7 @@ public partial class SettingsPanel : Page
         try
         {
             var s = App.State.Settings;
-            RamSlider.Value = s.DefaultMaxRamMb;
+            RamSlider.Value = s.EffectiveDefaultMaxRamMb;
             RamValueLabel.Text = $"{(int)RamSlider.Value} MB";
             UseSidePanelBox.IsChecked = s.UseSidePanel;
             LauncherScaleSlider.Value = UiScale.Launcher;
@@ -802,6 +802,7 @@ public partial class SettingsPanel : Page
         var ramMb = (int)RamSlider.Value;
         RamValueLabel.Text = $"{ramMb} MB";
         App.State.Settings.DefaultMaxRamMb = ramMb;
+        App.State.Settings.DefaultMaxRamChosen = true;
         App.State.Settings.Save();
         StatusLabel.Text = "Default memory saved automatically.";
     }

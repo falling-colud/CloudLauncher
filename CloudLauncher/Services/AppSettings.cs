@@ -34,8 +34,19 @@ public sealed partial class AppSettings
     public Guid? UserId { get; set; }
     public string PacksRoot { get; set; } = Path.Combine(DataRoot, "packs");
 
-    /// <summary>Default max RAM (MB) used when launching a pack that has no override.</summary>
+    /// <summary>The Settings page's "Maximum RAM allocated to new instances", in MB. Only used once
+    /// <see cref="DefaultMaxRamChosen"/> is set; see <see cref="EffectiveDefaultMaxRamMb"/>.</summary>
     public int DefaultMaxRamMb { get; set; } = 4096;
+
+    /// <summary>True once the user has picked a default in Settings. Until then an instance without
+    /// its own value gets <see cref="RecommendedRamMb"/>, which follows the PC's memory.</summary>
+    public bool DefaultMaxRamChosen { get; set; }
+
+    /// <summary>What an instance with no memory value of its own launches with.</summary>
+    /// <remarks>Before 0.9.5 the Settings default was saved but never used: every instance without its
+    /// own value got the recommendation (16384 MB on a PC with 32 GB or more), whatever Settings said.</remarks>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public int EffectiveDefaultMaxRamMb => DefaultMaxRamChosen ? DefaultMaxRamMb : RecommendedRamMb();
 
     /// <summary>Per-pack max RAM override (MB). Empty/missing means "use default".</summary>
     public Dictionary<Guid, int> PackMaxRamMb { get; set; } = new();
@@ -866,7 +877,14 @@ public sealed partial class AppSettings
     }
 
     public int GetMaxRamFor(Guid packId) =>
-        PackMaxRamMb.TryGetValue(packId, out var v) ? v : RecommendedRamMb();
+        PackMaxRamMb.TryGetValue(packId, out var v) ? v : EffectiveDefaultMaxRamMb;
+
+    /// <summary>A Settings default other than the untouched 4096 was chosen by someone, back when it
+    /// was ignored: it counts as chosen now.</summary>
+    private void ApplyDefaultRamChoice()
+    {
+        if (!DefaultMaxRamChosen && DefaultMaxRamMb != 4096) DefaultMaxRamChosen = true;
+    }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
@@ -1004,6 +1022,7 @@ public sealed partial class AppSettings
                 loaded.MigrateServerUrl();
                 loaded.ApplyCustomGameWindowDefault();
                 loaded.ApplyLookAccentDefault();
+                loaded.ApplyDefaultRamChoice();
                 loaded.LoadCurseForgeApiKey();
                 if (plainTextSecrets)
                 {

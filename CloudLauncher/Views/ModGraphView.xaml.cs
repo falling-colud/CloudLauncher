@@ -37,14 +37,14 @@ public partial class ModGraphView : UserControl
     private static readonly Pen EdgePen = FrozenPen(EdgeBrush, 1.5);
     private static Pen FrozenPen(Brush b, double w) { var p = new Pen(b, w); p.Freeze(); return p; }
 
+    /// <summary>How the edge layer draws a line and an arrowhead (one instance each, which is what the
+    /// layer groups by).</summary>
+    private static readonly TiledCachedLayer.Ink LineInk = new(null, EdgePen);
+    private static readonly TiledCachedLayer.Ink HeadInk = new(ArrowBrush, null);
+
     /// <summary>How many nodes get their contents built per turn of the dispatcher: a few
     /// milliseconds of work on a slow machine, so input and rendering still get in between.</summary>
     private const int NodeChunk = 250;
-
-    /// <summary>Below this zoom nodes draw as frame plus icon only: the labels would be unreadable
-    /// but still cost a glyph-run rasterization per node. A note says the labels are hidden by the
-    /// zoom.</summary>
-    private const double LabelZoom = 0.42;
 
     private Guid _packId;
     private IReadOnlyList<PackMod> _mods = Array.Empty<PackMod>();
@@ -58,15 +58,21 @@ public partial class ModGraphView : UserControl
     private readonly Dictionary<PackMod, Rect> _rect = new();
     private readonly Dictionary<PackMod, GraphNode> _nodeEls = new();
 
-    /// <summary>Every dependency line on the canvas, in one element.</summary>
-    /// <remarks>Drawn as frozen <see cref="StreamGeometry"/> rather than shapes per edge, which would
-    /// mean thousands of elements on a big pack, and <see cref="RedrawEdges"/> runs on every drag
-    /// move.</remarks>
-    private EdgeLayer? _edges;
+    /// <summary>Every dependency line and arrowhead on the canvas, in one element.</summary>
+    /// <remarks>Frozen geometry rather than shapes per edge, which would mean thousands of elements
+    /// on a big pack, and <see cref="RedrawEdges"/> runs on every drag move. Cached tile by tile (see
+    /// <see cref="TiledCachedLayer"/>): drawn live, the lines were most of what a pan or zoom
+    /// cost.</remarks>
+    private TiledCachedLayer? _edges;
 
-    /// <summary>The wheel discs and guide rings of the Circles layout, drawn in one static layer: a
-    /// pack can have hundreds of wheels and nothing moves them.</summary>
-    private WheelLayer? _wheels;
+    /// <summary>The wheel discs and guide rings of the Circles layout, cached the same way: a pack can
+    /// have hundreds of wheels, and the rings are dashed, which is expensive to draw.</summary>
+    private TiledCachedLayer? _wheels;
+
+    /// <summary>The discs and rings the Circles layout adds, handed to <see cref="_wheels"/> once the
+    /// layout is done.</summary>
+    private readonly List<(Geometry, TiledCachedLayer.Ink)> _wheelItems = new();
+    private TiledCachedLayer.Ink? _fullDiscInk, _bareDiscInk, _ringInk;
 
     /// <summary>Theme brushes, fonts and glyph metrics resolved once per build and handed to every
     /// node, instead of each node walking the tree for the same five <c>FindResource</c> keys.</summary>
@@ -123,7 +129,20 @@ public partial class ModGraphView : UserControl
     public ModGraphView()
     {
         InitializeComponent();
-        Viewport.SizeChanged += (_, _) => TryFit();
+        Viewport.SizeChanged += (_, _) => { TryFit(); SyncLayers(); };
+        // Every way the view moves (wheel, buttons, drag, fit, jump to a node) ends in these two.
+        ZoomT.Changed += (_, _) => SyncLayers();
+        PanT.Changed += (_, _) => SyncLayers();
+    }
+
+    /// <summary>Tells the cached layers which part of the canvas is on screen.</summary>
+    private void SyncLayers()
+    {
+        var z = ZoomT.ScaleX;
+        if (z <= 0 || Viewport.ActualWidth <= 0) return;
+        var view = new Rect(-PanT.X / z, -PanT.Y / z, Viewport.ActualWidth / z, Viewport.ActualHeight / z);
+        _edges?.SetView(view, z);
+        _wheels?.SetView(view, z);
     }
 
     private bool IsCategoryMode => ClusterBox.SelectedIndex == 0;
@@ -218,8 +237,7 @@ public partial class ModGraphView : UserControl
         SetStatus("Laying out...");
     }
 
-    /// <summary>The one place the status line is written. The zoom note has its own label
-    /// (<see cref="ZoomNote"/>) so a transient message can't replace it.</summary>
+    /// <summary>The one place the status line is written.</summary>
     private void SetStatus(string text) => GraphStatus.Text = text;
 
     // ── rebuild / layout ──
@@ -246,11 +264,15 @@ public partial class ModGraphView : UserControl
         // The two drawn layers go in first. The edge layer is added even when the lines are off, so
         // the checkbox only toggles its visibility.
         var theme = _theme = new NodeTheme(this);
-        theme.ShowLabels = ZoomT.ScaleX >= LabelZoom;
-        var wheels = _wheels = new WheelLayer(theme);
+        var wheels = _wheels = new TiledCachedLayer();
+        _wheelItems.Clear();
+        _fullDiscInk = new TiledCachedLayer.Ink(theme.DiscFill, theme.DiscPen, 0.6);
+        _bareDiscInk = new TiledCachedLayer.Ink(theme.DiscFill, theme.DiscPen, 0.35);
+        // The rings' dashes are cut out as geometry (AddDashedCircle), so their ink is a solid pen.
+        _ringInk = new TiledCachedLayer.Ink(null, new Pen(theme.RingStroke, 1), 0.5);
         Panel.SetZIndex(wheels, -1);     // behind the edges and nodes
         GraphCanvas.Children.Add(wheels);
-        var edges = _edges = new EdgeLayer
+        var edges = _edges = new TiledCachedLayer
         {
             Visibility = ShowLines.IsChecked == true ? Visibility.Visible : Visibility.Collapsed
         };
@@ -268,7 +290,6 @@ public partial class ModGraphView : UserControl
         if (_mods.Count == 0)
         {
             SetStatus("No mods to graph.");
-            ZoomNote.Visibility = Visibility.Collapsed;   // nothing is being hidden from an empty canvas
             GraphCanvas.Width = GraphCanvas.Height = 0;
             _building = false;
             return;
@@ -285,9 +306,10 @@ public partial class ModGraphView : UserControl
             _ => LayoutCategories()
         };
 
-        wheels.Freeze();
+        wheels.SetContent(_wheelItems);
         GraphCanvas.Width = Math.Max(size.w, 50);
         GraphCanvas.Height = Math.Max(size.h, 50);
+        SyncLayers();
 
         RefreshCollapseButton();
 
@@ -673,10 +695,18 @@ public partial class ModGraphView : UserControl
 
     /// <summary>The faint disc behind a wheel, so a dependency group reads as one shape.</summary>
     private void AddWheelDisc(double cx, double cy, double radius, bool hasRings) =>
-        _wheels?.AddDisc(cx, cy, radius, hasRings);
+        _wheelItems.Add((Frozen(new EllipseGeometry(new Point(cx, cy), radius, radius)), hasRings ? _fullDiscInk! : _bareDiscInk!));
 
     /// <summary>A thin guide circle through a ring's node centres.</summary>
-    private void AddWheelRing(double cx, double cy, double radius) => _wheels?.AddRing(cx, cy, radius);
+    /// <remarks>Dashed 4 on, 6 off, as the ring pen's dash style was.</remarks>
+    private void AddWheelRing(double cx, double cy, double radius) =>
+        TiledCachedLayer.AddDashedCircle(_wheelItems, new Point(cx, cy), radius, 4, 6, _ringInk!);
+
+    private static Geometry Frozen(Geometry g)
+    {
+        g.Freeze();
+        return g;
+    }
 
     private (double w, double h) LayoutCustom()
     {
@@ -733,13 +763,17 @@ public partial class ModGraphView : UserControl
     private int DrawEdges()
     {
         var pairs = CollectEdges();
-        _edges?.Build(pairs, new Size(Math.Max(1, GraphCanvas.Width), Math.Max(1, GraphCanvas.Height)));
+        if (_edges is null) return pairs.Count;
+        var items = new List<(Geometry, TiledCachedLayer.Ink)>(pairs.Count * 4);
+        foreach (var (from, to) in pairs)
+            AddEdge(items, from, to);
+        _edges.SetContent(items);
         return pairs.Count;
     }
 
-    /// <summary>Writes one edge: its curve into <paramref name="line"/> and its arrowhead into
-    /// <paramref name="head"/>.</summary>
-    private static void WriteEdge(StreamGeometryContext line, StreamGeometryContext head, Rect from, Rect to)
+    /// <summary>Adds one edge: its curve, cut into pieces the edge layer caches tile by tile, and its
+    /// arrowhead. Nothing when the nodes overlap.</summary>
+    private static void AddEdge(List<(Geometry, TiledCachedLayer.Ink)> items, Rect from, Rect to)
     {
         var ca = new Point(from.X + from.Width / 2, from.Y + from.Height / 2);
         var cb = new Point(to.X + to.Width / 2, to.Y + to.Height / 2);
@@ -756,9 +790,7 @@ public partial class ModGraphView : UserControl
         var offset = len < 90 ? 0 : Math.Min(34, len * 0.14);
         var ctrl = new Point((start.X + end.X) / 2 + perp.X * offset,
                              (start.Y + end.Y) / 2 + perp.Y * offset);
-
-        line.BeginFigure(start, isFilled: false, isClosed: false);
-        line.QuadraticBezierTo(ctrl, end, isStroked: true, isSmoothJoin: true);
+        TiledCachedLayer.AddQuadratic(items, start, ctrl, end, LineInk);
 
         // Small, sleek arrowhead at the target end, scaled down on short edges.
         var arrowLen = Math.Clamp(len * 0.3, 4, 8);
@@ -767,9 +799,15 @@ public partial class ModGraphView : UserControl
         if (tan.Length > 0) tan.Normalize();
         var back = new Point(end.X - tan.X * arrowLen, end.Y - tan.Y * arrowLen);
         var ap = new Vector(-tan.Y, tan.X);
-        head.BeginFigure(end, isFilled: true, isClosed: true);
-        head.LineTo(new Point(back.X + ap.X * arrowW, back.Y + ap.Y * arrowW), isStroked: false, isSmoothJoin: false);
-        head.LineTo(new Point(back.X - ap.X * arrowW, back.Y - ap.Y * arrowW), isStroked: false, isSmoothJoin: false);
+        var head = new StreamGeometry();
+        using (var hc = head.Open())
+        {
+            hc.BeginFigure(end, isFilled: true, isClosed: true);
+            hc.LineTo(new Point(back.X + ap.X * arrowW, back.Y + ap.Y * arrowW), isStroked: false, isSmoothJoin: false);
+            hc.LineTo(new Point(back.X - ap.X * arrowW, back.Y - ap.Y * arrowW), isStroked: false, isSmoothJoin: false);
+        }
+        head.Freeze();
+        items.Add((head, HeadInk));
     }
 
     private static Point BorderPoint(Rect r, Point toward)
@@ -1282,22 +1320,6 @@ public partial class ModGraphView : UserControl
         ZoomT.ScaleX = ZoomT.ScaleY = newS;
         PanT.X = m.X - newS * cx;
         PanT.Y = m.Y - newS * cy;
-        ApplyZoomDetail(oldS, newS);
-    }
-
-    /// <summary>
-    /// Switches the nodes between full and reduced drawing when a zoom crosses
-    /// <see cref="LabelZoom"/>, and updates the status line to say which is shown.
-    /// </summary>
-    /// <remarks>Only on a crossing, since flipping the flag redraws every node.</remarks>
-    private void ApplyZoomDetail(double oldScale, double newScale)
-    {
-        var was = oldScale >= LabelZoom;
-        var now = newScale >= LabelZoom;
-        ZoomNote.Visibility = now ? Visibility.Collapsed : Visibility.Visible;
-        if (was == now) return;
-        if (_theme is not null) _theme.ShowLabels = now;
-        foreach (var node in _nodeEls.Values) node.InvalidateVisual();
     }
 
     /// <summary>Right-click on empty graph background: the pack-level actions, plus the toolbar
@@ -1354,7 +1376,6 @@ public partial class ModGraphView : UserControl
         ZoomT.ScaleX = ZoomT.ScaleY = newS;
         PanT.X = m.X - newS * cx;
         PanT.Y = m.Y - newS * cy;
-        ApplyZoomDetail(oldS, newS);
     }
 
     private void OnFit(object sender, RoutedEventArgs e)
@@ -1377,11 +1398,9 @@ public partial class ModGraphView : UserControl
         double vw = Math.Max(10, Viewport.ActualWidth), vh = Math.Max(10, Viewport.ActualHeight);
         var s = Math.Min((vw - 40) / GraphCanvas.Width, (vh - 40) / GraphCanvas.Height);
         s = Math.Clamp(s, 0.15, 1.4);
-        var old = ZoomT.ScaleX;
         ZoomT.ScaleX = ZoomT.ScaleY = s;
         PanT.X = (vw - GraphCanvas.Width * s) / 2;
         PanT.Y = (vh - GraphCanvas.Height * s) / 2;
-        ApplyZoomDetail(old, s);
     }
 
     // ── interactions ──
@@ -1603,7 +1622,7 @@ public partial class ModGraphView : UserControl
     {
         public readonly Brush Surface3, Surface2, TextPrimary, TextSecondary, Accent, BorderStrong;
         public readonly Brush RingStroke, DiscFill, DiscStroke;
-        public readonly Pen IconPen, DiscPen, RingPen;
+        public readonly Pen IconPen, DiscPen;
         public readonly FontFamily UiFont, IconFont;
         public readonly double Dpi;
 
@@ -1614,10 +1633,6 @@ public partial class ModGraphView : UserControl
         /// <summary>The icon clip, per border thickness (1 for a plain node, 2 for an emphasized one,
         /// which shifts the content in by a pixel).</summary>
         public readonly Geometry ThinIconClip, ThickIconClip;
-
-        /// <summary>False while the canvas is zoomed out past <see cref="LabelZoom"/>. Flipped by
-        /// <see cref="ApplyZoomDetail"/>, read by every node as it renders.</summary>
-        public bool ShowLabels = true;
 
         private readonly Dictionary<Brush, Pen> _thin = new(), _thick = new();
 
@@ -1636,13 +1651,6 @@ public partial class ModGraphView : UserControl
 
             IconPen = new Pen(R("BorderBrush"), 1);
             DiscPen = new Pen(DiscStroke, 1);
-            // Pen.DashCap defaults to Square (a Shape's is Flat), so Flat is set explicitly for the
-            // guide ring dashes.
-            RingPen = new Pen(RingStroke, 1)
-            {
-                DashStyle = new DashStyle(new double[] { 4, 6 }, 0),
-                DashCap = PenLineCap.Flat
-            };
 
             // Inherited from the window's style rather than hardcoded, the same font a plain TextBlock
             // would get.
@@ -1787,14 +1795,11 @@ public partial class ModGraphView : UserControl
             double cx = _thickness + 8, cy = _thickness, ch = NodeH - 2 * _thickness;
             var iy = cy + (ch - 28) / 2;
 
-            if (_t.ShowLabels)
-            {
-                // Icon well: a 1px border drawn inside a 28-square, so the stroke is inset by half.
-                dc.DrawRoundedRectangle(_t.Surface2, _t.IconPen, new Rect(cx + 0.5, iy + 0.5, 27, 27), 5.5, 5.5);
-                // Drawn under the artwork too, so it shows through an icon with transparency.
-                if (_initial is not null)
-                    dc.DrawText(_initial, new Point(cx + 14 - _initial.Width / 2, iy + 14 - _initial.Height / 2));
-            }
+            // Icon well: a 1px border drawn inside a 28-square, so the stroke is inset by half.
+            dc.DrawRoundedRectangle(_t.Surface2, _t.IconPen, new Rect(cx + 0.5, iy + 0.5, 27, 27), 5.5, 5.5);
+            // Drawn under the artwork too, so it shows through an icon with transparency.
+            if (_initial is not null)
+                dc.DrawText(_initial, new Point(cx + 14 - _initial.Width / 2, iy + 14 - _initial.Height / 2));
 
             if (_icon is not null)
             {
@@ -1803,8 +1808,7 @@ public partial class ModGraphView : UserControl
                 dc.Pop();
             }
 
-            // Below the label zoom the node is just the frame and icon.
-            if (!_t.ShowLabels || _name is null) return;
+            if (_name is null) return;
 
             var tx = cx + 36;
             var th = _name.Height + (_version?.Height ?? 0);
@@ -1841,142 +1845,6 @@ public partial class ModGraphView : UserControl
             var s = Math.Max(box.Width / src.Width, box.Height / src.Height);
             double w = src.Width * s, h = src.Height * s;
             return new Rect(box.X + (box.Width - w) / 2, box.Y + (box.Height - h) / 2, w, h);
-        }
-    }
-
-    /// <summary>
-    /// Every dependency line and arrowhead on the canvas, as frozen geometry: one pair of geometries
-    /// per tile of the canvas.
-    /// </summary>
-    /// <remarks>
-    /// Rasterizing a geometry costs roughly its bounding box times the edges crossing each scanline,
-    /// so one canvas-wide geometry is slow on the huge Circles and Custom canvases. Tiling bounds both
-    /// (at 1,500 nodes, Circles drops from ~950 ms to ~330 ms a frame). Layouts whose edges each span
-    /// the canvas, like the unsaved Custom grid, stay slow while the lines are shown.
-    /// </remarks>
-    private sealed class EdgeLayer : FrameworkElement
-    {
-        /// <summary>Roughly how wide a tile is, in canvas units. Small enough that a tile's
-        /// rasterization is bounded, big enough that a normal canvas is tens of tiles and not
-        /// thousands of draw calls.</summary>
-        private const double TileSize = 1200;
-        private const int MaxTiles = 24;   // per axis
-
-        private Geometry[] _lines = Array.Empty<Geometry>();
-        private Geometry[] _heads = Array.Empty<Geometry>();
-
-        public EdgeLayer() => IsHitTestVisible = false;   // edges aren't clickable
-
-        /// <summary>Refuses the hit test outright.</summary>
-        /// <remarks><see cref="UIElement.IsHitTestVisible"/> isn't enough: the content spans the whole
-        /// canvas, so bounds never reject it and a mouse move would test every curve.</remarks>
-        protected override HitTestResult? HitTestCore(PointHitTestParameters hitTestParameters) => null;
-
-        protected override GeometryHitTestResult? HitTestCore(GeometryHitTestParameters hitTestParameters) => null;
-
-        /// <param name="extent">The canvas the edges are spread over, which decides the tiling. Edges are
-        /// filed by midpoint rather than split per tile, since a clip doesn't stop the rasterizer walking
-        /// the full bounding box (splitting measured two to four times slower).</param>
-        public void Build(List<(Rect from, Rect to)> pairs, Size extent)
-        {
-            var cols = Math.Clamp((int)Math.Ceiling(extent.Width / TileSize), 1, MaxTiles);
-            var rows = Math.Clamp((int)Math.Ceiling(extent.Height / TileSize), 1, MaxTiles);
-            double tw = Math.Max(1, extent.Width) / cols, th = Math.Max(1, extent.Height) / rows;
-
-            var tiles = new List<(Rect from, Rect to)>?[cols * rows];
-            foreach (var pair in pairs)
-            {
-                var mx = (pair.from.X + pair.from.Width / 2 + pair.to.X + pair.to.Width / 2) / 2;
-                var my = (pair.from.Y + pair.from.Height / 2 + pair.to.Y + pair.to.Height / 2) / 2;
-                var c = Math.Clamp((int)(mx / tw), 0, cols - 1);
-                var r = Math.Clamp((int)(my / th), 0, rows - 1);
-                (tiles[r * cols + c] ??= new List<(Rect, Rect)>()).Add(pair);
-            }
-
-            var lines = new List<Geometry>();
-            var heads = new List<Geometry>();
-            foreach (var tile in tiles)
-            {
-                if (tile is null) continue;
-                var line = new StreamGeometry();
-                var head = new StreamGeometry();
-                using (var lc = line.Open())
-                using (var hc = head.Open())
-                    foreach (var (from, to) in tile)
-                        WriteEdge(lc, hc, from, to);
-                // Frozen: the render thread takes a frozen geometry straight, with no per-frame
-                // marshalling back to the UI thread.
-                line.Freeze();
-                head.Freeze();
-                lines.Add(line);
-                heads.Add(head);
-            }
-
-            _lines = lines.ToArray();
-            _heads = heads.ToArray();
-            InvalidateVisual();
-        }
-
-        protected override void OnRender(DrawingContext dc)
-        {
-            for (var i = 0; i < _lines.Length; i++)
-            {
-                dc.DrawGeometry(null, EdgePen, _lines[i]);
-                dc.DrawGeometry(ArrowBrush, null, _heads[i]);
-            }
-        }
-    }
-
-    /// <summary>The Circles layout's wheel discs and guide rings, as three frozen geometries.</summary>
-    private sealed class WheelLayer : FrameworkElement
-    {
-        private readonly NodeTheme _t;
-        // Two disc groups because the discs come in two opacities, each drawn inside a PushOpacity.
-        private readonly GeometryGroup _full = new(), _bare = new(), _rings = new();
-
-        public WheelLayer(NodeTheme theme)
-        {
-            _t = theme;
-            IsHitTestVisible = false;
-        }
-
-        /// <summary>Same reasoning as <see cref="EdgeLayer.HitTestCore(PointHitTestParameters)"/>:
-        /// canvas-wide content, nothing on it to click.</summary>
-        protected override HitTestResult? HitTestCore(PointHitTestParameters hitTestParameters) => null;
-
-        protected override GeometryHitTestResult? HitTestCore(GeometryHitTestParameters hitTestParameters) => null;
-
-        public void AddDisc(double cx, double cy, double radius, bool hasRings) =>
-            (hasRings ? _full : _bare).Children.Add(new EllipseGeometry(new Point(cx, cy), radius, radius));
-
-        public void AddRing(double cx, double cy, double radius) =>
-            _rings.Children.Add(new EllipseGeometry(new Point(cx, cy), radius, radius));
-
-        /// <summary>Called once the layout has finished adding wheels.</summary>
-        public void Freeze()
-        {
-            _full.Freeze();
-            _bare.Freeze();
-            _rings.Freeze();
-            InvalidateVisual();
-        }
-
-        protected override void OnRender(DrawingContext dc)
-        {
-            Discs(_full, 0.6);
-            Discs(_bare, 0.35);
-            if (_rings.Children.Count == 0) return;
-            dc.PushOpacity(0.5);
-            dc.DrawGeometry(null, _t.RingPen, _rings);
-            dc.Pop();
-
-            void Discs(GeometryGroup g, double opacity)
-            {
-                if (g.Children.Count == 0) return;
-                dc.PushOpacity(opacity);
-                dc.DrawGeometry(_t.DiscFill, _t.DiscPen, g);
-                dc.Pop();
-            }
         }
     }
 }

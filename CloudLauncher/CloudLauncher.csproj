@@ -46,7 +46,7 @@
         <!-- Launcher version. Bump this before publishing an update or building the installer;
              publish-release.ps1 and build-installer.ps1 read it and the in-app updater compares
              against it. -->
-        <Version>0.9.4</Version>
+        <Version>0.9.5</Version>
     </PropertyGroup>
 
 </Project>

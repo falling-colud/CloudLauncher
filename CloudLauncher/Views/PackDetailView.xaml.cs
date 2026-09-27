@@ -2722,22 +2722,34 @@ public partial class PackDetailView : Page
 
     // ── options tab ──────────────────────────────────────────────────────────
 
+    /// <summary>Saves the memory a moment after the slider stops moving, however it was moved (drag,
+    /// click on the track, keys, a screen reader). Releasing the mouse saves at once.</summary>
+    private System.Windows.Threading.DispatcherTimer? _ramSave;
+
     private void OnRamChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         RamValueLabel.Text = $"{(int)RamSlider.Value} MB";
+        if (_suppressEvents || _pack is null) return;
+        if (_ramSave is null)
+        {
+            _ramSave = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+            _ramSave.Tick += (_, _) => SaveRam();
+        }
+        _ramSave.Stop();
+        _ramSave.Start();
     }
 
     private void OnRamCommit(object sender, MouseEventArgs e) => SaveRam();
     private void OnRamKeyUp(object sender, KeyEventArgs e) => SaveRam();
 
+    /// <summary>Stores the slider's value for this instance. The same value as the default is stored as
+    /// "no value of its own", so the instance follows the default if it changes later.</summary>
     private void SaveRam()
     {
+        _ramSave?.Stop();
         if (_suppressEvents || _pack is null) return;
         var mb = (int)RamSlider.Value;
-        if (mb == App.State.Settings.DefaultMaxRamMb)
-            App.State.Settings.SetMaxRamFor(_pack.Id, null);
-        else
-            App.State.Settings.SetMaxRamFor(_pack.Id, mb);
+        App.State.Settings.SetMaxRamFor(_pack.Id, mb == App.State.Settings.EffectiveDefaultMaxRamMb ? null : mb);
         App.State.Settings.Save();
     }
 

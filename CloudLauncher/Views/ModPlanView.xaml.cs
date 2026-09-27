@@ -88,7 +88,35 @@ public partial class ModPlanView : UserControl
     private readonly Dictionary<string, TextBlock> _sectionCounts = new();
     private string? _hoverSectionId;
     private readonly List<UIElement> _edgeEls = new();
+
+    /// <summary>Every link's line and arrowhead, cached tile by tile (see <see cref="TiledCachedLayer"/>).
+    /// Drawn live as one shape per link, they were most of what a pan or zoom cost on a big board. The
+    /// click targets, tooltips and label chips stay elements of their own in <see cref="_edgeEls"/>.</summary>
+    private TiledCachedLayer? _linkLayer;
+    private readonly List<(Geometry, TiledCachedLayer.Ink)> _linkItems = new();
+
+    /// <summary>One ink per link look (colour, dashes, arrowhead), since the layer groups by ink.</summary>
+    private readonly Dictionary<(string? Color, bool Dashed, bool Head), TiledCachedLayer.Ink> _linkInks = new();
+
+    /// <summary>Every link's curve, for finding the one under the pointer (see <see cref="UpdateLinkHover"/>).</summary>
+    private readonly List<(PlanEdge Edge, Geometry Geometry, Rect Bounds)> _linkHits = new();
+
+    /// <summary>The links' click target: one invisible path that takes the shape of whichever link is
+    /// under the pointer. A wide invisible path per link was a fifth of a big board's frame time, even
+    /// at opacity 0.</summary>
+    private Path? _linkHover;
+    private PlanEdge? _hoverEdge;
+
+    /// <summary>How near a link counts as on it: the 12 px the old per-link targets were.</summary>
+    private static readonly Pen LinkHitPen = FrozenHitPen();
+    private static Pen FrozenHitPen() { var pen = new Pen(Brushes.Black, 12); pen.Freeze(); return pen; }
+
     private readonly GridLines _gridLines = new();
+
+    /// <summary>Writes the pan and zoom to disk a moment after the view stops moving, rather than on
+    /// every wheel notch and drag step: saving writes every board of the pack.</summary>
+    private readonly System.Windows.Threading.DispatcherTimer _viewportSave =
+        new() { Interval = TimeSpan.FromMilliseconds(600) };
     /// <summary>Ids of the currently selected cards. Shift+click adds to or removes from this set;
     /// a plain click replaces it.</summary>
     private readonly HashSet<string> _selected = new();
@@ -173,7 +201,11 @@ public partial class ModPlanView : UserControl
         InitializeComponent();
         GridBackdrop.Child = _gridLines;
         GridToggle.IsChecked = GridOn;
-        Viewport.SizeChanged += (_, _) => SyncGrid();
+        Viewport.SizeChanged += (_, _) => { SyncGrid(); SyncLinkView(); };
+        // Every way the view moves (wheel, buttons, drag, fit, jump to a section) ends in these two.
+        ZoomT.Changed += (_, _) => SyncLinkView();
+        PanT.Changed += (_, _) => SyncLinkView();
+        _viewportSave.Tick += (_, _) => { _viewportSave.Stop(); Save(); };
         // The grid takes its colour from the theme, so it follows a change of look. Subscribed only while
         // loaded: the event is static, and a handler added here would keep this view alive for the life
         // of the process.
@@ -183,11 +215,16 @@ public partial class ModPlanView : UserControl
             ThemeService.Changed += OnThemeChanged;
             OnThemeChanged();
         };
-        Unloaded += (_, _) => ThemeService.Changed -= OnThemeChanged;
+        Unloaded += (_, _) =>
+        {
+            ThemeService.Changed -= OnThemeChanged;
+            FlushViewportSave();
+        };
         // Leaving the board mid-hover mustn't strand the outline marker or the crosshair.
         Viewport.MouseLeave += (_, _) =>
         {
             if (Mouse.Captured is not null) return; // a drag in progress still owns them
+            ClearLinkHover();
             HideAnchorMarker();
             if (_anchorHover) { _anchorHover = false; UpdateArrowCursor(); }
         };
@@ -1102,7 +1139,26 @@ public partial class ModPlanView : UserControl
         _board.PanX = PanT.X;
         _board.PanY = PanT.Y;
         _board.Zoom = ZoomT.ScaleX;
-        Save(); // pan/zoom isn't undoable content, so persist without an undo checkpoint
+        // Pan/zoom isn't undoable content, so it's persisted without an undo checkpoint, and not on
+        // every notch: any other save in the meantime carries it anyway.
+        _viewportSave.Stop();
+        _viewportSave.Start();
+    }
+
+    /// <summary>Writes a pending pan/zoom now, when the board is left.</summary>
+    private void FlushViewportSave()
+    {
+        if (!_viewportSave.IsEnabled) return;
+        _viewportSave.Stop();
+        Save();
+    }
+
+    /// <summary>Tells the link layer which part of the board is on screen.</summary>
+    private void SyncLinkView()
+    {
+        var z = ZoomT.ScaleX;
+        if (_linkLayer is null || z <= 0 || Viewport.ActualWidth <= 0) return;
+        _linkLayer.SetView(new Rect(-PanT.X / z, -PanT.Y / z, Viewport.ActualWidth / z, Viewport.ActualHeight / z), z);
     }
 
     private void RestoreViewport()
@@ -1150,7 +1206,17 @@ public partial class ModPlanView : UserControl
         AutoSizeSections();
 
         foreach (var n in _board.Nodes.Where(n => n.Kind == PlanNodeKind.Section)) AddSection(n);
+        _linkLayer = new TiledCachedLayer();
+        Panel.SetZIndex(_linkLayer, 0);   // above sections (-2), below cards (2), with the links' click targets
+        BoardCanvas.Children.Add(_linkLayer);
+        _linkItems.Clear();
+        _linkHits.Clear();
+        _hoverEdge = null;
+        _linkHover = CreateLinkHover();
+        BoardCanvas.Children.Add(_linkHover);
         foreach (var edge in _board.Edges.ToList()) AddEdge(edge);
+        _linkLayer.SetContent(_linkItems);
+        SyncLinkView();
         foreach (var n in _board.Nodes.Where(n => n.Kind != PlanNodeKind.Section)) AddCard(n);
 
         ApplySelectionVisual();
@@ -3326,31 +3392,29 @@ public partial class ModPlanView : UserControl
         if (len < 2) return;
 
         var stroke = ColorOf(edge.Color, EdgeBrush);
-        var (geo, tan, mid) = EdgeCurve(start, pa?.Normal, end, pb?.Normal);
+        var shape = EdgeShape(start, pa?.Normal, end, pb?.Normal);
+        var (geo, tan, mid) = (shape.Geometry(), shape.EndTangent, shape.Mid);
 
-        var path = new Path
+        // The line goes to the cached layer. Solid lines are cut into pieces so a long one isn't redrawn
+        // for every tile it crosses; a dashed one stays whole, since a cut would restart its dashes.
+        var dashed = edge.Style == PlanEdgeStyle.Dashed;
+        var ink = LinkInk(edge.Color, stroke, dashed, head: false);
+        if (dashed)
         {
-            Data = geo, Stroke = stroke, StrokeThickness = 1.8, IsHitTestVisible = false,
-            StrokeDashArray = edge.Style == PlanEdgeStyle.Dashed ? new DoubleCollection { 5, 4 } : null
-        };
-        Panel.SetZIndex(path, 0);
-        BoardCanvas.Children.Add(path);
-        _edgeEls.Add(path);
+            var whole = shape.Geometry();
+            whole.Freeze();
+            _linkItems.Add((whole, ink));
+        }
+        else if (shape.Cubic)
+            TiledCachedLayer.AddCubic(_linkItems, shape.Start, shape.C1, shape.C2, shape.End, ink);
+        else
+            TiledCachedLayer.AddQuadratic(_linkItems, shape.Start, shape.C1, shape.End, ink);
 
-        // A fat transparent copy makes a 2 px line comfortably clickable.
-        var hit = new Path
-        {
-            Data = geo, Stroke = Brushes.Transparent, StrokeThickness = 12, Cursor = Cursors.Hand,
-            ToolTip = new ToolTip { Content = "Click to label  ·  right-click to restyle, reverse or remove" }
-        };
-        // Handle the press too: left to bubble, it reaches the canvas, which starts a pan and
-        // captures the mouse, so the release would never come back here to open the label.
-        hit.MouseLeftButtonDown += (_, e) => e.Handled = true;
-        hit.MouseRightButtonUp += (_, e) => { e.Handled = true; ShowEdgeMenu(edge, hit); };
-        hit.MouseLeftButtonUp += (_, e) => { e.Handled = true; _ = EditEdgeLabelAsync(edge); };
-        Panel.SetZIndex(hit, 1);
-        BoardCanvas.Children.Add(hit);
-        _edgeEls.Add(hit);
+        // Clickable through the shared target, which takes this shape while the pointer is on it.
+        geo.Freeze();
+        var hitBounds = geo.Bounds;
+        hitBounds.Inflate(LinkHitPen.Thickness / 2 + 1, LinkHitPen.Thickness / 2 + 1);
+        _linkHits.Add((edge, geo, hitBounds));
 
         if (edge.Style == PlanEdgeStyle.Arrow)
         {
@@ -3358,20 +3422,15 @@ public partial class ModPlanView : UserControl
             var arrowW = arrowLen * 0.52;
             var back = new Point(end.X - tan.X * arrowLen, end.Y - tan.Y * arrowLen);
             var ap = new Vector(-tan.Y, tan.X);
-            var arrow = new Polygon
+            var arrow = new StreamGeometry();
+            using (var ctx = arrow.Open())
             {
-                Points = new PointCollection
-                {
-                    end,
-                    new Point(back.X + ap.X * arrowW, back.Y + ap.Y * arrowW),
-                    new Point(back.X - ap.X * arrowW, back.Y - ap.Y * arrowW)
-                },
-                Fill = edge.Color is null ? ArrowBrush : stroke,
-                IsHitTestVisible = false
-            };
-            Panel.SetZIndex(arrow, 0);
-            BoardCanvas.Children.Add(arrow);
-            _edgeEls.Add(arrow);
+                ctx.BeginFigure(end, isFilled: true, isClosed: true);
+                ctx.LineTo(new Point(back.X + ap.X * arrowW, back.Y + ap.Y * arrowW), isStroked: false, isSmoothJoin: false);
+                ctx.LineTo(new Point(back.X - ap.X * arrowW, back.Y - ap.Y * arrowW), isStroked: false, isSmoothJoin: false);
+            }
+            arrow.Freeze();
+            _linkItems.Add((arrow, LinkInk(edge.Color, edge.Color is null ? ArrowBrush : stroke, dashed: false, head: true)));
         }
 
         if (!string.IsNullOrWhiteSpace(edge.Label))
@@ -3403,12 +3462,91 @@ public partial class ModPlanView : UserControl
         }
     }
 
+    /// <summary>The shared click target for links (see <see cref="_linkHover"/>). Empty until the pointer
+    /// is on a link.</summary>
+    private Path CreateLinkHover()
+    {
+        var hit = new Path
+        {
+            Stroke = Brushes.Black, StrokeThickness = LinkHitPen.Thickness, Cursor = Cursors.Hand, Opacity = 0,
+            ToolTip = new ToolTip { Content = "Click to label  ·  right-click to restyle, reverse or remove" }
+        };
+        // Handle the press too: left to bubble, it reaches the canvas, which starts a pan and
+        // captures the mouse, so the release would never come back here to open the label.
+        hit.MouseLeftButtonDown += (_, e) => { if (_hoverEdge is not null) e.Handled = true; };
+        hit.MouseRightButtonUp += (_, e) =>
+        {
+            if (_hoverEdge is not { } edge) return;
+            e.Handled = true;
+            ShowEdgeMenu(edge, hit);
+        };
+        hit.MouseLeftButtonUp += (_, e) =>
+        {
+            if (_hoverEdge is not { } edge) return;
+            e.Handled = true;
+            _ = EditEdgeLabelAsync(edge);
+        };
+        Panel.SetZIndex(hit, 1);   // over the sections and the drawn links, under the cards
+        return hit;
+    }
+
+    /// <summary>Points the shared target at the link under the pointer, if any. A card (or anything else
+    /// that sits above the links) under the pointer wins, as it did when each link had its own target.</summary>
+    private void UpdateLinkHover(Point at, DependencyObject? source)
+    {
+        if (_linkHover is null) return;
+        if (Mouse.Captured is not null || !PointerAtLinkLevel(source))
+        {
+            ClearLinkHover();
+            return;
+        }
+
+        // Last added is on top, as the per-link targets were.
+        PlanEdge? found = null;
+        Geometry? shape = null;
+        for (var i = _linkHits.Count - 1; i >= 0; i--)
+        {
+            var (edge, geo, bounds) = _linkHits[i];
+            if (!bounds.Contains(at) || !geo.StrokeContains(LinkHitPen, at)) continue;
+            found = edge;
+            shape = geo;
+            break;
+        }
+        if (ReferenceEquals(found, _hoverEdge)) return;
+        _hoverEdge = found;
+        _linkHover.Data = shape;
+    }
+
+    private void ClearLinkHover()
+    {
+        _hoverEdge = null;
+        if (_linkHover is not null) _linkHover.Data = null;
+    }
+
+    /// <summary>True when what is under the pointer lies below the links: the board itself, a section,
+    /// or the link target.</summary>
+    private bool PointerAtLinkLevel(DependencyObject? source)
+    {
+        for (var d = source; d is not null;
+             d = d is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d))
+        {
+            if (ReferenceEquals(d, BoardCanvas)) return true;
+            if (d is UIElement el && ReferenceEquals(VisualTreeHelper.GetParent(el), BoardCanvas))
+                return ReferenceEquals(el, _linkHover) || Panel.GetZIndex(el) < 1;
+        }
+        return true;
+    }
+
     private void RedrawEdges()
     {
         foreach (var el in _edgeEls) BoardCanvas.Children.Remove(el);
         _edgeEls.Clear();
+        _linkItems.Clear();
+        _linkHits.Clear();
+        ClearLinkHover();
         if (_board is null) return;
         foreach (var edge in _board.Edges.ToList()) AddEdge(edge);
+        _linkLayer?.SetContent(_linkItems);
     }
 
     private static Point Centre(Rect r) => new(r.X + r.Width / 2, r.Y + r.Height / 2);
@@ -3417,14 +3555,45 @@ public partial class ModPlanView : UserControl
     /// the arrowhead) and its midpoint (for the label). With both ends automatic it's a gentle
     /// single bend. A pinned end leaves or meets its card square to that side of the outline, so
     /// the arrow visibly comes out of the chosen spot instead of cutting back across the card.</summary>
-    private static (PathGeometry Geometry, Vector EndTangent, Point Mid) EdgeCurve(
-        Point start, Vector? startNormal, Point end, Vector? endNormal)
+    /// <summary>A link's curve by its control points: a quadratic (<see cref="C1"/> only) or a cubic.</summary>
+    private readonly record struct LinkShape(bool Cubic, Point Start, Point C1, Point C2, Point End,
+        Vector EndTangent, Point Mid)
+    {
+        public PathGeometry Geometry()
+        {
+            var fig = new PathFigure { StartPoint = Start, IsFilled = false };
+            fig.Segments.Add(Cubic ? new BezierSegment(C1, C2, End, true) : new QuadraticBezierSegment(C1, End, true));
+            var geo = new PathGeometry();
+            geo.Figures.Add(fig);
+            return geo;
+        }
+    }
+
+    /// <summary>The ink a link's line or arrowhead is drawn with, one per look.</summary>
+    private TiledCachedLayer.Ink LinkInk(string? color, Brush brush, bool dashed, bool head)
+    {
+        var key = (color, dashed, head);
+        if (_linkInks.TryGetValue(key, out var ink)) return ink;
+        if (head) return _linkInks[key] = new TiledCachedLayer.Ink(brush, null);
+        // What the line's Shape used to be: 1.8 thick, flat caps, 5-on 4-off dashes (in thicknesses).
+        var pen = new Pen(brush, 1.8);
+        if (dashed) pen.DashStyle = new DashStyle(new double[] { 5, 4 }, 0);
+        pen.DashCap = PenLineCap.Flat;
+        pen.Freeze();
+        return _linkInks[key] = new TiledCachedLayer.Ink(null, pen);
+    }
+
+    /// <summary>The curve an arrow follows between its two ends, the direction it arrives in (for
+    /// the arrowhead) and its midpoint (for the label). With both ends automatic it's a gentle
+    /// single bend. A pinned end leaves or meets its card square to that side of the outline, so
+    /// the arrow visibly comes out of the chosen spot instead of cutting back across the card.</summary>
+    private static LinkShape EdgeShape(Point start, Vector? startNormal, Point end, Vector? endNormal)
     {
         var dir = end - start;
         var len = dir.Length;
-        var fig = new PathFigure { StartPoint = start, IsFilled = false };
         Vector tangent;
         Point mid;
+        LinkShape shape;
 
         if (startNormal is null && endNormal is null)
         {
@@ -3432,26 +3601,31 @@ public partial class ModPlanView : UserControl
             if (perp.Length > 0) perp.Normalize();
             var offset = len < 110 ? 0 : Math.Min(38, len * 0.13);
             var ctrl = new Point((start.X + end.X) / 2 + perp.X * offset, (start.Y + end.Y) / 2 + perp.Y * offset);
-            fig.Segments.Add(new QuadraticBezierSegment(ctrl, end, true));
             tangent = offset == 0 ? dir : end - ctrl;
             mid = new Point(0.25 * start.X + 0.5 * ctrl.X + 0.25 * end.X, 0.25 * start.Y + 0.5 * ctrl.Y + 0.25 * end.Y);
+            shape = new LinkShape(false, start, ctrl, ctrl, end, default, default);
         }
         else
         {
             var reach = Math.Clamp(len * 0.4, 24, 120);
             var c1 = startNormal is { } n1 ? start + n1 * reach : start + dir / 3;
             var c2 = endNormal is { } n2 ? end + n2 * reach : end - dir / 3;
-            fig.Segments.Add(new BezierSegment(c1, c2, end, true));
             tangent = end - c2;
             mid = new Point(0.125 * start.X + 0.375 * (c1.X + c2.X) + 0.125 * end.X,
                             0.125 * start.Y + 0.375 * (c1.Y + c2.Y) + 0.125 * end.Y);
+            shape = new LinkShape(true, start, c1, c2, end, default, default);
         }
 
         if (tangent.Length < 0.001) tangent = dir;
         if (tangent.Length > 0) tangent.Normalize();
-        var geo = new PathGeometry();
-        geo.Figures.Add(fig);
-        return (geo, tangent, mid);
+        return shape with { EndTangent = tangent, Mid = mid };
+    }
+
+    private static (PathGeometry Geometry, Vector EndTangent, Point Mid) EdgeCurve(
+        Point start, Vector? startNormal, Point end, Vector? endNormal)
+    {
+        var shape = EdgeShape(start, startNormal, end, endNormal);
+        return (shape.Geometry(), shape.EndTangent, shape.Mid);
     }
 
     private static Point BorderPoint(Rect r, Point toward)
@@ -4419,6 +4593,7 @@ public partial class ModPlanView : UserControl
         if (_arrowFrom is not null && _arrowPreview is not null)
             _arrowPreview.Data = LinkPreviewGeometry(_arrowFrom, _arrowFromAnchor, at);
         UpdateAnchorHover(at, e.OriginalSource as DependencyObject);
+        UpdateLinkHover(at, e.OriginalSource as DependencyObject);
     }
 
     private void OnViewportMouseUp(object sender, MouseButtonEventArgs e)
@@ -4629,21 +4804,33 @@ public partial class ModPlanView : UserControl
     private void OnThemeChanged() =>
         _gridLines.Ink = (TryFindResource("TextTertiaryBrush") as SolidColorBrush)?.Color ?? Color.FromRgb(0x8A, 0x94, 0xA6);
 
-    /// <summary>The ruled backdrop, drawn line by line in screen space rather than as a tile the
-    /// canvas transform scales. A 1 px pen in a scaled tile blurs unevenly at any zoom but 100%;
-    /// here every line is one device pixel on a whole pixel at any zoom, every fourth is a shade
-    /// stronger, and minor lines fade out as cells shrink, before they get dense enough to
-    /// shimmer.</summary>
+    /// <summary>The ruled backdrop, drawn in screen space rather than as a tile the canvas transform
+    /// scales. A 1 px pen in a scaled tile blurs unevenly at any zoom but 100%; here every line is one
+    /// device pixel on a whole pixel at any zoom, every fourth is a shade stronger, and minor lines fade
+    /// out as cells shrink, before they get dense enough to shimmer.</summary>
+    /// <remarks>
+    /// <para>Drawn once per zoom and handed to the GPU as a bitmap (<see cref="BitmapCache"/>); a pan
+    /// only slides it. The pattern repeats every major line, so the drawing covers the viewport plus one
+    /// major cell each way, and the pan's remainder by that period is the shift. Drawn live on every
+    /// pan step, the grid halved the frame rate of a big board (51 against 117 fps measured).</para>
+    /// <para>The shift is rounded to whole device pixels, which keeps the lines sharp; they may sit up to
+    /// half a pixel off the cards, which isn't visible.</para>
+    /// </remarks>
     private sealed class GridLines : FrameworkElement
     {
         private const double MinorAlpha = 0.11, MajorAlpha = 0.2;
-        private double _panX, _panY, _zoom = 1;
+        private double _zoom = -1;
         private Color _ink = Color.FromRgb(0x8A, 0x94, 0xA6);
+        private readonly TranslateTransform _shift = new();
 
         public GridLines()
         {
             IsHitTestVisible = false;
             RenderOptions.SetEdgeMode(this, EdgeMode.Aliased);
+            RenderTransform = _shift;
+            var cache = new BitmapCache { SnapsToDevicePixels = true, EnableClearType = false };
+            cache.Freeze();
+            CacheMode = cache;
         }
 
         public Color Ink
@@ -4652,20 +4839,42 @@ public partial class ModPlanView : UserControl
             set { _ink = value; InvalidateVisual(); }
         }
 
+        /// <summary>The distance the pattern repeats over on screen: one major cell.</summary>
+        private double Period => GridCell * GridMajorEvery * _zoom;
+
         /// <summary>Follows the canvas: the board's origin is at (<paramref name="panX"/>,
         /// <paramref name="panY"/>) on screen, at <paramref name="zoom"/>.</summary>
         public void Follow(double panX, double panY, double zoom)
         {
-            _panX = panX;
-            _panY = panY;
-            _zoom = Math.Max(0.05, zoom);
+            zoom = Math.Max(0.05, zoom);
+            if (zoom != _zoom)
+            {
+                _zoom = zoom;
+                InvalidateVisual();
+            }
+
+            // Shift by the pan's remainder, one period back, so the drawing starts left of and above the
+            // viewport; whole device pixels, so the cached bitmap is placed without resampling.
+            var period = Period;
+            var px = VisualTreeHelper.GetDpi(this).DpiScaleX;
+            static double Mod(double v, double m) => ((v % m) + m) % m;
+            _shift.X = Math.Round((Mod(panX, period) - period) * px) / px;
+            _shift.Y = Math.Round((Mod(panY, period) - period) * px) / px;
+        }
+
+        protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+        {
+            base.OnRenderSizeChanged(sizeInfo);
             InvalidateVisual();
         }
 
         protected override void OnRender(DrawingContext dc)
         {
-            double w = ActualWidth, h = ActualHeight, cell = GridCell * _zoom;
-            if (w <= 0 || h <= 0) return;
+            if (_zoom <= 0) return;
+            double cell = GridCell * _zoom, period = Period;
+            // The viewport plus two periods: one for the shift, one so the far edge is always covered.
+            double w = ActualWidth + 2 * period, h = ActualHeight + 2 * period;
+            if (ActualWidth <= 0 || ActualHeight <= 0) return;
 
             // Minor lines at full strength until a cell is 14 px across on screen, gone by 6.
             var minorFade = Math.Clamp((cell - 6) / 8, 0, 1);
@@ -4674,11 +4883,11 @@ public partial class ModPlanView : UserControl
             using (var minorLines = minor.Open())
             using (var majorLines = major.Open())
             {
-                // Board line k is at pan + k x cell on screen, across and down.
-                for (var k = (int)Math.Ceiling(-_panX / cell); _panX + k * cell <= w; k++)
-                    Line(k, new Point(_panX + k * cell, 0), new Point(_panX + k * cell, h));
-                for (var k = (int)Math.Ceiling(-_panY / cell); _panY + k * cell <= h; k++)
-                    Line(k, new Point(0, _panY + k * cell), new Point(w, _panY + k * cell));
+                // Line k is at k x cell from the drawing's origin, which sits on a major line.
+                for (var k = 0; k * cell <= w; k++)
+                    Line(k, new Point(k * cell, 0), new Point(k * cell, h));
+                for (var k = 0; k * cell <= h; k++)
+                    Line(k, new Point(0, k * cell), new Point(w, k * cell));
 
                 void Line(int k, Point from, Point to)
                 {

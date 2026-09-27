@@ -3,6 +3,15 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.5 - 2026-09-27
+
+- Memory: the Settings default ("Maximum RAM allocated to new instances") is used again. It was saved
+  but ignored, so every instance without its own value got 16384 MB on a PC with 32 GB or more. An
+  instance's own memory slider now saves however it is moved.
+- The Graph and Planning views stay smooth when zoomed far out. Dependency lines, links and the
+  planning grid are drawn once per zoom instead of on every frame, and mod names show at every zoom
+  again.
+
 ## 0.9.4 - 2026-09-27
 
 - NeoForge versions show again when creating or editing an instance. NeoForge's own version list

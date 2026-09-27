@@ -61,13 +61,6 @@
                     </Grid>
                 </slate:SlateBorder>
 
-                <!-- Zoomed far out, nodes drop their names, versions and markers: the text is unreadable
-                at that scale and is most of what a pan or zoom costs. This note says so, since a node
-                without its name looks like one that has none. -->
-                <TextBlock DockPanel.Dock="Right" x:Name="ZoomNote" Style="{StaticResource Caption}" Foreground="{DynamicResource WarningBrush}"
-                           VerticalAlignment="Center" Margin="10,0,0,0" Visibility="Collapsed"
-                           Text="· names hidden at this zoom"
-                           ToolTip="Too small to read at this scale, so they are not drawn. Zoom in (or press Fit on a smaller selection) and they come back."/>
                 <TextBlock x:Name="HintLabel" Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
                            VerticalAlignment="Center" Margin="16,0,0,0"
                            TextTrimming="CharacterEllipsis"
