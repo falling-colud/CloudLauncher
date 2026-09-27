@@ -157,6 +157,14 @@
                                         <TextBlock Text="DEFAULT" Style="{StaticResource PillText}"
                                                    Foreground="{DynamicResource TextOnAccentBrush}"/>
                                     </slate:SlateBorder>
+                                    <!--  A mod loads it in every world, outside the stack the switch edits.  -->
+                                    <slate:SlateBorder Style="{StaticResource Pill}" Margin="8,0,0,0"
+                                            Background="{DynamicResource AccentSoftBrush}"
+                                            ToolTip="{Binding AlwaysOnTip}"
+                                            Visibility="{Binding AlwaysOnLabel, Converter={StaticResource NotEmptyVis}}">
+                                        <TextBlock Text="{Binding AlwaysOnLabel}" Style="{StaticResource PillText}"
+                                                   Foreground="{DynamicResource TextPrimaryBrush}"/>
+                                    </slate:SlateBorder>
                                     <!--  No LIBRARY pill: whether the launcher keeps its own copy
                                     is an internal detail the user doesn't need to act on.  -->
                                     <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"

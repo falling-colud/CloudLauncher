@@ -43,6 +43,13 @@ public sealed class AppState
     /// <summary>Mod semantics on top of the content library: the user's default mod set, the rules
     /// that decide which instances get it, and the same-mod collision guard a jar needs.</summary>
     public ModLibraryService ModLibrary { get; }
+
+    /// <summary>A world's data packs: its <c>datapacks/</c> folder and level.dat's on/off lists.</summary>
+    public DataPackService DataPacks { get; }
+
+    /// <summary>Mods like Paxi that load packs in every world from a folder of their own. Built after
+    /// ContentDefaults because moving a pack in has to switch its default off.</summary>
+    public GlobalPackService GlobalPacks { get; }
     public ModFingerprintCache ModFingerprints { get; }
     public ModCounterpartCache ModCounterparts { get; }
     public ModAddedCache ModAdded { get; }
@@ -128,6 +135,8 @@ public sealed class AppState
             Settings, Packs, Library, Worlds, ResourcePacks, Shaders, ContentActivation, Instances);
         // Launcher is created before the content services, so it gets the defaults engine by setter below.
         ModLibrary = new ModLibraryService(Library, ContentDefaults, Packs);
+        DataPacks = new DataPackService(Packs, Instances);
+        GlobalPacks = new GlobalPackService(Packs, Instances, ModFingerprints, ResourcePacks, Library, ContentDefaults);
 
         Launcher.SetContentDefaults(ContentDefaults);
         Update = new UpdateService(Api);

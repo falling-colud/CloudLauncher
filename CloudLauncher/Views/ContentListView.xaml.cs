@@ -127,6 +127,13 @@ public sealed record ContentRowState
     /// <inheritdoc cref="NeedsLoader"/>
     public string LoaderTip { get; init; } = "";
 
+    /// <summary>"ALWAYS ON · PAXI": the pack sits in a folder a mod loads in every world, not in the
+    /// stack the switch edits. Empty hides it.</summary>
+    public string AlwaysOnLabel { get; init; } = "";
+
+    /// <inheritdoc cref="AlwaysOnLabel"/>
+    public string AlwaysOnTip { get; init; } = "";
+
     /// <summary>An advisory the row shows but never acts on, e.g. "pack_format 32". Empty hides
     /// it.</summary>
     public string FormatLabel { get; init; } = "";
@@ -224,6 +231,8 @@ public sealed class ContentRow : INotifyPropertyChanged
     public bool NeedsLoader => _state.NeedsLoader;
     public string LoaderLabel => _state.LoaderLabel;
     public string LoaderTip => _state.LoaderTip;
+    public string AlwaysOnLabel => _state.AlwaysOnLabel;
+    public string AlwaysOnTip => _state.AlwaysOnTip;
     public string FormatLabel => _state.FormatLabel;
     public string FormatTip => _state.FormatTip;
     public bool ToggleOn => _state.ToggleOn;
@@ -272,6 +281,8 @@ public sealed class ContentRow : INotifyPropertyChanged
         Raise(nameof(NeedsLoader));
         Raise(nameof(LoaderLabel));
         Raise(nameof(LoaderTip));
+        Raise(nameof(AlwaysOnLabel));
+        Raise(nameof(AlwaysOnTip));
         Raise(nameof(FormatLabel));
         Raise(nameof(FormatTip));
         Raise(nameof(ToggleOn));

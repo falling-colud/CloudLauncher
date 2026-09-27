@@ -110,6 +110,11 @@ public partial class ImportContentCard : UserControl
     /// the receipt: "in your library" and "only in these instances" are different outcomes.</summary>
     private string? _libraryNote;
 
+    /// <summary>Instances with a mod that loads resource packs in every world, and the folder a pack
+    /// goes into there. Only read for resource packs.</summary>
+    private Dictionary<Guid, GlobalPackFolder> _alwaysOn = new();
+    private bool _alwaysOnRead;
+
     private ImportContentCard(MainWindow shell, ImportRequest request)
     {
         InitializeComponent();
@@ -490,7 +495,36 @@ public partial class ImportContentCard : UserControl
         }
 
         if (ct.IsCancellationRequested) return;
+        await RefreshAlwaysOnAsync();
+        if (ct.IsCancellationRequested) return;
         BuildTargetRows(states);
+    }
+
+    /// <summary>For a resource pack: which instances have a mod (Paxi, Global Packs, Open Loader...)
+    /// that loads packs in every world, and where each would put this one.</summary>
+    /// <remarks>Read once per card. The instances' <c>mods/</c> listings are cheap and the jar lookups
+    /// are memoised, but there is no reason to repeat them per step.</remarks>
+    private async Task RefreshAlwaysOnAsync()
+    {
+        if (_spec.Kind != ImportContentKind.ResourcePack || _alwaysOnRead) return;
+        _alwaysOnRead = true;
+        try
+        {
+            var packs = _request.Packs;
+            _alwaysOn = await Task.Run(() => packs
+                .Select(p => (p.Id, Folder: GlobalPackService.DefaultTarget(
+                    App.State.GlobalPacks.FoldersFor(p.Id, p.Name, p.MinecraftVersion, GlobalPackKind.Resource))))
+                .Where(t => t.Folder is not null)
+                .ToDictionary(t => t.Id, t => t.Folder!));
+        }
+        catch (Exception ex) { AppLog.LogError(nameof(ImportContentCard), ex); }
+
+        AlwaysOnCard.Visibility = _alwaysOn.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        var mods = _alwaysOn.Values.Select(f => f.LoadedByLabel).Distinct().ToList();
+        AlwaysOnNote.Text = _alwaysOn.Count == 0 ? ""
+            : $"Instead of resourcepacks/, a ticked instance that has {string.Join(" or ", mods)} gets it in "
+            + "that mod's folder: on in every world and not in the game's pack list. The others get it the "
+            + "usual way.";
     }
 
     /// <summary>The library's own record for this file where there is one, else a stand-in so
@@ -535,6 +569,8 @@ public partial class ImportContentCard : UserControl
                     : $"will be added to {_spec.InstanceFolder}/";
                 if (states.TryGetValue(pack.Id, out var s) && s.LoaderMissing)
                     note += " · nothing in this instance can load one yet";
+                if (_alwaysOn.TryGetValue(pack.Id, out var always))
+                    note += $" · has {always.LoadedByLabel}";
 
                 return new ImportTargetRow(pack, note, canTake: true,
                     hint: $"Put this {_spec.LowerNoun} into {pack.Name}");
@@ -942,6 +978,66 @@ public partial class ImportContentCard : UserControl
             stored = await StoreInLibraryAsync(path, libraryKind, ct);
         }
 
+        // "Always on": ticked instances with a mod such as Paxi take the pack into that mod's folder
+        // instead of resourcepacks/, and the rest carry on below as usual.
+        string? alwaysSummary = null;
+        var alwaysPlaced = 0;
+        if (AlwaysOnBox.IsChecked == true && _alwaysOn.Count > 0)
+        {
+            (alwaysPlaced, alwaysSummary, targets) = await PlaceAlwaysOnAsync(path, name, targets, stored, ct);
+            if (targets.Count == 0)
+                return (alwaysPlaced, stored is not null, alwaysSummary);
+        }
+        if (alwaysSummary is not null)
+        {
+            var (placedRest, libraryRest, summaryRest) = await PlaceRestAsync(path, name, targets, stored, ct);
+            return (alwaysPlaced + placedRest, libraryRest, $"{alwaysSummary}  ·  {summaryRest}");
+        }
+        return await PlaceRestAsync(path, name, targets, stored, ct);
+    }
+
+    /// <summary>Copies the pack into the always-on folder of every ticked instance that has one, and
+    /// hands back the instances still to do.</summary>
+    /// <remarks>A copy, not a library link: the mod reads the folder directly, and the defaults engine
+    /// never looks there, so a link would gain nothing and could be relinked or pruned by accident.</remarks>
+    private async Task<(int Placed, string Summary, List<PackSummary> Remaining)> PlaceAlwaysOnAsync(
+        string path, string name, List<PackSummary> targets, LibraryItem? stored, CancellationToken ct)
+    {
+        var rest = new List<PackSummary>();
+        var done = new List<string>();
+        var failed = new List<string>();
+        foreach (var target in targets)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!_alwaysOn.TryGetValue(target.Id, out var folder)) { rest.Add(target); continue; }
+            Log($"Putting {name} in {target.Name}'s always-on folder...");
+            try
+            {
+                await Task.Run(() => App.State.GlobalPacks.Install(target.Id, target.Name, folder, path), ct);
+                // The launcher's own copy must not also be handed to this instance as a default, or
+                // the game would load the pack twice.
+                if (stored is not null)
+                    App.State.ContentDefaults.SetChoice(target.Id, stored.Key, ContentDefaultChoice.Excluded);
+                done.Add($"{target.Name} ({folder.LoadedByLabel})");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                AppLog.LogError(nameof(ImportContentCard), ex);
+                failed.Add($"{target.Name}: {ex.Message}");
+            }
+        }
+        var summary = done.Count == 0
+            ? $"Not made always on - {failed.FirstOrDefault() ?? "nothing to do"}"
+            : $"{name} is always on in {string.Join(", ", done)}"
+              + (failed.Count > 0 ? $"; {failed.Count} failed - {failed[0]}" : "");
+        return (done.Count, summary, rest);
+    }
+
+    /// <summary>The usual placement for everything the always-on step didn't take.</summary>
+    private async Task<(int Placed, bool Library, string Summary)> PlaceRestAsync(
+        string path, string name, List<PackSummary> targets, LibraryItem? stored, CancellationToken ct)
+    {
         // Placing from the library is a separate capability that three kinds lack: Apply refuses worlds
         // (a shared save would be two games writing one set of region files), and a config or KubeJS
         // bundle is a zip in the library but a tree of files in the instance. Those use their own

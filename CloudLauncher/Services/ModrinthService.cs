@@ -146,14 +146,16 @@ public sealed class ModrinthService
         return resp?.Hits?.Select(ToSummary).ToList() ?? new();
     }
 
-    private List<ModBrowseCategory>? _categoryCache;
+    /// <summary>Per project type. With one slot for all of them, whichever browser asked second got
+    /// the first one's list.</summary>
+    private readonly Dictionary<string, List<ModBrowseCategory>> _categoryCache = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Modrinth's category tags for a project type (mod, resourcepack, ...), cached for
-    /// the session. Header categories only, with loaders and resolutions filtered out, so the
-    /// filter matches the site's "Categories" list.</summary>
+    /// <summary>Modrinth's category tags for a project type (mod, resourcepack, datapack, ...), cached
+    /// per type for the session. Header categories only, with loaders and resolutions filtered out, so
+    /// the filter matches the site's "Categories" list.</summary>
     public async Task<List<ModBrowseCategory>> GetCategoriesAsync(string projectType = "mod", CancellationToken ct = default)
     {
-        if (_categoryCache is { } cached) return cached;
+        if (_categoryCache.TryGetValue(projectType, out var cached)) return cached;
         try
         {
             var tags = await ProxyGetJsonAsync<List<CategoryTag>>("tag/category", ct);
@@ -166,7 +168,7 @@ public sealed class ModrinthService
                 .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
                 .Select(n => new ModBrowseCategory(Prettify(n), n))
                 .ToList();
-            _categoryCache = list;
+            _categoryCache[projectType] = list;
             return list;
         }
         catch { return new(); }

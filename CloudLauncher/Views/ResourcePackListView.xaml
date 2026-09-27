@@ -143,6 +143,13 @@
             </DockPanel>
         </slate:SlateBorder>
 
+        <!--  Packs a mod such as Paxi loads in every world, outside options.txt. Hidden when the
+        instance has no such mod.  -->
+        <ScrollViewer x:Name="AlwaysOnHost" DockPanel.Dock="Bottom" MaxHeight="260" Margin="0,12,0,0"
+                      VerticalScrollBarVisibility="Auto" Visibility="Collapsed">
+            <local:AlwaysOnPacksPanel x:Name="AlwaysOnPanel"/>
+        </ScrollViewer>
+
         <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                 CornerRadius="6"
@@ -356,6 +363,13 @@
                             <MenuItem x:Name="CtxCopyTo" Header="Copy to instance..." Click="OnCtxCopyTo">
                                 <MenuItem.Icon>
                                     <TextBlock Text="&#xE8C8;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                </MenuItem.Icon>
+                            </MenuItem>
+                            <!--  Only when the instance has a mod such as Paxi; the header names it.  -->
+                            <MenuItem x:Name="CtxMakeAlwaysOn" Header="Make always on" Click="OnCtxMakeAlwaysOn"
+                                      Visibility="Collapsed">
+                                <MenuItem.Icon>
+                                    <TextBlock Text="&#xE840;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
                                 </MenuItem.Icon>
                             </MenuItem>
                             <MenuItem x:Name="CtxCreateHosted"

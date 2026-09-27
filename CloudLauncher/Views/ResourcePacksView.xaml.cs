@@ -153,6 +153,22 @@ public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
 
         public DateTimeOffset? ScannedUtc { get; init; }
         public int Failed { get; init; }
+
+        /// <summary>Packs a mod such as Paxi loads in every world, per instance. Kept apart from
+        /// <see cref="Installed"/>: they are not in options.txt, so nothing that edits the stack may
+        /// touch them.</summary>
+        public List<RpAlwaysOn> AlwaysOn { get; init; } = [];
+
+        /// <summary>Where "Make always on" puts a pack, for each instance that has such a mod.</summary>
+        public Dictionary<Guid, GlobalPackFolder> AlwaysOnTargets { get; init; } = new();
+    }
+
+    /// <summary>One pack in an instance's always-on folder, by its row key.</summary>
+    private sealed record RpAlwaysOn(PackSummary Pack, GlobalPackEntry Entry)
+    {
+        /// <summary>Distinct from every <see cref="ResourcePackService.Key(Guid, string)"/> form, so a
+        /// folder membership or a settings lookup can never mistake it for a stack pack.</summary>
+        public string Key => $"{Pack.Id:N}:always/{Entry.Folder.RelativeDir}/{Entry.FileName}";
     }
 
     /// <summary>The counts behind one row.</summary>
@@ -327,13 +343,16 @@ public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
             }
         }
 
+        var (alwaysOn, targets) = ScanAlwaysOn(ct);
         var model = new RpModel
         {
             Library = library,
             Installed = installed,
             Overrides = LoadOverrides(_packs),
             ScannedUtc = oldest,
-            Failed = failed
+            Failed = failed,
+            AlwaysOn = alwaysOn,
+            AlwaysOnTargets = targets
         };
 
         // Check again before publishing, so a superseded pass can't leave its model behind for the
@@ -342,6 +361,33 @@ public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
         _model = model;
         _conflictNote = ConflictNote(ct);
         return BuildRows(model, cheap: false);
+    }
+
+    /// <summary>Every instance's always-on resource packs (Paxi, Global Packs, Open Loader...), and
+    /// where each such instance would put a new one.</summary>
+    /// <remarks>Not cached like the stack scan: it is a listing of a folder or two per instance with
+    /// such a mod, and a directory listing of <c>mods/</c> for the rest (the jar lookups are
+    /// memoised by <see cref="GlobalPackService"/>).</remarks>
+    private (List<RpAlwaysOn>, Dictionary<Guid, GlobalPackFolder>) ScanAlwaysOn(CancellationToken ct)
+    {
+        var found = new List<RpAlwaysOn>();
+        var targets = new Dictionary<Guid, GlobalPackFolder>();
+        foreach (var pack in _packs)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var folders = App.State.GlobalPacks.FoldersFor(pack.Id, pack.Name, pack.MinecraftVersion,
+                    GlobalPackKind.Resource);
+                if (folders.Count == 0) continue;
+                if (GlobalPackService.DefaultTarget(folders) is { } target) targets[pack.Id] = target;
+                foreach (var entry in GlobalPackService.Scan(App.State.Packs.GameDir(pack.Id), folders))
+                    found.Add(new RpAlwaysOn(pack, entry));
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { AppLog.LogError(nameof(ResourcePacksView), ex); }
+        }
+        return (found, targets);
     }
 
     /// <summary>One instance's packs, including the <c>local/</c> folder, minus the copies the launch
@@ -569,7 +615,47 @@ public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
             rows.Add(new ContentRow(InstanceState(installed, model, scope)));
         }
 
+        // Always-on packs last, one row per instance and file: they are not in any stack, so they
+        // never fold into a library row or count towards one.
+        foreach (var always in model.AlwaysOn)
+        {
+            if (scope is not null && always.Pack.Id != scope.Id) continue;
+            rows.Add(new ContentRow(AlwaysOnState(always, model)));
+        }
+
         return rows;
+    }
+
+    private ContentRowState AlwaysOnState(RpAlwaysOn always, RpModel model)
+    {
+        var entry = always.Entry;
+        var folder = FolderOf(always.Key);
+        model.Facts[always.Key] = new RpRowFacts(1, 1, 0, entry.SizeBytes, entry.Modified);
+        var order = entry.Folder.CanOrder && entry.Order > 0 ? $"#{entry.Order} in {entry.Folder.ModName}'s order" : null;
+        return new ContentRowState
+        {
+            Key = always.Key,
+            DisplayName = entry.DisplayName,
+            Item = null,
+            PackId = always.Pack.Id,
+            Path = entry.FilePath,
+            MetaLine = $"{entry.FileName}  ·  {SizeLabel(entry.SizeBytes)}  ·  in {always.Pack.Name}"
+                     + $"  ·  {entry.Folder.RelativeDir}/",
+            CoverageLine = order ?? "always on",
+            CoverageTip = entry.Folder.OrderNote,
+            Tooltip = $"{entry.DisplayName}\n{entry.AlwaysOnLabel} in {always.Pack.Name}, whatever options.txt "
+                    + $"says.\n{entry.Folder.OrderNote}\nIts menu moves it back into resourcepacks/.",
+            AlwaysOnLabel = $"ALWAYS ON · {entry.Folder.LoadedByLabel.ToUpperInvariant()}",
+            AlwaysOnTip = $"{entry.Folder.LoadedByLabel} loads it in every world from {entry.Folder.RelativeDir}/. "
+                        + "It isn't in options.txt, so it can't be switched off here - move it back into "
+                        + "resourcepacks/ from its menu to do that.",
+            FolderLabel = folder ?? "",
+            FolderTip = folder is null ? "" : $"Filed under {folder}",
+            ToggleOn = true,
+            CanToggle = false,
+            ToggleTip = $"Always on: {entry.Folder.LoadedByLabel} loads it in every world.",
+            CanOpen = false
+        };
     }
 
     /// <summary>Are these two paths the same bytes? Name-only while painting from memory.</summary>
@@ -1306,6 +1392,8 @@ public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
     /// pack's place in that instance's load order.</remarks>
     private void OpenRow(ContentRow row)
     {
+        // An always-on pack has no page; its menu is what there is.
+        if (_model.AlwaysOn.Any(a => a.Key == row.Key)) { Reveal(row); return; }
         if (FirstInstalled(row) is { } installed)
         {
             _shell.OpenLocalResourcePackDetail(installed.Info.Key, row.DisplayName);
@@ -1429,13 +1517,100 @@ public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
     private const int IcTop = 0xE74A, IcBottom = 0xE74B, IcOrder = 0xE71D, IcRename = 0xE8AC;
     private const int IcFile = 0xE8E5, IcReveal = 0xE8DA, IcFolder = 0xE8F1, IcShare = 0xE8EC;
     private const int IcCopy = 0xE8C8, IcLocal = 0xE753, IcDelete = 0xE74D;
-    private const int IcMore = 0xE712, IcApply = 0xE895;
+    private const int IcMore = 0xE712, IcApply = 0xE895, IcAlways = 0xE840;
+
+    /// <summary>The menu for a pack in an always-on folder: it has no page and no switch, so moving it
+    /// back, its place in the mod's order, revealing and deleting are what there is.</summary>
+    private ContextMenu BuildAlwaysOnMenu(ContentRow row, RpAlwaysOn always)
+    {
+        var entry = always.Entry;
+        var menu = ContentMenu.New(row.DisplayName, $"{entry.AlwaysOnLabel} in {always.Pack.Name}");
+        menu.Items.Add(ContentMenu.Item("Move to resourcepacks (switched on there)",
+            () => _ = AlwaysOnWriteAsync(always, () =>
+            {
+                var name = App.State.GlobalPacks.MoveToResourcePacks(always.Pack.Id, always.Pack.Name,
+                    always.Pack.MinecraftVersion, entry);
+                return $"{name} is in {always.Pack.Name}'s resourcepacks/ now, switched on at the top.";
+            }), ContentMenu.Glyph(IcOn)));
+        if (entry.Folder.CanOrder)
+        {
+            var sameFolder = _model.AlwaysOn
+                .Where(a => a.Pack.Id == always.Pack.Id && a.Entry.Folder.RelativeDir == entry.Folder.RelativeDir)
+                .Select(a => a.Entry)
+                .ToList();
+            menu.Items.Add(ContentMenu.Item($"Move up in {entry.Folder.ModName}'s order",
+                () => _ = AlwaysOnWriteAsync(always, () =>
+                {
+                    App.State.GlobalPacks.Move(always.Pack.Id, always.Pack.Name, entry, sameFolder, -1);
+                    return $"Moved {entry.DisplayName} up.";
+                }), ContentMenu.Glyph(IcTop)));
+            menu.Items.Add(ContentMenu.Item($"Move down in {entry.Folder.ModName}'s order",
+                () => _ = AlwaysOnWriteAsync(always, () =>
+                {
+                    App.State.GlobalPacks.Move(always.Pack.Id, always.Pack.Name, entry, sameFolder, +1);
+                    return $"Moved {entry.DisplayName} down.";
+                }), ContentMenu.Glyph(IcBottom)));
+        }
+        menu.Items.Add(BuildFolderMenu(row));
+        menu.Items.Add(ContentMenu.Item("Reveal in Explorer", () => Reveal(row), ContentMenu.Glyph(IcReveal)));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(ContentMenu.Item($"Delete from {always.Pack.Name}...", () => _ = DeleteAlwaysOnAsync(always),
+            ContentMenu.Glyph(IcDelete)));
+        return menu;
+    }
+
+    /// <summary>Runs one always-on write off the UI thread, then reloads and says what happened.</summary>
+    private async Task AlwaysOnWriteAsync(RpAlwaysOn always, Func<string> work)
+    {
+        try
+        {
+            var message = await Task.Run(work);
+            ScanCaches.InvalidatePack(always.Pack.Id, ScanScope.ResourcePacks);
+            await ReloadThenSayAsync(message);
+        }
+        catch (GlobalPackRefusedException refused) { Fail(refused.Message); }
+        catch (Exception ex) { Fail("That didn't work.", ex); }
+    }
+
+    private async Task DeleteAlwaysOnAsync(RpAlwaysOn always)
+    {
+        var entry = always.Entry;
+        if (!await AppDialog.ConfirmAsync(_shell, "Delete this pack?",
+                $"{entry.FileName} will be deleted from {entry.Folder.RelativeDir}/ in {always.Pack.Name}, and "
+                + $"{entry.Folder.LoadedByLabel} stops loading it. This can't be undone.",
+                "Delete", danger: true))
+            return;
+        await AlwaysOnWriteAsync(always, () =>
+        {
+            App.State.GlobalPacks.Remove(always.Pack.Id, always.Pack.Name, entry);
+            return $"Deleted {entry.FileName}.";
+        });
+    }
+
+    /// <summary>Moves an instance's own pack into its always-on folder (out of resourcepacks/ and
+    /// options.txt, so it doesn't load twice).</summary>
+    private async Task MakeAlwaysOnAsync(RpInstalled installed, GlobalPackFolder target)
+    {
+        try
+        {
+            await Task.Run(() => App.State.GlobalPacks.MoveFromResourcePacks(
+                installed.Pack.Id, installed.Pack.Name, installed.Info, target));
+            ScanCaches.InvalidatePack(installed.Pack.Id, ScanScope.ResourcePacks);
+            await ReloadThenSayAsync($"{installed.Info.DisplayName} is always on in {installed.Pack.Name} now, "
+                                     + $"loaded by {target.LoadedByLabel}.");
+        }
+        catch (GlobalPackRefusedException refused) { Fail(refused.Message); }
+        catch (Exception ex) { Fail("That didn't work.", ex); }
+    }
 
     /// <summary>The row's menu, built when it is opened.</summary>
     /// <remarks>Left-click on "..." gives the short list, right-click gives everything. Built on demand
     /// because a big ContextMenu in the item template would be built for every row.</remarks>
     private ContextMenu? BuildRowMenu(ContentRow row, bool full)
     {
+        if (_model.AlwaysOn.FirstOrDefault(a => a.Key == row.Key) is { } always)
+            return BuildAlwaysOnMenu(row, always);
+
         var scope = ScopedPack();
         var installed = FirstInstalled(row);
         var menu = ContentMenu.New(row.DisplayName,
@@ -1523,6 +1698,9 @@ public partial class ResourcePacksView : Page, IReusablePage, IRefreshablePage
         if (installed is not null)
             menu.Items.Add(ContentMenu.Item("Copy to another instance...", () => _ = CopyElsewhereAsync(row),
                 ContentMenu.Glyph(IcCopy)));
+        if (installed is not null && _model.AlwaysOnTargets.GetValueOrDefault(installed.Pack.Id) is { } alwaysTarget)
+            menu.Items.Add(ContentMenu.Item($"Make always on in {installed.Pack.Name} ({alwaysTarget.LoadedByLabel})",
+                () => _ = MakeAlwaysOnAsync(installed, alwaysTarget), ContentMenu.Glyph(IcAlways)));
         menu.Items.Add(ContentMenu.Item("Reveal in Explorer", () => Reveal(row), ContentMenu.Glyph(IcReveal)));
         menu.Items.Add(ContentMenu.Item("Copy key", () =>
         {

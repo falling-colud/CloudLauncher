@@ -401,6 +401,10 @@
                 </ScrollViewer>
             </TabItem>
 
+            <TabItem Header="Data packs">
+                <local:DataPacksPanel x:Name="DataPacksTab"/>
+            </TabItem>
+
             <TabItem Header="Backups">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <slate:SlateBorder Style="{StaticResource Card}" Margin="0,18,0,18" Padding="0">

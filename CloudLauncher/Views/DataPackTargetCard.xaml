@@ -1,0 +1,86 @@
+<UserControl x:Class="CloudLauncher.Views.DataPackTargetCard"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:anim="clr-namespace:CloudLauncher.Animations">
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Padding="24" Width="560" MaxHeight="640">
+        <slate:SlateBorder.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </slate:SlateBorder.Effect>
+        <DockPanel>
+            <StackPanel DockPanel.Dock="Top">
+                <TextBlock x:Name="TitleText" Style="{StaticResource H2}" TextWrapping="Wrap" Text="Install data pack"/>
+                <TextBlock x:Name="FileText" Style="{StaticResource Caption}" Margin="0,4,0,0"
+                           TextTrimming="CharacterEllipsis"/>
+                <TextBlock Style="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,10,0,0"
+                           Text="A data pack belongs to a world. Pick the instance, then tick the worlds that get it."/>
+
+                <TextBlock Text="Instance" Style="{StaticResource Caption}" Margin="0,14,0,4"
+                           Foreground="{DynamicResource TextSecondaryBrush}"/>
+                <ComboBox x:Name="InstanceBox" DisplayMemberPath="Name" SelectionChanged="OnInstanceChanged"/>
+                <TextBlock x:Name="VersionWarning" Style="{StaticResource Caption}" Margin="0,6,0,0"
+                           TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}" Visibility="Collapsed"/>
+            </StackPanel>
+
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+                <Button Content="Cancel" Style="{StaticResource SubtleButton}" Margin="0,0,8,0" Click="OnCancel"/>
+                <Button x:Name="InstallButton" Content="Install" Style="{StaticResource AccentButton}"
+                        Click="OnInstall" IsEnabled="False"/>
+            </StackPanel>
+
+            <StackPanel DockPanel.Dock="Bottom">
+                <TextBlock x:Name="SummaryText" Style="{StaticResource Caption}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <StackPanel Margin="0,14,0,0">
+                <!--  Only when the instance has a mod that loads packs in every world. The caption sits
+                outside the CheckBox: the app's CheckBox template can't wrap text.  -->
+                <slate:SlateBorder x:Name="GlobalCard" Background="{DynamicResource Surface1Brush}"
+                        BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                        CornerRadius="8" Padding="12" Margin="0,0,0,10" Visibility="Collapsed">
+                    <StackPanel>
+                        <CheckBox x:Name="GlobalBox" Content="Every world, new ones too"
+                                  Checked="OnTickChanged" Unchecked="OnTickChanged"/>
+                        <TextBlock x:Name="GlobalNote" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                   Margin="24,4,0,0"/>
+                    </StackPanel>
+                </slate:SlateBorder>
+                <TextBlock x:Name="NoGlobalNote" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                           Margin="0,0,0,10" Visibility="Collapsed"
+                           Text="Without a mod like Paxi, Global Packs or Open Loader in this instance, a data pack only goes into the worlds you tick here - worlds you make later won't have it."/>
+
+                <DockPanel Margin="0,0,0,6">
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button Content="All" Style="{StaticResource LinkButton}" Click="OnSelectAll" Margin="0,0,10,0"/>
+                        <Button Content="None" Style="{StaticResource LinkButton}" Click="OnSelectNone"/>
+                    </StackPanel>
+                    <TextBlock Text="Worlds" Style="{StaticResource H3}"/>
+                </DockPanel>
+                <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
+                        BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
+                        CornerRadius="8" Padding="10,6">
+                    <Grid MinHeight="60">
+                        <ScrollViewer MaxHeight="240" VerticalScrollBarVisibility="Auto" anim:Animate.SmoothScroll="True">
+                            <ItemsControl x:Name="WorldList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="0,4">
+                                            <CheckBox IsChecked="{Binding IsChecked}" Content="{Binding Name}"
+                                                      Checked="OnTickChanged" Unchecked="OnTickChanged"/>
+                                            <TextBlock Text="{Binding Meta}" Style="{StaticResource Caption}"
+                                                       Margin="24,2,0,0" TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <TextBlock x:Name="WorldsEmptyText" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                   TextAlignment="Center" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                   MaxWidth="420" Visibility="Collapsed"/>
+                    </Grid>
+                </slate:SlateBorder>
+            </StackPanel>
+        </DockPanel>
+    </slate:SlateBorder>
+</UserControl>

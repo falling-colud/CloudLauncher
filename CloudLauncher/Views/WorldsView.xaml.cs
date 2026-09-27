@@ -1301,6 +1301,13 @@ public partial class WorldsView : Page, IReusablePage, IRefreshablePage
 
     private void OnBrowse(object sender, RoutedEventArgs e) => _shell.OpenWorldBrowser();
 
+    /// <summary>The data pack store. Data packs live inside worlds, so this page is where the store
+    /// is found; the worlds are picked after a download.</summary>
+    /// <remarks>The instance in scope starts selected and sets the Minecraft version filter. Each
+    /// world's own page lists its packs and opens the same store with that world ticked.</remarks>
+    private void OnBrowseDataPacks(object sender, RoutedEventArgs e) =>
+        _shell.OpenDataPackBrowser(_packs, _scopePackId, preferredWorldDir: null, pushed: false);
+
     /// <summary>
     /// The Import flow: pick the .zip or the save folder, pick the instances (or none), publish it if
     /// you want.

@@ -120,7 +120,8 @@
 
                     <!--  The pinned first row, in its own box above the list so "no instance" doesn't
                     look like one more instance to tick.  -->
-                    <slate:SlateBorder Grid.Row="0" Background="{DynamicResource Surface1Brush}"
+                    <StackPanel Grid.Row="0">
+                    <slate:SlateBorder Background="{DynamicResource Surface1Brush}"
                             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
                             CornerRadius="8" Padding="12" Margin="0,0,0,10">
                         <CheckBox x:Name="LibraryOnlyBox" ToolTipService.ShowOnDisabled="True"
@@ -132,6 +133,19 @@
                             </StackPanel>
                         </CheckBox>
                     </slate:SlateBorder>
+                    <!--  Resource packs only, and only when a ticked-able instance has a mod such as
+                    Paxi. The caption sits outside the CheckBox, whose template can't wrap.  -->
+                    <slate:SlateBorder x:Name="AlwaysOnCard" Background="{DynamicResource Surface1Brush}"
+                            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                            CornerRadius="8" Padding="12" Margin="0,0,0,10" Visibility="Collapsed">
+                        <StackPanel>
+                            <CheckBox x:Name="AlwaysOnBox" Content="Always on, where the instance has a mod for it"
+                                      Checked="OnTargetTicked" Unchecked="OnTargetTicked"/>
+                            <TextBlock x:Name="AlwaysOnNote" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                       Margin="24,4,0,0"/>
+                        </StackPanel>
+                    </slate:SlateBorder>
+                    </StackPanel>
 
                     <slate:SlateBorder Grid.Row="1" Background="{DynamicResource Surface1Brush}"
                             BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
