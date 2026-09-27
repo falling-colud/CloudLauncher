@@ -58,6 +58,38 @@
                 </DataTrigger>
             </Style.Triggers>
         </Style>
+
+        <!-- The "edited" badge: changed since the launcher first saw the file. -->
+        <Style x:Key="EditedBadge" TargetType="Border" BasedOn="{StaticResource Pill}">
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+        </Style>
+        <Style x:Key="EditedBadgeText" TargetType="TextBlock" BasedOn="{StaticResource PillText}">
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}"/>
+        </Style>
+
+        <!-- How the file compares with its copy in defaultconfigs/. -->
+        <Style x:Key="DefaultsBadge" TargetType="Border" BasedOn="{StaticResource Pill}">
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding DefaultsStateName}" Value="Differs">
+                    <Setter Property="Background" Value="{DynamicResource WarningBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding DefaultsStateName}" Value="Same">
+                    <Setter Property="Background" Value="{DynamicResource SuccessBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="DefaultsBadgeText" TargetType="TextBlock" BasedOn="{StaticResource PillText}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding DefaultsStateName}" Value="Differs">
+                    <Setter Property="Foreground" Value="White"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding DefaultsStateName}" Value="Same">
+                    <Setter Property="Foreground" Value="White"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
     </Page.Resources>
 
     <Grid>
@@ -73,7 +105,7 @@
 
         <!-- Header -->
                 <!-- Row 0 - title and subtitle; the actions live in the bar below, as on Instances. -->
-        <DockPanel Grid.Row="0" Style="{StaticResource PageHeaderPanel}">
+        <DockPanel x:Name="HeaderPanel" Grid.Row="0" Style="{StaticResource PageHeaderPanel}">
             <StackPanel>
                 <TextBlock Style="{StaticResource H1}" Text="Config &amp; scripts"/>
                 <TextBlock Style="{StaticResource PageSubtitle}"
@@ -82,7 +114,7 @@
         </DockPanel>
 
         <!-- Row 1 - actions left, search and the icon-only utilities right. -->
-        <Grid Grid.Row="1" Style="{StaticResource PageFilterBar}">
+        <Grid x:Name="FilterBar" Grid.Row="1" Style="{StaticResource PageFilterBar}">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
@@ -106,6 +138,29 @@
                         <TextBlock Text="New file..." VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
+                <Button x:Name="DefaultsButton" Style="{StaticResource HeaderActionButton}" Click="OnDefaultsMenu"
+                        ToolTip="Put configs into defaultconfigs/, where FML fills in a missing config from"
+                        Margin="0,3,8,3">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE74E;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="To defaultconfigs" VerticalAlignment="Center"/>
+                        <TextBlock Text="&#xE70D;" FontFamily="{DynamicResource IconFont}" FontSize="9"
+                                   Margin="6,1,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <Button.ContextMenu>
+                        <ContextMenu Opened="OnDefaultsMenuOpened">
+                            <MenuItem x:Name="DefaultsCopySelectedItem" Header="Copy the selected files"
+                                      Click="OnCopySelectedToDefaults"/>
+                            <MenuItem x:Name="DefaultsCopyEditedItem" Header="Copy every edited config"
+                                      Click="OnCopyEditedToDefaults"/>
+                            <Separator/>
+                            <MenuItem x:Name="DefaultsMoveSelectedItem"
+                                      Header="Move the selected files (take them out of config)"
+                                      Click="OnMoveSelectedToDefaults"/>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
             </WrapPanel>
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -119,11 +174,11 @@
             </StackPanel>
         </Grid>
 
-        <Border Grid.Row="2" Style="{StaticResource PageDivider}"/>
+        <Border x:Name="Divider" Grid.Row="2" Style="{StaticResource PageDivider}"/>
 
         <!-- Row 3 - sort first, then the one on/off filter, then which instance's files, then the
              kind chips: the same strip, in the same place, as the one under the Instances actions. -->
-        <Grid Grid.Row="3" Margin="28,4,28,16">
+        <Grid x:Name="ChipRow" Grid.Row="3" Margin="28,4,28,16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -155,23 +210,37 @@
                           ToolTip="Which instance's files to list. With 'All instances' every file is listed once, with a badge saying how many instances have it."/>
             </StackPanel>
 
-            <ItemsControl x:Name="KindStrip" Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center">
-                <ItemsControl.ItemsPanel>
-                    <ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate>
-                </ItemsControl.ItemsPanel>
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Border Style="{StaticResource KindChip}" ToolTip="{Binding Hint}"
-                                MouseLeftButtonUp="OnKindChipClick" Tag="{Binding}">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="{Binding Label}" Style="{StaticResource KindChipText}"/>
-                                <TextBlock Text="{Binding CountLabel}" Style="{StaticResource KindChipText}"
-                                           Margin="6,0,0,0" Opacity="0.75"/>
-                            </StackPanel>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
+            <WrapPanel Grid.Column="1" Orientation="Horizontal" Margin="12,0,0,0" VerticalAlignment="Center">
+                <ItemsControl x:Name="KindStrip" VerticalAlignment="Center">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Style="{StaticResource KindChip}" ToolTip="{Binding Hint}"
+                                    MouseLeftButtonUp="OnKindChipClick" Tag="{Binding}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="{Binding Label}" Style="{StaticResource KindChipText}"/>
+                                    <TextBlock Text="{Binding CountLabel}" Style="{StaticResource KindChipText}"
+                                               Margin="6,0,0,0" Opacity="0.75"/>
+                                </StackPanel>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <!-- An on/off filter beside the kinds rather than one of them: an edited file is still
+                     a config or a script. Same look, so it reads as part of the strip. -->
+                <Border x:Name="EditedChip" Style="{StaticResource KindChip}" ToolTip="{Binding Hint}"
+                        MouseLeftButtonUp="OnEditedChipClick">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE70F;" FontFamily="{DynamicResource IconFont}"
+                                   Style="{StaticResource KindChipText}" FontSize="11" Margin="0,0,6,0"/>
+                        <TextBlock Text="{Binding Label}" Style="{StaticResource KindChipText}"/>
+                        <TextBlock Text="{Binding CountLabel}" Style="{StaticResource KindChipText}"
+                                   Margin="6,0,0,0" Opacity="0.75"/>
+                    </StackPanel>
+                </Border>
+            </WrapPanel>
         </Grid>
 
         <!-- Content search bar: only visible while the user is grepping file contents. -->
@@ -198,7 +267,7 @@
         </slate:SlateBorder>
 
         <!-- File list + detail -->
-        <Grid Grid.Row="5" Margin="28,0,28,16">
+        <Grid x:Name="ListArea" Grid.Row="5" Margin="28,0,28,16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="1.05*" MinWidth="380"/>
                 <ColumnDefinition Width="14"/>
@@ -245,6 +314,14 @@
                                                 </MenuItem.Icon>
                                             </MenuItem>
                                             <MenuItem Header="Copy the whole folder to other instances..." Click="OnRowCopyFolder"/>
+                                            <Separator/>
+                                            <MenuItem Header="Copy to defaultconfigs..." Click="OnRowCopyToDefaults">
+                                                <MenuItem.Icon>
+                                                    <TextBlock Text="&#xE74E;" FontFamily="{DynamicResource IconFont}" FontSize="12"/>
+                                                </MenuItem.Icon>
+                                            </MenuItem>
+                                            <MenuItem Header="Compare with defaultconfigs..." Click="OnRowCompareDefaults"/>
+                                            <MenuItem Header="Mark as not edited" Click="OnRowMarkNotEdited"/>
                                             <Separator/>
                                             <MenuItem Header="Pin / unpin" Click="OnRowPin">
                                                 <MenuItem.Icon>
@@ -302,7 +379,8 @@
                                         </slate:SlateBorder>
 
                                         <StackPanel VerticalAlignment="Center">
-                                            <StackPanel Orientation="Horizontal">
+                                            <!-- Wraps rather than clips when a narrow list meets three badges. -->
+                                            <WrapPanel Orientation="Horizontal">
                                                 <TextBlock Text="{Binding FileName}" FontWeight="SemiBold"
                                                            TextTrimming="CharacterEllipsis" MaxWidth="240"
                                                            Opacity="{Binding MissingOpacity}"/>
@@ -312,12 +390,23 @@
                                                     <TextBlock Text="{Binding StateLabel}"
                                                                Style="{StaticResource StateBadgeText}"/>
                                                 </Border>
+                                                <Border Style="{StaticResource EditedBadge}"
+                                                        Visibility="{Binding EditedVisibility}"
+                                                        ToolTip="{Binding EditedHint}">
+                                                    <TextBlock Text="EDITED" Style="{StaticResource EditedBadgeText}"/>
+                                                </Border>
+                                                <Border Style="{StaticResource DefaultsBadge}"
+                                                        Visibility="{Binding DefaultsVisibility}"
+                                                        ToolTip="{Binding DefaultsHint}">
+                                                    <TextBlock Text="{Binding DefaultsLabel}"
+                                                               Style="{StaticResource DefaultsBadgeText}"/>
+                                                </Border>
                                                 <TextBlock Text="&#xE7BA;" FontFamily="{DynamicResource IconFont}"
                                                            FontSize="11" Margin="8,0,0,0" VerticalAlignment="Center"
                                                            Foreground="{DynamicResource WarningBrush}"
                                                            Visibility="{Binding ErrorVisibility}"
                                                            ToolTip="{Binding ErrorHint}"/>
-                                            </StackPanel>
+                                            </WrapPanel>
                                             <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
                                                        Margin="0,2,0,0" TextTrimming="CharacterEllipsis"
                                                        ToolTip="{Binding FullPathHint}"/>
@@ -362,6 +451,9 @@
                                             <MenuItem Header="Copy the whole folder to other instances..." Click="OnRowCopyFolder"/>
                                             <MenuItem Header="Restore a backup..." Click="OnRowRestoreBackup"/>
                                             <Separator/>
+                                            <MenuItem Header="Move to defaultconfigs (take it out of config)..."
+                                                      Click="OnDetailMoveToDefaults"/>
+                                            <Separator/>
                                             <MenuItem Header="Rename..." Click="OnRowRename"/>
                                             <MenuItem Header="Delete..." Click="OnRowDelete"/>
                                         </ContextMenu>
@@ -394,6 +486,33 @@
                                 </StackPanel>
                                 <TextBlock x:Name="ErrorText" Style="{StaticResource Caption}" Margin="0,6,0,0"
                                            TextWrapping="Wrap" FontFamily="Consolas"/>
+                            </StackPanel>
+                        </slate:SlateBorder>
+
+                        <!-- Whether this file has been edited, and how it stands against defaultconfigs. -->
+                        <slate:SlateBorder x:Name="EditPanel" DockPanel.Dock="Top" Visibility="Collapsed" Margin="0,12,0,0"
+                                Background="{DynamicResource Surface2Brush}"
+                                BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
+                                CornerRadius="8" Padding="12,9">
+                            <StackPanel>
+                                <TextBlock x:Name="EditHeader" FontWeight="SemiBold" FontSize="12"
+                                           TextWrapping="Wrap"/>
+                                <TextBlock x:Name="EditText" Style="{StaticResource Caption}" Margin="0,4,0,0"
+                                           TextWrapping="Wrap"/>
+                                <TextBlock x:Name="DefaultsText" Style="{StaticResource Caption}" Margin="0,4,0,0"
+                                           TextWrapping="Wrap"/>
+                                <WrapPanel Margin="0,4,0,0">
+                                    <Button x:Name="EditCompareDefaultsButton" Content="Compare with defaultconfigs"
+                                            Style="{StaticResource SubtleButton}" Padding="10,4" Margin="0,4,6,0"
+                                            Click="OnDetailCompareDefaults"/>
+                                    <Button x:Name="EditToDefaultsButton" Content="Copy to defaultconfigs"
+                                            Style="{StaticResource SubtleButton}" Padding="10,4" Margin="0,4,6,0"
+                                            Click="OnDetailCopyToDefaults"/>
+                                    <Button x:Name="EditResetButton" Content="Mark as not edited"
+                                            Style="{StaticResource SubtleButton}" Padding="10,4" Margin="0,4,6,0"
+                                            Click="OnDetailMarkNotEdited"
+                                            ToolTip="Take the file as it is now as its original, so it no longer shows as edited"/>
+                                </WrapPanel>
                             </StackPanel>
                         </slate:SlateBorder>
 
@@ -505,7 +624,7 @@
         </Grid>
 
         <!-- Status line -->
-        <Border Grid.Row="6" Style="{StaticResource PageStatusBar}">
+        <Border x:Name="StatusBar" Grid.Row="6" Style="{StaticResource PageStatusBar}">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>

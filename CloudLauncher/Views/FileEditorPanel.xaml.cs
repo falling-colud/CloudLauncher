@@ -706,6 +706,9 @@ public partial class FileEditorPanel : UserControl
 
         try
         {
+            // Before the write, so a config never seen by the Config pages still has its original
+            // recorded and this save shows as an edit.
+            ConfigEditTracker.RememberBeforeWrite(App.State.Packs, _packId, doc.Path);
             var writtenAt = TextFileService.Write(doc.Path, doc.Text, doc.Original);
             doc.Original = doc.Original with { Text = doc.Text, WrittenAtUtc = writtenAt };
             doc.IsDirty = false;

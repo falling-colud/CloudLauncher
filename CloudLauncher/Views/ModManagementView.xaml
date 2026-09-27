@@ -517,6 +517,12 @@
                 <Grid x:Name="PlanHost" Margin="0,12,0,0"/>
             </TabItem>
 
+            <!-- ───────────────────────── CONFIGS ───────────────────────── -->
+            <!-- The Config & scripts page pinned to this instance, built on first view. -->
+            <TabItem Header="Configs">
+                <Frame x:Name="ConfigsFrame" NavigationUIVisibility="Hidden" Margin="0,12,0,0"/>
+            </TabItem>
+
             <!-- ───────────────────────── ADVANCED ───────────────────────── -->
             <TabItem Header="Advanced">
                 <ScrollViewer Margin="0,12,0,0" VerticalScrollBarVisibility="Auto">

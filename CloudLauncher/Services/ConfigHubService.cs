@@ -24,7 +24,7 @@ namespace CloudLauncher.Services;
 /// </remarks>
 public static class ConfigHubService
 {
-    /// <summary>Which of the page's four sources a file came from. Drives the kind filter and the
+    /// <summary>Which of the page's folders a file came from. Drives the kind filter and the
     /// badge on each row.</summary>
     public enum FileKind
     {
@@ -37,7 +37,10 @@ public static class ConfigHubService
         /// with the real configs, so it's listed next to them.</summary>
         DefaultConfigs,
         /// <summary><c>logs/kubejs/</c>: where KubeJS script errors land.</summary>
-        KubeJsLog
+        KubeJsLog,
+        /// <summary><c>saves/&lt;world&gt;/serverconfig/</c>: one world's server settings. Last so the
+        /// byte stored in the scan cache keeps its meaning for the older kinds.</summary>
+        ServerConfig
     }
 
     /// <summary>One file in one instance.</summary>
@@ -93,8 +96,9 @@ public static class ConfigHubService
     public static Task WarmAsync() => Task.WhenAll(
         FileCache.EnsureLoadedAsync(), GroupCache.EnsureLoadedAsync(), KubeCache.EnsureLoadedAsync());
 
-    /// <summary>The folders the page covers, and the kind each produces. Order matters only in that
-    /// it is the order files appear in before sorting.</summary>
+    /// <summary>The fixed folders the page covers, and the kind each produces. Order matters only in
+    /// that it is the order files appear in before sorting. Each world's <c>serverconfig/</c> is added
+    /// per instance by <see cref="RootsOf"/>.</summary>
     private static readonly (string Relative, FileKind Kind)[] Roots =
     [
         ("config",         FileKind.Config),
@@ -102,6 +106,51 @@ public static class ConfigHubService
         ("defaultconfigs", FileKind.DefaultConfigs),
         ("logs/kubejs",    FileKind.KubeJsLog),
     ];
+
+    /// <summary>
+    /// Every folder walked in one instance: the fixed <see cref="Roots"/>, then the
+    /// <c>serverconfig/</c> of each world that has one.
+    /// </summary>
+    /// <remarks>
+    /// <para>Server configs are per world on Forge, and FML fills a new world's from
+    /// <c>defaultconfigs/</c>, so they belong next to the other two. Finding them costs one read of
+    /// <c>saves/</c>; the worlds themselves are never walked.</para>
+    /// <para>Sorted by name so the fingerprint built from this list is stable. A world linked in from
+    /// elsewhere is skipped, as the walk skips any linked folder.</para>
+    /// </remarks>
+    private static List<(string Relative, FileKind Kind)> RootsOf(string gameDir)
+    {
+        var roots = new List<(string, FileKind)>(Roots);
+        try
+        {
+            var saves = Path.Combine(gameDir, "saves");
+            if (!Directory.Exists(saves)) return roots;
+            foreach (var world in new DirectoryInfo(saves).GetDirectories().OrderBy(d => d.Name, StringComparer.Ordinal))
+            {
+                if (world.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                if (!Directory.Exists(Path.Combine(world.FullName, "serverconfig"))) continue;
+                roots.Add(($"saves/{world.Name}/serverconfig", FileKind.ServerConfig));
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return roots;
+    }
+
+    /// <summary>Which kind a game-relative path would be listed as, or null when it lies outside
+    /// every folder the page covers.</summary>
+    public static FileKind? KindForPath(string relativePath)
+    {
+        var rel = relativePath.Replace('\\', '/');
+        if (rel.StartsWith("logs/kubejs/", StringComparison.OrdinalIgnoreCase)) return FileKind.KubeJsLog;
+        foreach (var (root, kind) in Roots)
+            if (rel.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase)) return kind;
+        var parts = rel.Split('/');
+        return parts.Length >= 4 && parts[0].Equals("saves", StringComparison.OrdinalIgnoreCase)
+                                 && parts[2].Equals("serverconfig", StringComparison.OrdinalIgnoreCase)
+            ? FileKind.ServerConfig
+            : null;
+    }
 
     /// <summary>
     /// Folder names never walked into. They hold generated dumps, not hand-edited files; KubeJS's
@@ -307,7 +356,7 @@ public static class ConfigHubService
     }
 
     /// <summary>
-    /// What an instance's four config roots look like, cheaply: exists, own write time, and the
+    /// What an instance's config roots look like, cheaply: exists, own write time, and the
     /// recursive file count, folder count and byte total of each. It walks the tree, so it is paid
     /// only by the background rescan and never before serving a remembered list.
     /// </summary>
@@ -316,7 +365,7 @@ public static class ConfigHubService
     private static string FingerprintOf(string gameDir, CancellationToken ct)
     {
         var fingerprint = new Fingerprint();
-        foreach (var (relative, _) in Roots)
+        foreach (var (relative, _) in RootsOf(gameDir))
         {
             var root = Path.Combine(gameDir, relative.Replace('/', Path.DirectorySeparatorChar));
             fingerprint.Add(relative, RootFingerprint.Compute(root, SkipFolders, MaxWalkDepth, ct));
@@ -400,7 +449,7 @@ public static class ConfigHubService
     private static List<Entry> WalkPack(PackSummary pack, string gameDir, AppSettings settings, CancellationToken ct)
     {
         var files = new List<Entry>();
-        foreach (var (relative, kind) in Roots)
+        foreach (var (relative, kind) in RootsOf(gameDir))
         {
             var root = Path.Combine(gameDir, relative.Replace('/', Path.DirectorySeparatorChar));
             if (!Directory.Exists(root)) continue;
@@ -950,6 +999,127 @@ public static class ConfigHubService
                    .ToList();
     }
 
+    // ── defaultconfigs ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Where FML looks for the pack's default of this file, game-relative, or null when it never
+    /// does.
+    /// </summary>
+    /// <remarks>
+    /// <para>Read from FML itself (NeoForge's FML 4.0 for 1.21.1; Forge's fmlcore for 1.20.1 and
+    /// 1.21.1): when a mod's config file is missing, FML copies
+    /// <c>defaultconfigs/&lt;file name&gt;</c> into place before it would write the mod's built-in
+    /// defaults. The file name is the config's own, relative to the folder it loads from, so a
+    /// subfolder is kept: <c>config/create/client.toml</c> becomes
+    /// <c>defaultconfigs/create/client.toml</c>. That holds for every type: startup, client, common
+    /// and server.</para>
+    /// <para>Server configs load from <c>config/</c> on NeoForge 1.21, with a world's
+    /// <c>serverconfig/</c> as an override read in place; on Forge they load from the world's
+    /// <c>serverconfig/</c>. Either way the default is looked up by the same name, so
+    /// <c>saves/W/serverconfig/foo-server.toml</c> becomes <c>defaultconfigs/foo-server.toml</c>.</para>
+    /// <para>Only <c>.toml</c>: FML's configs are always TOML, and a mod that writes JSON or
+    /// <c>.cfg</c> reads its own file from <c>config/</c> and never looks here. <c>fml.toml</c> is
+    /// FML's own settings, read before any of this.</para>
+    /// </remarks>
+    public static string? DefaultConfigsPath(Entry entry)
+    {
+        var name = entry.Kind switch
+        {
+            FileKind.Config => entry.RelativePath["config/".Length..],
+            FileKind.ServerConfig => entry.RelativePath.Split('/', 4) is { Length: 4 } parts ? parts[3] : null,
+            _ => null
+        };
+        if (string.IsNullOrEmpty(name) || !name.EndsWith(".toml", StringComparison.OrdinalIgnoreCase)) return null;
+        if (name.Equals("fml.toml", StringComparison.OrdinalIgnoreCase)) return null;
+        return "defaultconfigs/" + name;
+    }
+
+    /// <summary>Why an instance on <paramref name="loader"/> has no defaultconfigs, or null when it
+    /// has.</summary>
+    public static string? NoDefaultConfigsReason(LoaderKind loader) => loader switch
+    {
+        LoaderKind.Forge or LoaderKind.NeoForge => null,
+        LoaderKind.Fabric =>
+            "Fabric and Quilt have no defaultconfigs folder. Each mod reads its own file in config/, " +
+            "so that is where a pack's settings go.",
+        _ => "Without a mod loader nothing reads defaultconfigs."
+    };
+
+    /// <summary>Why one file can't go to defaultconfigs, for the list of skipped files.</summary>
+    public static string WhyNotDefaultConfigs(Entry entry) => entry.Kind switch
+    {
+        FileKind.DefaultConfigs => "already in defaultconfigs",
+        FileKind.KubeJs or FileKind.KubeJsLog => "KubeJS files are not configs FML loads",
+        _ when entry.FileName.Equals("fml.toml", StringComparison.OrdinalIgnoreCase) =>
+            "FML reads its own fml.toml before defaultconfigs",
+        _ => "not a .toml file - the mod reads it from config/ only"
+    };
+
+    /// <param name="TargetRelativePath">Game-relative, under <c>defaultconfigs/</c>.</param>
+    /// <param name="Exists">A copy is already there and would be replaced (after a backup).</param>
+    /// <param name="Identical">That copy is byte-identical already, so there is nothing to do.</param>
+    public sealed record DefaultsItem(Entry Source, string TargetRelativePath, bool Exists, bool Identical);
+
+    /// <summary>What copying <paramref name="entries"/> into defaultconfigs would do. Files FML never
+    /// reads from there are left out; the caller lists them with <see cref="WhyNotDefaultConfigs"/>.
+    /// Call from a background thread: it hashes every copy that already exists.</summary>
+    public static List<DefaultsItem> PreviewDefaults(string gameDir, IEnumerable<Entry> entries)
+    {
+        var items = new List<DefaultsItem>();
+        foreach (var entry in entries)
+        {
+            if (DefaultConfigsPath(entry) is not { } target) continue;
+            var dest = Path.Combine(gameDir, target.Replace('/', Path.DirectorySeparatorChar));
+            var exists = File.Exists(dest);
+            items.Add(new DefaultsItem(entry, target, exists, exists && SameBytes(entry.FullPath, dest)));
+        }
+        return items;
+    }
+
+    /// <summary>
+    /// Copies each item's file into defaultconfigs, backing up a copy it replaces the same way
+    /// <see cref="Copy"/> does. With <paramref name="removeOriginal"/> the source is deleted once its
+    /// copy is written, so FML fills it back in from defaultconfigs on the next start. Call from a
+    /// background thread.
+    /// </summary>
+    /// <remarks>Two sources can map to one target (the same server config in two worlds); the later
+    /// one wins, and its earlier copy is still backed up.</remarks>
+    public static CopyResult CopyToDefaults(
+        Guid packId, string gameDir, IReadOnlyList<DefaultsItem> items, bool removeOriginal, CancellationToken ct)
+    {
+        // Invariant culture: BackupTakenUtc parses this stamp back to order the backups.
+        var stamp = TimeFormat.StampNow();
+        var copied = 0;
+        var backedUp = 0;
+        var failures = new List<string>();
+
+        foreach (var item in items)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (item.Identical && !removeOriginal) continue;
+            var dest = Path.Combine(gameDir, item.TargetRelativePath.Replace('/', Path.DirectorySeparatorChar));
+            try
+            {
+                if (!item.Identical)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                    if (File.Exists(dest))
+                    {
+                        File.Copy(dest, $"{dest}.bak-{stamp}", overwrite: true);
+                        backedUp++;
+                    }
+                    File.Copy(item.Source.FullPath, dest, overwrite: true);
+                    copied++;
+                }
+                // Only once the copy is known to be there: a failed copy must never cost the original.
+                if (removeOriginal && SameBytes(item.Source.FullPath, dest)) File.Delete(item.Source.FullPath);
+            }
+            catch (Exception ex) { failures.Add($"{item.Source.RelativePath}: {ex.Message}"); }
+        }
+        Invalidate(packId);
+        return new CopyResult(copied, backedUp, failures);
+    }
+
     // ── small helpers the page shares with its dialogs ───────────────────────
 
     public static string FormatSize(long bytes) => bytes switch
@@ -970,6 +1140,7 @@ public static class ConfigHubService
         FileKind.KubeJs => "KubeJS",
         FileKind.DefaultConfigs => "Default",
         FileKind.KubeJsLog => "Log",
+        FileKind.ServerConfig => "Server config",
         _ => ""
     };
 

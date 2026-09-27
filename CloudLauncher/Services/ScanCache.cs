@@ -178,7 +178,7 @@ public sealed record CachedScan<T>(
 public enum ScanScope
 {
     None = 0,
-    /// <summary>config/, kubejs/, defaultconfigs/, logs/kubejs/, and the cross-instance compare.</summary>
+    /// <summary>config/, kubejs/, defaultconfigs/, logs/kubejs/, each world's serverconfig/, and the cross-instance compare.</summary>
     Config = 1,
     Worlds = 2,
     ResourcePacks = 4,

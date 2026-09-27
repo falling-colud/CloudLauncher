@@ -286,6 +286,8 @@ public sealed class PackRuleService
         new() { Pattern = ".cloudlauncher/", Action = RuleAction.Shared  }, // mod flags travel with the pack
         new() { Pattern = "mods/",          Action = RuleAction.Shared  },
         new() { Pattern = "config/",        Action = RuleAction.Shared  },
+        // FML fills a missing config in from here, so a pack's defaults go wherever config/ goes.
+        new() { Pattern = "defaultconfigs/", Action = RuleAction.Shared  },
         new() { Pattern = "scripts/",       Action = RuleAction.Shared  },
         new() { Pattern = "resources/",     Action = RuleAction.Shared  },
         new() { Pattern = "resourcepacks/", Action = RuleAction.Shared  },

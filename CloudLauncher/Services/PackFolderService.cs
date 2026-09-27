@@ -718,6 +718,9 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
 
         var total = manifest.Entries.Count;
         var i = 0;
+        // Files this download replaced or brought in, so the Config pages take them as the new
+        // original rather than as local edits (see ConfigEditTracker.ForgetSynced).
+        var replaced = new List<string>();
         foreach (var e in manifest.Entries)
         {
             ct.ThrowIfCancellationRequested();
@@ -761,6 +764,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
                         $"Downloaded '{e.RelativePath}' failed integrity check (expected {e.Hash}, got {actualHash}).");
 
                 File.Move(tmp, abs, overwrite: true);
+                replaced.Add(e.RelativePath);
                 // A path that had no local copy is one this download brought in, so a stop can
                 // take it back out. A replaced file stays: its new copy is complete and verified.
                 if (localHash is null) job?.TrackCreatedFile(abs);
@@ -810,6 +814,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         }
 
         SaveSyncManifestLock(packId, manifest.Entries.Select(e => e.RelativePath));
+        ConfigEditTracker.ForgetSynced(PackRoot(packId), replaced);
         // Drop the cached mods.json / plans.json so the synced flags, categories and planning boards
         // are read from disk next time instead of being overwritten by stale in-memory copies.
         _modMetadata?.Invalidate(packId);

@@ -8,6 +8,8 @@ using CloudLauncher.Shared;
 using Kind = CloudLauncher.Services.ConfigHubService.FileKind;
 using Entry = CloudLauncher.Services.ConfigHubService.Entry;
 using GroupState = CloudLauncher.Services.ConfigHubService.GroupState;
+using FileEdit = CloudLauncher.Services.ConfigEditTracker.FileEdit;
+using DefaultCopyState = CloudLauncher.Services.ConfigEditTracker.DefaultCopyState;
 
 namespace CloudLauncher.Views;
 
@@ -16,15 +18,31 @@ namespace CloudLauncher.Views;
 /// inside each instance from one place.
 /// </summary>
 /// <remarks>
-/// Each row is a game-relative path (<c>config/jei/jei-client.ini</c>) with the instances that have
-/// a file there and whether their copies match. All disk work runs in <see cref="Task.Run"/> behind
-/// <see cref="_workCts"/>; <see cref="ConfigHubService"/> remembers scans across launches so the
-/// first frame shows the last results. Counts and empty panels go through <see cref="PageState"/>,
-/// and nothing is shown before a scan has finished.
+/// <para>Each row is a game-relative path (<c>config/jei/jei-client.ini</c>) with the instances that
+/// have a file there and whether their copies match. All disk work runs in <see cref="Task.Run"/>
+/// behind <see cref="_workCts"/>; <see cref="ConfigHubService"/> remembers scans across launches so
+/// the first frame shows the last results. Counts and empty panels go through
+/// <see cref="PageState"/>, and nothing is shown before a scan has finished.</para>
+/// <para>The same page is the Configs tab of one instance's Modpack Management, pinned to that
+/// instance (see <see cref="_scope"/>). It still scans every instance, so compare and "copy to other
+/// instances" work as they do here, and the two share one scan cache.</para>
+/// <para>Every scan also asks <see cref="ConfigEditTracker"/> which files have been edited since the
+/// launcher first saw them, which drives the Edited chip and the defaultconfigs actions.</para>
 /// </remarks>
 public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
 {
     private readonly MainWindow _shell;
+
+    /// <summary>The one instance this page lists when it is an instance's Configs tab, or null for the
+    /// cross-instance page. Replaces the instance picker.</summary>
+    private readonly PackSummary? _scope;
+
+    /// <summary>Which files are edited and how they stand against defaultconfigs. Replaced by every
+    /// scan, like <see cref="_scan"/>.</summary>
+    private ConfigEditTracker.Snapshot _edits = ConfigEditTracker.Snapshot.Empty;
+
+    /// <summary>The Edited chip: list only files that differ from their baseline.</summary>
+    private bool _editedOnly;
 
     private readonly ObservableCollection<FileRow> _rows = new();
     private readonly ObservableCollection<KindChip> _kindChips = new();
@@ -72,19 +90,26 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
 
     private enum SortMode { Name, Path, Modified, Size, Diff }
 
-    public ConfigHubView(MainWindow shell)
+    public ConfigHubView(MainWindow shell) : this(shell, scope: null) { }
+
+    /// <summary>The page pinned to one instance, for the Configs tab of its Modpack
+    /// Management.</summary>
+    public ConfigHubView(MainWindow shell, PackDetail pack) : this(shell, ScopeOf(pack)) { }
+
+    private ConfigHubView(MainWindow shell, PackSummary? scope)
     {
         InitializeComponent();
         _shell = shell;
+        _scope = scope;
         FileList.ItemsSource = _rows;
         KindStrip.ItemsSource = _kindChips;
         CopiesList.ItemsSource = _copies;
         HitsList.ItemsSource = _hits;
 
         _state = new PageState(FileList, PageStateHost, nameof(ConfigHubView))
-            .Copy(PageCopy.ConfigFiles)
+            .Copy(scope is null ? PageCopy.ConfigFiles : ScopedCopy)
             .Slots(CountLabel, StatusLabel, BusyBar, BusyCancelButton)
-            .DisableWhileBusy(RefreshButton, SortButton, DiffersToggle, PackFilterBox);
+            .DisableWhileBusy(RefreshButton, SortButton, DiffersToggle, PackFilterBox, DefaultsButton);
         _state.RetryRequested += () => _ = LoadAsync(force: true);
         _state.CancelRequested += () => _workCts?.Cancel();
 
@@ -92,10 +117,45 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         SearchBox.DebounceMilliseconds = 200;
         SearchBox.TextChanged += (_, _) => Refresh();
 
-        RestoreFilter();
+        // The instance tab starts on the plain list: the hub's remembered filter belongs to the hub.
+        if (scope is null) RestoreFilter();
+        else ApplyScopedLayout(scope);
         DiffersToggle.IsChecked = _differsOnly;
         Loaded += OnLoaded;
         Unloaded += (_, _) => _workCts?.Cancel();
+    }
+
+    /// <summary>The page's wording for one instance rather than all of them.</summary>
+    private static readonly PageCopy ScopedCopy = PageCopy.ConfigFiles with
+    {
+        LoadingLine = "Reading this instance's config, kubejs and defaultconfigs folders.",
+        EmptyBody = "This instance has no config, kubejs or defaultconfigs folder yet. "
+                  + "That is normal until it has been launched once."
+    };
+
+    private static PackSummary ScopeOf(PackDetail pack) => new(
+        pack.Id, pack.Name, pack.Description, pack.OwnerId, pack.OwnerUsername, pack.Visibility,
+        pack.IsShared, pack.IsEmpty, pack.MinecraftVersion, pack.Loader, pack.LoaderVersion,
+        pack.CreatedAt, pack.UpdatedAt, pack.EffectivePermissions, pack.Summary);
+
+    /// <summary>
+    /// Fits the page into a tab: no page title (the tab says it), no instance picker, and the
+    /// side margins dropped, since the tab's own page already has them.
+    /// </summary>
+    /// <remarks>The defaultconfigs button is hidden where the loader never reads that folder; the
+    /// detail pane says why.</remarks>
+    private void ApplyScopedLayout(PackSummary scope)
+    {
+        HeaderPanel.Visibility = Visibility.Collapsed;
+        Divider.Visibility = Visibility.Collapsed;
+        PackFilterBox.Visibility = Visibility.Collapsed;
+        FilterBar.Margin = new Thickness(0, 0, 0, 6);
+        ChipRow.Margin = new Thickness(0, 4, 0, 12);
+        ContentSearchBar.Margin = new Thickness(0, 0, 0, 12);
+        ListArea.Margin = new Thickness(0, 0, 0, 12);
+        SearchInFilesButton.ToolTip = "Search inside every config and script in this instance";
+        if (ConfigHubService.NoDefaultConfigsReason(scope.Loader) is not null)
+            DefaultsButton.Visibility = Visibility.Collapsed;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e) => await LoadAsync(force: false);
@@ -122,15 +182,19 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
 
             // ListPacksAsync falls back to its cache or the folders on this PC when the server is
             // unreachable, so this works offline.
-            _packs = (await (force ? App.State.Api.ListPacksAsync(ct) : App.State.Api.ListPacksQuickAsync(ct)))
-                .Where(p => !App.State.Settings.IsPackHidden(p.Id))
-                .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+            var listed = (await (force ? App.State.Api.ListPacksAsync(ct) : App.State.Api.ListPacksQuickAsync(ct)))
+                .Where(p => !App.State.Settings.IsPackHidden(p.Id) || p.Id == _scope?.Id)
                 .ToList();
+            // The instance a tab was opened for is listed even when the list does not have it yet.
+            if (_scope is { } pinned && listed.All(p => p.Id != pinned.Id)) listed.Add(pinned);
+            _packs = listed.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList();
             using (_filling.Hold()) RebuildPackFilter();
 
             var packs = _packs;
             var settings = App.State.Settings;
             var folders = App.State.Packs;
+            // A tab shows one instance's edits, so only that one is hashed.
+            var tracked = _scope is { } only ? packs.Where(p => p.Id == only.Id).ToList() : packs;
 
             // First load only; later loads already have rows on screen.
             if (!force && !_scanned)
@@ -140,7 +204,10 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
                 ct.ThrowIfCancellationRequested();
                 if (ConfigHubService.Cached(packs, folders) is { } remembered)
                 {
-                    Apply(remembered);
+                    // Stored answers only: nothing is hashed or written before the first frame.
+                    var rememberedEdits = await Task.Run(() => ConfigEditTracker.Evaluate(
+                        tracked, remembered.Files, folders, rehash: false, null, ct), ct);
+                    Apply(remembered, rememberedEdits);
                     var rememberedNote = remembered.ScannedUtc is { } when && PackListCache.Describe(when) is { } age
                         ? $"Scanned {age}. Re-reading every instance now."
                         : null;
@@ -157,10 +224,14 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
             }
 
             var progress = new Progress<string>(name => _state.Progress($"Scanning {name}..."));
-            var result = await Task.Run(
-                () => ConfigHubService.Rescan(packs, folders, settings, force, progress, ct), ct);
+            var editProgress = new Progress<string>(name => _state.Progress($"Checking {name} for edited files..."));
+            var (result, edits) = await Task.Run(() =>
+            {
+                var scan = ConfigHubService.Rescan(packs, folders, settings, force, progress, ct);
+                return (scan, ConfigEditTracker.Evaluate(tracked, scan.Files, folders, rehash: true, editProgress, ct));
+            }, ct);
 
-            Apply(result);
+            Apply(result, edits);
             var stale = App.State.Api.PackListStale is { Length: > 0 } why
                 ? $"Showing your last known instances - the server is not answering ({why}). " +
                   "The files on this PC are still readable and editable."
@@ -182,9 +253,10 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         finally { _loading = false; }
     }
 
-    private void Apply(ConfigHubService.ScanResult result)
+    private void Apply(ConfigHubService.ScanResult result, ConfigEditTracker.Snapshot edits)
     {
         _scan = result.Files;
+        _edits = edits;
         _groupStates = result.Groups;
         _kubeErrors = result.KubeErrors;
         _contentHits = null;
@@ -203,7 +275,9 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         PackFilterBox.SelectedItem = items.FirstOrDefault(i => i.Id == previous) ?? items[0];
     }
 
-    private Guid? SelectedPackId => (PackFilterBox.SelectedItem as PackFilterItem)?.Id;
+    /// <summary>The instance whose files are listed, or null for all of them. Always the pinned one in
+    /// an instance's tab.</summary>
+    private Guid? SelectedPackId => _scope?.Id ?? (PackFilterBox.SelectedItem as PackFilterItem)?.Id;
 
     /// <summary>The instance a new file is created in, or whose folder the toolbar opens: the filtered
     /// one, or the first instance when the filter is on "All".</summary>
@@ -238,17 +312,20 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         var pins = App.State.Settings.ConfigHubPins;
 
         // With "All instances", one row per relative path: the first instance alphabetically is the
-        // row's copy and the rest appear in the detail pane. A content search lists every hit.
+        // row's copy and the rest appear in the detail pane. A content search lists every hit, and so
+        // does the Edited chip: an edit belongs to one instance's copy, which may not be the first.
         var candidates = scope;
-        if (SelectedPackId is null && _contentHits is null)
+        if (SelectedPackId is null && _contentHits is null && !_editedOnly)
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             candidates = scope.Where(e => seen.Add(e.RelativePath)).ToList();
         }
+        if (_editedOnly) candidates = candidates.Where(IsEdited).ToList();
 
-        // Chip counts are taken after de-duplication and before the kind and search filters, so they
-        // match the rows each chip would show.
+        // Chip counts are taken after de-duplication and the Edited chip, and before the kind and
+        // search filters, so they match the rows each chip would show.
         var counts = candidates.GroupBy(e => e.Kind).ToDictionary(g => g.Key, g => g.Count());
+        var editedCount = scope.Count(IsEdited);
 
         var rows = new List<FileRow>();
         foreach (var entry in candidates)
@@ -268,19 +345,22 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
             rows.Add(new FileRow(entry, copies, state,
                 pinned: pins.Contains(ConfigHubService.PinKey(entry.PackId, entry.RelativePath)),
                 errorCount: ErrorsFor(entry).Count,
-                hitCount: hits?.Count ?? 0));
+                hitCount: hits?.Count ?? 0,
+                edit: _edits.For(entry)));
         }
 
         // A pin whose file is gone is shown greyed rather than dropped; the instance may be mid-sync.
-        if (!_differsOnly && _contentHits is null) rows.AddRange(MissingPinRows(rows, query));
+        if (!_differsOnly && !_editedOnly && _contentHits is null) rows.AddRange(MissingPinRows(rows, query));
 
         Sort(rows);
         _rows.Clear();
         foreach (var row in rows) _rows.Add(row);
 
         RebuildKindChips(counts, candidates.Count);
+        RebuildEditedChip(editedCount);
         if (_rows.Count == 0) ChooseEmptyCopy(query);
-        _state.Content(_rows.Count, countText: ScopeLabel(candidates.Count), note: _note);
+        _state.Content(_rows.Count, countText: ScopeLabel(candidates.Count, editedCount),
+            note: _editedOnly ? JoinNotes(_note, TrackingNote()) : _note);
 
         if (previous is { } key)
         {
@@ -288,6 +368,43 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
             if (restored is not null) FileList.SelectedItem = restored;
             else ShowDetail(null);
         }
+    }
+
+    private bool IsEdited(Entry entry) => _edits.For(entry)?.Edited == true;
+
+    private static string? JoinNotes(params string?[] notes)
+    {
+        var joined = string.Join("  ·  ", notes.Where(n => !string.IsNullOrEmpty(n)));
+        return joined.Length == 0 ? null : joined;
+    }
+
+    /// <summary>
+    /// The honest limit of edit tracking, for the status line while the Edited chip is on: tracking
+    /// starts the first time the launcher scans an instance, and nothing earlier can be known.
+    /// </summary>
+    private string? TrackingNote()
+    {
+        if (SelectedPackId is { } id)
+            return _edits.TrackingSince.TryGetValue(id, out var since)
+                ? $"Edits are tracked from {TimeFormat.DateTime(since)}. Anything changed before then " +
+                  "isn't known - compare with defaultconfigs where there is a copy."
+                : null;
+        if (_edits.TrackingSince.Count == 0) return null;
+        var latest = _edits.TrackingSince.Values.Max();
+        return "Edits are tracked from the first time each instance was scanned " +
+               $"(the latest on {TimeFormat.DateTime(latest)}). Anything changed before then isn't known.";
+    }
+
+    /// <summary>The Edited chip. Drawn with the kind chips' look but on its own, since it combines
+    /// with any kind.</summary>
+    private void RebuildEditedChip(int count)
+    {
+        var since = SelectedPackId is { } id && _edits.TrackingSince.TryGetValue(id, out var when)
+            ? $" Tracked since {TimeFormat.DateTime(when)}; earlier edits aren't known."
+            : "";
+        EditedChip.DataContext = new KindChip(null, "Edited", count, _editedOnly,
+            "Only files changed since the launcher first saw them: in the game, in the editor or by hand. " +
+            "A mod update that adds settings changes its config too." + since);
     }
 
     private static bool MatchesQuery(Entry entry, string query) =>
@@ -357,6 +474,9 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
             new(Kind.DefaultConfigs, "Defaults", For(Kind.DefaultConfigs),
                 _kindFilter == Kind.DefaultConfigs,
                 "game/defaultconfigs - what the pack copies into each NEW world, not what the game is using now"),
+            new(Kind.ServerConfig, "World server", For(Kind.ServerConfig),
+                _kindFilter == Kind.ServerConfig,
+                "game/saves/<world>/serverconfig - one world's server settings"),
             new(Kind.KubeJsLog, "KubeJS logs", For(Kind.KubeJsLog),
                 _kindFilter == Kind.KubeJsLog,
                 "game/logs/kubejs - where a script error is reported")
@@ -367,9 +487,19 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
 
     /// <summary>The count slot text for the current filter. Only called with counts from a
     /// completed scan.</summary>
-    private string ScopeLabel(int scopeCount)
+    private string ScopeLabel(int scopeCount, int editedCount)
     {
         if (_packs.Count == 0) return "";
+        if (_scope is { } pinned)
+        {
+            // Only this instance's paths: a difference between two other instances is not news here.
+            var mine = _scan.Where(e => e.PackId == pinned.Id).Select(e => e.RelativePath)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var differs = mine.Count(rel => _groupStates.GetValueOrDefault(rel) == GroupState.Differs);
+            return $"{scopeCount:N0} file(s) in this instance" +
+                   (editedCount > 0 ? $" · {editedCount:N0} edited" : "") +
+                   (differs > 0 ? $" · {differs:N0} differ from another instance" : "");
+        }
         var differing = _groupStates.Count(kv => kv.Value == GroupState.Differs);
         return (SelectedPackId is { } id
                    ? $"{scopeCount:N0} file(s) in {PackName(id)}"
@@ -398,6 +528,10 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
             _state.EmptyNext("Everything matches",
                 "No file at the same path differs between your instances. " +
                 "Turn the differences filter off to see them all.");
+        else if (_editedOnly && _kindFilter is null && query.Length == 0)
+            _state.EmptyNext("Nothing edited",
+                "Every file is still as the launcher first saw it. Edits made in the game, in the editor " +
+                "or by hand show up here after the next scan.");
         else if (query.Length > 0 || _kindFilter is not null)
             _state.EmptyFiltered();
         // Otherwise the default wording from PageCopy.ConfigFiles applies: no instance has these
@@ -444,6 +578,8 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         ErrorPanel.Visibility = errors.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         ErrorText.Text = string.Join("\n", errors);
 
+        ShowEditDetail(row);
+
         CopiesHeader.Text = row.Copies.Count > 1
             ? $"ACROSS INSTANCES - {row.Copies.Count}"
             : "ACROSS INSTANCES - ONLY THIS ONE";
@@ -460,6 +596,98 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         }
 
         _ = LoadDetailAsync(row, token);
+    }
+
+    /// <summary>
+    /// The detail pane's edit box: whether the file is edited, how it stands against its
+    /// defaultconfigs copy, and the buttons that go with that.
+    /// </summary>
+    /// <remarks>Says plainly what can't be known (edits before the file was first seen) and why an
+    /// action is missing (not a file FML reads from defaultconfigs, or a loader without it), rather
+    /// than leaving a button out without a word.</remarks>
+    private void ShowEditDetail(FileRow row)
+    {
+        var entry = row.Entry;
+        if (!ConfigEditTracker.IsTracked(entry.Kind))
+        {
+            EditPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+        EditPanel.Visibility = Visibility.Visible;
+
+        var edit = row.Edit;
+        EditHeader.Text = edit switch
+        {
+            null => "Not checked for edits yet",
+            { Created: true } => "Edited - created in the launcher",
+            { Edited: true } => "Edited since the launcher first saw it",
+            _ => "Not edited"
+        };
+        EditText.Text = edit switch
+        {
+            null => "The next scan records this file as it is now and checks it from then on.",
+            { Created: true } => "No mod wrote this file, so it counts as edited until you mark it otherwise.",
+            _ => $"Compared with the copy first seen {TimeFormat.DateTime(edit!.FirstSeenUtc ?? DateTimeOffset.UtcNow)}. " +
+                 "Edits made before then aren't known."
+        };
+
+        var loader = _packs.FirstOrDefault(p => p.Id == entry.PackId)?.Loader;
+        var noLoader = loader is { } l ? ConfigHubService.NoDefaultConfigsReason(l) : null;
+        var counterpart = DefaultsCounterpart(entry);
+        string defaults;
+        if (entry.Kind == Kind.DefaultConfigs)
+        {
+            defaults = counterpart is null
+                ? "FML copies this into config when the file there is missing. This instance has no copy in use."
+                : $"FML copies this into place when {counterpart.RelativePath} is missing.";
+        }
+        else if (noLoader is not null) defaults = noLoader;
+        else if (ConfigHubService.DefaultConfigsPath(entry) is not { } target)
+            defaults = entry.Kind is Kind.Config or Kind.ServerConfig
+                ? $"FML never reads this from defaultconfigs: {ConfigHubService.WhyNotDefaultConfigs(entry)}."
+                : "";
+        else defaults = row.Edit?.DefaultState switch
+        {
+            DefaultCopyState.Same => $"{target} is identical.",
+            DefaultCopyState.Differs => $"{target} holds a different version.",
+            DefaultCopyState.Unknown => $"{target} exists but could not be read to compare.",
+            _ => $"Not in defaultconfigs yet ({target})."
+        };
+        DefaultsText.Text = defaults;
+        DefaultsText.Visibility = defaults.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        EditCompareDefaultsButton.Visibility = counterpart is not null ? Visibility.Visible : Visibility.Collapsed;
+        EditToDefaultsButton.Visibility =
+            noLoader is null && ConfigHubService.DefaultConfigsPath(entry) is not null
+                             && row.Edit?.DefaultState != DefaultCopyState.Same
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        EditToDefaultsButton.Content = row.Edit?.DefaultState is DefaultCopyState.Differs or DefaultCopyState.Unknown
+            ? "Update defaultconfigs"
+            : "Copy to defaultconfigs";
+        EditResetButton.Visibility = row.IsEdited ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The other half of a config / defaultconfigs pair in the same instance: a config's default, or
+    /// the config a default fills in. Null when there is none in the scan.
+    /// </summary>
+    /// <remarks>A default can fill in both <c>config/</c> and a world's <c>serverconfig/</c>; the
+    /// <c>config/</c> copy is preferred, since that is the one every world falls back to.</remarks>
+    private Entry? DefaultsCounterpart(Entry entry)
+    {
+        if (entry.Kind == Kind.DefaultConfigs)
+        {
+            return _scan.Where(e => e.PackId == entry.PackId && e.Kind is Kind.Config or Kind.ServerConfig
+                                    && string.Equals(ConfigHubService.DefaultConfigsPath(e), entry.RelativePath,
+                                                     StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(e => e.Kind == Kind.Config ? 0 : 1)
+                        .ThenBy(e => e.RelativePath, StringComparer.OrdinalIgnoreCase)
+                        .FirstOrDefault();
+        }
+        if (ConfigHubService.DefaultConfigsPath(entry) is not { } target) return null;
+        return _scan.FirstOrDefault(e => e.PackId == entry.PackId
+                                         && string.Equals(e.RelativePath, target, StringComparison.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -1016,6 +1244,312 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         }
     }
 
+    // ── edits and defaultconfigs ─────────────────────────────────────────────
+
+    private void OnEditedChipClick(object sender, MouseButtonEventArgs e)
+    {
+        _editedOnly = !_editedOnly;
+        Refresh();
+        if (_scope is null) SaveFilter();
+    }
+
+    private async void OnRowMarkNotEdited(object sender, RoutedEventArgs e)
+    {
+        try { await MarkNotEditedAsync(RowsFor(sender)); }
+        catch (Exception ex) { Failed("Those files could not be marked as not edited.", ex); }
+    }
+
+    private async void OnDetailMarkNotEdited(object sender, RoutedEventArgs e)
+    {
+        try { await MarkNotEditedAsync(SelectedRows()); }
+        catch (Exception ex) { Failed("That file could not be marked as not edited.", ex); }
+    }
+
+    /// <summary>Takes each file as it is now as its new original, so it stops showing as
+    /// edited.</summary>
+    private async Task MarkNotEditedAsync(List<FileRow> rows)
+    {
+        var entries = rows.Where(r => r.IsEdited).Select(r => r.Entry).ToList();
+        if (entries.Count == 0)
+        {
+            Say("None of the selected files is marked as edited.");
+            return;
+        }
+        await Task.Run(() =>
+        {
+            foreach (var pack in entries.GroupBy(e => e.PackId))
+                ConfigEditTracker.MarkNotEdited(App.State.Packs.PackRoot(pack.Key), pack);
+        });
+        // Not forced: nothing on disk moved, so only the edit answers need recomputing.
+        await LoadAsync(force: false, note: $"Marked {entries.Count} file(s) as not edited.");
+    }
+
+    private async void OnRowCompareDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CompareWithDefaultsAsync(RowFor(sender)); }
+        catch (Exception ex) { Failed("Those files could not be compared.", ex); }
+    }
+
+    private async void OnDetailCompareDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CompareWithDefaultsAsync(SelectedRow); }
+        catch (Exception ex) { Failed("Those files could not be compared.", ex); }
+    }
+
+    /// <summary>
+    /// Compares a config with its defaultconfigs copy in the same instance, in the cross-instance
+    /// compare card.
+    /// </summary>
+    /// <remarks>
+    /// The card names each side by its instance; here both sides are one instance, so each is named by
+    /// its folder instead (<c>config</c>, <c>defaultconfigs</c>), which is what its copy buttons and
+    /// its "replace" prompt then say. The card backs up whatever it overwrites.
+    /// </remarks>
+    private async Task CompareWithDefaultsAsync(FileRow? row)
+    {
+        if (row is null || row.Missing) return;
+        if (DefaultsCounterpart(row.Entry) is not { } other)
+        {
+            var target = ConfigHubService.DefaultConfigsPath(row.Entry);
+            await AppDialog.MessageAsync(_shell, "Nothing to compare",
+                row.Entry.Kind == Kind.DefaultConfigs
+                    ? $"{row.Entry.PackName} has no config in use that {row.RelativePath} fills in."
+                    : target is not null
+                        ? $"There is no {target} in {row.Entry.PackName} yet. Use 'Copy to defaultconfigs' to put this file there."
+                        : $"FML never reads {row.FileName} from defaultconfigs: {ConfigHubService.WhyNotDefaultConfigs(row.Entry)}.");
+            return;
+        }
+
+        var inUse = row.Entry.Kind == Kind.DefaultConfigs ? other : row.Entry;
+        var defaults = row.Entry.Kind == Kind.DefaultConfigs ? row.Entry : other;
+        // "config/create/client.toml" against "defaultconfigs/create/client.toml": the in-use side is
+        // named by what is left of its path once the shared name is taken off, "config".
+        var sharedName = defaults.RelativePath["defaultconfigs/".Length..];
+        var left = inUse with { PackName = inUse.RelativePath[..^(sharedName.Length + 1)] };
+        var right = defaults with { PackName = "defaultconfigs" };
+
+        var card = new ConfigCompareCard([left, right], left, right, _shell);
+        await _shell.ShowCardAsync(card, card.Completion, card.Close);
+        if (card.CopiedSomething)
+        {
+            ConfigHubService.Invalidate(row.PackId);
+            await LoadAsync(force: true);
+        }
+    }
+
+    private void OnDefaultsMenu(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button button || button.ContextMenu is null) return;
+        button.ContextMenu.PlacementTarget = button;
+        button.ContextMenu.IsOpen = true;
+    }
+
+    /// <summary>Labels the defaultconfigs menu with what each entry would act on right now.</summary>
+    private void OnDefaultsMenuOpened(object sender, RoutedEventArgs e)
+    {
+        var selected = SelectedRows().Count(r => !r.Missing);
+        DefaultsCopySelectedItem.Header = selected > 0
+            ? $"Copy the {selected} selected file(s)"
+            : "Copy the selected files (select some first)";
+        DefaultsMoveSelectedItem.Header = selected > 0
+            ? $"Move the {selected} selected file(s) - take them out of config"
+            : "Move the selected files - take them out of config";
+        DefaultsCopySelectedItem.IsEnabled = DefaultsMoveSelectedItem.IsEnabled = selected > 0;
+
+        var edited = EditedNotInDefaults();
+        DefaultsCopyEditedItem.Header = SelectedPackId is null
+            ? "Copy every edited config (pick an instance first)"
+            : $"Copy every edited config not there yet ({edited.Count})";
+        DefaultsCopyEditedItem.IsEnabled = edited.Count > 0;
+    }
+
+    /// <summary>The listed instance's edited configs that FML could read from defaultconfigs and that
+    /// have no identical copy there yet. Empty with "All instances": one instance at a time.</summary>
+    private List<Entry> EditedNotInDefaults()
+    {
+        if (SelectedPackId is not { } packId) return [];
+        return _scan.Where(e => e.PackId == packId
+                                && _edits.For(e) is { Edited: true, DefaultPath: not null } edit
+                                && edit.DefaultState != DefaultCopyState.Same)
+                    .ToList();
+    }
+
+    private async void OnCopySelectedToDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CopyToDefaultsAsync(SelectedRows(), removeOriginal: false); }
+        catch (Exception ex) { Failed("Those files could not be copied into defaultconfigs.", ex); }
+    }
+
+    private async void OnMoveSelectedToDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CopyToDefaultsAsync(SelectedRows(), removeOriginal: true); }
+        catch (Exception ex) { Failed("Those files could not be moved into defaultconfigs.", ex); }
+    }
+
+    private async void OnCopyEditedToDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CopyToDefaultsAsync(EditedNotInDefaults(), removeOriginal: false); }
+        catch (Exception ex) { Failed("Those files could not be copied into defaultconfigs.", ex); }
+    }
+
+    private async void OnRowCopyToDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CopyToDefaultsAsync(RowsFor(sender), removeOriginal: false); }
+        catch (Exception ex) { Failed("Those files could not be copied into defaultconfigs.", ex); }
+    }
+
+    private async void OnDetailCopyToDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CopyToDefaultsAsync(SelectedRows(), removeOriginal: false); }
+        catch (Exception ex) { Failed("That file could not be copied into defaultconfigs.", ex); }
+    }
+
+    private async void OnDetailMoveToDefaults(object sender, RoutedEventArgs e)
+    {
+        try { await CopyToDefaultsAsync(SelectedRows(), removeOriginal: true); }
+        catch (Exception ex) { Failed("That file could not be moved into defaultconfigs.", ex); }
+    }
+
+    private Task CopyToDefaultsAsync(List<FileRow> rows, bool removeOriginal) =>
+        CopyToDefaultsAsync(rows.Where(r => !r.Missing).Select(r => r.Entry).ToList(), removeOriginal);
+
+    /// <summary>
+    /// Copies configs into the instance's defaultconfigs, or moves them there with
+    /// <paramref name="removeOriginal"/>, after saying exactly what will happen.
+    /// </summary>
+    /// <remarks>
+    /// <para>Copy is the default because it changes nothing about how the instance plays: FML only
+    /// reads defaultconfigs for a config that is missing. A move deletes the original so FML
+    /// recreates it from the new default on the next start.</para>
+    /// <para>A copy that replaces a different defaultconfigs file backs it up first, as every other
+    /// overwrite on this page does, and the question says so. Files FML would never read from there
+    /// are named with the reason instead of being copied.</para>
+    /// </remarks>
+    private async Task CopyToDefaultsAsync(List<Entry> entries, bool removeOriginal)
+    {
+        if (entries.Count == 0)
+        {
+            Say("Select the configs to put into defaultconfigs first.");
+            return;
+        }
+        var packId = entries[0].PackId;
+        if (entries.Any(e => e.PackId != packId))
+        {
+            await AppDialog.MessageAsync(_shell, "One instance at a time",
+                "The selected files come from different instances. Pick an instance in the filter first, " +
+                "then select its files.");
+            return;
+        }
+        var pack = _packs.FirstOrDefault(p => p.Id == packId);
+        if (pack is not null && ConfigHubService.NoDefaultConfigsReason(pack.Loader) is { } noDefaults)
+        {
+            await AppDialog.MessageAsync(_shell, "No defaultconfigs here", $"{pack.Name}: {noDefaults}");
+            return;
+        }
+
+        var skipped = entries.Where(e => ConfigHubService.DefaultConfigsPath(e) is null).ToList();
+        var gameDir = App.State.Packs.GameDir(packId);
+        var items = await Task.Run(() => ConfigHubService.PreviewDefaults(gameDir, entries.Except(skipped)));
+        var todo = removeOriginal ? items : items.Where(i => !i.Identical).ToList();
+        var skippedText = skipped.Count == 0
+            ? ""
+            : $"Left out {skipped.Count}:\n" +
+              string.Join("\n", skipped.Take(6).Select(s => $"· {s.RelativePath} - {ConfigHubService.WhyNotDefaultConfigs(s)}")) +
+              (skipped.Count > 6 ? $"\n... and {skipped.Count - 6} more." : "");
+        if (todo.Count == 0)
+        {
+            await AppDialog.MessageAsync(_shell, "Nothing to copy",
+                items.Count > 0
+                    ? "Every selected config already has an identical copy in defaultconfigs."
+                    : "None of the selected files is a config FML reads from defaultconfigs." +
+                      (skippedText.Length > 0 ? "\n\n" + skippedText : ""));
+            return;
+        }
+
+        var replacing = todo.Count(i => i.Exists && !i.Identical);
+        var verb = removeOriginal ? "Move" : "Copy";
+        var name = PackName(packId);
+        var message =
+            $"{verb} {todo.Count} config(s) into defaultconfigs in {name}:\n" +
+            string.Join("\n", todo.Take(8).Select(i => $"· {i.Source.RelativePath}  ->  {i.TargetRelativePath}")) +
+            (todo.Count > 8 ? $"\n... and {todo.Count - 8} more." : "") + "\n\n" +
+            (replacing > 0
+                ? $"{replacing} of them already have a different copy there. It is replaced, and backed up " +
+                  "next to itself as .bak-<timestamp> first.\n\n"
+                : "") +
+            (removeOriginal
+                ? "The originals are deleted. FML copies each one back from defaultconfigs the next time the " +
+                  "game starts, or for a world's server config, the next time that world loads." +
+                  (pack?.Loader == LoaderKind.NeoForge && todo.Any(i => i.Source.Kind == Kind.ServerConfig)
+                      ? " On NeoForge a world without its own server config uses the one in config first." : "") +
+                  "\n\n"
+                : "The originals stay where they are, so this instance plays exactly as it does now. FML only " +
+                  "reads defaultconfigs for a config that is missing: a new install, or a new world.\n\n") +
+            SharingNote(packId) +
+            (skippedText.Length > 0 ? skippedText + "\n\n" : "") +
+            "Continue?";
+
+        if (!await AppDialog.ConfirmAsync(_shell, $"{verb} to defaultconfigs", message, verb, "Cancel",
+                danger: removeOriginal || replacing > 0))
+            return;
+
+        _workCts?.Cancel();
+        _workCts = new CancellationTokenSource();
+        var ct = _workCts.Token;
+        _state.Begin("Copying into defaultconfigs...", refreshing: true);
+        try
+        {
+            var packRoot = App.State.Packs.PackRoot(packId);
+            var result = await Task.Run(() =>
+            {
+                var copied = ConfigHubService.CopyToDefaults(packId, gameDir, todo, removeOriginal, ct);
+                // What was just written is the chosen default, not an edit to the old one.
+                ConfigEditTracker.Accept(packRoot, todo.Select(i => (i.TargetRelativePath,
+                    Path.Combine(gameDir, i.TargetRelativePath.Replace('/', Path.DirectorySeparatorChar)))));
+                return copied;
+            }, ct);
+            var done =
+                $"{(removeOriginal ? "Moved" : "Copied")} {todo.Count - result.Failures.Count} config(s) into defaultconfigs" +
+                (result.BackedUp > 0 ? $" · {result.BackedUp} replaced file(s) backed up" : "") +
+                (result.Failures.Count > 0 ? $" · {result.Failures.Count} failed" : "") + ".";
+            if (result.Failures.Count > 0)
+                await AppDialog.MessageAsync(_shell, "Some files did not copy",
+                    string.Join("\n", result.Failures.Take(12)) +
+                    (result.Failures.Count > 12 ? $"\n... and {result.Failures.Count - 12} more." : ""));
+            await LoadAsync(force: true, note: done);
+        }
+        catch (OperationCanceledException)
+        {
+            _state.Cancelled("Stopped - files already copied were left in place.");
+        }
+        catch (Exception ex)
+        {
+            _state.Error("Those files could not all be copied into defaultconfigs.", ex, "Copy failed");
+        }
+    }
+
+    /// <summary>
+    /// A warning for the defaultconfigs question when this instance's sync would carry config but not
+    /// defaultconfigs, so its collaborators would never get the new defaults. Empty otherwise.
+    /// </summary>
+    /// <remarks>Instances made before the default rules shared defaultconfigs, or with rules of their
+    /// own, can be in this state. Local instances never sync, so they get no warning.</remarks>
+    private static string SharingNote(Guid packId)
+    {
+        try
+        {
+            if (App.State.LocalPacks.Contains(packId)) return "";
+            var rules = App.State.Rules.Load(App.State.Packs.PackRoot(packId));
+            var configShared = App.State.Rules.Match("config/x.toml", rules).IsAutoShared;
+            var defaultsShared = App.State.Rules.Match("defaultconfigs/x.toml", rules).IsAutoShared;
+            return configShared && !defaultsShared
+                ? "Note: this instance's file rules share config but not defaultconfigs, so people you share " +
+                  "it with won't get these copies. Add a Shared rule for defaultconfigs/ in its file rules.\n\n"
+                : "";
+        }
+        catch { return ""; }
+    }
+
     // ── housekeeping: new, rename, delete, restore ───────────────────────────
 
     private async void OnNewFile(object sender, RoutedEventArgs e)
@@ -1057,6 +1591,9 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(full)!);
                 await File.WriteAllTextAsync(full, "");
+                // No mod wrote it, so it is the user's edit from the start.
+                if (ConfigHubService.KindForPath(rel) is { } kind && ConfigEditTracker.IsTracked(kind))
+                    ConfigEditTracker.MarkCreated(App.State.Packs.PackRoot(packId), rel);
                 Say($"Created {rel} in {PackName(packId)}.");
                 FileEditorWindow.OpenFileFor(_shell, packId, PackName(packId), full);
             }
@@ -1225,8 +1762,9 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
     private Guid? _restoredPackId;
 
     /// <summary>
-    /// Restores the filter the page was left on, stored as <c>kind|packId|sort|differsOnly</c>.
-    /// Anything that doesn't parse falls back to the default.
+    /// Restores the filter the page was left on, stored as
+    /// <c>kind|packId|sort|differsOnly|editedOnly</c>. Anything that doesn't parse falls back to the
+    /// default. An instance's Configs tab neither reads nor writes it.
     /// </summary>
     private void RestoreFilter()
     {
@@ -1237,16 +1775,18 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
         if (parts.Length > 1 && Guid.TryParseExact(parts[1], "N", out var packId)) _restoredPackId = packId;
         if (parts.Length > 2 && Enum.TryParse<SortMode>(parts[2], out var sort)) _sort = sort;
         if (parts.Length > 3) _differsOnly = parts[3] == "1";
+        if (parts.Length > 4) _editedOnly = parts[4] == "1";
     }
 
     private void SaveFilter()
     {
+        if (_scope is not null) return;
         try
         {
             App.State.Settings.ConfigHubLastFilter =
                 $"{(_kindFilter is { } k ? k.ToString() : "")}|" +
                 $"{(SelectedPackId is { } id ? id.ToString("N") : "")}|" +
-                $"{_sort}|{(_differsOnly ? "1" : "0")}";
+                $"{_sort}|{(_differsOnly ? "1" : "0")}|{(_editedOnly ? "1" : "0")}";
             App.State.Settings.Save();
         }
         catch { /* a settings write that fails must not break the filter the user just clicked */ }
@@ -1279,13 +1819,14 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
     private sealed class FileRow
     {
         public FileRow(Entry entry, IReadOnlyList<Entry> copies, GroupState state,
-                       bool pinned, int errorCount, int hitCount, bool missing = false)
+                       bool pinned, int errorCount, int hitCount, bool missing = false, FileEdit? edit = null)
         {
             Entry = entry;
             Copies = copies;
             State = state;
             Pinned = pinned;
             Missing = missing;
+            Edit = edit;
 
             var differing = state == GroupState.Differs ? " · differs somewhere" : "";
             var where = missing
@@ -1363,6 +1904,45 @@ public partial class ConfigHubView : Page, IReusablePage, IRefreshablePage
 
         public string PinGlyph => Pinned ? "" : "";
         public string PinHint => Pinned ? "Unpin" : "Pin to the top of the list";
+
+        /// <summary>Edit tracking's answer for this file, or null when it isn't tracked or hasn't been
+        /// checked yet.</summary>
+        public FileEdit? Edit { get; }
+
+        public bool IsEdited => Edit?.Edited == true && !Missing;
+
+        public Visibility EditedVisibility => IsEdited ? Visibility.Visible : Visibility.Collapsed;
+
+        public string EditedHint => Edit is { Created: true }
+            ? "Created in the launcher, so no mod wrote it."
+            : Edit?.FirstSeenUtc is { } seen
+                ? $"Changed since the launcher first saw it, {TimeFormat.DateTime(seen)}."
+                : "Changed since the launcher first saw it.";
+
+        private DefaultCopyState DefaultState => Edit?.DefaultState ?? DefaultCopyState.NotApplicable;
+
+        /// <summary>The value the defaults badge's DataTriggers switch on.</summary>
+        public string DefaultsStateName => DefaultState.ToString();
+
+        public Visibility DefaultsVisibility =>
+            !Missing && DefaultState is DefaultCopyState.Same or DefaultCopyState.Differs or DefaultCopyState.Unknown
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+
+        public string DefaultsLabel => DefaultState switch
+        {
+            DefaultCopyState.Same => "IN DEFAULTS",
+            DefaultCopyState.Differs => "DEFAULTS DIFFER",
+            _ => "IN DEFAULTS ?"
+        };
+
+        public string DefaultsHint => DefaultState switch
+        {
+            DefaultCopyState.Same => $"{Edit?.DefaultPath} is identical to this file.",
+            DefaultCopyState.Differs =>
+                $"{Edit?.DefaultPath} holds a different version. Compare them, or copy this one over it.",
+            _ => $"{Edit?.DefaultPath} exists but could not be read to compare."
+        };
     }
 
     /// <summary>One instance's copy of the selected file, in the detail pane.</summary>

@@ -13,13 +13,13 @@ using CloudLauncher.Shared;
 namespace CloudLauncher.Views;
 
 /// <summary>
-/// The mod management page (List, Browse, Graph, Categories and Planning sub-tabs). Opened from the
+/// The mod management page (List, Browse, Graph, Categories, Planning and Configs sub-tabs). Opened from the
 /// Mod view's "Mods Management" button. All sub-tabs read the same <see cref="PackModInventory"/>.
 /// </summary>
 public partial class ModManagementView : Page, ISidePanelBackHandler
 {
     // Sub-tab indices, named so adding a tab can't shift the lazy-load and back-navigation logic.
-    private const int TabList = 0, TabBrowse = 1, TabGraph = 2, TabCategories = 3, TabPlan = 4;
+    private const int TabList = 0, TabBrowse = 1, TabGraph = 2, TabCategories = 3, TabPlan = 4, TabConfigs = 5;
 
     private readonly MainWindow _shell;
     private readonly PackDetail _pack;
@@ -36,6 +36,9 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private ModPlanView? _plan;
     private ModCategoriesView? _categories;
     private ModExplorerPage? _browse;
+    // The Configs tab: the Config & scripts page pinned to this instance. It loads and refreshes
+    // itself, so it takes no part in the dirty flags above.
+    private ConfigHubView? _configs;
 
     // Most recent launch-log lines, capped so the bottom status strip shows at most 3 at a time.
     private readonly LinkedList<string> _statusTail = new();
@@ -118,7 +121,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             SearchBox.SelectAll();
             e.Handled = true;
         }
-        else if (e.Key == Key.F5)
+        // The Configs tab has its own F5 (re-read every file), so the mod list's is not taken there.
+        else if (e.Key == Key.F5 && Tabs.SelectedIndex != TabConfigs)
         {
             OnRefresh(RefreshButton, e);
             e.Handled = true;
@@ -770,6 +774,12 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         else if (to == TabBrowse)
         {
             EnsureBrowse();
+        }
+        else if (to == TabConfigs && _configs is null)
+        {
+            // Built on first view: it scans the config folders, which the other tabs never need.
+            _configs = new ConfigHubView(_shell, _pack);
+            ConfigsFrame.Navigate(_configs);
         }
 
         // Coming back from the browser: mods may have been downloaded, so re-scan.
