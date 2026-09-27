@@ -3,6 +3,14 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.4 - 2026-09-27
+
+- NeoForge versions show again when creating or editing an instance. NeoForge's own version list
+  broke today and listed only its two newest betas; the launcher now falls back to another index
+  when that happens and keeps the last full list on this PC.
+- NeoForge builds for the year-numbered Minecraft versions (26.1.2, 26.3, ...) are matched to the
+  right Minecraft version.
+
 ## 0.9.3 - 2026-09-27
 
 - Instances can be duplicated: right-click one and pick Duplicate. The copy gets the same Minecraft

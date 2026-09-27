@@ -73,26 +73,144 @@ public sealed class VersionService
 
     // ---------- NeoForge ----------
 
+    /// <summary>Every NeoForge build, newest first.</summary>
+    /// <remarks>
+    /// <para>NeoForge's own Maven index is asked first. On 2026-09-27 it (and its maven-metadata.xml)
+    /// suddenly listed only the two newest betas, while every older installer was still downloadable,
+    /// which left the create dialog with nothing for any Minecraft version. So a list shorter than
+    /// <see cref="PlausibleNeoForgeCount"/> is topped up from Prism Launcher's public metadata index,
+    /// and the last good list is kept on disk as the final fallback.</para>
+    /// <para>Installing never depends on this list: an instance's NeoForge version is fetched straight
+    /// from its installer URL.</para>
+    /// </remarks>
     public Task<List<string>> ListNeoForgeVersionsAsync(CancellationToken ct = default) =>
         CachedAsync("neoforge", async () =>
         {
-            // NeoForge maven exposes a JSON list. Versions look like "21.1.86", where the first two
-            // parts track the Minecraft version (21.1.x -> MC 1.21.1, 20.4.x -> MC 1.20.4).
-            var resp = await Http.GetFromJsonAsync<MavenVersionList>(
-                "https://maven.neoforged.net/api/maven/versions/releases/net%2Fneoforged%2Fneoforge", ct);
-            var versions = resp?.Versions ?? new();
-            versions.Reverse(); // newest first
-            return versions;
+            var found = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                // Versions look like "21.1.86" (Minecraft 1.21.1) or, since Minecraft moved to year
+                // numbers, "26.1.2.111" (Minecraft 26.1.2); see NeoForgeVersionForMinecraft.
+                var resp = await Http.GetFromJsonAsync<MavenVersionList>(
+                    "https://maven.neoforged.net/api/maven/versions/releases/net%2Fneoforged%2Fneoforge", ct);
+                foreach (var v in resp?.Versions ?? []) found.Add(v);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                AppLog.Log("versions", "NeoForge's version list could not be read: " + ex.Message);
+            }
+
+            if (found.Count < PlausibleNeoForgeCount)
+            {
+                try
+                {
+                    var prism = await Http.GetFromJsonAsync<PrismIndex>(
+                        "https://meta.prismlauncher.org/v1/net.neoforged/index.json", ct);
+                    // Prism's index also carries NeoForge's first 1.20.1 builds ("47.1.106"), which were
+                    // published as a different artifact; the launcher has never offered those.
+                    foreach (var v in prism?.Versions ?? [])
+                        if (IsNeoForgeArtifactVersion(v.Version)) found.Add(v.Version);
+                    AppLog.Log("versions", $"NeoForge listed too few builds; topped up from Prism's index to {found.Count}.");
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    AppLog.Log("versions", "Prism's NeoForge index could not be read either: " + ex.Message);
+                }
+            }
+
+            var saved = LoadNeoForgeList();
+            if (found.Count < PlausibleNeoForgeCount) found.UnionWith(saved);
+            var list = found.OrderByDescending(v => v, NeoForgeVersionComparer.Instance).ToList();
+            if (list.Count >= PlausibleNeoForgeCount && list.Count >= saved.Count) SaveNeoForgeList(list);
+            return list;
         });
 
+    /// <summary>Fewer builds than this means an index is broken, not that NeoForge is new: it has well
+    /// over a thousand.</summary>
+    private const int PlausibleNeoForgeCount = 200;
+
+    private static string NeoForgeListPath =>
+        System.IO.Path.Combine(AppSettings.DataRootPath, "neoforge-versions.json");
+
+    private static List<string> LoadNeoForgeList()
+    {
+        try
+        {
+            return System.IO.File.Exists(NeoForgeListPath)
+                ? JsonSerializer.Deserialize<List<string>>(System.IO.File.ReadAllText(NeoForgeListPath)) ?? []
+                : [];
+        }
+        catch { return []; }
+    }
+
+    private static void SaveNeoForgeList(List<string> list)
+    {
+        try
+        {
+            var tmp = NeoForgeListPath + ".tmp";
+            System.IO.File.WriteAllText(tmp, JsonSerializer.Serialize(list));
+            System.IO.File.Move(tmp, NeoForgeListPath, overwrite: true);
+        }
+        catch { /* a fallback that can't be written just isn't there next time */ }
+    }
+
+    /// <summary>True for a build of the net.neoforged:neoforge artifact: three parts starting 20 or 21
+    /// (1.x Minecraft), or four parts (year-numbered Minecraft).</summary>
+    private static bool IsNeoForgeArtifactVersion(string? v)
+    {
+        if (string.IsNullOrWhiteSpace(v) || NeoForgeVersionForMinecraft(v) is null) return false;
+        var parts = v.Split('-')[0].Split('.');
+        return parts.Length >= 4 || int.Parse(parts[0]) <= 24;
+    }
+
+    /// <summary>The Minecraft version a NeoForge build is for.</summary>
+    /// <remarks>Two schemes: "21.1.86" is Minecraft 1.21.1 (and "21.0.143" is 1.21), from the years of
+    /// 1.x versions; since Minecraft moved to year numbers, a build has four parts, "26.1.2.111" for
+    /// Minecraft 26.1.2 and "26.3.0.25-beta" for 26.3.</remarks>
     public static string? NeoForgeVersionForMinecraft(string neoforgeVersion)
     {
-        // 21.1.86 -> 1.21.1, 20.4.237 -> 1.20.4, 21.0.143 -> 1.21
-        var parts = neoforgeVersion.Split('.');
+        var parts = neoforgeVersion.Split('-')[0].Split('.');
         if (parts.Length < 2) return null;
         if (!int.TryParse(parts[0], out var major) || !int.TryParse(parts[1], out var minor)) return null;
+        if (parts.Length >= 4)
+        {
+            if (!int.TryParse(parts[2], out var patch)) return null;
+            return patch == 0 ? $"{major}.{minor}" : $"{major}.{minor}.{patch}";
+        }
         // major.minor -> 1.major[.minor unless minor == 0]
         return minor == 0 ? $"1.{major}" : $"1.{major}.{minor}";
+    }
+
+    /// <summary>Orders NeoForge builds by their numbers; a -beta sorts before the same numbers without
+    /// it.</summary>
+    private sealed class NeoForgeVersionComparer : IComparer<string>
+    {
+        public static readonly NeoForgeVersionComparer Instance = new();
+
+        public int Compare(string? x, string? y)
+        {
+            if (ReferenceEquals(x, y)) return 0;
+            if (x is null) return -1;
+            if (y is null) return 1;
+            var (xn, xs) = Split(x);
+            var (yn, ys) = Split(y);
+            for (var i = 0; i < Math.Max(xn.Length, yn.Length); i++)
+            {
+                var a = i < xn.Length ? xn[i] : 0;
+                var b = i < yn.Length ? yn[i] : 0;
+                if (a != b) return a.CompareTo(b);
+            }
+            if (xs.Length == 0 || ys.Length == 0) return ys.Length.CompareTo(xs.Length);
+            return string.CompareOrdinal(xs, ys);
+        }
+
+        private static (int[] Numbers, string Suffix) Split(string v)
+        {
+            var dash = v.IndexOf('-');
+            var core = dash < 0 ? v : v[..dash];
+            var suffix = dash < 0 ? "" : v[(dash + 1)..];
+            return (core.Split('.').Select(p => int.TryParse(p, out var n) ? n : 0).ToArray(), suffix);
+        }
     }
 
     // ---------- Forge ----------
@@ -195,6 +313,16 @@ public sealed class VersionService
     {
         [JsonPropertyName("version")] public string Version { get; set; } = "";
         [JsonPropertyName("stable")] public bool Stable { get; set; }
+    }
+
+    /// <summary>Prism Launcher's metadata index for one component (only the fields used here).</summary>
+    private sealed class PrismIndex
+    {
+        [JsonPropertyName("versions")] public List<PrismIndexVersion>? Versions { get; set; }
+    }
+    private sealed class PrismIndexVersion
+    {
+        [JsonPropertyName("version")] public string Version { get; set; } = "";
     }
 
     private sealed class MavenVersionList
