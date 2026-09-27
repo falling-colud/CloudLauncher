@@ -13,7 +13,16 @@ public enum PlanNodeKind
     /// <summary>Free-text card: the actual planning prose.</summary>
     Note = 2,
     /// <summary>A titled backdrop region. Dragging it carries the cards sitting on it.</summary>
-    Section = 3
+    Section = 3,
+    /// <summary>A mod the pack doesn't have yet: one still to be found or ported, with a status, an
+    /// optional link and the store project it stands for (see <see cref="PlanPlaceholder"/>).</summary>
+    /// <remarks>Laid out so an older launcher still shows the card: it reads the unknown kind as a plain
+    /// number and draws it as a note (<see cref="PlanNode.Title"/> for the name, <see cref="PlanNode.Body"/>
+    /// for the note), sized from the <see cref="PlanNode.W"/> and <see cref="PlanNode.H"/> this version
+    /// always writes for it (with its grid on, the width rounds up to a section column). If that launcher saves the board, the card keeps its kind, name, note,
+    /// position, links and store project (<see cref="PlanNode.ModKey"/>); only the
+    /// <see cref="PlanNode.Placeholder"/> details (status, link, icon) go back to their defaults.</remarks>
+    Placeholder = 4
 }
 
 /// <summary>Which mod property a <see cref="PlanNodeKind.Group"/> card selects on.</summary>
@@ -60,6 +69,74 @@ public sealed class PlanTask
     public bool Done { get; set; }
 
     public PlanTask Clone() => new() { Text = Text, Done = Done };
+}
+
+/// <summary>The statuses a placeholder card can be in, as stored in <see cref="PlanPlaceholder.Status"/>.</summary>
+/// <remarks>Strings, not an enum: plans.json is read without an enum converter, so a name it doesn't
+/// know would fail the whole file, and <see cref="ModPlanService.Load"/> answers a file it can't read
+/// with an empty one. An unknown or missing value reads as <see cref="NeedsPort"/>.</remarks>
+public static class PlanPlaceholderStatus
+{
+    public const string NeedsPort = "needs-port";
+    public const string Looking   = "looking";
+    public const string Porting   = "porting";
+    public const string Found     = "found";
+    public const string Dropped   = "dropped";
+
+    /// <summary>Every status, in the order menus list them: from "nothing yet" to "settled".</summary>
+    public static readonly string[] All = [NeedsPort, Looking, Porting, Found, Dropped];
+
+    public static string Normalize(string? status) =>
+        All.FirstOrDefault(s => string.Equals(s, status?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? NeedsPort;
+
+    public static string Label(string? status) => Normalize(status) switch
+    {
+        Looking => "Looking for one",
+        Porting => "Porting it myself",
+        Found   => "Found",
+        Dropped => "Leaving it out",
+        _       => "Needs a port"
+    };
+
+    /// <summary>Still to be sorted out: what the board's "to find" count counts.</summary>
+    public static bool IsOpen(string? status) => Normalize(status) is NeedsPort or Looking or Porting;
+
+    /// <summary>The status dot's colour, from <c>AccentPalette</c>'s hues so it reads on every look.</summary>
+    public static string Hex(string? status) => Normalize(status) switch
+    {
+        Looking => "#5B9DF9", // blue
+        Porting => "#CFAEFF", // purple
+        Found   => "#3FB950", // green
+        Dropped => "#6B7688", // slate
+        _       => "#E3B341"  // amber
+    };
+}
+
+/// <summary>What a <see cref="PlanNodeKind.Placeholder"/> card carries beyond its name
+/// (<see cref="PlanNode.Title"/>), note (<see cref="PlanNode.Body"/>) and store project
+/// (<see cref="PlanNode.ModKey"/>), which live on the node itself so an older launcher keeps them.</summary>
+public sealed class PlanPlaceholder
+{
+    /// <summary>One of <see cref="PlanPlaceholderStatus"/>'s values.</summary>
+    public string Status { get; set; } = PlanPlaceholderStatus.NeedsPort;
+
+    /// <summary>Where the mod lives: a store page, a GitHub repo, any http(s) URL. Optional.</summary>
+    public string? Link { get; set; }
+
+    /// <summary>The attached store project's icon, so the card shows it without asking the store.</summary>
+    public string? IconUrl { get; set; }
+
+    /// <summary>What the last "is there a version for this pack?" check asked about, as
+    /// <c>"1.21.1 neoforge"</c>. Its answer shows only while the pack is still on that version and
+    /// loader.</summary>
+    public string? CheckedFor { get; set; }
+
+    /// <summary>The last check's answer: whether the project had a version for <see cref="CheckedFor"/>.</summary>
+    public bool? CheckedFound { get; set; }
+
+    public DateTimeOffset? CheckedAt { get; set; }
+
+    public PlanPlaceholder Clone() => (PlanPlaceholder)MemberwiseClone();
 }
 
 /// <summary>The live selection behind a group card: a property plus the value to match.</summary>
@@ -116,13 +193,17 @@ public sealed class PlanNode
     public double X { get; set; }
     public double Y { get; set; }
 
-    /// <summary>Explicit size. 0 means "use the card's natural size for its kind".</summary>
+    /// <summary>Explicit size. 0 means "use the card's natural size for its kind". A placeholder's are
+    /// always written: its H only for older launchers, which size a kind they don't know from W and H
+    /// (this version works the height out from what the card shows).</summary>
     public double W { get; set; }
     public double H { get; set; }
 
     /// <summary>For <see cref="PlanNodeKind.Mod"/>: the mod's metadata key
     /// (<c>modrinth:...</c>, <c>curseforge:...</c> or <c>file:...</c>). Migrated forward automatically
-    /// when a jar's identity resolves to a more stable key.</summary>
+    /// when a jar's identity resolves to a more stable key. For
+    /// <see cref="PlanNodeKind.Placeholder"/>: the store project it stands for, in the same form, when
+    /// one was attached; an installed mod with that key is the placeholder's match.</summary>
     public string? ModKey { get; set; }
 
     /// <summary>For <see cref="PlanNodeKind.Group"/>: the live selection.</summary>
@@ -172,6 +253,10 @@ public sealed class PlanNode
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool TasksCollapsed { get; set; }
 
+    /// <summary>Placeholder cards: status, link and store details. Null on every other kind, and then
+    /// left out of the JSON, so other cards serialize as they always did.</summary>
+    public PlanPlaceholder? Placeholder { get; set; }
+
     public PlanNode Clone() => new()
     {
         Id = Guid.NewGuid().ToString("N"),
@@ -180,6 +265,7 @@ public sealed class PlanNode
         Title = Title, Body = Body, Color = Color, Collapsed = Collapsed, Expanded = Expanded,
         Tracker = Tracker, Done = Done, Progress = Progress,
         Tasks = Tasks?.Select(t => t.Clone()).ToList(), TasksCollapsed = TasksCollapsed,
+        Placeholder = Placeholder?.Clone(),
         SectionId = SectionId // callers that re-id sections (duplicate/paste) remap this afterwards
     };
 }

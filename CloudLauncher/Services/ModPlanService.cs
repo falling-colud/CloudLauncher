@@ -337,6 +337,38 @@ public sealed class ModPlanService
         if (changed) Save(packId);
     }
 
+    // ── placeholder cards ────────────────────────────────────────────────────
+
+    /// <summary>A name cut down to its letters and digits in lower case, so "Farmer's Delight",
+    /// "farmers-delight" and "FarmersDelight" compare equal.</summary>
+    public static string MatchName(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return "";
+        var chars = new char[name.Length];
+        var n = 0;
+        foreach (var c in name)
+            if (char.IsLetterOrDigit(c)) chars[n++] = char.ToLowerInvariant(c);
+        return new string(chars, 0, n);
+    }
+
+    /// <summary>The store project a link points at, when it is a Modrinth or CurseForge project page:
+    /// the store and the slug (or id) from its path. Null for any other link.</summary>
+    public static (ModSource Source, string Slug)? StoreProjectOf(string? link)
+    {
+        if (!SafeLaunch.IsWebUrl(link, out var uri) || uri is null) return null;
+        var host = uri.Host.ToLowerInvariant();
+        var parts = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        // modrinth.com/mod/sodium (also /plugin, /datapack... and the generic /project)
+        if ((host == "modrinth.com" || host.EndsWith(".modrinth.com")) && parts.Length >= 2)
+            return (ModSource.Modrinth, Uri.UnescapeDataString(parts[1]));
+        // www.curseforge.com/minecraft/mc-mods/jei
+        if ((host == "curseforge.com" || host.EndsWith(".curseforge.com")) && parts.Length >= 3
+            && string.Equals(parts[0], "minecraft", StringComparison.OrdinalIgnoreCase))
+            return (ModSource.CurseForge, Uri.UnescapeDataString(parts[2]));
+        return null;
+    }
+
     // ── group cards ──────────────────────────────────────────────────────────
 
     /// <summary>Evaluates a group card's query against the current inventory.</summary>
@@ -460,5 +492,55 @@ public sealed class ModPlanService
             new[] { new PlanGroupQuery { Property = PlanGroupProperty.All, Value = "" } }));
 
         return options;
+    }
+}
+
+/// <summary>Finds the installed mod a placeholder card stands for, so the board can offer to swap the
+/// real card in once the mod is in the pack.</summary>
+/// <remarks>
+/// <para>Built once per board redraw from the pack's mods (a few dictionary fills), after which each
+/// placeholder is a handful of lookups rather than a scan of every mod.</para>
+/// <para>Strongest evidence first: the attached store project (<see cref="PlanNode.ModKey"/>), then a
+/// Modrinth or CurseForge link's slug, then the name, ignoring case, spaces and punctuation, against
+/// the mod's name on either store and its slugs. Names shorter than three letters are not matched
+/// by name alone, since "EMI" and "AE2"-style stubs are too easy to hit by accident.</para>
+/// </remarks>
+public sealed class PlanPlaceholderMatcher
+{
+    private readonly Dictionary<string, PackMod> _byKey = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PackMod> _bySlug = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PackMod> _byName = new(StringComparer.Ordinal);
+
+    public PlanPlaceholderMatcher(IReadOnlyList<PackMod> mods)
+    {
+        foreach (var mod in mods)
+        {
+            foreach (var key in mod.CandidateKeys) _byKey.TryAdd(key, mod);
+            if (mod.Modrinth is { } mr) Add(mr);
+            if (mod.CurseForge is { } cf) Add(cf);
+            Name(mod.DisplayName, mod);
+
+            void Add(ModSummary s)
+            {
+                if (!string.IsNullOrWhiteSpace(s.Slug)) _bySlug.TryAdd($"{s.Source}:{s.Slug}", mod);
+                Name(s.Name, mod);
+                Name(s.Slug, mod);
+            }
+        }
+
+        void Name(string? name, PackMod mod)
+        {
+            var key = ModPlanService.MatchName(name);
+            if (key.Length >= 3) _byName.TryAdd(key, mod);
+        }
+    }
+
+    public PackMod? Find(PlanNode placeholder)
+    {
+        if (placeholder.ModKey is { Length: > 0 } key && _byKey.TryGetValue(key, out var byKey)) return byKey;
+        if (ModPlanService.StoreProjectOf(placeholder.Placeholder?.Link) is { } project
+            && _bySlug.TryGetValue($"{project.Source}:{project.Slug}", out var bySlug)) return bySlug;
+        var name = ModPlanService.MatchName(placeholder.Title);
+        return name.Length >= 3 && _byName.TryGetValue(name, out var byName) ? byName : null;
     }
 }

@@ -365,7 +365,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         OpenModPage, RequestReload, UpdateMany, RecheckUpdates);
 
     private void LoadPlan() => _plan?.Load(_pack.Id, _all, _shell, OpenModPage, NoteSecondaryViewEdit,
-        RequestReload, UpdateMany, RecheckUpdates);
+        RequestReload, UpdateMany, RecheckUpdates, _pack.MinecraftVersion, ModUpdater.LoaderTag(_pack));
 
     private void UpdateMany(IReadOnlyList<PackMod> mods) => _ = UpdateManyAsync(mods);
     private void RecheckUpdates(IReadOnlyList<PackMod> mods) => _ = RecheckUpdatesAsync(mods);
