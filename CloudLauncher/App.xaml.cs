@@ -19,15 +19,18 @@ public partial class App : Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        // The updater is replacing this folder's files and opens the launcher when it is done. Every
+        // file this process has loaded stays locked while it runs, so it leaves straight away.
+        if (UpdateService.UpdateInProgress())
+        {
+            AppLog.Log("update", "An update is being installed; the updater opens the launcher when it is done.");
+            ExitNow();
+        }
+
         // Before anything can save settings: a second launcher on the same profile would write its
         // own copy over this one's (see SingleInstance). The running copy has been asked to come to the
         // front, so this one exits without opening a window.
-        if (!SingleInstance.Claim())
-        {
-            StartupUri = null;
-            Shutdown();
-            return;
-        }
+        if (!SingleInstance.Claim()) ExitNow();
         SingleInstance.ListenForActivation(() => Dispatcher.BeginInvoke(BringMainWindowToFront));
 
         base.OnStartup(e);
@@ -56,6 +59,16 @@ public partial class App : Application
 
         WarmRememberedScans();
         MigrateManualContentCompatibility();
+    }
+
+    /// <summary>Ends a copy that must not open, before any window exists.</summary>
+    /// <remarks>Not Shutdown: WPF would still open the StartupUri window after OnStartup returns, and
+    /// setting StartupUri to null throws (up to 0.9.5 every second copy crashed that way).</remarks>
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    private static void ExitNow()
+    {
+        AppLog.Flush();
+        Environment.Exit(0);
     }
 
     protected override void OnExit(ExitEventArgs e)

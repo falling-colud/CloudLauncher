@@ -3,6 +3,18 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.6 - 2026-09-27
+
+- Updating the launcher is quick wherever it is installed. The updater used to back up the whole
+  folder the launcher runs from; for a launcher kept in Downloads that meant copying everything in
+  Downloads, minutes with no window, and opening the launcher again in that time made the update
+  fail and put the old version back. It now backs up only the files the update replaces.
+- Only one update runs at a time, and a launcher opened while an update is being installed closes
+  at once; the updater opens it when it is done.
+- Opening the launcher while it is already running brings the open window to the front without
+  an error report.
+- A failed update's log names the files that could not be replaced.
+
 ## 0.9.5 - 2026-09-27
 
 - Memory: the Settings default ("Maximum RAM allocated to new instances") is used again. It was saved
