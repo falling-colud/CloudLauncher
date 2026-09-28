@@ -174,6 +174,7 @@ public static class ThemeService
         SetBrush(app, "InfoBrush", info);
         SetBrush(app, "InfoBlueBrush", info);
         SetBrush(app, "AccentTextBrush", info);
+        SetBrush(app, "TextSelectionBrush", SelectionColour(accent, surface));
 
         // Tag pills are told apart by hue: shared follows the accent, the rest are fixed (team purple,
         // public green, Modrinth blue). Both tones are recomputed so they stay legible on light backgrounds.
@@ -368,8 +369,35 @@ public static class ThemeService
         SetBrush(app, "InfoBrush", info);
         SetBrush(app, "InfoBlueBrush", info);
         SetBrush(app, "AccentTextBrush", info);
+        SetBrush(app, "TextSelectionBrush", SelectionColour(accent, bg));
         SetBrush(app, SystemColors.HighlightBrushKey, accent);
         SetBrush(app, SystemColors.HighlightTextBrushKey, onAccent);
+    }
+
+    /// <summary>The highlight behind selected text: text boxes, the config editor, the log view and the
+    /// description pages.</summary>
+    /// <remarks>
+    /// WPF paints a text box's selection over the text at <c>SelectionOpacity</c> (0.5 in the app's
+    /// styles), so the colour has to stand out from the background at that strength while the text
+    /// under it stays readable. The accent walked away from the background (lighter on a dark theme, darker on a light one) does
+    /// both, a little further than <see cref="Readable(Color, Color)"/> goes for text. The old
+    /// AccentSoftBrush was already translucent, and a dark accent such as Rust at 40 % of that all but
+    /// vanished on Slate's near-black.
+    /// </remarks>
+    private static Color SelectionColour(Color accent, Color background)
+    {
+        var target = Luminance(background) < 0.5 ? Colors.White : Colors.Black;
+        var colour = accent;
+        for (var i = 0; i < 10 && Math.Abs(Luminance(colour) - Luminance(background)) < 0.45; i++)
+            colour = Mix(colour, target, 0.16);
+        return colour;
+    }
+
+    /// <summary><see cref="SelectionColour"/> as a CSS colour, at the strength a text box shows it.</summary>
+    private static string SelectionCss(Color accent, Color background)
+    {
+        var c = SelectionColour(accent, background);
+        return $"rgba({c.R},{c.G},{c.B},0.5)";
     }
 
     private static void ApplySlateLogAndHtml(Application app, Color accent, Color bg, Color logBg, Color logText, Color logMuted)
@@ -381,7 +409,7 @@ public static class ThemeService
         SetBrush(app, "LogWarningBrush",    Hex("#E0A458"));
         SetBrush(app, "LogErrorBrush",      Hex("#F07178"));
         SetBrush(app, "LogSuccessBrush",    Hex("#5CB176"));
-        SetBrushWithAlpha(app, "LogSelectionBrush", accent, 0x55);
+        SetBrushWithAlpha(app, "LogSelectionBrush", SelectionColour(accent, logBg), 0x55);
 
         var link = Readable(accent, bg);
         CloudLauncher.Shared.PackText.HtmlPalette.Current = new CloudLauncher.Shared.PackText.HtmlPalette(
@@ -395,7 +423,8 @@ public static class ThemeService
             TextStrong: "#ECEAE4",
             TextSoft: "#C9C6BE",
             Link: ToHex(link),
-            LinkHover: ToHex(Lighten(link, 0.22)));
+            LinkHover: ToHex(Lighten(link, 0.22)),
+            Selection: SelectionCss(accent, bg));
     }
 
     /// <summary>The WCAG contrast ratio of two colours, from 1 (the same) to 21 (black on white).</summary>
@@ -568,7 +597,7 @@ public static class ThemeService
         SetBrush(app, "LogWarningBrush",    TryParse(theme.LogWarning) ?? Parse(theme.Warning, "#E3B341"));
         SetBrush(app, "LogErrorBrush",      TryParse(theme.LogError) ?? Parse(null, logDark ? "#FF6B6B" : "#B02A2A"));
         SetBrush(app, "LogSuccessBrush",    Parse(theme.Success, "#3FB950"));
-        SetBrush(app, "LogSelectionBrush",  WithAlpha(accent, 0x55));
+        SetBrush(app, "LogSelectionBrush",  WithAlpha(SelectionColour(accent, logBg), 0x55));
     }
 
     /// <summary>
@@ -593,7 +622,8 @@ public static class ThemeService
             TextStrong: ToHex(Mix(surface, contrast, dark ? 0.92 : 0.86)),
             TextSoft: ToHex(Mix(surface, contrast, dark ? 0.78 : 0.72)),
             Link: ToHex(link),
-            LinkHover: ToHex(dark ? Lighten(link, 0.22) : Darken(link, 0.18)));
+            LinkHover: ToHex(dark ? Lighten(link, 0.22) : Darken(link, 0.18)),
+            Selection: SelectionCss(accent, surface));
     }
 
     /// <summary>A pill's background and foreground for one hue: a translucent wash of it behind text

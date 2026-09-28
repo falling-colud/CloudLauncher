@@ -145,7 +145,8 @@
                     <DataGridTemplateColumn x:Name="UpdateColumn" Header="Update" Width="88" CanUserSort="False">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <Button Content="Update" Click="OnModAction"
+                                <Button Content="{DynamicResource ModUpdateButtonLabel}" Click="OnModAction"
+                                        MouseRightButtonUp="OnModActionRightClick"
                                         IsEnabled="{Binding HasUpdate}" Padding="6,2"
                                         Visibility="{Binding HasUpdate, Converter={StaticResource BoolVis}}"
                                         MinHeight="0" MinWidth="0" FontSize="11"

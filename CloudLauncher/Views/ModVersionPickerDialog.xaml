@@ -1,7 +1,8 @@
-﻿<UserControl x:Class="CloudLauncher.Views.ModVersionPickerDialog"
+<UserControl x:Class="CloudLauncher.Views.ModVersionPickerDialog"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:slate="clr-namespace:CloudLauncher.Controls">
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:views="clr-namespace:CloudLauncher.Views">
     <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
             BorderThickness="1" CornerRadius="12" Padding="22">
         <slate:SlateBorder.Effect>
@@ -28,41 +29,56 @@
                 </Grid>
             </StackPanel>
 
-            <slate:SlateBorder Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
-                    BorderThickness="1" CornerRadius="6">
-                <!--  Double-click installs; right-click offers the changelog first.  -->
-                <ListBox x:Name="List" Background="Transparent" BorderThickness="0" MouseDoubleClick="OnListDoubleClick"
-                         SelectionChanged="OnSelectionChanged" MouseRightButtonUp="OnListRightClick">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <Grid Margin="2,3" Opacity="{Binding Dim}">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <StackPanel Grid.Column="0">
-                                    <StackPanel Orientation="Horizontal">
-                                        <TextBlock Text="{Binding VersionLabel}" FontWeight="SemiBold"
-                                                   Foreground="{DynamicResource TextPrimaryBrush}"
-                                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                        <slate:SlateBorder Style="{StaticResource Pill}" Background="{Binding ChannelBrush}" Margin="8,0,0,0">
-                                            <TextBlock Text="{Binding Channel}" Style="{StaticResource PillText}" Foreground="White"/>
-                                        </slate:SlateBorder>
-                                        <slate:SlateBorder Style="{StaticResource Pill}" Background="{DynamicResource AccentSoftBrush}" Margin="6,0,0,0"
-                                                Visibility="{Binding CurrentVisibility}">
-                                            <TextBlock Text="Current" Style="{StaticResource PillText}" Foreground="{DynamicResource AccentTextBrush}"/>
-                                        </slate:SlateBorder>
+            <!--  The list, and the selected version's changelog beside it, or under it when the card is
+            too narrow for two columns (see OnBodySizeChanged).  -->
+            <Grid x:Name="Body" SizeChanged="OnBodySizeChanged">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition x:Name="PaneColumn" Width="1.2*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition x:Name="PaneRow" Height="0"/>
+                </Grid.RowDefinitions>
+
+                <slate:SlateBorder Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                        BorderThickness="1" CornerRadius="6">
+                    <!--  Double-click installs; right-click offers the changelog first.  -->
+                    <ListBox x:Name="List" Background="Transparent" BorderThickness="0" MouseDoubleClick="OnListDoubleClick"
+                             SelectionChanged="OnSelectionChanged" MouseRightButtonUp="OnListRightClick">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Margin="2,3" Opacity="{Binding Dim}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding VersionLabel}" FontWeight="SemiBold"
+                                                       Foreground="{DynamicResource TextPrimaryBrush}"
+                                                       TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                            <slate:SlateBorder Style="{StaticResource Pill}" Background="{Binding ChannelBrush}" Margin="8,0,0,0">
+                                                <TextBlock Text="{Binding Channel}" Style="{StaticResource PillText}" Foreground="White"/>
+                                            </slate:SlateBorder>
+                                            <slate:SlateBorder Style="{StaticResource Pill}" Background="{DynamicResource AccentSoftBrush}" Margin="6,0,0,0"
+                                                    Visibility="{Binding CurrentVisibility}">
+                                                <TextBlock Text="Current" Style="{StaticResource PillText}" Foreground="{DynamicResource AccentTextBrush}"/>
+                                            </slate:SlateBorder>
+                                        </StackPanel>
+                                        <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"
+                                                   Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0"/>
                                     </StackPanel>
-                                    <TextBlock Text="{Binding MetaLabel}" Style="{StaticResource Caption}"
-                                               Foreground="{DynamicResource TextSecondaryBrush}" Margin="0,2,0,0"/>
-                                </StackPanel>
-                                <TextBlock Grid.Column="1" Text="{Binding DateLabel}" Style="{StaticResource Caption}"
-                                           Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
-                            </Grid>
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
-            </slate:SlateBorder>
+                                    <TextBlock Grid.Column="1" Text="{Binding DateLabel}" Style="{StaticResource Caption}"
+                                               Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </slate:SlateBorder>
+
+                <views:VersionChangelogPane x:Name="ChangelogPane" Grid.Column="1" Margin="14,0,0,0"/>
+            </Grid>
         </DockPanel>
     </slate:SlateBorder>
 </UserControl>

@@ -83,10 +83,13 @@ public static class ModOptionsMenu
         // ── Enable / Disable ──
         AppendEnableItems(menu, targets, ctx);
 
-        // ── Updates ──
-        if (UpdateItem(targets, ctx) is { } update) menu.Items.Add(update);
-        if (!multi && ctx.OnUpdateToVersion is not null)
-            menu.Items.Add(Item("Update to version...", () => ctx.OnUpdateToVersion!.Invoke(primary), Glyph(IcHistory)));
+        // ── Updates ── in the order the Update button offers them: its click first.
+        var update = UpdateItem(targets, ctx);
+        var toVersion = !multi && ctx.OnUpdateToVersion is not null
+            ? Item("Update to version...", () => ctx.OnUpdateToVersion!.Invoke(primary), Glyph(IcHistory))
+            : null;
+        foreach (var item in UpdateButtonPicksVersion ? new[] { toVersion, update } : new[] { update, toVersion })
+            if (item is not null) menu.Items.Add(item);
         // Kept beside the update actions it governs rather than down in the flag list.
         menu.Items.Add(FlagToggle("Lock updates", targets, ctx,
             m => m.UpdateLocked, (m, v) => m.UpdateLocked = v, Glyph(IcLock)));
@@ -283,9 +286,14 @@ public static class ModOptionsMenu
         else if (!multi && ctx.OnOpenPage is not null)
             menu.Items.Add(Item("Open page", () => ctx.OnOpenPage!.Invoke(primary), Glyph(IcPage)));
 
-        // Unlike the full menu, leave the update item out when there is nothing to update.
-        if (targets.Any(t => t.HasUpdate) && UpdateItem(targets, ctx) is { } update)
-            menu.Items.Add(update);
+        // Unlike the full menu, leave the update items out when there is nothing to update. When the
+        // Update button picks the version, so does the first item here, with the newest one after it.
+        if (targets.Any(t => t.HasUpdate))
+        {
+            if (UpdateButtonPicksVersion && !multi && ctx.OnUpdateToVersion is not null)
+                menu.Items.Add(Item("Update to version...", () => ctx.OnUpdateToVersion!.Invoke(primary), Glyph(IcHistory)));
+            if (UpdateItem(targets, ctx) is { } update) menu.Items.Add(update);
+        }
 
         AppendEnableItems(menu, targets, ctx);
 
@@ -320,6 +328,63 @@ public static class ModOptionsMenu
                 full.Placement = placement;
                 full.IsOpen = true;
             }));
+    }
+
+    // ── a mod row's Update button ───────────────────────────────────────────────
+
+    /// <summary>Resource keys for the Update button's label and tooltip, so every list's button
+    /// follows <see cref="AppSettings.UpdateButtonPicksVersion"/> without being rebuilt.</summary>
+    public const string UpdateButtonLabelKey = "ModUpdateButtonLabel", UpdateButtonToolTipKey = "ModUpdateButtonToolTip";
+
+    /// <summary>Settings > Mods, "The Update button lets me pick the version".</summary>
+    private static bool UpdateButtonPicksVersion => App.State.Settings.UpdateButtonPicksVersion;
+
+    /// <summary>Puts the Update button's label and tooltip in the app's resources to match the
+    /// setting. Called at start-up and when the setting changes.</summary>
+    /// <remarks>"Update..." with the ellipsis when the click opens the version list, the way every
+    /// other button that opens a picker is labelled.</remarks>
+    public static void ApplyUpdateButtonLabel()
+    {
+        if (Application.Current is not { } app) return;
+        var picks = UpdateButtonPicksVersion;
+        app.Resources[UpdateButtonLabelKey] = picks ? "Update..." : "Update";
+        app.Resources[UpdateButtonToolTipKey] = picks
+            ? "Pick the version to update to. Right-click to update to the newest."
+            : "Update to the newest version. Right-click to pick the version.";
+    }
+
+    /// <summary>A plain click on a mod row's Update button.</summary>
+    /// <param name="pickVersion">Opens the version list, or null where the list cannot offer one (a
+    /// jar no store knows, a window without a card layer); the button then updates to the newest
+    /// whatever the setting says.</param>
+    /// <remarks>"Update all" never goes through here: it always takes every mod to its newest
+    /// version.</remarks>
+    public static void RunUpdateButton(PackMod mod, Action<PackMod> toNewest, Action<PackMod>? pickVersion)
+    {
+        if (UpdateButtonPicksVersion && pickVersion is not null) pickVersion(mod);
+        else toNewest(mod);
+    }
+
+    /// <summary>A right-click on a mod row's Update button: a one-item menu with whichever update the
+    /// click does not do, like the arrow half of a split button.</summary>
+    /// <returns>False when there is nothing else to offer (no version list here), so the caller can
+    /// let the right-click through to the row's own menu.</returns>
+    public static bool OpenUpdateButtonMenu(FrameworkElement button, PackMod mod, Action<PackMod> toNewest,
+        Action<PackMod>? pickVersion)
+    {
+        if (pickVersion is null) return false;
+        var menu = new ContextMenu
+        {
+            MinWidth = 200,
+            PlacementTarget = button,
+            Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom
+        };
+        menu.Items.Add(UpdateButtonPicksVersion
+            ? Item("Update to newest", () => toNewest(mod), Glyph(IcRefresh),
+                gesture: mod.LatestVersion?.VersionNumber is { Length: > 0 and <= 24 } newest ? newest : null)
+            : Item("Update to version...", () => pickVersion(mod), Glyph(IcHistory)));
+        menu.IsOpen = true;
+        return true;
     }
 
     // ── items shared by both menus ──────────────────────────────────────────────

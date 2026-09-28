@@ -2945,6 +2945,12 @@ public partial class ModsView : Page, IReusablePage, IRefreshablePage
     private void OnVersionsGridPreviewRightDown(object sender, MouseButtonEventArgs e) =>
         VersionRowMenu.SelectRowUnder(VersionsGrid, e);
 
+    /// <summary>The changelog under the list follows the selected version. A new mod clears the
+    /// selection, which clears the changelog with it.</summary>
+    private void OnVersionSelected(object sender, SelectionChangedEventArgs e) =>
+        VersionChangelog.Show(VersionsGrid.SelectedItem is VersionDisplayRow row ? ChangelogVersionOf(row) : null,
+            _currentExternalMod);
+
     /// <summary>Right-click on a version: its changelog, an install of that specific version, and
     /// its number for the clipboard.</summary>
     private void OnVersionsGridRightClick(object sender, MouseButtonEventArgs e)

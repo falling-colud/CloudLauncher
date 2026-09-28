@@ -252,6 +252,16 @@ public partial class ResourcePackExplorerPage : Page
         }
     }
 
+    /// <summary>The X in the search box emptied it: back to the default listing at once, as Escape
+    /// does, rather than after the typing pause.</summary>
+    private async void OnSearchCleared(object? sender, EventArgs e)
+    {
+        _searchText = "";
+        _searchTimer?.Stop();
+        _lastSearched = "";
+        await ResetAndLoadAsync();
+    }
+
     private void OnFiltersClick(object sender, RoutedEventArgs e) => FiltersPopup.IsOpen = !FiltersPopup.IsOpen;
 
     private async void OnApplyFilters(object sender, RoutedEventArgs e)

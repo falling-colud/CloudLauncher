@@ -747,11 +747,13 @@ public partial class MainWindow : Window, IDialogHost
     {
         DialogLayer.Children.Add(overlay);
         SetOverlayVisible(true);
+        DialogStackChanged?.Invoke();
         try { return await overlay.Result; }
         finally
         {
             DialogLayer.Children.Remove(overlay);
             if (DialogLayer.Children.Count == 0) SetOverlayVisible(false);
+            DialogStackChanged?.Invoke();
         }
     }
 
@@ -762,6 +764,31 @@ public partial class MainWindow : Window, IDialogHost
     /// the WebView2 description views paint over anything WPF draws, so they swap to a snapshot of
     /// themselves while an overlay is up.</summary>
     public static event Action<bool>? OverlayChanged;
+
+    /// <summary>Raised after every card or dialog added to or removed from the dialog layer, including
+    /// one stacked over another. See <see cref="IsUnderCard"/>.</summary>
+    public static event Action? DialogStackChanged;
+
+    /// <summary>Whether a card or dialog in the dialog layer sits over <paramref name="element"/>, so a
+    /// native surface there has to hide.</summary>
+    /// <remarks>
+    /// Something on a card is only under the cards stacked after its own: the changelog on the update
+    /// review or the version picker has to show on its own card, and hide once a changelog card opens
+    /// over that one. Anything else in a launcher window is under any card; other windows have no
+    /// dialog layer.
+    /// </remarks>
+    public static bool IsUnderCard(DependencyObject element)
+    {
+        if (Window.GetWindow(element) is not MainWindow main) return false;
+        var layer = main.DialogLayer;
+        if (layer.Children.Count == 0) return false;
+        for (var d = element; d is not null; d = System.Windows.Media.VisualTreeHelper.GetParent(d))
+        {
+            if (d is UIElement card && ReferenceEquals(System.Windows.Media.VisualTreeHelper.GetParent(d), layer))
+                return layer.Children.IndexOf(card) < layer.Children.Count - 1;
+        }
+        return true;
+    }
 
     private void SetOverlayVisible(bool visible)
     {
@@ -800,11 +827,13 @@ public partial class MainWindow : Window, IDialogHost
 
         DialogLayer.Children.Add(layer);
         SetOverlayVisible(true);
+        DialogStackChanged?.Invoke();
         try { await completion; }
         finally
         {
             DialogLayer.Children.Remove(layer);
             if (DialogLayer.Children.Count == 0) SetOverlayVisible(false);
+            DialogStackChanged?.Invoke();
         }
     }
 

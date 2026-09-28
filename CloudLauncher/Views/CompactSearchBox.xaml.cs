@@ -8,7 +8,8 @@ using System.Windows.Threading;
 namespace CloudLauncher.Views;
 
 /// <summary>The glyph that grows into a search field: a 36x36 rounded box holding a magnifier that
-/// expands to <see cref="ExpandedWidth"/> on click and collapses when it loses focus while empty.</summary>
+/// expands to <see cref="ExpandedWidth"/> on click and collapses when it loses focus while empty.
+/// While it has text, an X at the right (and Escape) empties it without closing it.</summary>
 /// <remarks>Use this rather than copying the markup, so every page's search box behaves the
 /// same.</remarks>
 public partial class CompactSearchBox : UserControl
@@ -199,14 +200,35 @@ public partial class CompactSearchBox : UserControl
             _debounce?.Stop();
             // Enter means "search now". Pages handling SearchSubmitted search themselves; otherwise flush
             // the debounce. Either way Enter is instant and searches once.
-            if (SearchSubmitted is { } submitted) submitted(this, EventArgs.Empty);
+            if (SearchSubmitted is { } submitted)
+            {
+                // The page has searched for this text now, so clearing it later must still count as
+                // a change and bring the default list back.
+                _lastFlushed = Box.Text.Trim();
+                submitted(this, EventArgs.Empty);
+            }
             else FlushDebounce();
         }
         else if (e.Key == Key.Escape)
         {
             e.Handled = true;
-            Clear();
+            // One step per press, like the X: the first empties the box and keeps the caret there,
+            // the next closes it.
+            if (Box.Text.Length > 0) ClearKeepingFocus();
+            else Clear();
         }
+    }
+
+    /// <summary>The X was clicked. It has already emptied the box and put the caret back.</summary>
+    private void OnClearButtonCleared(object? sender, EventArgs e) => ClearKeepingFocus();
+
+    /// <summary>Empties the query and tells the page at once, but leaves the box open with the caret
+    /// in it, ready for the next search.</summary>
+    private void ClearKeepingFocus()
+    {
+        SetCurrentValue(TextProperty, "");
+        FlushDebounce();
+        Box.Focus();
     }
 
     private void OnBoxLostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)

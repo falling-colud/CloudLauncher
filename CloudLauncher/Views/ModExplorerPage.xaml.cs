@@ -1031,6 +1031,11 @@ public partial class ModExplorerPage : Page
     private void OnVersionsGridPreviewRightDown(object sender, MouseButtonEventArgs e) =>
         VersionRowMenu.SelectRowUnder(VersionsGrid, e);
 
+    /// <summary>The changelog under the list follows the selected version. A new mod or filter
+    /// clears the selection, which clears the changelog with it.</summary>
+    private void OnVersionSelected(object sender, SelectionChangedEventArgs e) =>
+        VersionChangelog.Show((VersionsGrid.SelectedItem as VersionRow)?.Source, _currentMod);
+
     /// <summary>Right-click on a version: its changelog, a download of that specific version, and
     /// its number for the clipboard.</summary>
     private void OnVersionsGridRightClick(object sender, MouseButtonEventArgs e)

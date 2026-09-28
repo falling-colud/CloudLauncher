@@ -346,6 +346,30 @@
         </Setter>
     </Style>
 
+    <!--  The X inside a search box (Views/SearchClearButton, which applies this itself). Small and
+    quiet so it doesn't compete with the text; brightens on hover like the other icon buttons.  -->
+    <Style x:Key="SearchClearButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
+        <Setter Property="Content" Value="&#xE711;"/>
+        <Setter Property="FontSize" Value="10"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextTertiaryBrush}"/>
+        <Setter Property="MinWidth" Value="0"/>
+        <Setter Property="MinHeight" Value="0"/>
+        <Setter Property="Width" Value="24"/>
+        <Setter Property="Height" Value="24"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!--  A mod row's Update button. ModOptionsMenu.ApplyUpdateButtonLabel replaces these when
+    Settings > Mods makes the button open the version list.  -->
+    <sys:String x:Key="ModUpdateButtonLabel">Update</sys:String>
+    <sys:String x:Key="ModUpdateButtonToolTip">Update to the newest version. Right-click to pick the version.</sys:String>
+
     <!--  Window-caption button (min / max / close)  -->
     <Style x:Key="CaptionButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
         <!-- Window controls shouldn't bob on hover - colour feedback only. -->
@@ -491,7 +515,13 @@
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="10,5"/>
         <Setter Property="CaretBrush" Value="{DynamicResource AccentBrush}"/>
-        <Setter Property="SelectionBrush" Value="{DynamicResource AccentSoftBrush}"/>
+        <!--  TextSelectionBrush is opaque and drawn over the text at SelectionOpacity; see
+        ThemeService.SelectionColour. Half strength rather than WPF's 0.4, which left a dark accent
+        faint on Slate. SelectionTextBrush only counts where WPF draws the selection under the text
+        instead (the non-adorner mode), and keeps the text as it was.  -->
+        <Setter Property="SelectionBrush" Value="{DynamicResource TextSelectionBrush}"/>
+        <Setter Property="SelectionOpacity" Value="0.5"/>
+        <Setter Property="SelectionTextBrush" Value="{DynamicResource TextPrimaryBrush}"/>
         <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
         <Setter Property="FontSize" Value="13"/>
         <Setter Property="MinHeight" Value="34"/>
@@ -540,7 +570,9 @@
         <Setter Property="BorderThickness" Value="1"/>
         <Setter Property="Padding" Value="10,5"/>
         <Setter Property="CaretBrush" Value="{DynamicResource AccentBrush}"/>
-        <Setter Property="SelectionBrush" Value="{DynamicResource AccentSoftBrush}"/>
+        <Setter Property="SelectionBrush" Value="{DynamicResource TextSelectionBrush}"/>
+        <Setter Property="SelectionOpacity" Value="0.5"/>
+        <Setter Property="SelectionTextBrush" Value="{DynamicResource TextPrimaryBrush}"/>
         <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
         <Setter Property="FontSize" Value="13"/>
         <Setter Property="MinHeight" Value="34"/>

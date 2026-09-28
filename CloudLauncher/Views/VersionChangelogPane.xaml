@@ -1,0 +1,23 @@
+<UserControl x:Class="CloudLauncher.Views.VersionChangelogPane"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:views="clr-namespace:CloudLauncher.Views">
+    <DockPanel>
+        <!--  Which version the notes below belong to, so a slow answer cannot pass for another's.  -->
+        <TextBlock x:Name="HeaderLabel" DockPanel.Dock="Top" Style="{StaticResource Caption}"
+                   Foreground="{DynamicResource TextSecondaryBrush}" Margin="2,0,0,6"
+                   TextTrimming="CharacterEllipsis" Text="Changelog"/>
+
+        <!--  As on VersionChangelogCard: StateHost after the viewer so it draws on top, and PageState
+        collapses the viewer while a panel is up, since WebView2 would paint over it.  -->
+        <slate:SlateBorder CornerRadius="6" ClipToBounds="True" Padding="2"
+                BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                Background="{DynamicResource Surface0Brush}">
+            <Grid>
+                <views:RichDescriptionView x:Name="ChangelogView"/>
+                <views:PageStateView x:Name="StateHost"/>
+            </Grid>
+        </slate:SlateBorder>
+    </DockPanel>
+</UserControl>

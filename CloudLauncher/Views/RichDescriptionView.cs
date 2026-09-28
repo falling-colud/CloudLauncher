@@ -100,25 +100,30 @@ public sealed class RichDescriptionView : UserControl, IDisposable
     {
         Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged; // avoid double-subscribe
         Animations.Animate.AirspaceTransitionChanged += OnAirspaceTransitionChanged;
-        MainWindow.OverlayChanged -= OnOverlayChanged;
-        MainWindow.OverlayChanged += OnOverlayChanged;
+        MainWindow.DialogStackChanged -= OnDialogStackChanged;
+        MainWindow.DialogStackChanged += OnDialogStackChanged;
         // If we loaded into a transition already in flight, cover with the snapshot immediately.
         if (Animations.Animate.IsTransitionActiveFor(this)) BeginTransitionOverlay();
-        if (MainWindow.IsOverlayVisible) OnOverlayChanged(true);
+        if (MainWindow.IsUnderCard(this)) OnOverlayChanged(true);
         EnsureWebViewInitialized();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
-        MainWindow.OverlayChanged -= OnOverlayChanged;
+        MainWindow.DialogStackChanged -= OnDialogStackChanged;
         _revealTimer.Stop();
     }
 
     private bool _overlayCover;
 
+    /// <summary>A card or dialog opened or closed somewhere in the window.</summary>
+    /// <remarks>Asks whether one is over this view rather than whether any is up: a view on a card
+    /// (the update review, the version picker, a changelog card) must keep showing on it.</remarks>
+    private void OnDialogStackChanged() => OnOverlayChanged(MainWindow.IsUnderCard(this));
+
     /// <summary>
-    /// A card or dialog is over the window. The native surface would paint over it, so it hides behind
+    /// A card or dialog is over the view. The native surface would paint over it, so it hides behind
     /// its snapshot (or the panel background, if nothing has rendered) until the overlay closes.
     /// </summary>
     private void OnOverlayChanged(bool visible)
@@ -320,6 +325,7 @@ public sealed class RichDescriptionView : UserControl, IDisposable
         if (_disposed) return;
         _disposed = true;
         Animations.Animate.AirspaceTransitionChanged -= OnAirspaceTransitionChanged;
+        MainWindow.DialogStackChanged -= OnDialogStackChanged;
         _revealTimer.Stop();
         _web.NavigationStarting -= OnNavigationStarting;
         _web.NavigationCompleted -= OnNavigationCompleted;

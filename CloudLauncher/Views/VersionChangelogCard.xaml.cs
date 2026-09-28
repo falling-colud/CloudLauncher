@@ -21,8 +21,8 @@ namespace CloudLauncher.Views;
 public partial class VersionChangelogCard : UserControl
 {
     /// <summary>Page-state wording, so loading, empty, error and offline look the way they do on every
-    /// other page.</summary>
-    private static readonly PageCopy ChangelogCopy = new()
+    /// other page. Shared with <see cref="VersionChangelogPane"/>.</summary>
+    internal static readonly PageCopy ChangelogCopy = new()
     {
         Glyph = "",
         FilteredGlyph = "",
@@ -255,7 +255,7 @@ public partial class VersionChangelogCard : UserControl
     /// <remarks>An <see cref="HttpRequestException"/> with a status code (404, 429, 500) is the store
     /// answering, not a dead connection, even though the transport classifier treats every
     /// HttpRequestException as offline.</remarks>
-    private static string? OfflineReason(Exception ex, CancellationToken ct) => ex switch
+    internal static string? OfflineReason(Exception ex, CancellationToken ct) => ex switch
     {
         OfflineException offline => offline.Reason ?? App.State.OfflineReason ?? "the connection failed",
         HttpRequestException { StatusCode: not null } => null,
@@ -306,7 +306,7 @@ public partial class VersionChangelogCard : UserControl
             && !Regex.IsMatch(text, @"<\s*img\b", RegexOptions.IgnoreCase);
     }
 
-    private static string EmptyBodyFor(ModSource source) => source switch
+    internal static string EmptyBodyFor(ModSource source) => source switch
     {
         ModSource.CurseForge => "CurseForge has no notes for this file.",
         ModSource.External => "Nothing was written for it when it was uploaded.",
@@ -314,7 +314,7 @@ public partial class VersionChangelogCard : UserControl
     };
 
     /// <summary>A sentence a person can act on. The exception itself goes to the launcher log.</summary>
-    private static string PlainReason(Exception ex) => ex switch
+    internal static string PlainReason(Exception ex) => ex switch
     {
         SessionExpiredException => "You have been signed out. Sign in again, then retry.",
         HttpRequestException { StatusCode: HttpStatusCode.NotFound } => "The store no longer has this version.",
