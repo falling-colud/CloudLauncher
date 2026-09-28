@@ -10,9 +10,10 @@ using CloudLauncher.Services;
 namespace CloudLauncher.Views;
 
 /// <summary>The Modpack planning sub-tab: a zoomable board of cards you arrange and connect.</summary>
-/// <remarks>Four kinds of card: a mod (one specific jar), a group (a live query like "everything
-/// tagged Magic" or "priority P3", re-evaluated on every rebuild), a note (free text), and a
-/// section (a titled backdrop that carries the cards on it when dragged). Any two cards can be
+/// <remarks>Five kinds of card: a mod (one specific jar), a group (a live query like "everything
+/// tagged Magic" or "priority P3", re-evaluated on every rebuild), a note (free text), a section (a
+/// titled backdrop that carries the cards on it when dragged), and a placeholder (a mod the pack
+/// doesn't have yet, see ModPlanView.Placeholders.cs). Any two cards can be
 /// joined by a labelled arrow. Everything is stored in <c>game/.cloudlauncher/plans.json</c> via
 /// <see cref="ModPlanService"/>, so boards sync with the pack like mod flags do.</remarks>
 public partial class ModPlanView : UserControl
@@ -238,11 +239,16 @@ public partial class ModPlanView : UserControl
     /// implementation so "Update to newest" behaves the same here.</param>
     /// <param name="onRecheckUpdates">Re-runs the update check for the given mods after something
     /// changed what counts as an update for them (their channel, or the store they follow).</param>
+    /// <param name="mcVersion">The pack's Minecraft version and <paramref name="loader"/> tag
+    /// ("neoforge"), which placeholder cards ask the stores about. Without them the check is hidden.</param>
     public void Load(Guid packId, IReadOnlyList<PackMod> mods, MainWindow? owner,
         Action<PackMod>? onOpenMod = null, Action? onModsChanged = null, Action? onReload = null,
-        Action<IReadOnlyList<PackMod>>? onUpdate = null, Action<IReadOnlyList<PackMod>>? onRecheckUpdates = null)
+        Action<IReadOnlyList<PackMod>>? onUpdate = null, Action<IReadOnlyList<PackMod>>? onRecheckUpdates = null,
+        string? mcVersion = null, string? loader = null)
     {
         _packId = packId;
+        _mcVersion = string.IsNullOrWhiteSpace(mcVersion) ? null : mcVersion;
+        _loader = string.IsNullOrWhiteSpace(loader) ? null : loader;
         _mods = mods;
         _owner = owner;
         _onOpenMod = onOpenMod;
@@ -263,6 +269,7 @@ public partial class ModPlanView : UserControl
         SyncGrid();
         Rebuild();
         HintIfOffGrid();
+        AnnouncePlaceholderMatches(); // after the grid hint: a mod turning up matters more
     }
 
     /// <summary>Points at Tools > Snap everything to the grid when the open board has cards between
@@ -1194,6 +1201,7 @@ public partial class ModPlanView : UserControl
         _edgeEls.Clear();
         // Drop ids for cards that no longer exist, so a stale selection can't resurrect one.
         _selected.RemoveWhere(id => _board.Node(id) is null);
+        RefreshPlaceholderMatches(); // before sizing: a placeholder whose mod is installed gains a line
 
         // Sizes first: edges need every endpoint rect before anything is added to the tree.
         foreach (var n in _board.Nodes)
@@ -1221,6 +1229,7 @@ public partial class ModPlanView : UserControl
 
         ApplySelectionVisual();
         RefreshSectionCounts();
+        UpdatePlaceholderSummary();
 
         EmptyHint.Visibility = _board.IsEmpty ? Visibility.Visible : Visibility.Collapsed;
         PlanStatus.ToolTip = null; // only HintIfOffGrid's line carries one
@@ -1277,6 +1286,8 @@ public partial class ModPlanView : UserControl
                 var w = CardW(n, NoteW, grid);
                 return (w, NoteCardH(n, w, grid));
             }
+            case PlanNodeKind.Placeholder:
+                return PlaceholderSize(n, grid);
             default:
             {
                 // Only the width: AutoSizeSections owns a section's height, keeping it wrapped
@@ -1386,9 +1397,10 @@ public partial class ModPlanView : UserControl
     {
         var card = node.Kind switch
         {
-            PlanNodeKind.Mod   => CreateModCard(node),
-            PlanNodeKind.Group => CreateGroupCard(node),
-            _                  => CreateNoteCard(node)
+            PlanNodeKind.Mod         => CreateModCard(node),
+            PlanNodeKind.Group       => CreateGroupCard(node),
+            PlanNodeKind.Placeholder => CreatePlaceholderCard(node),
+            _                        => CreateNoteCard(node)
         };
 
         _baseBorder[node.Id] = card.BorderBrush;
@@ -1404,14 +1416,17 @@ public partial class ModPlanView : UserControl
         Register(node, card, 2);
     }
 
-    /// <summary>Double-click does the obvious thing per card: edit a note, open a mod's note,
-    /// fold a group.</summary>
+    /// <summary>Double-click does the obvious thing per card: edit a note or a placeholder, open a
+    /// mod's note, fold a group.</summary>
     private void OnCardDoubleClick(PlanNode node, Border card)
     {
         switch (node.Kind)
         {
             case PlanNodeKind.Note:
                 BeginEditNote(node, card);
+                break;
+            case PlanNodeKind.Placeholder:
+                _ = EditPlaceholderAsync(node);
                 break;
             case PlanNodeKind.Group:
                 node.Collapsed = !node.Collapsed;
@@ -3863,6 +3878,7 @@ public partial class ModPlanView : UserControl
             // A full section leaves no empty body to right-click, so give it a reliable "add" here.
             menu.Items.Add(Item("Add note to section", () => AddNoteNode(SectionAnchor(node), edit: true)));
             menu.Items.Add(Item("Add mod card to section...", () => _ = AddModCardAsync(SectionAnchor(node))));
+            menu.Items.Add(Item("Add placeholder to section...", () => _ = AddPlaceholderAsync(SectionAnchor(node))));
             menu.Items.Add(new Separator());
             menu.Items.Add(Item("Arrange cards", () => ArrangeSection(node)));
             menu.Items.Add(Item("Fit width to cards", () => ShrinkSection(node)));
@@ -4689,6 +4705,7 @@ public partial class ModPlanView : UserControl
 
         // Everything you can put on a board, placed where you clicked rather than at the view centre.
         menu.Items.Add(Item("Add mod card...", () => _ = AddModCardAsync(at)));
+        menu.Items.Add(Item("Add placeholder here...", () => _ = AddPlaceholderAsync(at)));
         var groupParent = new MenuItem { Header = "Add group card" };
         AddGroupOptionsTo(groupParent.Items, at);
         menu.Items.Add(groupParent);

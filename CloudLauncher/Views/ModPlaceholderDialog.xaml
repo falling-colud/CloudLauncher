@@ -1,0 +1,140 @@
+<UserControl x:Class="CloudLauncher.Views.ModPlaceholderDialog"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:slate="clr-namespace:CloudLauncher.Controls">
+    <slate:SlateBorder Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+            BorderThickness="1" CornerRadius="12" Width="500" MaxHeight="780">
+        <slate:SlateBorder.Effect>
+            <DropShadowEffect Color="#000000" Opacity="0.55" BlurRadius="28" ShadowDepth="6"/>
+        </slate:SlateBorder.Effect>
+        <DockPanel>
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="22,4,22,20">
+                <Button Content="Cancel" Style="{StaticResource SubtleButton}" Margin="0,0,8,0" Click="OnCancel"/>
+                <Button x:Name="OkButton" Content="Add" Style="{StaticResource AccentButton}" Click="OnOk"/>
+            </StackPanel>
+
+            <!-- Scrolls only when the window is too short for the store results. -->
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="22,18,22,4">
+                <StackPanel>
+                    <TextBlock x:Name="TitleText" Text="Add placeholder" Style="{StaticResource H2}"/>
+                    <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextSecondaryBrush}"
+                               TextWrapping="Wrap" Margin="0,6,0,0"
+                               Text="A mod the pack doesn't have yet, kept on the board until the real one is in."/>
+
+                    <TextBlock Text="Name" Style="{StaticResource Caption}" Margin="0,14,0,4"/>
+                    <TextBox x:Name="NameBox" TextChanged="OnNameChanged"/>
+
+                    <TextBlock Text="Status" Style="{StaticResource Caption}" Margin="0,12,0,6"/>
+                    <WrapPanel x:Name="StatusPanel"/>
+
+                    <TextBlock Text="Link (optional)" Style="{StaticResource Caption}" Margin="0,6,0,4"/>
+                    <Grid>
+                        <TextBox x:Name="LinkBox" TextChanged="OnLinkChanged"/>
+                        <TextBlock x:Name="LinkHint" Text="CurseForge, Modrinth, GitHub or any other link" IsHitTestVisible="False"
+                                   Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center" Margin="12,0,12,0"/>
+                    </Grid>
+
+                    <TextBlock Text="Note (optional)" Style="{StaticResource Caption}" Margin="0,12,0,4"/>
+                    <TextBox x:Name="NoteBox" AcceptsReturn="True" TextWrapping="Wrap" Height="52"
+                             VerticalContentAlignment="Top" VerticalScrollBarVisibility="Auto"/>
+
+                    <!-- ───────────── attach a real project ───────────── -->
+                    <Border Height="1" Margin="0,16,0,10" Background="{DynamicResource BorderBrush}"/>
+                    <TextBlock Text="FIND IT ON A STORE" Style="{StaticResource Caption}"
+                               Foreground="{DynamicResource TextTertiaryBrush}"/>
+                    <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextSecondaryBrush}"
+                               TextWrapping="Wrap" Margin="0,4,0,8"
+                               Text="If it exists, just not for this pack, attach it: the card gets its icon and link, and knows the mod once it is installed."/>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <RadioButton x:Name="ModrinthRadio" Content="Modrinth" GroupName="PlaceholderStore" IsChecked="True"
+                                         Style="{StaticResource SegmentRadio}" MinWidth="0" FontSize="12" Margin="0,0,6,0"/>
+                            <RadioButton x:Name="CurseForgeRadio" Content="CurseForge" GroupName="PlaceholderStore"
+                                         Style="{StaticResource SegmentRadio}" MinWidth="0" FontSize="12" Margin="0,0,8,0"/>
+                        </StackPanel>
+                        <TextBox x:Name="SearchBox" Grid.Column="1" PreviewKeyDown="OnSearchKey"/>
+                        <Button Grid.Column="2" Content="Search" Style="{StaticResource SubtleButton}" Margin="8,0,0,0"
+                                Click="OnSearch"/>
+                    </Grid>
+
+                    <TextBlock x:Name="SearchStatus" Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                               TextWrapping="Wrap" Margin="2,6,0,0" Visibility="Collapsed"/>
+
+                    <slate:SlateBorder x:Name="ResultsHost" Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                            BorderThickness="1" CornerRadius="6" Margin="0,8,0,0" Visibility="Collapsed">
+                        <ListBox x:Name="Results" Background="Transparent" BorderThickness="0" MaxHeight="190"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" SelectionChanged="OnResultPicked">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <slate:SlateBorder Width="28" Height="28" CornerRadius="6" ClipToBounds="True"
+                                                Background="{DynamicResource Surface3Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                                                BorderThickness="1" Margin="0,0,10,0">
+                                            <Grid>
+                                                <TextBlock Text="{Binding Initial}" FontWeight="SemiBold" FontSize="12"
+                                                           Foreground="{DynamicResource TextSecondaryBrush}"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                <Image Source="{Binding IconUrl}" Stretch="UniformToFill"/>
+                                            </Grid>
+                                        </slate:SlateBorder>
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Name}" Foreground="{DynamicResource TextPrimaryBrush}"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding Meta}" Style="{StaticResource Caption}"
+                                                       Foreground="{DynamicResource TextSecondaryBrush}" TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </slate:SlateBorder>
+
+                    <!-- the attached project, once there is one -->
+                    <slate:SlateBorder x:Name="AttachedRow" Background="{DynamicResource Surface3Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                            BorderThickness="1" CornerRadius="6" Padding="8,6" Margin="0,10,0,0" Visibility="Collapsed">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <slate:SlateBorder Width="28" Height="28" CornerRadius="6" ClipToBounds="True"
+                                    Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderBrush}"
+                                    BorderThickness="1" Margin="0,0,10,0">
+                                <Grid>
+                                    <TextBlock x:Name="AttachedInitial" FontWeight="SemiBold" FontSize="12"
+                                               Foreground="{DynamicResource TextSecondaryBrush}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    <Image x:Name="AttachedIcon" Stretch="UniformToFill"/>
+                                </Grid>
+                            </slate:SlateBorder>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock x:Name="AttachedName" Foreground="{DynamicResource TextPrimaryBrush}" TextTrimming="CharacterEllipsis"/>
+                                <TextBlock x:Name="AttachedMeta" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                            <Button Grid.Column="2" Content="Remove" Style="{StaticResource LinkButton}" VerticalAlignment="Center"
+                                    Margin="8,0,2,0" Click="OnDetach" ToolTip="Stop tying this placeholder to that project"/>
+                        </Grid>
+                    </slate:SlateBorder>
+
+                    <StackPanel x:Name="CheckRow" Orientation="Horizontal" Margin="0,10,0,0" Visibility="Collapsed">
+                        <Button x:Name="CheckButton" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
+                                Click="OnCheck" ToolTip="Asks the store once whether this project has a version for the pack"/>
+                    </StackPanel>
+                    <TextBlock x:Name="CheckText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="2,6,0,0"
+                               Visibility="Collapsed"/>
+                </StackPanel>
+            </ScrollViewer>
+        </DockPanel>
+    </slate:SlateBorder>
+</UserControl>
