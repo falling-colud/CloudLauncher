@@ -48,7 +48,17 @@ public partial class ModExplorerWindow : Window
     private void OnSearchKeyDown(object s, KeyEventArgs e)
     {
         if (e.Key == Key.Enter) OnSearch(s, new RoutedEventArgs());
+        else if (e.Key == Key.Escape && SearchBox.Text.Length > 0)
+        {
+            // Same as the X: empty the box and bring the default list back.
+            e.Handled = true;
+            SearchBox.Clear();
+            OnSearch(s, new RoutedEventArgs());
+        }
     }
+
+    /// <summary>The X in the search box emptied it; list the default results again.</summary>
+    private void OnSearchCleared(object? sender, EventArgs e) => OnSearch(this, new RoutedEventArgs());
     private void OnFilterChanged(object s, SelectionChangedEventArgs e)
     {
         if (_isInitializing || !IsLoaded) return;
@@ -163,6 +173,10 @@ public partial class ModExplorerWindow : Window
 
     private void OnVersionsGridPreviewRightDown(object sender, MouseButtonEventArgs e) =>
         VersionRowMenu.SelectRowUnder(VersionsGrid, e);
+
+    /// <summary>The changelog under the list follows the selected version.</summary>
+    private void OnVersionSelected(object sender, SelectionChangedEventArgs e) =>
+        VersionChangelog.Show((VersionsGrid.SelectedItem as VersionRow)?.Source, _currentMod);
 
     /// <summary>Right-click menu for a version: changelog, download this version, copy its number.
     /// Same menu as the in-window browse page.</summary>

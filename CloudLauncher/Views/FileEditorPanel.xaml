@@ -340,7 +340,7 @@
                              Background="Transparent"
                              Foreground="{DynamicResource TextPrimaryBrush}"
                              CaretBrush="{DynamicResource AccentBrush}"
-                             SelectionBrush="{DynamicResource AccentSoftBrush}"
+                             SelectionBrush="{DynamicResource TextSelectionBrush}" SelectionOpacity="0.5"
                              BorderThickness="0" Padding="10,8"
                              VerticalContentAlignment="Top" HorizontalContentAlignment="Left"
                              TextChanged="OnEditorTextChanged"

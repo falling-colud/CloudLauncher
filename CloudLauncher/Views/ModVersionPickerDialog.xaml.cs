@@ -8,7 +8,8 @@ using CloudLauncher.Services;
 namespace CloudLauncher.Views;
 
 /// <summary>In-window picker for a specific mod version to install, including beta and alpha
-/// channels. Compatible versions show first; "Show all" reveals the rest.</summary>
+/// channels. Compatible versions show first; "Show all" reveals the rest. The selected version's
+/// changelog shows beside the list.</summary>
 public partial class ModVersionPickerDialog : UserControl
 {
     /// <summary>What the picker came back with: the version to install, and whether the mod should
@@ -54,9 +55,30 @@ public partial class ModVersionPickerDialog : UserControl
     {
         var card = new ModVersionPickerDialog(title, versions, mc, loader, currentVersionId, currentVersionNumber,
             keepVersion) { _host = host };
-        await host.ShowCardAsync(card, card.Result, card.Cancel,
-            new ResizableCardSpec("mod-version-picker", 520, 614, MinWidth: 440, MinHeight: 360));
+        // A new size key: sizes remembered for the old list-only card are too narrow for the
+        // changelog beside the list.
+        try
+        {
+            await host.ShowCardAsync(card, card.Result, card.Cancel,
+                new ResizableCardSpec("mod-version-picker-changelog", 960, 640, MinWidth: 440, MinHeight: 420));
+        }
+        finally { card.ChangelogPane.Release(); }
         return card.Result.Result;
+    }
+
+    /// <summary>Width from which the changelog sits beside the list rather than under it.</summary>
+    private const double SideBySideWidth = 720;
+
+    /// <summary>Puts the changelog beside the list on a wide card and under it on a narrow one, so a
+    /// small window still gets both at a readable width.</summary>
+    private void OnBodySizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var beside = e.NewSize.Width >= SideBySideWidth;
+        PaneColumn.Width = beside ? new GridLength(1.2, GridUnitType.Star) : new GridLength(0);
+        PaneRow.Height = beside ? new GridLength(0) : new GridLength(1, GridUnitType.Star);
+        Grid.SetColumn(ChangelogPane, beside ? 1 : 0);
+        Grid.SetRow(ChangelogPane, beside ? 0 : 1);
+        ChangelogPane.Margin = beside ? new Thickness(14, 0, 0, 0) : new Thickness(0, 12, 0, 0);
     }
 
     /// <summary>
@@ -103,7 +125,13 @@ public partial class ModVersionPickerDialog : UserControl
 
     private void OnShowAllChanged(object sender, RoutedEventArgs e) => Refresh();
 
-    private void OnSelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateInstallButton();
+    /// <summary>Relabels Install and shows the selected version's changelog (fetched once the
+    /// selection settles; see <see cref="VersionChangelogPane"/>).</summary>
+    private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateInstallButton();
+        ChangelogPane.Show((List.SelectedItem as VersionRowVm)?.Version);
+    }
 
     /// <summary>Disables and relabels Install when the installed version is selected.</summary>
     private void UpdateInstallButton()

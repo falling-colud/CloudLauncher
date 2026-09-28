@@ -2,6 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:slate="clr-namespace:CloudLauncher.Controls"
+             xmlns:views="clr-namespace:CloudLauncher.Views"
              VerticalAlignment="Center">
     <!--  Host is what animates; the control sizes itself to it. Right-aligned so that in a
     stretched column the box grows leftwards, away from the page edge.  -->
@@ -17,6 +18,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
 
             <Button x:Name="ToggleButton" Grid.Column="0"
@@ -48,6 +50,12 @@
                     </TextBox.Template>
                 </TextBox>
             </Grid>
+
+            <!--  Only there while the box has text; clears it and keeps the caret in it. The negative left
+            margin eats into the box's own right margin, so the text stops just short of the X.  -->
+            <views:SearchClearButton x:Name="ClearButton" Grid.Column="2" Margin="-6,0,6,0"
+                                     Target="{Binding ElementName=Box}"
+                                     Cleared="OnClearButtonCleared"/>
         </Grid>
     </slate:SlateBorder>
 </UserControl>

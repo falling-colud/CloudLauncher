@@ -438,7 +438,10 @@
                                                 <StackPanel Grid.Column="4" Orientation="Horizontal"
                                                             HorizontalAlignment="{DynamicResource ModRowActionsAlign}"
                                                             VerticalAlignment="Center" Margin="0,0,14,0">
-                                                    <Button Content="Update" Click="OnUpdateClick" Padding="10,4" FontSize="11"
+                                                    <Button Content="{DynamicResource ModUpdateButtonLabel}"
+                                                            ToolTip="{DynamicResource ModUpdateButtonToolTip}"
+                                                            Click="OnUpdateClick" MouseRightButtonUp="OnUpdateRightClick"
+                                                            Padding="10,4" FontSize="11"
                                                             MinHeight="0" Margin="0,0,8,0"
                                                             Visibility="{Binding HasUpdate, Converter={StaticResource BoolVis}}"/>
                                                     <Button Style="{StaticResource NoteButton}" Content="&#xE70B;"

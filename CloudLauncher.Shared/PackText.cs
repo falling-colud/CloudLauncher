@@ -840,12 +840,25 @@ public static partial class PackText
     /// colours and <see cref="Recolour"/> maps them across, so there is one stylesheet and the default
     /// theme costs nothing.
     /// </remarks>
+    /// <param name="Selection">The highlight behind selected text, as any CSS colour, or null for the
+    /// browser's own. Not in the stylesheet as a stand-in colour like the others: the default palette
+    /// has none, and a missing rule leaves the default output unchanged.</param>
     public sealed record HtmlPalette(
         string Background, string Surface, string SurfaceAlt, string ScrollTrack,
         string Border, string BorderStrong,
         string Text, string TextStrong, string TextSoft,
-        string Link, string LinkHover)
+        string Link, string LinkHover,
+        string? Selection = null)
     {
+        /// <summary>A <c>::selection</c> rule for <see cref="Selection"/>, or nothing without one.</summary>
+        /// <remarks>Only the background is set, so selected text keeps its own colour (link, heading,
+        /// code). Characters that could end the rule are refused, since the value lands in a style
+        /// block.</remarks>
+        internal string SelectionStyle() =>
+            string.IsNullOrWhiteSpace(Selection) || Selection.IndexOfAny(['<', '>', '{', '}', ';']) >= 0
+                ? ""
+                : $"::selection{{background:{Selection}}}";
+
         /// <summary>The colours the stylesheet is written in. Replacing these with themselves is a
         /// no-op, so the default theme's output is unchanged.</summary>
         public static readonly HtmlPalette Default = new(
@@ -1076,9 +1089,11 @@ public static partial class PackText
         var detailsShim = legacyIe
             ? "<script>try{document.createElement('details');document.createElement('summary');}catch(e){}</script>"
             : "";
+        // The theme's selection highlight goes here too: IE has no ::selection.
         var modernStyle = legacyIe
             ? ""
-            : "<style>details:not([open]) > summary:before{content:\"\\25B8  \"}</style>";
+            : "<style>details:not([open]) > summary:before{content:\"\\25B8  \"}"
+              + HtmlPalette.Current.SelectionStyle() + "</style>";
 
         // The X-UA-Compatible meta tag must be one of the first head children (per MS docs). It
         // forces the WPF WebBrowser host into IE11 mode even before FEATURE_BROWSER_EMULATION takes

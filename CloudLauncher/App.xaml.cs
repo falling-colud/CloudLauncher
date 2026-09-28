@@ -55,6 +55,7 @@ public partial class App : Application
         // window is shown, so nothing paints in the stock palette first. It swallows its own errors so a
         // theme problem can't stop the launcher from opening.
         ThemeService.ApplyLook(State.Settings);
+        Views.ModOptionsMenu.ApplyUpdateButtonLabel();
         UiSounds.Install();
 
         WarmRememberedScans();

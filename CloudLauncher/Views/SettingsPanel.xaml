@@ -454,6 +454,12 @@
                                Margin="150,8,0,0" TextWrapping="Wrap"
                                Text="Applies to downloading a mod, to Update all, and to required dependencies. A mod that only ever publishes betas still installs whatever this is set to."/>
 
+                    <CheckBox x:Name="UpdateButtonPicksVersionBox" Margin="150,14,0,0" Click="OnUpdateButtonPicksVersionChanged"
+                              Content="The Update button lets me pick the version"/>
+                    <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                               Margin="150,6,0,0" TextWrapping="Wrap"
+                               Text="On, a mod's Update button opens its version list, with each version's changelog, and right-clicking it updates to the newest. Update all still takes every mod to its newest version."/>
+
                     <DockPanel Margin="0,16,0,0">
                         <TextBlock DockPanel.Dock="Left" Text="Update checks" Width="150"
                                    Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>

@@ -384,11 +384,24 @@ public partial class ModListView : UserControl
 
     // ── updates ───────────────────────────────────────────────────────────────
 
-    private async void OnModAction(object s, RoutedEventArgs e)
+    private void OnModAction(object s, RoutedEventArgs e)
     {
         if (s is FrameworkElement el && el.DataContext is PackMod mod && mod.HasUpdate)
-            await UpdateModAsync(mod);
+            ModOptionsMenu.RunUpdateButton(mod, m => _ = UpdateModAsync(m), VersionPickerFor(mod));
     }
+
+    /// <summary>Right-click on a row's Update button: the other kind of update. Handled, so the grid's
+    /// own menu does not open over it.</summary>
+    private void OnModActionRightClick(object s, MouseButtonEventArgs e)
+    {
+        if (s is FrameworkElement el && el.DataContext is PackMod mod && mod.HasUpdate)
+            e.Handled = ModOptionsMenu.OpenUpdateButtonMenu(el, mod, m => _ = UpdateModAsync(m), VersionPickerFor(mod));
+    }
+
+    /// <summary>"Update to version...", or null where this list cannot show the picker (see
+    /// <see cref="BuildModOptionsContext"/>).</summary>
+    private Action<PackMod>? VersionPickerFor(PackMod mod) =>
+        mod.IsExternal || _ownerWindow is not MainWindow ? null : m => _ = UpdateToVersionAsync(m);
 
     private async Task UpdateModAsync(PackMod mod)
     {
@@ -534,9 +547,7 @@ public partial class ModListView : UserControl
         OnChanged = () => { _view.Refresh(); UpdateStatusLabel(); },
         OnOpenPage = mod.IsExternal ? null : OpenModPage,
         OnUpdate = list => _ = UpdateManyAsync(list),
-        OnUpdateToVersion = mod.IsExternal || _ownerWindow is not MainWindow
-            ? null
-            : m => _ = UpdateToVersionAsync(m),
+        OnUpdateToVersion = VersionPickerFor(mod),
         OnDelete = list => _ = DeleteFilesAsync(list),
         OnReveal = Reveal,
         OnSetEnabled = (list, enabled) => _ = SetManyEnabledAsync(list, enabled),

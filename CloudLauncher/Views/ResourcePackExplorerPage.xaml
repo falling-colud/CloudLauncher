@@ -31,6 +31,8 @@
                             <TextBlock DockPanel.Dock="Left" Text="&#xE721;" FontFamily="{DynamicResource IconFont}"
                                        FontSize="13" VerticalAlignment="Center" Margin="2,0,8,0"
                                        Foreground="{DynamicResource TextTertiaryBrush}"/>
+                            <views:SearchClearButton DockPanel.Dock="Right" Target="{Binding ElementName=SearchBox}"
+                                                     Cleared="OnSearchCleared"/>
                             <TextBox x:Name="SearchBox" BorderThickness="0" Background="Transparent"
                                      VerticalAlignment="Center"
                                      KeyDown="OnSearchKeyDown" TextChanged="OnSearchTextChanged"

@@ -246,6 +246,13 @@ public sealed partial class AppSettings
     /// still be pinned to release.</remarks>
     public string ModVersionChannel { get; set; } = ModUpdateChannel.Alpha;
 
+    /// <summary>Whether a mod's Update button opens the version list instead of installing the
+    /// newest version. Off by default.</summary>
+    /// <remarks>For pack makers who read what they are moving to before every update. The button's
+    /// right-click and the mod menus still offer "Update to newest", and "Update all" is not affected.
+    /// See <see cref="Views.ModOptionsMenu.RunUpdateButton"/>.</remarks>
+    public bool UpdateButtonPicksVersion { get; set; }
+
     // ── downloads ────────────────────────────────────────────────────────────
 
     /// <summary>How many mod files download at once: "Update all", browse-page downloads with

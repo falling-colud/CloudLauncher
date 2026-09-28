@@ -768,6 +768,9 @@ public static partial class PackText
         if (legacyIe) sb.Append("<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\"/>");
         else sb.Append(ContentSecurityPolicyMeta(EditorInlineHandlers()));
         sb.Append(Recolour(EditorDocumentStyles));
+        // The theme's selection highlight, as in the read-only page. IE has no ::selection.
+        if (!legacyIe && HtmlPalette.Current.SelectionStyle() is { Length: > 0 } selection)
+            sb.Append("<style>").Append(selection).Append("</style>");
         // The script hard-codes palette colours too (swatch rows, the colour "Remove"), so it goes
         // through Recolour like the stylesheet.
         var script = Recolour(EditorDocumentScript);

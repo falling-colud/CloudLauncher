@@ -352,7 +352,8 @@
                                     <Style TargetType="TextBox">
                                         <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
                                         <Setter Property="CaretBrush" Value="{DynamicResource AccentBrush}"/>
-                                        <Setter Property="SelectionBrush" Value="{DynamicResource AccentSoftBrush}"/>
+                                        <Setter Property="SelectionBrush" Value="{DynamicResource TextSelectionBrush}"/>
+                                        <Setter Property="SelectionOpacity" Value="0.5"/>
                                         <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
                                         <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
                                         <Setter Property="Template">

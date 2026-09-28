@@ -185,6 +185,14 @@ public partial class ShaderBrowserView : Page
         catch (Exception ex) { _state.Error("the stores could not be searched.", ex); }
     }
 
+    /// <summary>The X in the search box emptied it: search again at once, as Escape does, since this
+    /// page otherwise only searches on Enter.</summary>
+    private async void OnQueryCleared(object? sender, EventArgs e)
+    {
+        try { await RestartAsync(); }
+        catch (Exception ex) { _state.Error("the stores could not be searched.", ex); }
+    }
+
     protected override async void OnPreviewKeyDown(KeyEventArgs e)
     {
         try

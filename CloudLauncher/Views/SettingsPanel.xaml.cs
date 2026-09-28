@@ -123,6 +123,7 @@ public partial class SettingsPanel : Page
             ModRowWidthSlider.Value = s.EffectiveModRowContentWidth;
             ModRowWidthLabel.Text = $"{(int)ModRowWidthSlider.Value} px";
             ModRowActionsRightBox.IsChecked = s.ModRowActionsAtRight;
+            UpdateButtonPicksVersionBox.IsChecked = s.UpdateButtonPicksVersion;
             UseCustomGameWindowBox.IsChecked = s.UseCustomGameWindow;
             CustomGameWindowOptions.IsEnabled = s.UseCustomGameWindow;
             MinecraftWindowKey.Bound = s.MinecraftWindowToggleKey;
@@ -169,6 +170,16 @@ public partial class SettingsPanel : Page
             _ => ModUpdateChannel.Alpha
         };
         App.State.Settings.Save();
+    }
+
+    /// <summary>Whether a mod's Update button opens the version list. The buttons read their label
+    /// from app resources, so every list changes at once.</summary>
+    private void OnUpdateButtonPicksVersionChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppress) return;
+        App.State.Settings.UpdateButtonPicksVersion = UpdateButtonPicksVersionBox.IsChecked == true;
+        App.State.Settings.Save();
+        ModOptionsMenu.ApplyUpdateButtonLabel();
     }
 
     private void OnModRowWidthChanged(object sender, RoutedPropertyChangedEventArgs<double> e)

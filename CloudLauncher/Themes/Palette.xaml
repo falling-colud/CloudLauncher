@@ -61,6 +61,10 @@
     derives this for every look.  -->
     <SolidColorBrush x:Key="AccentTextBrush" Color="#FFD36A6A"/>
 
+    <!--  Selected text. Opaque on purpose: text boxes draw it over the text at SelectionOpacity,
+    so a translucent brush would fade twice. ThemeService derives it from the accent.  -->
+    <SolidColorBrush x:Key="TextSelectionBrush" Color="#FFD36A6A"/>
+
     <!--  Play reuses the accent red - unified "action" colour  -->
     <SolidColorBrush x:Key="PlayBrush"        Color="{StaticResource AccentColor}"/>
     <SolidColorBrush x:Key="PlayHoverBrush"   Color="{StaticResource AccentHoverColor}"/>

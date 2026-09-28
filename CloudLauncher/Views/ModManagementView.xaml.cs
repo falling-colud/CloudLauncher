@@ -1642,7 +1642,16 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
 
     private void OnUpdateClick(object sender, RoutedEventArgs e)
     {
-        if (ModOf(sender) is { } mod) _ = UpdateModAsync(mod);
+        if (ModOf(sender) is { } mod)
+            ModOptionsMenu.RunUpdateButton(mod, m => _ = UpdateModAsync(m), m => _ = UpdateToVersionAsync(m));
+    }
+
+    /// <summary>Right-click on the Update button: the other kind of update. Handled, or it bubbles to
+    /// the row and opens the full menu instead.</summary>
+    private void OnUpdateRightClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is FrameworkElement button && ModOf(sender) is { } mod)
+            e.Handled = ModOptionsMenu.OpenUpdateButtonMenu(button, mod, m => _ = UpdateModAsync(m), m => _ = UpdateToVersionAsync(m));
     }
 
     private void OnToggleEnabled(object sender, RoutedEventArgs e)
