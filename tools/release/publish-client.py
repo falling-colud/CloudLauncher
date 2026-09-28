@@ -144,7 +144,8 @@ if not VERSION_RE.match(version):
 
 zip_size, zip_sha = os.path.getsize(zip_path), sha(zip_path)
 inst_size, inst_sha = os.path.getsize(inst_path), sha(inst_path)
-with open(notes_path, encoding='utf-8') as f:
+# utf-8-sig: a notes file saved by PowerShell or Notepad starts with a BOM, which would lead the notes.
+with open(notes_path, encoding='utf-8-sig') as f:
     notes = f.read().strip()
 print(f'zip {zip_size} {zip_sha}\ninstaller {inst_size} {inst_sha}')
 

@@ -3,6 +3,31 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.7 - 2026-09-28
+
+- Modpack management has a Configs tab: the instance's configs, KubeJS scripts, defaultconfigs
+  and world server configs, with search, edit, compare and copy.
+- Edited configs are tracked. An Edited filter and badge show every config that changed since
+  the launcher first saw it, and "To defaultconfigs" copies or moves them into defaultconfigs so
+  the pack ships them as its defaults. Configs that already have a defaultconfigs copy say
+  whether it matches.
+- Data packs: browse and install them from Modrinth and CurseForge, and switch them on and off
+  per world from the world's new Data packs tab. Adding from a file or by dragging works too.
+- Mods that load packs for every world (Paxi, Global Packs, Open Loader and similar) are
+  supported: their always-on resource packs and data packs are listed, can be added, moved and
+  (for Paxi) put in order, and an install can go straight into them.
+- Planning boards take placeholders for mods that aren't in the pack yet, with a status such as
+  "Needs a port", a link and a note. A list shows what is still left to find, and a placeholder
+  turns into the real mod's card once the mod is added.
+- The version picker and the Versions tabs show the selected version's changelog.
+- An option in Settings > Mods makes the Update button open the version picker instead of
+  updating to the newest version. Right-click an Update button for the other choice.
+- Search boxes have an X to clear them.
+- Selected text is clearly highlighted in every look and accent.
+- Fixed: changelogs opened from a card showed nothing, clearing a search after pressing Enter
+  didn't bring the full list back, and turning resource packs on could break the "fabric" and
+  mod resources entries.
+
 ## 0.9.6 - 2026-09-27
 
 - Updating the launcher is quick wherever it is installed. The updater used to back up the whole
