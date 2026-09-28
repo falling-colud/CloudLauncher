@@ -154,16 +154,26 @@ public sealed class ResourcePackService(AppSettings settings, PackFolderService 
     /// <param name="minecraftVersion">The instance's Minecraft version, if known. Only needed when
     /// options.txt has no named pack to copy the spelling from, so a pre-1.13 instance isn't given a
     /// <c>file/</c> prefix it doesn't understand. Can be omitted when reordering or removing.</param>
+    /// <remarks>Not every entry is a file. Loaders and mods put their own packs in the stack
+    /// (<c>fabric</c>, <c>mod_resources</c>, a global-pack mod's ids), and <see cref="ActiveFor"/>
+    /// hands those back unchanged. Each name is therefore written the way the file already spelled
+    /// it; only a name the file has never seen gets the prefix. Prefixing everything turned
+    /// <c>fabric</c> into <c>file/fabric</c>, a pack that doesn't exist, which the game then
+    /// silently dropped along with Fabric's own resources.</remarks>
     public void SetActive(Guid packId, string? packName, IReadOnlyList<string> fileNamesHighestFirst,
         string? minecraftVersion = null)
     {
         var dir = packName is null ? packs.GameDir(packId) : packs.GameDir(packId, packName);
         var prefix = OptionsTxtService.UsesFilePrefix(dir, minecraftVersion) ? "file/" : "";
 
+        var spelled = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in OptionsTxtService.ReadResourcePacks(dir))
+            spelled.TryAdd(OptionsTxtService.EntryFileName(raw), raw);
+
         var ordered = fileNamesHighestFirst
             .Where(n => !string.IsNullOrWhiteSpace(n))
             .Reverse()
-            .Select(n => prefix + n)
+            .Select(n => spelled.TryGetValue(n, out var raw) ? raw : prefix + n)
             .ToList();
 
         OptionsTxtService.WriteResourcePacks(dir, ordered);

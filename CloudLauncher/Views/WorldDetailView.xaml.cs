@@ -183,6 +183,11 @@ public partial class WorldDetailView : Page
                 RefreshInstancesTab();
             }
             finally { _suppress = false; }
+
+            // Its own reads (level.dat, each pack's zip, the instance's mods) run off the UI thread and
+            // report on the tab, so the rest of the page doesn't wait for them.
+            if (_allPacks.FirstOrDefault(p => p.Id == _world.SourcePackId) is { } owner)
+                _ = DataPacksTab.LoadAsync(_shell, owner, _world);
         }
         catch (Exception ex) { SetStatus(ex.Message, StatusKind.Error); }
     }

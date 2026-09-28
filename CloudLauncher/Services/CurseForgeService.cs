@@ -55,6 +55,9 @@ public sealed class CurseForgeService
     public const int ClassIdModpacks = 4471;
     public const int ClassIdWorlds = 17;
     public const int ClassIdShaders = 6552;
+    /// <summary>"Data Packs", from <c>categories?gameId=432&amp;classesOnly=true</c> (checked
+    /// 2026-09-28).</summary>
+    public const int ClassIdDataPacks = 6945;
 
     public async Task<List<ModSummary>> SearchAsync(
         string query,

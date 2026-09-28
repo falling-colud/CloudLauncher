@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -46,6 +46,9 @@ public partial class ResourcePackListView : UserControl
         _view.CustomSort = new StackOrderComparer(() => _sortMode);
         ResourcePackGrid.ItemsSource = _view;
         FolderStrip.ItemsSource = _folderChips;
+
+        AlwaysOnPanel.Configure(GlobalPackKind.Resource, "Move to resourcepacks (switched on there)", MoveOutOfAlwaysOnAsync);
+        AlwaysOnPanel.Changed += () => _ = ScanAsync();
     }
 
     public void Load(PackDetail pack, Window owner)
@@ -119,6 +122,12 @@ public partial class ResourcePackListView : UserControl
             _view.Refresh();
             RestoreSelection(previousSelection);
             UpdateStatus();
+
+            // Its own section: these packs are not in options.txt, so the grid's switch and arrows
+            // would mean nothing for them.
+            await AlwaysOnPanel.LoadAsync(pack.Id, pack.Name, pack.MinecraftVersion);
+            if (generation == _scanGeneration)
+                AlwaysOnHost.Visibility = AlwaysOnPanel.HasFolders ? Visibility.Visible : Visibility.Collapsed;
         }
         catch (Exception ex)
         {
@@ -916,7 +925,55 @@ public partial class ResourcePackListView : UserControl
             : Visibility.Collapsed;
 
         CtxCopyTo.Header = single ? "Copy to instance..." : $"Copy {rows.Count} to instance...";
+
+        var alwaysOn = GlobalPackService.DefaultTarget(AlwaysOnPanel.Folders);
+        CtxMakeAlwaysOn.Visibility = alwaysOn is null ? Visibility.Collapsed : Visibility.Visible;
+        if (alwaysOn is not null)
+            CtxMakeAlwaysOn.Header = single
+                ? $"Make always on ({alwaysOn.LoadedByLabel})"
+                : $"Make {rows.Count} always on ({alwaysOn.LoadedByLabel})";
         CtxDelete.Header = single ? "Delete file" : $"Delete {rows.Count} files";
+    }
+
+    // ── always on ────────────────────────────────────────────────────────────
+
+    /// <summary>Moves the selected packs into the always-on folder of the instance's global-pack
+    /// mod.</summary>
+    /// <remarks><see cref="GlobalPackService.MoveFromResourcePacks"/> takes them out of
+    /// <c>resourcepacks/</c> and options.txt, so the game doesn't load them twice.</remarks>
+    private async void OnCtxMakeAlwaysOn(object sender, RoutedEventArgs e)
+    {
+        if (_pack is not { } pack || GlobalPackService.DefaultTarget(AlwaysOnPanel.Folders) is not { } target) return;
+        var rows = Selected();
+        if (rows.Count == 0) return;
+        try
+        {
+            await Task.Run(() =>
+            {
+                foreach (var row in rows)
+                    App.State.GlobalPacks.MoveFromResourcePacks(pack.Id, pack.Name, row.Info, target);
+            });
+            StatusLabel.Text = rows.Count == 1
+                ? $"{rows[0].DisplayName} is always on now, loaded by {target.LoadedByLabel}."
+                : $"{rows.Count} packs are always on now, loaded by {target.LoadedByLabel}.";
+        }
+        catch (GlobalPackRefusedException refused) { StatusLabel.Text = refused.Message; }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ResourcePackListView), ex);
+            StatusLabel.Text = "That didn't work - " + ex.Message;
+        }
+        await ScanAsync();
+    }
+
+    /// <summary>The always-on panel's "move out": back into <c>resourcepacks/</c>, switched on at the
+    /// top so it keeps loading.</summary>
+    private async Task<string> MoveOutOfAlwaysOnAsync(GlobalPackEntry entry)
+    {
+        if (_pack is not { } pack) return "";
+        var name = await Task.Run(() =>
+            App.State.GlobalPacks.MoveToResourcePacks(pack.Id, pack.Name, pack.MinecraftVersion, entry));
+        return $"{name} is in resourcepacks/ now, switched on at the top.";
     }
 
     private void OnCtxEdit(object sender, RoutedEventArgs e)

@@ -30,7 +30,7 @@ public partial class MainWindow : Window, IDialogHost
         None, Settings, Account, Teams, McAccount, McDefaults,
         PackDetail, ModExplorer, ModManagement, FileManagement, WorldDetail, PackBrowser, WorldBrowser, ModDetail,
         ResourcePackDetail, LocalResourcePackDetail, ShaderPackDetail, ResourcePackBrowser,
-        ResourcePackExplorer, ShaderBrowser, BundleDetail
+        ResourcePackExplorer, ShaderBrowser, BundleDetail, DataPackBrowser
     }
     private SidePanelKind _currentSidePanel = SidePanelKind.None;
     private string _currentSidePanelTitle = "";
@@ -509,6 +509,21 @@ public partial class MainWindow : Window, IDialogHost
     {
         var page = new ShaderBrowserView(this, packs, preferredTarget);
         OpenSidePanelFresh(SidePanelKind.ShaderBrowser, "Download shader packs", page);
+        return page;
+    }
+
+    /// <summary>Opens the data pack store. Returns the page so a world page can hear about an install
+    /// and re-read its list.</summary>
+    /// <param name="preferredWorldDir">The save to tick first when a download asks for worlds.</param>
+    /// <param name="pushed">True from a world's page, so Back returns to it; false from a master
+    /// page.</param>
+    public DataPackBrowserView OpenDataPackBrowser(
+        IReadOnlyList<CloudLauncher.Shared.PackSummary> packs, Guid? preferredTarget, string? preferredWorldDir,
+        bool pushed)
+    {
+        var page = new DataPackBrowserView(this, packs, preferredTarget, preferredWorldDir);
+        if (pushed) OpenSidePanelPushed(SidePanelKind.DataPackBrowser, "Download data packs", page);
+        else OpenSidePanelFresh(SidePanelKind.DataPackBrowser, "Download data packs", page);
         return page;
     }
 

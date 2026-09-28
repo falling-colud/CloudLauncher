@@ -60,6 +60,15 @@
                         <TextBlock Text="Browse" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Button>
+                <Button x:Name="DataPacksButton" Style="{StaticResource HeaderActionButton}"
+                        Click="OnBrowseDataPacks" Margin="0,3,8,3"
+                        ToolTip="Find data packs on CurseForge and Modrinth, then pick the worlds that get them. A world's own page lists the packs it has.">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE7B8;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                   Margin="0,0,6,0" VerticalAlignment="Center"/>
+                        <TextBlock Text="Data packs" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
             </WrapPanel>
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
