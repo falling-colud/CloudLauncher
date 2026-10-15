@@ -83,11 +83,15 @@ public static class AccountExport
                 g => g.OrderBy(e => e.RelativePath, StringComparer.Ordinal)
                       .Select(e => new PackFile(e.RelativePath, e.Hash, e.Size))
                       .ToList());
+        // Planning boards as stored: the launcher's own plans.json document, unparsed.
+        var plans = await db.PackPlans.AsNoTracking()
+            .Where(d => d.Pack.OwnerId == id)
+            .ToDictionaryAsync(d => d.PackId, d => d.Json, ct);
 
         return packs.Select(p => new OwnedPack(
             p.Id, p.Name, p.Summary, p.Description, p.Visibility, p.IsShared, p.IsEmpty,
             p.MinecraftVersion, p.Loader, p.LoaderVersion, p.RulesJson, p.CreatedAt, p.UpdatedAt,
-            files.GetValueOrDefault(p.Id) ?? new List<PackFile>())).ToList();
+            files.GetValueOrDefault(p.Id) ?? new List<PackFile>(), plans.GetValueOrDefault(p.Id))).ToList();
     }
 
     private static async Task<List<HostedItem>> HostedItemsAsync(AppDbContext db, Guid id, CancellationToken ct)
@@ -281,7 +285,8 @@ public static class AccountExport
     private sealed record OwnedPack(
         Guid Id, string Name, string? Summary, string? Description, PackVisibility Visibility,
         bool IsShared, bool IsEmpty, string? MinecraftVersion, LoaderKind Loader, string? LoaderVersion,
-        string? RulesJson, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, List<PackFile> Files);
+        string? RulesJson, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt, List<PackFile> Files,
+        string? PlansJson);
 
     private sealed record PackFile(string Path, string Hash, long Size);
 

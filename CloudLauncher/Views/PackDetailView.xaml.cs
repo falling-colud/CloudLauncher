@@ -20,6 +20,8 @@ public partial class PackDetailView : Page
     private readonly MainWindow _shell;
     private readonly Guid _packId;
     private readonly bool _hostedInMinecraftWindow;
+    /// <summary>The launch button last drew as Kill instance (see <see cref="OnLaunch"/>).</summary>
+    private bool _launchButtonKills;
 
     /// <summary>The instance this page is showing. Used by the shell to close the page if the
     /// instance is deleted.</summary>
@@ -147,15 +149,30 @@ public partial class PackDetailView : Page
         SharedView.DeleteRequested += () => _ = DeleteSelectedAsync(SharedView);
         SharedView.RenameRequested += () => _ = RenameSelectedAsync(SharedView);
         LogContent.StatsChanged += UpdateLogLinesLabel;
-        ProgressHub.ProgressChanged += OnHeroProgressChanged;
-        ProgressHub.ProgressCleared += OnHeroProgressCleared;
-        PackJobs.Changed += OnPackJobsChanged;
-        App.State.Instances.StateChanged += OnInstanceStateChanged;
-        ServerHostingPanel.Host.StateChanged += OnServerHostStateChanged;
-        App.State.ModpackDownload.PackAdded += OnPackDownloadUpdated;
         AddHandler(UIElement.PreviewMouseWheelEvent, new MouseWheelEventHandler(OnPagePreviewMouseWheel), true);
         AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler(OnPagePreviewKeyDown), true);
-        Loaded += async (_, _) => await ReloadAsync();
+        // Global events are subscribed here, not in the constructor, to pair with the removals in
+        // Unloaded: the page is unloaded and loaded again whenever a side-panel or host-panel page is
+        // pushed over it and popped. Subscribed once in the constructor, they were dead after that,
+        // so a game that exited (or crashed) left "Kill instance" showing, and clicking it launched.
+        Loaded += async (_, _) =>
+        {
+            ProgressHub.ProgressChanged -= OnHeroProgressChanged;
+            ProgressHub.ProgressChanged += OnHeroProgressChanged;
+            ProgressHub.ProgressCleared -= OnHeroProgressCleared;
+            ProgressHub.ProgressCleared += OnHeroProgressCleared;
+            PackJobs.Changed -= OnPackJobsChanged;
+            PackJobs.Changed += OnPackJobsChanged;
+            App.State.Instances.StateChanged -= OnInstanceStateChanged;
+            App.State.Instances.StateChanged += OnInstanceStateChanged;
+            ServerHostingPanel.Host.StateChanged -= OnServerHostStateChanged;
+            ServerHostingPanel.Host.StateChanged += OnServerHostStateChanged;
+            App.State.ModpackDownload.PackAdded -= OnPackDownloadUpdated;
+            App.State.ModpackDownload.PackAdded += OnPackDownloadUpdated;
+            // Whatever changed while the page was away (the game exiting, a transfer ending).
+            UpdateLaunchButtonState();
+            await ReloadAsync();
+        };
         if (_hostedInMinecraftWindow)
         {
             DetailTabs.HorizontalAlignment = HorizontalAlignment.Left;
@@ -393,6 +410,7 @@ public partial class PackDetailView : Page
         UpdateTransferControls();
         var playable = _pack is { IsEmpty: false } && !string.IsNullOrEmpty(_pack.MinecraftVersion);
         var status = App.State.Instances.GetStatus(_packId);
+        _launchButtonKills = status != MinecraftInstanceStatus.Idle;
         if (status != MinecraftInstanceStatus.Idle)
         {
             LaunchButton.Style = (Style)FindResource("KillInstanceButton");
@@ -1706,6 +1724,7 @@ public partial class PackDetailView : Page
 
             // RAM + auto-update
             var ram = App.State.Settings.GetMaxRamFor(pack.Id);
+            RamSlider.Maximum = AppSettings.RamSliderMaximum(ram);
             RamSlider.Value = ram;
             RamValueLabel.Text = $"{ram} MB";
             JvmArgsBox.Text = App.State.Settings.GetJvmArgsFor(pack.Id);
@@ -3801,9 +3820,18 @@ public partial class PackDetailView : Page
     private async void OnLaunch(object sender, RoutedEventArgs e)
     {
         if (_pack is null) return;
+        // Read before IsBusy, which redraws the button when it finds the game has exited.
+        var clickedKill = _launchButtonKills;
         if (App.State.Instances.IsBusy(_packId))
         {
             StopActiveInstance();
+            return;
+        }
+        // The button said Kill but the game has already gone: a Kill click must never launch.
+        if (clickedKill)
+        {
+            UpdateLaunchButtonState();
+            StatusLabel.Text = "Minecraft had already stopped.";
             return;
         }
 

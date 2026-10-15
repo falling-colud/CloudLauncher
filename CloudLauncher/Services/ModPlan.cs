@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CloudLauncher.Services;
@@ -257,6 +258,11 @@ public sealed class PlanNode
     /// left out of the JSON, so other cards serialize as they always did.</summary>
     public PlanPlaceholder? Placeholder { get; set; }
 
+    /// <summary>Fields this launcher doesn't know, from a newer one sharing the board. Kept and written
+    /// back unchanged, so a live sync between two versions can't strip them.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+
     public PlanNode Clone() => new()
     {
         Id = Guid.NewGuid().ToString("N"),
@@ -266,7 +272,8 @@ public sealed class PlanNode
         Tracker = Tracker, Done = Done, Progress = Progress,
         Tasks = Tasks?.Select(t => t.Clone()).ToList(), TasksCollapsed = TasksCollapsed,
         Placeholder = Placeholder?.Clone(),
-        SectionId = SectionId // callers that re-id sections (duplicate/paste) remap this afterwards
+        SectionId = SectionId, // callers that re-id sections (duplicate/paste) remap this afterwards
+        Extra = Extra is null ? null : new Dictionary<string, JsonElement>(Extra)
     };
 }
 
@@ -298,11 +305,17 @@ public sealed class PlanEdge
     /// Null = automatic.</summary>
     public PlanAnchor? ToAnchor { get; set; }
 
+    /// <summary>Fields this launcher doesn't know, from a newer one sharing the board. Kept and written
+    /// back unchanged, so a live sync between two versions can't strip them.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+
     /// <summary>A copy running between other cards (duplicating, pasting) that keeps everything else.</summary>
     public PlanEdge CopyBetween(string fromId, string toId) => new()
     {
         FromId = fromId, ToId = toId, Label = Label, Color = Color, Style = Style,
-        FromAnchor = FromAnchor?.Clone(), ToAnchor = ToAnchor?.Clone()
+        FromAnchor = FromAnchor?.Clone(), ToAnchor = ToAnchor?.Clone(),
+        Extra = Extra is null ? null : new Dictionary<string, JsonElement>(Extra)
     };
 }
 
@@ -328,6 +341,11 @@ public sealed class PlanBoard
     public double PanY { get; set; }
     public double Zoom { get; set; } = 1;
 
+    /// <summary>Fields this launcher doesn't know, from a newer one sharing the board. Kept and written
+    /// back unchanged, so a live sync between two versions can't strip them.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+
     [JsonIgnore]
     public bool IsEmpty => Nodes.Count == 0 && Edges.Count == 0;
 
@@ -346,4 +364,9 @@ public sealed class PackPlans
 
     /// <summary>The board that was open last, so the tab reopens on it.</summary>
     public string? LastBoardId { get; set; }
+
+    /// <summary>Fields this launcher doesn't know, from a newer one sharing the board. Kept and written
+    /// back unchanged, so a live sync between two versions can't strip them.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
 }

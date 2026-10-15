@@ -144,6 +144,31 @@ public static class FakeWorld
         [new BundleInvitationEntry(G(911), G(332), "Garden Config Set", BundleKind.ConfigBundle, Mara, "mara", Ivy, "ivy",
             PackPermissions.ReadOnly, null, Now - TimeSpan.FromHours(2), null, null, null, false, "tok-ivy-cfg")]);
 
+    // ── live planning boards ─────────────────────────────────────────────────
+    // Kept the way the real server keeps them: one revision-numbered document per pack, a store on an
+    // old revision is a 409, and a wait on the current revision is answered 204 (after a short pause in
+    // Program, not the real 25 s, to keep runs short).
+
+    static readonly Dictionary<string, (long Rev, string? Json)> PlanDocs = new();
+
+    public static (int Status, object? Body) Plans(string method, string path, NameValueCollection q, string body)
+    {
+        lock (PlanDocs)
+        {
+            PlanDocs.TryGetValue(path, out var cur);
+            PackPlansDocument Doc() => cur.Json is null
+                ? new(0, null, null)
+                : new(cur.Rev, Now, JsonDocument.Parse(cur.Json).RootElement.Clone());
+            if (method == "GET")
+                return long.TryParse(q["after"], out var after) && after == cur.Rev ? (204, null) : (200, Doc());
+            if (method != "PUT") return (404, null);
+            var req = JsonSerializer.Deserialize<PutPackPlansRequest>(body, Json)!;
+            if (req.BaseRevision != cur.Rev) return (409, Doc());
+            PlanDocs[path] = (cur.Rev + 1, req.Plans.GetRawText());
+            return (200, new PackPlansStored(cur.Rev + 1, Now));
+        }
+    }
+
     // ── routing ──────────────────────────────────────────────────────────────
 
     /// <summary>Answers one request, or null for a 404.</summary>

@@ -493,10 +493,13 @@ public sealed partial class ApiClient
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var path = request.RequestUri?.AbsolutePath ?? "";
+            // Storing planning boards changes nothing the instance list shows, and happens after every
+            // edit on a board, so it doesn't count either.
             var mutation = request.Method != HttpMethod.Get && request.Method != HttpMethod.Head
                            && request.Method != HttpMethod.Options
                            && !path.Contains("/proxy/", StringComparison.OrdinalIgnoreCase)
-                           && !path.Contains("/auth/", StringComparison.OrdinalIgnoreCase);
+                           && !path.Contains("/auth/", StringComparison.OrdinalIgnoreCase)
+                           && !path.EndsWith("/plans", StringComparison.OrdinalIgnoreCase);
             if (!mutation) return await base.SendAsync(request, ct);
             owner.ForgetRecentPacks();
             try { return await base.SendAsync(request, ct); }
@@ -1852,6 +1855,37 @@ public sealed partial class ApiClient
     private static string JsonText(string text) =>
         System.Text.Json.JsonEncodedText.Encode(text, System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping).ToString();
 
+    // ── planning boards (synced live, apart from the pack's files) ──────────────
+
+    /// <summary>The pack's boards as the server holds them. With <paramref name="after"/>, the server
+    /// waits up to <paramref name="waitSeconds"/> for a revision other than that one, and null comes
+    /// back when none was stored meanwhile.</summary>
+    public async Task<PackPlansDocument?> GetPackPlansAsync(Guid packId, long? after, int waitSeconds,
+        CancellationToken ct = default)
+    {
+        RefuseIfLocal(packId);
+        await EnsureTokenAsync(ct);
+        var url = after is { } rev ? $"packs/{packId}/plans?after={rev}&wait={waitSeconds}" : $"packs/{packId}/plans";
+        var resp = await _http.GetAsync(url, ct);
+        if (resp.StatusCode == HttpStatusCode.NoContent) { resp.Dispose(); return null; }
+        return await ReadAsync<PackPlansDocument>(resp, ct);
+    }
+
+    /// <summary>Stores the boards as a change on <paramref name="baseRevision"/>. When someone stored a
+    /// newer revision first, nothing is stored and their document comes back as the conflict, to merge
+    /// into and send again.</summary>
+    public async Task<(PackPlansStored? Stored, PackPlansDocument? Conflict)> PutPackPlansAsync(
+        Guid packId, long baseRevision, System.Text.Json.JsonElement plans, CancellationToken ct = default)
+    {
+        RefuseIfLocal(packId);
+        await EnsureTokenAsync(ct);
+        var resp = await _http.PutAsJsonAsync($"packs/{packId}/plans",
+            new PutPackPlansRequest(baseRevision, plans), JsonOpts, ct);
+        if (resp.StatusCode == HttpStatusCode.Conflict)
+            return (null, await ReadAsync<PackPlansDocument>(resp, ct, acceptConflict: true));
+        return (await ReadAsync<PackPlansStored>(resp, ct), null);
+    }
+
     // ── sync ─────────────────────────────────────────────────────────────────
 
     public async Task<PackManifest> GetManifestAsync(Guid packId, CancellationToken ct = default)
@@ -2009,11 +2043,12 @@ public sealed partial class ApiClient
         }
     }
 
-    private static async Task<T> ReadAsync<T>(HttpResponseMessage resp, CancellationToken ct)
+    private static async Task<T> ReadAsync<T>(HttpResponseMessage resp, CancellationToken ct,
+        bool acceptConflict = false)
     {
         using (resp)
         {
-            if (!resp.IsSuccessStatusCode)
+            if (!resp.IsSuccessStatusCode && !(acceptConflict && resp.StatusCode == HttpStatusCode.Conflict))
             {
                 var body = await resp.Content.ReadAsStringAsync(ct);
                 throw new ApiException($"{(int)resp.StatusCode} {resp.ReasonPhrase}: {body}", resp.StatusCode);

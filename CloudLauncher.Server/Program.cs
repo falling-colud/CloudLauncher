@@ -108,6 +108,8 @@ builder.Services.AddScoped<ResourcePackPermissionResolver>();
 builder.Services.AddScoped<ContentBundlePermissionResolver>();
 // Writes the activity feed: an injectable wrapper around ActivityLog's static methods.
 builder.Services.AddScoped<ActivityWriter>();
+// Wakes the launchers waiting on a pack's planning boards when one stores a change.
+builder.Services.AddSingleton<CloudLauncher.Server.Controllers.PlanChangeSignals>();
 // Deletes old refresh tokens and abandoned Google sign-ins.
 builder.Services.AddHostedService<AuthMaintenance>();
 // Upload quota checks, the pending-upload ledger and the unused-file cleanup job.

@@ -120,10 +120,23 @@ public static class Program
                     var path = ctx.Request.Url!.AbsolutePath.Trim('/');
                     await Task.Delay(60);
                     object? answer = null;
-                    try { answer = FakeWorld.Answer(ctx.Request.HttpMethod, path, ctx.Request.QueryString); }
+                    var status = 0;
+                    try
+                    {
+                        if (path.StartsWith("packs/") && path.EndsWith("/plans"))
+                        {
+                            using var reader = new StreamReader(ctx.Request.InputStream);
+                            (status, answer) = FakeWorld.Plans(ctx.Request.HttpMethod, path, ctx.Request.QueryString,
+                                await reader.ReadToEndAsync());
+                            if (status == 204 && ctx.Request.QueryString["wait"] is { } wait && wait != "0")
+                                await Task.Delay(2000);
+                        }
+                        else answer = FakeWorld.Answer(ctx.Request.HttpMethod, path, ctx.Request.QueryString);
+                    }
                     catch (Exception ex) { Log("server threw on /" + path + ": " + ex.Message); }
-                    var status = answer is null ? 404 : 200;
-                    var body = answer is null ? "{\"error\":\"not found\"}" : JsonSerializer.Serialize(answer, answer.GetType(), FakeWorld.Json);
+                    if (status == 0) status = answer is null ? 404 : 200;
+                    var body = answer is not null ? JsonSerializer.Serialize(answer, answer.GetType(), FakeWorld.Json)
+                        : status == 404 ? "{\"error\":\"not found\"}" : "";
                     var bytes = Encoding.UTF8.GetBytes(body);
                     ctx.Response.StatusCode = status;
                     ctx.Response.ContentType = "application/json";

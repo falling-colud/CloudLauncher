@@ -818,7 +818,8 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
         // Drop the cached mods.json / plans.json so the synced flags, categories and planning boards
         // are read from disk next time instead of being overwritten by stale in-memory copies.
         _modMetadata?.Invalidate(packId);
-        _modPlans?.Invalidate(packId);
+        _modPlans?.AfterPackDownload(packId, replaced.Any(r =>
+            r.Replace('\\', '/').Equals(".cloudlauncher/plans.json", StringComparison.OrdinalIgnoreCase)));
         Report("Done.");
         ProgressHub.Clear(packId);
         settings.PackSyncedVersion[packId] = manifest.Version;

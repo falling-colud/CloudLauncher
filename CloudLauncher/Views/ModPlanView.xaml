@@ -4,12 +4,6 @@
              xmlns:slate="clr-namespace:CloudLauncher.Controls"
              xmlns:local="clr-namespace:CloudLauncher.Views"
              Background="Transparent" Focusable="True">
-    <UserControl.Resources>
-        <local:PriorityToBrushConverter x:Key="PriorityBrush"/>
-        <local:PriorityToVisibilityConverter x:Key="PriorityVis"/>
-        <local:NotEmptyToVisibilityConverter x:Key="NotEmptyVis"/>
-    </UserControl.Resources>
-
     <DockPanel>
         <!-- ───────────────────────────── toolbar ───────────────────────────── -->
         <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
@@ -42,6 +36,15 @@
             </StackPanel>
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <!-- Whether the boards are live on the server (ModPlanView.ShowSyncState). Hidden for an
+                instance that is only on this PC. -->
+                <StackPanel x:Name="SyncBadge" Orientation="Horizontal" VerticalAlignment="Center"
+                            Margin="0,0,14,0" Visibility="Collapsed" Background="Transparent">
+                    <Ellipse x:Name="SyncDot" Width="7" Height="7" VerticalAlignment="Center" Margin="0,0,6,0"
+                             Fill="{DynamicResource TextTertiaryBrush}"/>
+                    <TextBlock x:Name="SyncText" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextTertiaryBrush}"/>
+                </StackPanel>
                 <TextBlock x:Name="PlanStatus" Style="{StaticResource Caption}"
                            Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"
                            Margin="0,0,10,0" MaxWidth="360" TextTrimming="CharacterEllipsis"/>
@@ -50,7 +53,7 @@
                         Margin="0,0,8,0" Visibility="Collapsed" Click="OnPlaceholderSummary"/>
                 <Button x:Name="RailToggle" Style="{StaticResource IconButton}" Content="&#xE71C;"
                         FontFamily="{DynamicResource IconFont}" FontSize="13"
-                        ToolTip="Show or hide the boards and mods rail" Click="OnToggleRail"/>
+                        ToolTip="Show or hide the boards rail" Click="OnToggleRail"/>
                 <!-- One setting for every board, saved in the launcher settings rather than on the
                 board, since it is an editing preference. -->
                 <CheckBox x:Name="GridToggle" Content="Grid" IsChecked="True" VerticalAlignment="Center"
@@ -72,124 +75,36 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- The rail holds both board navigation and the mods to drag onto a board. They share
-            the column through a splitter rather than a tab toggle, since filling a board uses
-            both at once. -->
+            <!-- The rail is the board switcher. Mods get onto a board with the Mod button above. -->
             <slate:SlateBorder x:Name="RailHost" Grid.Column="0" Margin="0,0,10,0"
                     Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="1" CornerRadius="8">
-                <Grid Margin="8">
-                    <Grid.RowDefinitions>
-                        <!-- MinHeights so the splitter can't squeeze either list to nothing. -->
-                        <RowDefinition Height="1.3*" MinHeight="88"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="*" MinHeight="112"/>
-                    </Grid.RowDefinitions>
+                <!-- ───────────── boards + their categories ───────────── -->
+                <DockPanel Margin="8">
+                    <Grid DockPanel.Dock="Top" Margin="2,2,2,6">
+                        <TextBlock Text="BOARDS" Style="{StaticResource Caption}"
+                                   Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="RailSummary" HorizontalAlignment="Right" VerticalAlignment="Center"
+                                   Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
+                                   MaxWidth="120" TextTrimming="CharacterEllipsis"/>
+                    </Grid>
+                    <!-- Docked under the list rather than as its last row, so it stays
+                    reachable without scrolling. -->
+                    <ContentControl x:Name="RailNewChips" DockPanel.Dock="Bottom" Margin="0,7,0,0"/>
 
-                    <!-- ───────────── boards + their categories ───────────── -->
-                    <DockPanel Grid.Row="0">
-                        <Grid DockPanel.Dock="Top" Margin="2,2,2,6">
-                            <TextBlock Text="BOARDS" Style="{StaticResource Caption}"
-                                       Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center"/>
-                            <TextBlock x:Name="RailSummary" HorizontalAlignment="Right" VerticalAlignment="Center"
-                                       Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
-                                       MaxWidth="120" TextTrimming="CharacterEllipsis"/>
-                        </Grid>
-                        <!-- Docked under the list rather than as its last row, so it stays
-                        reachable without scrolling. -->
-                        <ContentControl x:Name="RailNewChips" DockPanel.Dock="Bottom" Margin="0,7,0,0"/>
-
-                        <!-- Drop handling is on the ScrollViewer rather than the row host, so
-                        dropping in the gap under the last row means "put it at the end" (as in
-                        ContentListView). -->
-                        <ScrollViewer x:Name="RailScroll" Background="Transparent" Padding="0,0,2,0"
-                                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                                      AllowDrop="True" DragOver="OnRailDragOver" Drop="OnRailDrop"
-                                      DragLeave="OnRailDragLeave">
-                            <StackPanel x:Name="RailList" Background="Transparent"/>
-                        </ScrollViewer>
-                    </DockPanel>
-
-                    <!-- Hairline under the splitter's own (transparent) grab strip, so the divider reads
-                         as a line while staying a comfortable 7px to grab. -->
-                    <Border Grid.Row="1" Height="1" Margin="2,3" VerticalAlignment="Center"
-                            IsHitTestVisible="False" Background="{DynamicResource BorderBrush}"/>
-                    <GridSplitter Grid.Row="1" Height="7" Margin="0,3" Background="Transparent"
-                                  HorizontalAlignment="Stretch" VerticalAlignment="Center"
-                                  ResizeBehavior="PreviousAndNext" ResizeDirection="Rows"
-                                  FocusVisualStyle="{x:Null}"
-                                  ToolTip="Drag to give the boards or the mods more of the rail"/>
-
-                    <!-- ───────────── mods to drag onto the board ───────────── -->
-                    <DockPanel Grid.Row="2">
-                        <Grid DockPanel.Dock="Top" Margin="2,2,2,6">
-                            <TextBlock Text="MODS" Style="{StaticResource Caption}"
-                                       Foreground="{DynamicResource TextTertiaryBrush}" VerticalAlignment="Center"/>
-                            <TextBlock x:Name="PaletteSummary" HorizontalAlignment="Right" VerticalAlignment="Center"
-                                       Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"/>
-                        </Grid>
-                        <slate:SlateBorder DockPanel.Dock="Top" MinHeight="30" Margin="0,0,0,8"
-                                Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderBrush}"
-                                BorderThickness="1" CornerRadius="6">
-                            <Grid>
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto"/>
-                                    <ColumnDefinition Width="*"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="&#xE721;" FontFamily="{DynamicResource IconFont}"
-                                           FontSize="12" Foreground="{DynamicResource TextSecondaryBrush}"
-                                           VerticalAlignment="Center" Margin="9,0,7,0"/>
-                                <Grid Grid.Column="1">
-                                    <TextBlock x:Name="PaletteHint" Text="Search mods..."
-                                               Foreground="{DynamicResource TextTertiaryBrush}" FontSize="12"
-                                               VerticalAlignment="Center" Margin="0,0,8,0" IsHitTestVisible="False"/>
-                                    <TextBox x:Name="PaletteSearch" Background="Transparent" BorderThickness="0"
-                                             FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"
-                                             TextChanged="OnPaletteSearch">
-                                        <TextBox.Template>
-                                            <ControlTemplate TargetType="TextBox">
-                                                <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
-                                            </ControlTemplate>
-                                        </TextBox.Template>
-                                    </TextBox>
-                                </Grid>
-                            </Grid>
-                        </slate:SlateBorder>
-
-                        <ListBox x:Name="PaletteList" Background="Transparent" BorderThickness="0"
-                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                                 PreviewMouseLeftButtonDown="OnPaletteMouseDown"
-                                 PreviewMouseMove="OnPaletteMouseMove"
-                                 MouseDoubleClick="OnPaletteDoubleClick"
-                                 ToolTip="Drag onto the board, or double-click to drop it in the middle">
-                            <ListBox.ItemTemplate>
-                                <DataTemplate>
-                                    <Grid Margin="0,2">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="4"/>
-                                            <ColumnDefinition Width="*"/>
-                                        </Grid.ColumnDefinitions>
-                                        <slate:SlateBorder Grid.Column="0" CornerRadius="2" Margin="0,1,7,1"
-                                                Background="{Binding Priority, Converter={StaticResource PriorityBrush}}"
-                                                Visibility="{Binding Priority, Converter={StaticResource PriorityVis}}"/>
-                                        <StackPanel Grid.Column="1">
-                                            <TextBlock Text="{Binding DisplayName}" FontSize="12"
-                                                       Foreground="{DynamicResource TextPrimaryBrush}"
-                                                       TextTrimming="CharacterEllipsis"/>
-                                            <TextBlock Text="{Binding CategoriesLabel}" FontSize="10"
-                                                       Foreground="{DynamicResource TextTertiaryBrush}"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       Visibility="{Binding CategoriesLabel, Converter={StaticResource NotEmptyVis}}"/>
-                                        </StackPanel>
-                                    </Grid>
-                                </DataTemplate>
-                            </ListBox.ItemTemplate>
-                        </ListBox>
-                    </DockPanel>
-                </Grid>
+                    <!-- Drop handling is on the ScrollViewer rather than the row host, so
+                    dropping in the gap under the last row means "put it at the end" (as in
+                    ContentListView). -->
+                    <ScrollViewer x:Name="RailScroll" Background="Transparent" Padding="0,0,2,0"
+                                  VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                  AllowDrop="True" DragOver="OnRailDragOver" Drop="OnRailDrop"
+                                  DragLeave="OnRailDragLeave">
+                        <StackPanel x:Name="RailList" Background="Transparent"/>
+                    </ScrollViewer>
+                </DockPanel>
             </slate:SlateBorder>
 
-            <slate:SlateBorder x:Name="Viewport" Grid.Column="1" ClipToBounds="True" AllowDrop="True"
+            <slate:SlateBorder x:Name="Viewport" Grid.Column="1" ClipToBounds="True"
                     Focusable="True" FocusVisualStyle="{x:Null}"
                     Background="{DynamicResource Surface1Brush}" BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="1" CornerRadius="8"
@@ -199,9 +114,7 @@
                     MouseLeftButtonDown="OnViewportMouseDown"
                     MouseMove="OnViewportMouseMove"
                     MouseLeftButtonUp="OnViewportMouseUp"
-                    MouseRightButtonUp="OnViewportRightClick"
-                    DragOver="OnViewportDragOver"
-                    Drop="OnViewportDrop">
+                    MouseRightButtonUp="OnViewportRightClick">
                 <Grid>
                     <!-- ruled grid (ModPlanView.GridLines, drawn in code), kept in sync with the canvas pan/zoom -->
                     <Decorator x:Name="GridBackdrop" IsHitTestVisible="False"/>
@@ -223,7 +136,7 @@
                                    HorizontalAlignment="Center" Margin="0,0,0,6"/>
                         <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
                                    TextAlignment="Center" TextWrapping="Wrap"
-                                   Text="Drag mods in from the MODS list on the left, add a live group card for a category or priority, and connect them with arrows: turn on Arrow above and click one card then another, or drag the dot on a card's edge. Double-click anywhere for a note, right-click for everything else. Drop cards onto a section and they move with it; shift-drag to select a group."/>
+                                   Text="Add mods with the Mod button above, add a live group card for a category or priority, and connect them with arrows: turn on Arrow above and click one card then another, or drag the dot on a card's edge. Double-click anywhere for a note, right-click for everything else. Drop cards onto a section and they move with it; shift-drag to select a group."/>
                     </StackPanel>
                 </Grid>
             </slate:SlateBorder>

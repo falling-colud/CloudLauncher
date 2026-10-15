@@ -898,37 +898,52 @@ public sealed partial class AppSettings
     private static extern bool GetPhysicallyInstalledSystemMemory(out long totalMemoryInKilobytes);
 
     private static int _recommendedRamMb;
+    private static long _installedRamMb = -1;
+
+    /// <summary>The machine's installed memory in MB, or 0 when Windows won't say.</summary>
+    /// <remarks>Uses GetPhysicallyInstalledSystemMemory because GlobalMemoryStatusEx leaves out
+    /// hardware-reserved memory, so an 8 GB machine would read as ~7.9 GB.</remarks>
+    public static long InstalledRamMb()
+    {
+        if (_installedRamMb >= 0) return _installedRamMb;
+        long mb = 0;
+        try { if (GetPhysicallyInstalledSystemMemory(out var kb) && kb > 0) mb = kb / 1024; }
+        catch { /* not available: callers fall back */ }
+        _installedRamMb = mb;
+        return mb;
+    }
 
     /// <summary>How much RAM to give a pack with no value set, based on the machine's installed
     /// memory.</summary>
     /// <remarks>
     /// 8 GB gets 6 GB, 16 GB gets 10 GB, 32 GB or more gets 16 GB (Minecraft gains little past ~16 GB);
-    /// under 8 GB it takes half. Uses GetPhysicallyInstalledSystemMemory because GlobalMemoryStatusEx
-    /// leaves out hardware-reserved memory, so an 8 GB machine would read as ~7.9 GB. Falls back to
-    /// 4 GB if the call fails.
+    /// under 8 GB it takes half. Falls back to 4 GB if the installed memory can't be read.
     /// </remarks>
     public static int RecommendedRamMb()
     {
         if (_recommendedRamMb != 0) return _recommendedRamMb;
-        int chosen;
-        try
+        var installedMb = InstalledRamMb();
+        var chosen = installedMb switch
         {
-            if (GetPhysicallyInstalledSystemMemory(out var kb) && kb > 0)
-            {
-                long installedMb = kb / 1024;
-                chosen = installedMb switch
-                {
-                    >= 32L * 1024 => 16384,
-                    >= 16L * 1024 => 10240,
-                    >= 8L * 1024 => 6144,
-                    _ => (int)Math.Max(2048, Math.Min(4096, installedMb / 2)),
-                };
-            }
-            else chosen = 4096;
-        }
-        catch { chosen = 4096; }
+            0 => 4096,
+            >= 32L * 1024 => 16384,
+            >= 16L * 1024 => 10240,
+            >= 8L * 1024 => 6144,
+            _ => (int)Math.Max(2048, Math.Min(4096, installedMb / 2)),
+        };
         _recommendedRamMb = chosen;
         return chosen;
+    }
+
+    /// <summary>The top of a memory slider: all of this machine's installed memory, so a 64 GB PC
+    /// can give a pack more than 32 GB. Never below <paramref name="current"/> (rounded up to the
+    /// slider's 512 MB step), so a value set on a bigger machine isn't cut down just by being shown.
+    /// 32 GB when the installed memory can't be read.</summary>
+    public static double RamSliderMaximum(int current)
+    {
+        var installed = InstalledRamMb();
+        double top = installed > 0 ? Math.Max(4096, installed / 1024 * 1024) : 32768;
+        return Math.Max(top, Math.Ceiling(current / 512.0) * 512.0);
     }
 
     public void SetMaxRamFor(Guid packId, int? mb)

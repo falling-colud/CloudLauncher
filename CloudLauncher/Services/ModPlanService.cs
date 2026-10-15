@@ -9,8 +9,9 @@ namespace CloudLauncher.Services;
 public sealed record PlanGroupOption(string Header, IReadOnlyList<PlanGroupQuery> Options);
 
 /// <summary>
-/// Loads and saves the pack's planning boards from <c>game/.cloudlauncher/plans.json</c>. The default
-/// rules route that folder to Shared, so boards travel to collaborators like mod flags do.
+/// Loads and saves the pack's planning boards from <c>game/.cloudlauncher/plans.json</c>. Every save
+/// is also sent to the server by <see cref="PlanSyncService"/>, which keeps the boards live across PCs
+/// and collaborators; the file still travels with the pack's own sync as well, for older launchers.
 ///
 /// Also resolves mod cards back to their <see cref="PackMod"/> (migrating the stored key when a
 /// jar's identity firms up) and evaluates group card queries against the current inventory.
@@ -28,6 +29,32 @@ public sealed class ModPlanService
     };
 
     public ModPlanService(PackFolderService packs) { _packs = packs; }
+
+    /// <summary>After every save of a pack's boards, on the thread that saved.</summary>
+    public event Action<Guid>? Saved;
+
+    /// <summary>The in-memory boards were swapped for another copy: a merge from the server, or a pack
+    /// download that rewrote plans.json. An open board re-reads them. Raised on any thread.</summary>
+    public event Action<Guid>? Replaced;
+
+    /// <summary>A pack download just wrote the pack's files; the flag says whether plans.json was
+    /// among them. Raised on the download's thread.</summary>
+    public event Action<Guid, bool>? PackFilesReplaced;
+
+    public static string Serialize(PackPlans doc) => JsonSerializer.Serialize(doc, JsonOpts);
+
+    /// <summary>A plans.json document, or null when it isn't one.</summary>
+    public static PackPlans? Parse(string json)
+    {
+        try { return JsonSerializer.Deserialize<PackPlans>(json, JsonOpts); }
+        catch { return null; }
+    }
+
+    /// <summary>The pack's boards as they stand in memory, serialized as the file is.</summary>
+    public string CurrentJson(Guid packId)
+    {
+        lock (_lock) return Serialize(Load(packId));
+    }
 
     // ── load / save ──────────────────────────────────────────────────────────
 
@@ -60,19 +87,38 @@ public sealed class ModPlanService
         lock (_lock)
         {
             if (!_cache.TryGetValue(packId, out var doc)) return;
-            var path = TryPlanPath(packId);
-            if (path is null) return;
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                // Temp file plus atomic rename, as for mods.json: a torn write would leave an unparseable
-                // file, which Load() resets to empty, losing every board.
-                var tmp = path + ".tmp";
-                File.WriteAllText(tmp, JsonSerializer.Serialize(doc, JsonOpts));
-                File.Move(tmp, path, overwrite: true);
-            }
-            catch { /* best-effort */ }
+            if (!Write(packId, doc)) return;
         }
+        Saved?.Invoke(packId);
+    }
+
+    private bool Write(Guid packId, PackPlans doc)
+    {
+        var path = TryPlanPath(packId);
+        if (path is null) return false;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            // Temp file plus atomic rename, as for mods.json: a torn write would leave an unparseable
+            // file, which Load() resets to empty, losing every board.
+            var tmp = path + ".tmp";
+            File.WriteAllText(tmp, Serialize(doc));
+            File.Move(tmp, path, overwrite: true);
+            return true;
+        }
+        catch { return false; /* best-effort */ }
+    }
+
+    /// <summary>Puts a merged copy from the server in place of the in-memory boards and on disk. Not a
+    /// <see cref="Saved"/>: nothing here is new to the server.</summary>
+    public void ReplaceFromSync(Guid packId, PackPlans doc)
+    {
+        lock (_lock)
+        {
+            _cache[packId] = doc;
+            Write(packId, doc);
+        }
+        Replaced?.Invoke(packId);
     }
 
     /// <summary>Drops the in-memory copy so the next <see cref="Load"/> re-reads from disk
@@ -80,6 +126,15 @@ public sealed class ModPlanService
     public void Invalidate(Guid packId)
     {
         lock (_lock) { _cache.Remove(packId); }
+    }
+
+    /// <summary>Called once a pack download has written the pack's files. Re-reads the boards from
+    /// disk and lets the live sync decide whether a plans.json from the download may stand.</summary>
+    public void AfterPackDownload(Guid packId, bool plansReplaced)
+    {
+        Invalidate(packId);
+        PackFilesReplaced?.Invoke(packId, plansReplaced);
+        Replaced?.Invoke(packId);
     }
 
     // ── boards ───────────────────────────────────────────────────────────────

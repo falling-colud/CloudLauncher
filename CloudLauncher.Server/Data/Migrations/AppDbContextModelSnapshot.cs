@@ -17,7 +17,7 @@ namespace CloudLauncher.Server.Data.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.0")
+                .HasAnnotation("ProductVersion", "10.0.12")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
@@ -60,15 +60,15 @@ namespace CloudLauncher.Server.Data.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TargetTeamId");
+
+                    b.HasIndex("TargetUserId");
+
                     b.HasIndex("ActorUserId", "CreatedAt")
                         .IsDescending(false, true);
 
                     b.HasIndex("SubjectType", "SubjectId", "CreatedAt")
                         .IsDescending(false, false, true);
-
-                    b.HasIndex("TargetTeamId");
-
-                    b.HasIndex("TargetUserId");
 
                     b.ToTable("ActivityEntries");
                 });
@@ -893,6 +893,27 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.ToTable("PackManifestEntries");
                 });
 
+            modelBuilder.Entity("CloudLauncher.Server.Data.PackPlanDocument", b =>
+                {
+                    b.Property<Guid>("PackId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Json")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<long>("Revision")
+                        .IsConcurrencyToken()
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("PackId");
+
+                    b.ToTable("PackPlans", (string)null);
+                });
+
             modelBuilder.Entity("CloudLauncher.Server.Data.PackTeam", b =>
                 {
                     b.Property<Guid>("PackId")
@@ -1632,6 +1653,17 @@ namespace CloudLauncher.Server.Data.Migrations
                     b.HasOne("CloudLauncher.Server.Data.Pack", "Pack")
                         .WithMany("ManifestEntries")
                         .HasForeignKey("PackId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Pack");
+                });
+
+            modelBuilder.Entity("CloudLauncher.Server.Data.PackPlanDocument", b =>
+                {
+                    b.HasOne("CloudLauncher.Server.Data.Pack", "Pack")
+                        .WithOne()
+                        .HasForeignKey("CloudLauncher.Server.Data.PackPlanDocument", "PackId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 

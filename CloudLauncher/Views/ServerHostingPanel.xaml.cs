@@ -260,9 +260,9 @@ public sealed partial class ServerHostingPanel : UserControl
         {
             var settings = App.State.Settings;
             var ram = settings.GetServerMaxRamFor(_pack.Id);
-            // Keep the slider's 32 GB ceiling unless the pack already asks for more. Deriving it from the
-            // current value would park the thumb at the far right.
-            RamSlider.Maximum = Math.Max(RamSlider.Maximum, RoundUpToTick(ram));
+            // The ceiling is the PC's installed memory, raised only if the pack already asks for more.
+            // Deriving it from the current value alone would park the thumb at the far right.
+            RamSlider.Maximum = AppSettings.RamSliderMaximum(ram);
             RamSlider.Value = Math.Clamp(ram, RamSlider.Minimum, RamSlider.Maximum);
             JvmArgsBox.Text = settings.GetServerJvmArgsFor(_pack.Id);
             AutoRestartCheck.IsChecked = settings.GetServerAutoRestart(_pack.Id);
@@ -270,8 +270,6 @@ public sealed partial class ServerHostingPanel : UserControl
         }
         finally { _filling = false; }
     }
-
-    private static double RoundUpToTick(int mb) => Math.Ceiling(mb / 512.0) * 512.0;
 
     private void FillEula()
     {

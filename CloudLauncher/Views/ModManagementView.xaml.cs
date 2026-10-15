@@ -26,6 +26,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private List<PackMod> _all = new();
     private int _gen;
     private bool _loaded;
+    private bool _launchButtonStops;   // the launch button last drew as Stop (see OnLaunch)
     private bool _graphLoaded;
     private bool _planLoaded;
     private bool _categoriesLoaded;
@@ -74,12 +75,17 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             VerticalAlignment = VerticalAlignment.Center
         });
 
-        App.State.Instances.StateChanged += OnInstanceStateChanged;
         Unloaded += (_, _) => App.State.Instances.StateChanged -= OnInstanceStateChanged;
         UpdateLaunchButton();
 
         Loaded += (_, _) =>
         {
+            // Subscribed here to pair with the Unloaded removal: this page is unloaded whenever
+            // another is pushed over it, and a subscription made once in the constructor was dead
+            // after that, leaving Stop showing for a game that had exited.
+            App.State.Instances.StateChanged -= OnInstanceStateChanged;
+            App.State.Instances.StateChanged += OnInstanceStateChanged;
+            UpdateLaunchButton();
             if (!_loaded) { _loaded = true; _ = ReloadAsync(); }
             SyncLauncherDefaults();
             UiScale.Changed -= ApplyModScale;   // re-apply the mod-list zoom live when the slider moves
@@ -218,6 +224,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
     private void UpdateLaunchButton()
     {
         var status = App.State.Instances.GetStatus(_pack.Id);
+        _launchButtonStops = status != MinecraftInstanceStatus.Idle;
         LaunchButton.IsEnabled = status != MinecraftInstanceStatus.Launching;
         LaunchButton.Content = status switch
         {
@@ -229,7 +236,11 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
 
     private async void OnLaunch(object sender, RoutedEventArgs e)
     {
+        // Read before IsBusy, which redraws the button when it finds the game has exited.
+        var clickedStop = _launchButtonStops;
         if (App.State.Instances.IsBusy(_pack.Id)) { App.State.Instances.Stop(_pack.Id); UpdateLaunchButton(); return; }
+        // The button said Stop but the game has already gone: a Stop click must never launch.
+        if (clickedStop) { UpdateLaunchButton(); return; }
 
         if (App.State.MinecraftAccounts.Current is null)
         {

@@ -57,6 +57,7 @@ public sealed class AppState
     public ModMetadataService ModMetadata { get; }
     public PackModInventory ModInventory { get; }
     public ModPlanService ModPlans { get; }
+    public PlanSyncService PlanSync { get; }
     public TestLaunchScope TestScope { get; }
     public UpdateService Update { get; }
 
@@ -117,6 +118,7 @@ public sealed class AppState
         ModInventory = new PackModInventory(Packs, ModFingerprints, Modrinth, CurseForge, ModMetadata, ModAdded);
         ModPlans = new ModPlanService(Packs);
         Packs.SetModPlans(ModPlans);
+        PlanSync = new PlanSyncService(Api, Packs, ModPlans);
         TestScope = new TestLaunchScope(Packs);
         ModpackImport = new ModpackImportService(Modrinth, CurseForge, Api, Packs, ModFingerprints);
         ModpackImport.SetModMetadata(ModMetadata);

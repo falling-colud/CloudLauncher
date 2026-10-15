@@ -3,6 +3,22 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.8 - 2026-10-15
+
+- Planning boards are live. Every change is saved to the server as you make it, and the boards
+  update by themselves on your other PCs and for everyone on the pack, with no upload or download
+  of the pack. When two people change a board at the same time, both sets of changes are kept. A
+  badge on the board's toolbar says whether it is synced; changes made offline are sent when the
+  server is back. People with view-only access see changes as they happen, and their own edits
+  stay on their PC.
+- The memory sliders go up to all of the PC's memory instead of stopping at 32 GB.
+- A selection box on a planning board (Shift-drag) now takes in the sections it reaches, and
+  dragging the selection moves those sections with their cards. A box started inside a section
+  still selects only the cards in it.
+- The planning board's left rail is only the board list now; add mods with the Mod button.
+- Fixed: after a game exited or crashed, the instance page could keep showing Kill instance or
+  Stop, and clicking it started the game again.
+
 ## 0.9.7 - 2026-09-28
 
 - Modpack management has a Configs tab: the instance's configs, KubeJS scripts, defaultconfigs

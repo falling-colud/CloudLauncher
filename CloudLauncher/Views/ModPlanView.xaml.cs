@@ -57,8 +57,6 @@ public partial class ModPlanView : UserControl
     /// <summary>Every this-many grid lines, one is drawn a shade stronger.</summary>
     private const int GridMajorEvery = 4;
 
-    private const string ModDragFormat = "CloudLauncher.PlanModKey";
-
     /// <summary>How near a card's outline (screen px, outside / inside it) an arrow end pins to that exact
     /// spot instead of attaching automatically.</summary>
     private const double OutlineOuterPx = 9, OutlineInnerPx = 5;
@@ -170,9 +168,6 @@ public partial class ModPlanView : UserControl
     private bool _anchorHover;      // the pointer is on an outline, so pressing here draws a pinned arrow
     private bool _swallowArrowUp;   // the release of a press the arrow tool used mustn't click the card too
 
-    // palette drag
-    private Point _paletteDown;
-
     // ── rail state ──────────────────────────────────────────────────────────────
 
     /// <summary>Board rows in drawing order, each with the container it was drawn into. Drag
@@ -221,6 +216,26 @@ public partial class ModPlanView : UserControl
             ThemeService.Changed -= OnThemeChanged;
             FlushViewportSave();
         };
+        // Live sync with the server, only while the board is on screen. After the viewport flush above,
+        // so letting go of the watch sends that save too.
+        _remoteRetry.Tick += (_, _) => ApplyRemoteWhenIdle();
+        Loaded += (_, _) =>
+        {
+            Plans.Replaced -= OnPlansReplaced;
+            Plans.Replaced += OnPlansReplaced;
+            App.State.PlanSync.StateChanged -= OnSyncStateChanged;
+            App.State.PlanSync.StateChanged += OnSyncStateChanged;
+            EnsureSyncWatch();
+        };
+        Unloaded += (_, _) =>
+        {
+            Plans.Replaced -= OnPlansReplaced;
+            App.State.PlanSync.StateChanged -= OnSyncStateChanged;
+            _remoteRetry.Stop();
+            _syncWatch?.Dispose();
+            _syncWatch = null;
+            _syncPack = Guid.Empty;
+        };
         // Leaving the board mid-hover mustn't strand the outline marker or the crosshair.
         Viewport.MouseLeave += (_, _) =>
         {
@@ -264,12 +279,113 @@ public partial class ModPlanView : UserControl
         GridToggle.IsChecked = GridOn;
 
         RefreshBoardRail();
-        RefreshPalette();
         if (first) RestoreViewport();
         SyncGrid();
         Rebuild();
         HintIfOffGrid();
         AnnouncePlaceholderMatches(); // after the grid hint: a mod turning up matters more
+        EnsureSyncWatch();
+    }
+
+    // ── live sync ───────────────────────────────────────────────────────────────
+    // PlanSyncService sends every save to the server and merges in what other PCs and collaborators
+    // store. When a merge changes the boards, the canvas is redrawn from them, but never in the middle
+    // of a gesture or while a text box on the board is being typed in: that waits until it's done.
+
+    private IDisposable? _syncWatch;
+    private Guid _syncPack;
+    private bool _remotePending;
+    private readonly System.Windows.Threading.DispatcherTimer _remoteRetry = new() { Interval = TimeSpan.FromMilliseconds(400) };
+
+    /// <summary>Holds the sync open for the pack on screen. Called from Loaded and from Load, since the
+    /// view is shown before it is told which pack it belongs to.</summary>
+    private void EnsureSyncWatch()
+    {
+        if (IsLoaded && _packId != Guid.Empty && _syncPack != _packId)
+        {
+            _syncWatch?.Dispose();
+            _syncPack = _packId;
+            _syncWatch = App.State.PlanSync.Watch(_packId);
+        }
+        ShowSyncState();
+    }
+
+    private void OnPlansReplaced(Guid packId)
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(() => OnPlansReplaced(packId)); return; }
+        if (packId != _packId || !_loaded) return;
+        _remotePending = true;
+        ApplyRemoteWhenIdle();
+    }
+
+    /// <summary>Mid-gesture or typing on the board: a redraw now would pull the card or the text box
+    /// out from under the pointer.</summary>
+    private bool BusyEditing =>
+        _railEditing || _dragNode is not null || _resizeNode is not null || _linkFrom is not null || _marquee
+        || _panning || Keyboard.FocusedElement is System.Windows.Controls.Primitives.TextBoxBase box && IsAncestorOf(box);
+
+    private void ApplyRemoteWhenIdle()
+    {
+        if (!_remotePending) return;
+        if (BusyEditing) { _remoteRetry.Stop(); _remoteRetry.Start(); return; }
+        _remoteRetry.Stop();
+        _remotePending = false;
+
+        string Content() => _board is null ? "" :
+            System.Text.Json.JsonSerializer.Serialize(new BoardSnapshot(_board.Nodes, _board.Edges), HistoryJson);
+        var before = Content();
+        var openId = _board?.Id;
+
+        var board = Plans.Load(_packId).Boards.FirstOrDefault(b => b.Id == openId) ?? Plans.CurrentBoard(_packId);
+        var sameBoard = board.Id == openId;
+        _board = board;
+        _selected.RemoveWhere(id => _board.Node(id) is null);
+        if (sameBoard) StashViewport();   // the fresh copy takes the view as it is on screen, not as last saved
+        else RestoreViewport();           // the open board was deleted elsewhere
+        Rebuild();
+
+        // Undo works on this board's snapshots, so stepping back past someone else's change would
+        // quietly revert it. Their change starts the history over instead.
+        if (sameBoard && Content() != before)
+        {
+            ResetHistory();
+            PlanStatus.Text = "Updated with changes made elsewhere.";
+        }
+        else if (!sameBoard)
+            PlanStatus.Text = "The board that was open was deleted elsewhere.";
+    }
+
+    private void OnSyncStateChanged(Guid packId)
+    {
+        if (packId == _packId) ShowSyncState();
+    }
+
+    private void ShowSyncState()
+    {
+        var sync = App.State.PlanSync;
+        var state = _packId == Guid.Empty ? PlanSyncState.Off : sync.StateOf(_packId);
+        SyncBadge.Visibility = state == PlanSyncState.Off ? Visibility.Collapsed : Visibility.Visible;
+        var (text, brush, tip) = state switch
+        {
+            PlanSyncState.Syncing => ("Saving...", "AccentTextBrush",
+                "Sending your changes to the server."),
+            PlanSyncState.Synced => ("Synced", "SuccessBrush",
+                "Boards save to the server as you edit. Changes from your other PCs, and from anyone else on "
+                + "this pack, show up here as they make them."),
+            PlanSyncState.Offline => ("Offline", "WarningBrush",
+                "Can't reach the server. Your changes are kept on this PC and sent as soon as it's back."),
+            PlanSyncState.ViewOnly => ("View only", "TextTertiaryBrush",
+                "Changes from the pack's editors show up here live. Your access to this pack doesn't include "
+                + "uploading, so changes you make stay on this PC."),
+            _ => ("Not synced", "TextTertiaryBrush",
+                "The server doesn't keep live boards for this pack. They still travel with the pack's files "
+                + "when it's uploaded."),
+        };
+        SyncText.Text = text;
+        SyncDot.SetResourceReference(Shape.FillProperty, brush);
+        SyncBadge.ToolTip = state == PlanSyncState.Synced && sync.SyncedAt(_packId) is { } at
+            ? $"{tip}\nLast in step with the server at {at:t}."
+            : tip;
     }
 
     /// <summary>Points at Tools > Snap everything to the grid when the open board has cards between
@@ -2754,11 +2870,7 @@ public partial class ModPlanView : UserControl
         // make the card jump on the first move.
         (_dragOrigX, _dragOrigY) = ShownAt(node);
 
-        // A section carries whatever is sitting on it; any other card carries the rest of the
-        // selection, so a multi-selection moves as one block.
-        _dragCarried = (node.Kind == PlanNodeKind.Section
-                ? ContainedNodes(node)
-                : SelectedNodes().Where(n => n.Id != node.Id).ToList())
+        _dragCarried = CarriedWith(node)
             .Select(n => { var (x, y) = ShownAt(n); return (n, x, y); })
             .ToList();
 
@@ -2767,6 +2879,22 @@ public partial class ModPlanView : UserControl
         _dragCapture = e.Source as UIElement;
         _dragCapture?.CaptureMouse();
         e.Handled = true;
+    }
+
+    /// <summary>What moves along with a dragged card: the rest of the selection when the card is part
+    /// of it (so a multi-selection moves as one block), plus every card sitting on a section that
+    /// moves. Each card once, however many ways it qualifies: a card both selected and on a selected
+    /// section would otherwise move twice as far.</summary>
+    private List<PlanNode> CarriedWith(PlanNode node)
+    {
+        var moving = new List<PlanNode> { node };
+        if (_selected.Contains(node.Id)) moving.AddRange(SelectedNodes().Where(n => n.Id != node.Id));
+        var seen = moving.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var section in moving.Where(n => n.Kind == PlanNodeKind.Section).ToList())
+            foreach (var card in ContainedNodes(section))
+                if (seen.Add(card.Id)) moving.Add(card);
+        moving.RemoveAt(0);
+        return moving;
     }
 
     /// <summary>Where a card is shown: where it's stored, unless the grid has fitted it somewhere
@@ -2940,15 +3068,13 @@ public partial class ModPlanView : UserControl
         }
         _collapseSelectionOnUp = false;
 
-        // Assign section membership from where things landed. Dragging a section keeps its own
-        // cards (they were carried); dragging a card, and any carried selection, re-homes each into
-        // the section it was dropped on, or none. That stops a section from taking cards it merely
-        // overlaps.
-        if (dropped.Kind != PlanNodeKind.Section)
-        {
-            AssignSectionFromPosition(dropped);
-            foreach (var n in carried) AssignSectionFromPosition(n);
-        }
+        // Assign section membership from where things landed. A card that rode along with its own
+        // section keeps it; every other card that moved is re-homed into the section it was dropped
+        // on, or none. That stops a section from taking cards it merely overlaps.
+        var movedSections = carried.Append(dropped).Where(n => n.Kind == PlanNodeKind.Section)
+            .Select(n => n.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (var n in carried.Append(dropped))
+            if (n.SectionId is null || !movedSections.Contains(n.SectionId)) AssignSectionFromPosition(n);
 
         Commit();
         // Full rebuild, not just a count refresh: the section the card landed in (or left) has to
@@ -4024,6 +4150,11 @@ public partial class ModPlanView : UserControl
             _board.Nodes.Remove(n);
             _board.Edges.RemoveAll(x => x.FromId == n.Id || x.ToId == n.Id);
         }
+        // Cards on a deleted section that weren't selected themselves stay, loose (as RemoveNode).
+        var goneSections = nodes.Where(n => n.Kind == PlanNodeKind.Section).Select(n => n.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var card in _board.Nodes)
+            if (card.SectionId is not null && goneSections.Contains(card.SectionId)) card.SectionId = null;
         _selected.Clear();
         Commit();
         Rebuild();
@@ -4032,8 +4163,17 @@ public partial class ModPlanView : UserControl
 
     /// <summary>Echoes the selection size, so shift-clicking a stack of cards gives feedback even
     /// where the accent outlines are hard to count.</summary>
-    private void ReportSelection() =>
-        PlanStatus.Text = _selected.Count > 1 ? $"{_selected.Count} cards selected" : "";
+    private void ReportSelection()
+    {
+        var picked = SelectedNodes();
+        if (picked.Count <= 1) { PlanStatus.Text = ""; return; }
+        var sections = picked.Count(n => n.Kind == PlanNodeKind.Section);
+        var cards = picked.Count - sections;
+        static string Count(int n, string what) => $"{n} {what}{(n == 1 ? "" : "s")}";
+        PlanStatus.Text = sections == 0 ? $"{Count(cards, "card")} selected"
+            : cards == 0 ? $"{Count(sections, "section")} selected"
+            : $"{Count(cards, "card")} and {Count(sections, "section")} selected";
+    }
 
     /// <summary>"Delete the whole selection" entry, offered only when the right-clicked card is part
     /// of a multi-selection.</summary>
@@ -4482,75 +4622,11 @@ public partial class ModPlanView : UserControl
         Rebuild();
     }
 
-    // ── palette ─────────────────────────────────────────────────────────────────
-    // The mods list shares the rail with the boards tree above it. Mods get onto a board by dragging
-    // one onto the canvas or double-clicking it.
-
-    private void RefreshPalette()
-    {
-        var q = PaletteSearch.Text?.Trim();
-        IEnumerable<PackMod> list = _mods;
-        if (!string.IsNullOrEmpty(q))
-            list = list.Where(m => m.DisplayName.Contains(q, StringComparison.OrdinalIgnoreCase)
-                                   || m.CategoriesLabel.Contains(q, StringComparison.OrdinalIgnoreCase));
-        var shown = list.OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
-        PaletteList.ItemsSource = shown;
-        PaletteHint.Visibility = string.IsNullOrEmpty(PaletteSearch.Text) ? Visibility.Visible : Visibility.Collapsed;
-        // The count tells a search that found nothing apart from a pack that really is that small,
-        // which the short list in the rail can't show by itself.
-        PaletteSummary.Text = shown.Count == _mods.Count ? $"{shown.Count}" : $"{shown.Count} of {_mods.Count}";
-    }
-
-    private void OnPaletteSearch(object sender, TextChangedEventArgs e) { if (IsLoaded) RefreshPalette(); }
-
     private void OnToggleRail(object sender, RoutedEventArgs e)
     {
         var show = RailColumn.Width.Value == 0;
         RailColumn.Width = show ? new GridLength(RailWidth) : new GridLength(0);
         RailHost.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void OnPaletteMouseDown(object sender, MouseButtonEventArgs e) => _paletteDown = e.GetPosition(this);
-
-    private void OnPaletteMouseMove(object sender, MouseEventArgs e)
-    {
-        if (e.LeftButton != MouseButtonState.Pressed) return;
-        var p = e.GetPosition(this);
-        if (Math.Abs(p.X - _paletteDown.X) < SystemParameters.MinimumHorizontalDragDistance &&
-            Math.Abs(p.Y - _paletteDown.Y) < SystemParameters.MinimumVerticalDragDistance) return;
-
-        if (FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject)?.DataContext is not PackMod mod) return;
-        DragDrop.DoDragDrop(PaletteList, new DataObject(ModDragFormat, mod.Key), DragDropEffects.Copy);
-    }
-
-    private void OnPaletteDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (FindAncestor<ListBoxItem>(e.OriginalSource as DependencyObject)?.DataContext is PackMod mod)
-            AddModNode(mod, ViewCenter());
-    }
-
-    private void OnViewportDragOver(object sender, DragEventArgs e)
-    {
-        e.Effects = e.Data.GetDataPresent(ModDragFormat) ? DragDropEffects.Copy : DragDropEffects.None;
-        e.Handled = true;
-    }
-
-    private void OnViewportDrop(object sender, DragEventArgs e)
-    {
-        if (e.Data.GetData(ModDragFormat) is not string key) return;
-        var mod = _mods.FirstOrDefault(m => m.CandidateKeys.Contains(key, StringComparer.OrdinalIgnoreCase));
-        if (mod is null) return;
-
-        var drop = e.GetPosition(BoardCanvas);
-        if (_board?.Nodes.Any(n => n.Kind == PlanNodeKind.Mod && n.ModKey is not null
-                                   && mod.CandidateKeys.Contains(n.ModKey, StringComparer.OrdinalIgnoreCase)) == true)
-        {
-            PlanStatus.Text = $"{mod.DisplayName} is already on this board.";
-            return;
-        }
-        // Drop under the cursor, not centred on it; FreeSpot() recentres by half the card.
-        AddModNode(mod, new Point(drop.X + ModW / 2, drop.Y + ModH / 2));
-        e.Handled = true;
     }
 
     // ── pan / zoom / background ─────────────────────────────────────────────────
@@ -4667,10 +4743,12 @@ public partial class ModPlanView : UserControl
         if (_board is not null)
             foreach (var node in _board.Nodes)
             {
-                // Sections are skipped: sweeping an area would otherwise pick up the backdrop under
-                // the cards, and dragging the result would move the section and double-move its cards.
-                if (node.Kind == PlanNodeKind.Section) continue;
-                if (_rect.TryGetValue(node.Id, out var r) && r.IntersectsWith(box)) _selected.Add(node.Id);
+                if (!_rect.TryGetValue(node.Id, out var r) || !r.IntersectsWith(box)) continue;
+                // A section the box started inside is only the backdrop of a sweep over its own
+                // cards, so it stays out. One the box reaches from outside joins, and dragging the
+                // selection then carries its cards too (each once, see CarriedWith).
+                if (node.Kind == PlanNodeKind.Section && r.Contains(_marqueeStart)) continue;
+                _selected.Add(node.Id);
             }
 
         ApplySelectionVisual();
@@ -5092,12 +5170,5 @@ public partial class ModPlanView : UserControl
         var mi = new MenuItem { Header = header, InputGestureText = active ? "✓" : "" };
         mi.Click += (_, _) => onClick();
         return mi;
-    }
-
-    private static T? FindAncestor<T>(DependencyObject? from) where T : DependencyObject
-    {
-        for (var d = from; d is not null; d = VisualTreeHelper.GetParent(d))
-            if (d is T hit) return hit;
-        return null;
     }
 }

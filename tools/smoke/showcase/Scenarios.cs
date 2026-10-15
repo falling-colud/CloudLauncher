@@ -142,6 +142,117 @@ public static class Scenarios
                 Program.Pump(300);
                 break;
             }
+            case "planning-select":
+            {
+                // Shift-drag selection boxes and group drags with sections in them, through the view's own
+                // code (reflection on the private handlers). Results are PASS/FAIL lines in the log.
+                var shell = Program.MakeShell(1280, 820);
+                System.Threading.SynchronizationContext.SetSynchronizationContext(
+                    new System.Windows.Threading.DispatcherSynchronizationContext(shell.Dispatcher));
+                shell.Show();
+                Program.Pump(1500);
+                var board = new CloudLauncher.Services.PlanBoard { Name = "Select", SectionMembershipSet = true };
+                CloudLauncher.Services.PlanNode Add(string id, CloudLauncher.Services.PlanNodeKind kind, double x, double y,
+                    double w, double h, string? section = null)
+                {
+                    var n = new CloudLauncher.Services.PlanNode { Id = id, Kind = kind, X = x, Y = y, W = w, H = h, Title = id, SectionId = section };
+                    board.Nodes.Add(n);
+                    return n;
+                }
+                var note = CloudLauncher.Services.PlanNodeKind.Note;
+                var sec = CloudLauncher.Services.PlanNodeKind.Section;
+                Add("secA", sec, 288, 48, 552, 216);
+                Add("a1", note, 312, 96, 240, 48, "secA");
+                Add("a2", note, 576, 96, 240, 48, "secA");
+                Add("secB", sec, 288, 336, 552, 216);
+                Add("b1", note, 312, 384, 240, 48, "secB");
+                Add("loose", note, 24, 48, 216, 48);
+                var plans = new CloudLauncher.Services.PackPlans { Boards = { board }, LastBoardId = board.Id };
+                var file = System.IO.Path.Combine(App.State.Packs.GameDir(FakeWorld.Hearthstone), ".cloudlauncher", "plans.json");
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(file)!);
+                System.IO.File.WriteAllText(file, System.Text.Json.JsonSerializer.Serialize(plans));
+                App.State.ModPlans.Invalidate(FakeWorld.Hearthstone);
+                var view = new CloudLauncher.Views.ModPlanView();
+                var host = new Window
+                {
+                    Left = -24000, Top = -24000, Width = 1100, Height = 700, ShowActivated = false, ShowInTaskbar = false,
+                    WindowStartupLocation = WindowStartupLocation.Manual, Content = view,
+                };
+                host.Show();
+                Program.Pump(800);
+                view.Load(FakeWorld.Hearthstone, Array.Empty<CloudLauncher.Services.PackMod>(), shell);
+                Program.Pump(1200);
+
+                var t = typeof(CloudLauncher.Views.ModPlanView);
+                const System.Reflection.BindingFlags F = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                object? Call(string m, params object?[] a) => t.GetMethod(m, F)!.Invoke(view, a);
+                var selected = (HashSet<string>)t.GetField("_selected", F)!.GetValue(view)!;
+                var live = (CloudLauncher.Services.PlanBoard)t.GetField("_board", F)!.GetValue(view)!;
+                CloudLauncher.Services.PlanNode Node(string id) => live.Nodes.Single(n => n.Id == id);
+                void Check(string name, bool ok, string detail = "") => Program.Log($"{(ok ? "PASS" : "FAIL")}  {name} {(ok ? "" : detail)}");
+                string Sel() => string.Join(",", selected.OrderBy(s => s));
+                void Sweep(Point from, Point to)
+                {
+                    Call("ClearSelection");
+                    Call("BeginMarquee", from);
+                    Call("UpdateMarquee", to);
+                    Call("EndMarquee");
+                }
+
+                // From empty canvas across the top of section A and into its first card.
+                Sweep(new Point(250, 20), new Point(400, 120));
+                Check("box from outside takes the section it reaches", selected.Contains("secA") && selected.Contains("a1"), Sel());
+                Check("...and not what it didn't reach", !selected.Contains("a2") && !selected.Contains("secB"), Sel());
+                // Starting inside section A's body: only its cards.
+                Sweep(new Point(300, 160), new Point(830, 90));
+                Check("box started inside a section leaves that section out", !selected.Contains("secA")
+                    && selected.Contains("a1") && selected.Contains("a2"), Sel());
+                // Everything: both sections, all cards.
+                Sweep(new Point(10, 10), new Point(900, 600));
+                Check("box over everything takes both sections", selected.SetEquals(new[] { "secA", "secB", "a1", "a2", "b1", "loose" }), Sel());
+
+                // Dragging the loose card with that selection moves every card exactly once.
+                var carried = (List<CloudLauncher.Services.PlanNode>)Call("CarriedWith", Node("loose"))!;
+                Check("drag carries each other card once", carried.Count == 5 && carried.Select(n => n.Id).Distinct().Count() == 5,
+                    string.Join(",", carried.Select(n => n.Id)));
+                // Section A plus the loose card selected, dragging the section: its cards come too, once.
+                selected.Clear(); selected.Add("secA"); selected.Add("loose");
+                carried = (List<CloudLauncher.Services.PlanNode>)Call("CarriedWith", Node("secA"))!;
+                Check("dragging a selected section brings the rest of the selection and its own cards",
+                    carried.Select(n => n.Id).OrderBy(s => s).SequenceEqual(new[] { "a1", "a2", "loose" }), string.Join(",", carried.Select(n => n.Id)));
+
+                // A real move through DragTo: everything shifts by the same whole cells, nothing twice.
+                Sweep(new Point(10, 10), new Point(900, 600));
+                var before = live.Nodes.ToDictionary(n => n.Id, n => (n.X, n.Y));
+                var dragNode = Node("loose");
+                t.GetField("_dragNode", F)!.SetValue(view, dragNode);
+                t.GetField("_dragStart", F)!.SetValue(view, new Point(0, 0));
+                t.GetField("_dragOrigX", F)!.SetValue(view, dragNode.X);
+                t.GetField("_dragOrigY", F)!.SetValue(view, dragNode.Y);
+                var carriedField = t.GetField("_dragCarried", F)!;
+                var listType = carriedField.FieldType;
+                var list = Activator.CreateInstance(listType)!;
+                foreach (var n in (List<CloudLauncher.Services.PlanNode>)Call("CarriedWith", dragNode)!)
+                    listType.GetMethod("Add")!.Invoke(list, new object[] { (n, n.X, n.Y) });
+                carriedField.SetValue(view, list);
+                Call("DragTo", new Point(48, 96));
+                var moved = live.Nodes.Select(n => (n.Id, dx: n.X - before[n.Id].X, dy: n.Y - before[n.Id].Y)).ToList();
+                Check("every card moved by the same amount", moved.Select(m => (m.dx, m.dy)).Distinct().Count() == 1 && moved[0].dx != 0,
+                    string.Join(" ", moved.Select(m => $"{m.Id}:{m.dx},{m.dy}")));
+                var up = new System.Windows.Input.MouseButtonEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0,
+                    System.Windows.Input.MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent };
+                t.GetMethod("OnCardUp", F)!.Invoke(view, new object?[] { view, up });
+                live = (CloudLauncher.Services.PlanBoard)t.GetField("_board", F)!.GetValue(view)!;
+                Check("cards keep their sections after the group drop", Node("a1").SectionId == "secA" && Node("a2").SectionId == "secA"
+                    && Node("b1").SectionId == "secB" && Node("loose").SectionId is null,
+                    $"a1={Node("a1").SectionId} b1={Node("b1").SectionId} loose={Node("loose").SectionId}");
+                Program.Pump(400);
+                Program.Shoot(view, "planning-select", 1);
+                host.Close();
+                shell.Hide();
+                Program.Pump(300);
+                break;
+            }
             case "settings-look":
             {
                 var shell = Program.MakeShell(1280, 900);

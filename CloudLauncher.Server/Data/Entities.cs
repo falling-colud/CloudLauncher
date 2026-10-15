@@ -105,6 +105,21 @@ public class PackListing
     public DateTimeOffset AddedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
+/// <summary>
+/// A pack's planning boards: the launcher's plans.json, stored apart from the pack's files.
+/// </summary>
+/// <remarks>Its own table rather than a column on <see cref="Pack"/>, which is loaded all over the
+/// place: a big board would ride along with every one of those loads. <see cref="Revision"/> is a
+/// concurrency token, so two launchers storing on the same revision can't both win.</remarks>
+public class PackPlanDocument
+{
+    public Guid PackId { get; set; }
+    public Pack Pack { get; set; } = null!;
+    public string Json { get; set; } = null!;
+    public long Revision { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public class Team
 {
     public Guid Id { get; set; } = Guid.NewGuid();

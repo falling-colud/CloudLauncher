@@ -107,6 +107,7 @@ public partial class SettingsPanel : Page
         try
         {
             var s = App.State.Settings;
+            RamSlider.Maximum = AppSettings.RamSliderMaximum(s.EffectiveDefaultMaxRamMb);
             RamSlider.Value = s.EffectiveDefaultMaxRamMb;
             RamValueLabel.Text = $"{(int)RamSlider.Value} MB";
             UseSidePanelBox.IsChecked = s.UseSidePanel;
