@@ -686,6 +686,11 @@ public partial class ServersView : Page, IReusablePage, IRefreshablePage
             // PC. It can still throw otherwise, and an exception escaping this async void handler's
             // callee would crash the launcher.
             var pack = await App.State.Api.GetPackAsync(packId);
+            if (!await ManualDownloadsCard.ConfirmLaunchAsync(_shell, pack.Id, pack.Name))
+            {
+                Say("");
+                return;
+            }
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
             var proc = await App.State.Launcher.LaunchTrackedAsync(
                 pack, new Progress<string>(_ => { }), joinServerAddress: row.Address);

@@ -1722,6 +1722,7 @@ public partial class WorldsView : Page, IReusablePage, IRefreshablePage
 
             _state.Note("Launching...");
             var pack = await App.State.Api.GetPackAsync(packId);
+            if (!await ManualDownloadsCard.ConfirmLaunchAsync(_shell, pack.Id, pack.Name)) return;
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
 
             if (packId != save.SourcePackId)

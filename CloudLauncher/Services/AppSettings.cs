@@ -303,6 +303,14 @@ public sealed partial class AppSettings
     /// want this set a key.</summary>
     public bool CurseForgeDirect { get; set; } = true;
 
+    /// <summary>Where the "download by hand" card looks for the files a CurseForge modpack could not
+    /// download; null means the Windows Downloads folder.</summary>
+    public string? ManualDownloadFolder { get; set; }
+
+    /// <summary>Whether a file that card puts in an instance is removed from the watched folder. Off by
+    /// default: the launcher leaves the user's own folders alone unless asked.</summary>
+    public bool ManualDownloadRemoveAfterAdding { get; set; }
+
     /// <summary>The plain-text settings.json slot the key was kept in before 1.8.0. Read so an
     /// existing key moves into <see cref="SecretStore"/>, then written back empty, unless the store
     /// can't be written on this PC; then the key stays here so it survives a restart.</summary>

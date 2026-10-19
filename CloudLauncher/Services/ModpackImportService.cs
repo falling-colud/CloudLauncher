@@ -37,14 +37,20 @@ public sealed class ModpackImportService(
     private int DownloadConcurrency => _settings?.EffectiveModDownloadConcurrency ?? 3;
 
     private AppSettings? _settings;
+    private ManualDownloadService? _manualDownloads;
 
     public void SetSettings(AppSettings settings) => _settings = settings;
+
+    /// <summary>Where a CurseForge import records the files it could not download, for the card
+    /// that walks the user through getting them by hand.</summary>
+    public void SetManualDownloads(ManualDownloadService manualDownloads) => _manualDownloads = manualDownloads;
 
     public void SetPackAssets(PackAssetService assets) => _assets = assets;
     public void SetModMetadata(ModMetadataService metadata) => _metadata = metadata;
 
     /// <summary>The file written next to a CurseForge import's mods when some could not be
-    /// downloaded, listing each with its project page.</summary>
+    /// downloaded, listing each with its download page. The launcher itself works from
+    /// <see cref="ManualDownloadService.ListFileName"/>; this one is for whoever opens the folder.</summary>
     public const string ManualDownloadsFileName = "manual-downloads.txt";
 
     /// <summary>A warning for the import log, or for the launcher log when nobody is reading the
@@ -237,6 +243,9 @@ public sealed class ModpackImportService(
 
         await CopyOverridesAsync(overridesEntry, "overrides/", gameDir, log, progress, ct, job);
 
+        // A Modrinth pack links every file, so whatever an earlier CurseForge import of this instance
+        // left to download by hand is no longer this pack's to ask for.
+        _manualDownloads?.Record(pack.Id, Path.GetFileName(mrpackPath), []);
         RecordPackSource(pack.Id, ModSource.Modrinth, log);
         log?.Report($"Import complete: {pack.Name}");
         progress?.Report(new ImportProgress(1, $"Import complete: {pack.Name}"));
@@ -370,9 +379,9 @@ public sealed class ModpackImportService(
         catch (Exception ex) { Warn(log, $"could not ask what each file is ({ex.Message}); everything goes into mods."); projects = new(); }
 
         var cfCompleted = 0;
-        // Files CurseForge would not hand out (an author's opt-out, mostly), with the sentence that
-        // says where to get each one, for the note written next to the mods at the end.
-        var missing = new System.Collections.Concurrent.ConcurrentBag<string>();
+        // Files the launcher could not download: an author's opt-out mostly, or a download that kept
+        // failing. Each is listed at the end with its download page, for the user to fetch by hand.
+        var missing = new System.Collections.Concurrent.ConcurrentBag<(CfFileRef File, bool OptedOut, string? Reason)>();
         using var cfGate = new SemaphoreSlim(DownloadConcurrency, DownloadConcurrency);
         await Task.WhenAll(files.Select(async (f, i) =>
         {
@@ -396,7 +405,7 @@ public sealed class ModpackImportService(
                     try { url = await curseforge.GetDownloadUrlAsync(f.ProjectId, f.FileId, ct); }
                     catch (StoreRequestException ex) when (ex.Failure == StoreFailure.NotDistributable)
                     {
-                        missing.Add(ex.Plain);
+                        missing.Add((f, true, null));
                         Warn(log, ex.Plain);
                         return;
                     }
@@ -452,7 +461,7 @@ public sealed class ModpackImportService(
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                missing.Add($"{f.ProjectId}:{f.FileId}: {StoreRequestException.PlainFor(ex) ?? ex.Message}");
+                missing.Add((f, false, StoreRequestException.PlainFor(ex) ?? ex.Message));
                 Warn(log, $"could not download {f.ProjectId}:{f.FileId}: {ex.Message}");
             }
             finally
@@ -465,7 +474,9 @@ public sealed class ModpackImportService(
         await CopyOverridesAsync(overrides, prefix, gameDir, log, progress, ct, job);
 
         RecordPackSource(pack.Id, ModSource.CurseForge, log);
-        var note = missing.IsEmpty ? "" : WriteManualDownloadsNote(gameDir, missing, job);
+        var manual = await DescribeManualDownloadsAsync(missing.ToList(), knownFiles, knownMods, projects, log, ct);
+        _manualDownloads?.Record(pack.Id, Path.GetFileName(zipPath), manual);
+        var note = manual.Count == 0 ? "" : WriteManualDownloadsNote(gameDir, manual, job);
         log?.Report($"Import complete: {pack.Name}{note}");
         if (note.Length > 0) AppLog.Log("import", $"{pack.Name}{note}");
         progress?.Report(new ImportProgress(1, $"Import complete: {pack.Name}{note}"));
@@ -474,24 +485,90 @@ public sealed class ModpackImportService(
     }
 
     /// <summary>
-    /// Writes <see cref="ManualDownloadsFileName"/> into the game folder, one file per line with where
-    /// to get it, and returns the sentence to append to the completion line. The pack still opens
+    /// Turns the files an import could not download into entries the user can act on: the project's
+    /// name and download page, where the file goes, and the size and hashes that recognise it once it
+    /// is downloaded. One lookup for all of them; what it cannot answer comes from the listings the
+    /// import already had.
+    /// </summary>
+    private async Task<List<ManualDownloadEntry>> DescribeManualDownloadsAsync(
+        List<(CfFileRef File, bool OptedOut, string? Reason)> missing,
+        Dictionary<int, ModVersion> knownFiles,
+        Dictionary<int, ModSummary> knownMods,
+        Dictionary<int, CurseForgeProjectFacts> projects,
+        IProgress<string>? log,
+        CancellationToken ct)
+    {
+        if (missing.Count == 0) return [];
+        Dictionary<int, CurseForgeFileDetails> details;
+        try { details = await curseforge.GetFileDetailsAsync(missing.Select(m => m.File.FileId), ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            Warn(log, $"could not look up the files to download by hand ({ex.Message}); listing what is known.");
+            details = new();
+        }
+
+        var entries = new List<ManualDownloadEntry>();
+        foreach (var (f, optedOut, reason) in missing)
+        {
+            details.TryGetValue(f.FileId, out var d);
+            knownFiles.TryGetValue(f.FileId, out var version);
+            knownMods.TryGetValue(f.ProjectId, out var mod);
+            var classId = d?.ClassId is > 0 ? d.ClassId : projects.GetValueOrDefault(f.ProjectId).ClassId;
+            var folder = classId switch
+            {
+                CurseForgeService.ClassIdResourcePacks => "resourcepacks",
+                CurseForgeService.ClassIdShaders => "shaderpacks",
+                _ => "mods"
+            };
+            var entry = new ManualDownloadEntry
+            {
+                ProjectId = f.ProjectId,
+                FileId = f.FileId,
+                Name = d?.ProjectName ?? mod?.Name ?? $"CurseForge project {f.ProjectId}",
+                FileName = d?.FileName ?? version?.Files.FirstOrDefault()?.Filename ?? "",
+                Size = d?.Length ?? version?.Files.FirstOrDefault()?.Size ?? 0,
+                Fingerprint = d?.Fingerprint ?? 0,
+                Sha1 = d?.Sha1,
+                Folder = folder,
+                Disabled = !f.Required && folder == "mods",
+                ProjectUrl = d?.WebsiteUrl,
+                IconUrl = d?.IconUrl ?? mod?.IconUrl,
+                // A file that came back without a link from a project that turned off outside downloads
+                // is the opt-out, whichever way the request failed.
+                OptedOut = optedOut || d is { AllowsDistribution: false },
+                Reason = optedOut ? null : reason
+            };
+            if (!entry.IsUsable)
+            {
+                Warn(log, $"{entry.Name} ({f.ProjectId}:{f.FileId}) can't be listed for a manual download: CurseForge gave no usable file name.");
+                continue;
+            }
+            entries.Add(entry);
+        }
+        return entries;
+    }
+
+    /// <summary>
+    /// Writes <see cref="ManualDownloadsFileName"/> into the game folder, one file per line with its
+    /// download page, and returns the sentence to append to the completion line. The pack still opens
     /// without those files, so this is a note rather than a failure.
     /// </summary>
-    private static string WriteManualDownloadsNote(string gameDir, IEnumerable<string> missing, PackJob? job)
+    private static string WriteManualDownloadsNote(string gameDir, IReadOnlyList<ManualDownloadEntry> files, PackJob? job)
     {
-        var lines = missing.OrderBy(m => m, StringComparer.OrdinalIgnoreCase).ToList();
         try
         {
             var path = Path.Combine(gameDir, ManualDownloadsFileName);
             var isNew = !File.Exists(path);
             File.WriteAllLines(path,
             [
-                $"{lines.Count} file(s) in this pack could not be downloaded by the launcher.",
-                "Most are mods whose authors allow downloads through the CurseForge app only: get each from",
-                "its project page (or the CurseForge app) and drop it into the mods folder.",
+                $"{files.Count} file(s) in this pack could not be downloaded by the launcher.",
+                "Their authors allow downloads through CurseForge's own website and app only. Open each link",
+                "below (the download starts by itself after a few seconds); the launcher's \"Download by hand\"",
+                "window then moves each file from your Downloads folder into the instance. Or put each file in",
+                "the folder named in brackets yourself.",
                 "",
-                .. lines
+                .. files.Select(f => $"{f.Name}: {f.FileName} [{f.Folder}]{Environment.NewLine}    {f.DownloadPageUrl}")
             ]);
             if (isNew) job?.TrackCreatedFile(path);
         }
@@ -499,7 +576,7 @@ public sealed class ModpackImportService(
         {
             AppLog.Log("import", $"Could not write {ManualDownloadsFileName}: {ex.Message}");
         }
-        return $". {lines.Count} file(s) could not be downloaded (see {ManualDownloadsFileName} in the instance folder)";
+        return $". {files.Count} file(s) need downloading by hand from CurseForge";
     }
 
     /// <summary>Unpacks a modpack's override files into the game folder. An entry whose path is not a

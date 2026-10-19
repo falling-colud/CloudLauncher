@@ -23,6 +23,10 @@ public sealed class AppState
     public CurseForgeService CurseForge { get; }
     public ModpackImportService ModpackImport { get; }
     public ModpackDownloadService ModpackDownload { get; }
+
+    /// <summary>Files a CurseForge modpack import could not download, per instance, until the user
+    /// has put them in by hand.</summary>
+    public ManualDownloadService ManualDownloads { get; }
     public PackAssetService PackAssets { get; }
     public WorldService Worlds { get; }
     public ResourcePackService ResourcePacks { get; }
@@ -120,12 +124,14 @@ public sealed class AppState
         Packs.SetModPlans(ModPlans);
         PlanSync = new PlanSyncService(Api, Packs, ModPlans);
         TestScope = new TestLaunchScope(Packs);
+        ManualDownloads = new ManualDownloadService(Packs, Settings);
         ModpackImport = new ModpackImportService(Modrinth, CurseForge, Api, Packs, ModFingerprints);
+        ModpackImport.SetManualDownloads(ManualDownloads);
         ModpackImport.SetModMetadata(ModMetadata);
         ModpackImport.SetSettings(Settings);
         PackAssets = new PackAssetService(Packs, Modrinth);
         Packs.SetPackAssets(PackAssets);
-        ModpackDownload = new ModpackDownloadService(Modrinth, CurseForge, ModpackImport, Api, Packs, PackAssets, Settings);
+        ModpackDownload = new ModpackDownloadService(Modrinth, CurseForge, ModpackImport, Api, Packs, PackAssets, Settings, ManualDownloads);
         ModpackImport.SetPackAssets(PackAssets);
         Worlds = new WorldService(Settings, Packs);
         ResourcePacks = new ResourcePackService(Settings, Packs);

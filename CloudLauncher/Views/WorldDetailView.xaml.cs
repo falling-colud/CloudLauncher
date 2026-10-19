@@ -1547,6 +1547,7 @@ public partial class WorldDetailView : Page
                 return;
             }
             var pack = await App.State.Api.GetPackAsync(packId);
+            if (!await ManualDownloadsCard.ConfirmLaunchAsync(_shell, pack.Id, pack.Name)) return;
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
 
             if (packId != _world.SourcePackId)

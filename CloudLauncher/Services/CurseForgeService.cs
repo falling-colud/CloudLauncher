@@ -19,6 +19,25 @@ public sealed record CurseForgeFileIndex(string GameVersion, int FileId, int Rel
 /// can be listed in a pack, but only the CurseForge app can download them.</param>
 public readonly record struct CurseForgeProjectFacts(int ClassId, bool AllowsDistribution, string Name);
 
+/// <summary>What <see cref="CurseForgeService.GetFileDetailsAsync"/> says about one file: enough to send
+/// someone to its download page and to recognise the file once they have it.</summary>
+/// <param name="WebsiteUrl">The project's page on curseforge.com; null when CurseForge did not say.</param>
+/// <param name="Fingerprint">CurseForge's murmur2 fingerprint of the file; 0 when not given.</param>
+/// <param name="Sha1">Lower-case hex SHA-1 of the file; null when not given.</param>
+public sealed record CurseForgeFileDetails(
+    int ProjectId,
+    int FileId,
+    string ProjectName,
+    string? WebsiteUrl,
+    string? IconUrl,
+    int ClassId,
+    bool AllowsDistribution,
+    string FileName,
+    string DisplayName,
+    long Length,
+    long Fingerprint,
+    string? Sha1);
+
 /// <summary>
 /// CurseForge API wrapper. Requests go through the launcher server's proxy
 /// (<c>/proxy/curseforge/*</c>), which attaches the admin-configured API key, so clients never see it.
@@ -290,6 +309,55 @@ public sealed class CurseForgeService
             var payload = await resp.Content.ReadFromJsonAsync<CfFilesResponse>(Json, ct);
             foreach (var f in payload?.Data ?? new())
                 if (f.ModId > 0) result[f.Id] = ToCfVersion(f.ModId, f);
+        }
+        return result;
+    }
+
+    /// <summary>Everything needed to hand a file over by hand: the project's name, page and class, and the
+    /// file's name, size and hashes, keyed by file id. Two round trips per fifty files
+    /// (<c>POST /mods/files</c> and <c>POST /mods</c>). A file CurseForge does not know is absent.</summary>
+    /// <remarks>For the files a modpack import could not download (an author's third-party opt-out,
+    /// mostly), which the user fetches from the website instead. Throws when a call fails, like
+    /// <see cref="GetModsAsync"/>.</remarks>
+    public async Task<Dictionary<int, CurseForgeFileDetails>> GetFileDetailsAsync(
+        IEnumerable<int> fileIds, CancellationToken ct = default)
+    {
+        var files = new Dictionary<int, CfFile>();
+        foreach (var chunk in fileIds.Where(i => i > 0).Distinct().Chunk(BatchSize))
+        {
+            using var resp = await ProxyPostJsonAsync("mods/files", new { fileIds = chunk }, ct);
+            if (!resp.IsSuccessStatusCode)
+                throw await CurseForgeRequestExceptionAsync("file lookup", resp, ct);
+            var payload = await resp.Content.ReadFromJsonAsync<CfFilesResponse>(Json, ct);
+            foreach (var f in payload?.Data ?? new())
+                if (f.ModId > 0) files[f.Id] = f;
+        }
+
+        var mods = new Dictionary<int, CfMod>();
+        foreach (var chunk in files.Values.Select(f => f.ModId).Distinct().Chunk(BatchSize))
+        {
+            using var resp = await ProxyPostJsonAsync("mods", new { modIds = chunk, filterPcOnly = false }, ct);
+            if (!resp.IsSuccessStatusCode)
+                throw await CurseForgeRequestExceptionAsync("mod lookup", resp, ct);
+            var payload = await resp.Content.ReadFromJsonAsync<CfSearchResponse>(Json, ct);
+            foreach (var m in payload?.Data ?? new())
+                mods[m.Id] = m;
+        }
+
+        var result = new Dictionary<int, CurseForgeFileDetails>();
+        foreach (var f in files.Values)
+        {
+            mods.TryGetValue(f.ModId, out var mod);
+            var sha1 = f.Hashes?.FirstOrDefault(h => h.Algo == 1 && !string.IsNullOrWhiteSpace(h.Value))?.Value;
+            result[f.Id] = new CurseForgeFileDetails(
+                f.ModId, f.Id,
+                mod?.Name ?? f.DisplayName,
+                mod?.Links?.WebsiteUrl,
+                mod?.Logo?.ThumbnailUrl ?? mod?.Logo?.Url,
+                mod?.ClassId ?? 0,
+                mod?.AllowModDistribution != false,
+                f.FileName, f.DisplayName, f.FileLength, f.FileFingerprint,
+                sha1?.Trim().ToLowerInvariant());
         }
         return result;
     }
@@ -920,6 +988,14 @@ public sealed class CurseForgeService
         [JsonPropertyName("gameVersions")]  public List<string>? GameVersions { get; set; }
         [JsonPropertyName("releaseType")]   public int ReleaseType { get; set; }
         [JsonPropertyName("dependencies")]  public List<CfFileDependency>? Dependencies { get; set; }
+        [JsonPropertyName("fileFingerprint")] public long FileFingerprint { get; set; }
+        [JsonPropertyName("hashes")]        public List<CfFileHash>? Hashes { get; set; }
+    }
+    /// <summary>One of a file's hashes: <c>algo</c> 1 is SHA-1, 2 is MD5.</summary>
+    private sealed class CfFileHash
+    {
+        [JsonPropertyName("value")] public string? Value { get; set; }
+        [JsonPropertyName("algo")]  public int Algo { get; set; }
     }
     private sealed class CfFileDependency
     {

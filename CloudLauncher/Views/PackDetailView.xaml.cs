@@ -169,8 +169,11 @@ public partial class PackDetailView : Page
             ServerHostingPanel.Host.StateChanged += OnServerHostStateChanged;
             App.State.ModpackDownload.PackAdded -= OnPackDownloadUpdated;
             App.State.ModpackDownload.PackAdded += OnPackDownloadUpdated;
+            App.State.ManualDownloads.Changed -= OnManualDownloadsChanged;
+            App.State.ManualDownloads.Changed += OnManualDownloadsChanged;
             // Whatever changed while the page was away (the game exiting, a transfer ending).
             UpdateLaunchButtonState();
+            _ = UpdateManualDownloadsChipAsync();
             await ReloadAsync();
         };
         if (_hostedInMinecraftWindow)
@@ -199,6 +202,7 @@ public partial class PackDetailView : Page
             App.State.Instances.StateChanged -= OnInstanceStateChanged;
             ServerHostingPanel.Host.StateChanged -= OnServerHostStateChanged;
             App.State.ModpackDownload.PackAdded -= OnPackDownloadUpdated;
+            App.State.ManualDownloads.Changed -= OnManualDownloadsChanged;
             // The Logs tab subscribes this when "Launcher log" is selected; remove it in case the page
             // closes on that row.
             AppLog.MessageAppended -= OnLauncherLogAppended;
@@ -402,6 +406,35 @@ public partial class PackDetailView : Page
     {
         if (pack.Id != _packId) return;
         Dispatcher.BeginInvoke(async () => await ReloadAsync());
+    }
+
+    // ── files to download by hand ────────────────────────────────────────────
+
+    private void OnManualDownloadsChanged(Guid packId)
+    {
+        if (packId == _packId) _ = UpdateManualDownloadsChipAsync();
+    }
+
+    /// <summary>Shows the chip beside Play while a CurseForge import's hand downloads are still
+    /// missing, with how many.</summary>
+    private async Task UpdateManualDownloadsChipAsync()
+    {
+        int waiting;
+        try { waiting = await Task.Run(() => App.State.ManualDownloads.Waiting(_packId).Count); }
+        catch (Exception ex)
+        {
+            AppLog.LogError("manual-downloads", ex);
+            waiting = 0;
+        }
+        ManualDownloadsChip.Visibility = waiting > 0 && !_hostedInMinecraftWindow ? Visibility.Visible : Visibility.Collapsed;
+        ManualDownloadsChipText.Text = waiting == 1 ? "1 file to download by hand" : $"{waiting} files to download by hand";
+    }
+
+    private async void OnOpenManualDownloads(object sender, RoutedEventArgs e)
+    {
+        try { await ManualDownloadsCard.ShowAsync(_shell, _packId, _pack?.Name ?? ""); }
+        catch (Exception ex) { AppLog.LogError("manual-downloads", ex); }
+        _ = UpdateManualDownloadsChipAsync();
     }
 
     private void UpdateLaunchButtonState()
@@ -3841,6 +3874,12 @@ public partial class PackDetailView : Page
             _shell.OpenMcAccount();
             return;
         }
+
+        // Files a CurseForge import could not download: get them first, or play without them.
+        LaunchButton.IsEnabled = false;
+        var goAhead = await ManualDownloadsCard.ConfirmLaunchAsync(ListOwnerWindow, _pack.Id, _pack.Name);
+        UpdateLaunchButtonState();
+        if (!goAhead || _pack is null) return;
 
         StatusLabel.Text = "Checking Java...";
         LaunchButton.IsEnabled = false;

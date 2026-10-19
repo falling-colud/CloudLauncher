@@ -220,6 +220,19 @@
                                        Foreground="{DynamicResource AccentTextBrush}"/>
                         </StackPanel>
                     </Button>
+                    <!-- Shown while a CurseForge import left files that only CurseForge's own website hands
+                    out. Opens the card that links each one and picks them up from Downloads. -->
+                    <Button x:Name="ManualDownloadsChip" Click="OnOpenManualDownloads"
+                            Visibility="Collapsed" Margin="0,0,10,10"
+                            ToolTip="Files this pack needs that only CurseForge's website can download. Click to get them.">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE7BA;" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                                       Foreground="{DynamicResource WarningBrush}"
+                                       Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="ManualDownloadsChipText" Text="Files to download by hand"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
                     <!-- Shown only while this instance's server is running. Opens File Management > Hosting,
                     where the server is started and stopped. -->
                     <Button x:Name="ServerStatusChip" Click="OnOpenServerHosting"

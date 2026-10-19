@@ -969,6 +969,12 @@ public partial class PackListView : Page, IReusablePage, IRefreshablePage
                 _shell.OpenMcAccount();
                 return;
             }
+            // Files a CurseForge import could not download: get them first, or play without them.
+            if (!await ManualDownloadsCard.ConfirmLaunchAsync(_shell, pack.Id, pack.Name))
+            {
+                SetStatus("");
+                return;
+            }
             App.State.Packs.EnsurePackFolder(pack.Id, pack.Name, pack.IsShared);
             var proc = await App.State.Launcher.LaunchTrackedAsync(pack, new Progress<string>(_ => { }));
             _shell.OpenMinecraftHost(pack, proc);

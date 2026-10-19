@@ -122,6 +122,9 @@ public partial class MainWindow : Window, IDialogHost
         // ConnectivityChanged is a static-lifetime event on AppState, so OnClosed has to
         // unsubscribe (see the matching -= there).
         App.State.ConnectivityChanged += OnConnectivityChanged;
+        // An import that finished with files CurseForge would only hand to its own site and app. Same
+        // static lifetime, same unsubscribe in OnClosed.
+        App.State.ManualDownloads.Needed += OnManualDownloadsNeeded;
         OfflineBar.RetryRequested += OnOfflineRetry;
         // Sync now rather than on the next change: a call may already have failed during startup.
         OfflineBar.Sync();
@@ -170,6 +173,7 @@ public partial class MainWindow : Window, IDialogHost
     {
         UiScale.Changed -= ApplyUiScale;
         App.State.ConnectivityChanged -= OnConnectivityChanged;
+        App.State.ManualDownloads.Needed -= OnManualDownloadsNeeded;
         OfflineBar.RetryRequested -= OnOfflineRetry;
         _source?.RemoveHook(WndProc);
         _source = null;
@@ -179,6 +183,14 @@ public partial class MainWindow : Window, IDialogHost
 
     /// <summary>Raised on the UI thread by <see cref="AppState"/> whenever the server's
     /// reachability flips, in either direction.</summary>
+    /// <summary>Brings up the card for the files an import could not download. Raised on the UI
+    /// thread when the import finishes, wherever the user is by then.</summary>
+    private async void OnManualDownloadsNeeded(Guid packId, string packName)
+    {
+        try { await ManualDownloadsCard.ShowAsync(this, packId, packName); }
+        catch (Exception ex) { AppLog.LogError("manual-downloads", ex); }
+    }
+
     private void OnConnectivityChanged()
     {
         OfflineBar.Sync();

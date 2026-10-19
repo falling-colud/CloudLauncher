@@ -12,6 +12,7 @@ public static class Scenarios
         {
             case "sharing": Sharing(); break;
             case "logs": Logs(); break;
+            case "manual-downloads": ManualDownloads(); break;
             case "open": Open(); break;
             case "files":
             {
@@ -366,6 +367,74 @@ public static class Scenarios
             shell.CloseSidePanel();
             Program.Pump(900);
         }
+        shell.Hide();
+        Program.Pump(300);
+    }
+
+    /// <summary>The "download by hand" card over the instance page, as an import leaves it (three
+    /// files, one already added) and as the check before Play shows it.</summary>
+    private static void ManualDownloads()
+    {
+        var shell = Program.MakeShell(1280, 820);
+        System.Threading.SynchronizationContext.SetSynchronizationContext(
+            new System.Windows.Threading.DispatcherSynchronizationContext(shell.Dispatcher));
+        var id = FakeWorld.Hearthstone;
+        CloudLauncher.App.State.ManualDownloads.Record(id, "Hearthstone Valley 2.4.zip",
+        [
+            new CloudLauncher.Services.ManualDownloadEntry
+            {
+                ProjectId = 521480, FileId = 9243656, Name = "Skin Layers 3D", OptedOut = true,
+                FileName = "skinlayers3d-neoforge-1.11.4-mc1.21.1.jar", Size = 1905514, Fingerprint = 3196735172,
+                Folder = "mods", ProjectUrl = "https://www.curseforge.com/minecraft/mc-mods/skin-layers-3d"
+            },
+            new CloudLauncher.Services.ManualDownloadEntry
+            {
+                ProjectId = 448233, FileId = 9100286, Name = "Entity Culling Fabric/Forge", OptedOut = true,
+                FileName = "entityculling-neoforge-1.11.3-mc1.21.1.jar", Size = 1510075, Fingerprint = 737333498,
+                Folder = "mods", Disabled = true, ProjectUrl = "https://www.curseforge.com/minecraft/mc-mods/entityculling"
+            },
+            new CloudLauncher.Services.ManualDownloadEntry
+            {
+                ProjectId = 453763, FileId = 9254421, Name = "Fresh Animations", OptedOut = true,
+                FileName = "FreshAnimations_v1.11_26.1+.zip", Size = 777123, Fingerprint = 2960052495,
+                Folder = "resourcepacks", ProjectUrl = "https://www.curseforge.com/minecraft/texture-packs/fresh-animations",
+                State = CloudLauncher.Services.ManualDownloadState.Added
+            },
+            new CloudLauncher.Services.ManualDownloadEntry
+            {
+                ProjectId = 238222, FileId = 9254760, Name = "Just Enough Items (JEI)", OptedOut = false,
+                Reason = "CurseForge is busy right now (HTTP 503).",
+                FileName = "jei-1.21.1-neoforge-19.69.0.456.jar", Size = 7350892, Fingerprint = 1,
+                Folder = "mods", ProjectUrl = "https://www.curseforge.com/minecraft/mc-mods/jei"
+            },
+        ]);
+        // Fresh Animations counts as added only if it is really there.
+        var rp = System.IO.Path.Combine(CloudLauncher.App.State.Packs.GameDir(id), "resourcepacks");
+        System.IO.Directory.CreateDirectory(rp);
+        System.IO.File.WriteAllText(System.IO.Path.Combine(rp, "FreshAnimations_v1.11_26.1+.zip"), "x");
+
+        shell.Show();
+        Program.Pump(2500);
+        shell.OpenPackDetail(id, "Hearthstone Valley");
+        Program.Pump(3500);
+        Program.Shoot((FrameworkElement)shell.Content, "manual-downloads-chip", 1);
+
+        _ = CloudLauncher.Views.ManualDownloadsCard.ShowAsync(shell, id, "Hearthstone Valley");
+        Program.Pump(2500);
+        Program.Shoot((FrameworkElement)shell.Content, "manual-downloads-card", 1);
+        if (Program.Find<CloudLauncher.Views.ManualDownloadsCard>((DependencyObject)shell.Content).FirstOrDefault() is { } card)
+        {
+            Program.Shoot(card, "manual-downloads-card-2x", 2);
+            card.RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,
+                PresentationSource.FromVisual(card)!, 0, System.Windows.Input.Key.Escape)
+            { RoutedEvent = UIElement.PreviewKeyDownEvent });
+            Program.Pump(1200);
+        }
+        else Program.Log("no card found");
+
+        _ = CloudLauncher.Views.ManualDownloadsCard.ConfirmLaunchAsync(shell, id, "Hearthstone Valley");
+        Program.Pump(2500);
+        Program.Shoot((FrameworkElement)shell.Content, "manual-downloads-launch", 1);
         shell.Hide();
         Program.Pump(300);
     }

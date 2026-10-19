@@ -24,7 +24,8 @@ public sealed class ModpackDownloadService(
     ApiClient api,
     PackFolderService packs,
     PackAssetService assets,
-    AppSettings settings)
+    AppSettings settings,
+    ManualDownloadService manualDownloads)
 {
     public event Action<PackSummary>? PackAdded;
 
@@ -174,8 +175,7 @@ public sealed class ModpackDownloadService(
                 result = await import.ImportCurseForgeZipIntoPackAsync(tempPath, packId, null, importProgress, metadata, ct, job);
 
             NotifyPackAdded(result);
-            ProgressHub.Report(packId, 1, $"Ready: {result.Name}");
-            ProgressHub.Clear(packId);
+            ReportReady(packId, result);
         }
         catch (OperationCanceledException)
         {
@@ -211,8 +211,7 @@ public sealed class ModpackDownloadService(
                 result = await import.ImportCurseForgeZipIntoPackAsync(filePath, packId, null, importProgress, null, ct, job);
 
             NotifyPackAdded(result);
-            ProgressHub.Report(packId, 1, $"Ready: {result.Name}");
-            ProgressHub.Clear(packId);
+            ReportReady(packId, result);
         }
         catch (OperationCanceledException)
         {
@@ -222,6 +221,18 @@ public sealed class ModpackDownloadService(
         {
             await MarkImportFailedAsync(packId, ex.Message, CancellationToken.None);
         }
+    }
+
+    /// <summary>The import's last progress line, and the card for any files it could not download,
+    /// which the user has to fetch from CurseForge's website.</summary>
+    private void ReportReady(Guid packId, PackSummary result)
+    {
+        var waiting = manualDownloads.Waiting(packId).Count;
+        ProgressHub.Report(packId, 1, waiting == 0
+            ? $"Ready: {result.Name}"
+            : $"Ready: {result.Name} - {waiting} file(s) to download by hand");
+        ProgressHub.Clear(packId);
+        if (waiting > 0) manualDownloads.RaiseNeeded(packId, result.Name);
     }
 
     /// <summary>

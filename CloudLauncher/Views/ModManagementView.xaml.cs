@@ -251,6 +251,8 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         }
 
         LaunchButton.IsEnabled = false;
+        var goAhead = await ManualDownloadsCard.ConfirmLaunchAsync(_shell, _pack.Id, _pack.Name);
+        if (!goAhead) { UpdateLaunchButton(); return; }
         ListStatus.Text = "Checking Java...";
         var (javaOk, javaMsg) = await LaunchService.CheckJavaAsync(_pack.MinecraftVersion, App.State.Settings.GetJavaPathFor(_pack.Id));
         if (!javaOk)

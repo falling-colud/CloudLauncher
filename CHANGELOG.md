@@ -3,6 +3,19 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.9 - 2026-10-19
+
+- CurseForge modpacks with files the launcher isn't allowed to download (authors can switch off
+  downloads outside CurseForge's own site and app) now open a "Download by hand" window when the
+  import finishes. Each file has a Download button that opens its download page on
+  curseforge.com, and the launcher watches your Downloads folder: each file is recognised by its
+  fingerprint as soon as it lands, even under a browser's "(1)" name, and goes into mods,
+  resourcepacks or shaderpacks, switched off if the pack ships it off. Files can also be added
+  with Add files or dropped on the window, a file you don't need can be skipped, and another
+  folder can be watched instead of Downloads.
+- While files are still missing, the instance page shows how many beside Play, and Play asks
+  first: get them, or play anyway.
+
 ## 0.9.8 - 2026-10-15
 
 - Planning boards are live. Every change is saved to the server as you make it, and the boards
