@@ -1,0 +1,200 @@
+/* The live planning-board viewer (/plans/view/<token>, and the Discord Activity).
+   Same tokens as the site (site.css): the launcher's Slate dark look with the Rust accent. */
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-400-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Pixeloid Sans";
+  src: url("/fonts/pixeloid-sans-700.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --bg: #161615;
+  --canvas: #191918;
+  --s2: #1d1d1c;
+  --s3: #222221;
+  --hover: #2a2a28;
+  --title: #141413;
+  --line: #33332f;
+  --line-strong: #45443f;
+  --text: #eceae4;
+  --text-2: #a19f97;
+  --text-3: #86847d;
+  --accent: #601b00;
+  --accent-text: #a07868;
+  --live: #5cb176;
+  --grid: rgb(138 148 166 / .07);
+  --grid-major: rgb(138 148 166 / .13);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--canvas);
+  color: var(--text);
+  font: 14px/1.4 "Inter", "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+
+.bar {
+  position: fixed;
+  inset: 0 0 auto 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 12px 0 16px;
+  padding-top: env(safe-area-inset-top);
+  background: var(--title);
+  border-bottom: 1px solid var(--line);
+}
+
+.pack {
+  flex: none;
+  max-width: 34vw;
+  overflow: hidden;
+  font: 700 18px/1 "Pixeloid Sans", "Inter", sans-serif;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tabs {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  flex: none;
+  padding: 7px 12px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tab:hover { background: var(--hover); color: var(--text); }
+.tab[aria-selected="true"] {
+  border-color: var(--line-strong);
+  background: var(--s3);
+  color: var(--text);
+}
+.tab .count { margin-left: 6px; color: var(--text-3); font-size: 12px; }
+
+.tools { display: flex; flex: none; align-items: center; gap: 8px; }
+
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.live.on::before { background: var(--live); }
+.live.on { color: var(--text-2); }
+
+.btn {
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--s3);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--line-strong); background: var(--hover); }
+
+.stage {
+  position: fixed;
+  inset: 52px 0 0 0;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+  background-color: var(--canvas);
+}
+.stage.dragging { cursor: grabbing; }
+
+.board {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.board svg { display: block; }
+
+.note {
+  position: absolute;
+  left: 16px;
+  bottom: 12px;
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgb(20 20 19 / .85);
+  color: var(--text-3);
+  font-size: 12px;
+  pointer-events: none;
+}
+.note:empty { display: none; }
+
+.message {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--text-2);
+  text-align: center;
+}
+.message strong { display: block; margin-bottom: 6px; color: var(--text); font-size: 16px; }
+
+@media (max-width: 640px) {
+  .pack { max-width: 28vw; font-size: 14px; }
+  .live span { display: none; }
+  #png { display: none; }
+}

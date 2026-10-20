@@ -120,6 +120,57 @@ public class PackPlanDocument
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
+/// <summary>
+/// A Discord channel showing a pack's planning boards, one message per board, kept current by
+/// <c>DiscordPlanPublisher</c>.
+/// </summary>
+public class PackDiscordLink
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid PackId { get; set; }
+    public Pack Pack { get; set; } = null!;
+    public Guid CreatedById { get; set; }
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary><c>"webhook"</c> or <c>"bot"</c> (see <see cref="CloudLauncher.Shared.PackDiscordLinkDto"/>).</summary>
+    public string Mode { get; set; } = "webhook";
+
+    /// <summary>The one board shown, or null for all of them.</summary>
+    public string? BoardId { get; set; }
+
+    public string? WebhookId { get; set; }
+    public string? WebhookToken { get; set; }
+
+    /// <summary>A bot link's code until someone uses it in a channel with <c>/plan link</c>.</summary>
+    public string? Code { get; set; }
+    public DateTimeOffset? CodeExpiresAt { get; set; }
+    public string? LinkedByDiscordUserId { get; set; }
+
+    public string? GuildId { get; set; }
+    public string? ChannelId { get; set; }
+
+    /// <summary>The webhook's name or the channel's, for the launcher to show.</summary>
+    public string? Label { get; set; }
+
+    /// <summary>The secret half of the board viewer's address (<c>/plans/view/{Id:N}.{ViewKey}</c>).</summary>
+    public string ViewKey { get; set; } = null!;
+
+    /// <summary>The plan revision the messages show.</summary>
+    public long PublishedRevision { get; set; }
+    public DateTimeOffset? PublishedAt { get; set; }
+
+    /// <summary>The posted messages, one per board, with a hash of what each shows (JSON).</summary>
+    public string? MessagesJson { get; set; }
+
+    /// <summary>Redraw every message on the next pass, changed or not.</summary>
+    public bool RefreshRequested { get; set; }
+
+    /// <summary>The channel or webhook is gone, or the app lost access: stop posting until relinked.</summary>
+    public bool Broken { get; set; }
+    public string? LastError { get; set; }
+    public DateTimeOffset? LastErrorAt { get; set; }
+}
+
 public class Team
 {
     public Guid Id { get; set; } = Guid.NewGuid();

@@ -15,19 +15,34 @@ public sealed class SecurityHeadersMiddleware(RequestDelegate next)
         "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; " +
         "frame-ancestors 'none'";
 
+    /// <summary>Where the Discord Activity is served from (Discord's URL mapping points here).</summary>
+    public const string ActivityPath = "/discord-activity";
+
+    /// <summary>The Discord Activity (<see cref="ActivityPath"/>) is the same kind of page, but it runs
+    /// inside Discord's own window, through Discord's proxy on discordsays.com, so Discord may frame it.</summary>
+    public const string ActivityContentSecurityPolicy =
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; " +
+        "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; " +
+        "frame-ancestors https://discord.com https://*.discord.com https://*.discordsays.com";
+
+    /// <summary>Set on a request whose path was a <see cref="ActivityPath"/> alias before it was rewritten.</summary>
+    public const string ActivityItem = "cl.activity";
+
     public Task InvokeAsync(HttpContext context)
     {
         context.Response.OnStarting(static state =>
         {
             var http = (HttpContext)state;
             var headers = http.Response.Headers;
+            var activity = http.Items.ContainsKey(ActivityItem) || http.Request.Path.StartsWithSegments(ActivityPath);
             SetIfMissing(headers, HeaderNames.XContentTypeOptions, "nosniff");
             SetIfMissing(headers, "Referrer-Policy", "no-referrer");
-            SetIfMissing(headers, HeaderNames.XFrameOptions, "DENY");
+            if (!activity) SetIfMissing(headers, HeaderNames.XFrameOptions, "DENY");
             if (http.Request.IsHttps)
                 SetIfMissing(headers, HeaderNames.StrictTransportSecurity, "max-age=31536000");
             if (IsHtml(http.Response.ContentType))
-                SetIfMissing(headers, HeaderNames.ContentSecurityPolicy, ContentSecurityPolicy);
+                SetIfMissing(headers, HeaderNames.ContentSecurityPolicy,
+                    activity ? ActivityContentSecurityPolicy : ContentSecurityPolicy);
             return Task.CompletedTask;
         }, context);
 

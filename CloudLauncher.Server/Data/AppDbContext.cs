@@ -13,6 +13,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
     public DbSet<PackCollaborator> PackCollaborators => Set<PackCollaborator>();
     public DbSet<PackListing> PackListings => Set<PackListing>();
     public DbSet<PackPlanDocument> PackPlans => Set<PackPlanDocument>();
+    public DbSet<PackDiscordLink> PackDiscordLinks => Set<PackDiscordLink>();
     public DbSet<Team> Teams => Set<Team>();
     public DbSet<TeamMember> TeamMembers => Set<TeamMember>();
     public DbSet<PackTeam> PackTeams => Set<PackTeam>();
@@ -88,6 +89,26 @@ public class AppDbContext(DbContextOptions<AppDbContext> options)
                 .OnDelete(DeleteBehavior.Cascade);
             e.Property(x => x.Json).IsRequired();
             e.Property(x => x.Revision).IsConcurrencyToken();
+        });
+
+        b.Entity<PackDiscordLink>(e =>
+        {
+            e.HasIndex(x => x.PackId);
+            e.HasIndex(x => x.ChannelId);
+            // NULLs are distinct in Postgres, so only pending bot links take part.
+            e.HasIndex(x => x.Code).IsUnique();
+            e.HasOne(x => x.Pack).WithMany().HasForeignKey(x => x.PackId).OnDelete(DeleteBehavior.Cascade);
+            e.Property(x => x.Mode).HasMaxLength(16).IsRequired();
+            e.Property(x => x.BoardId).HasMaxLength(64);
+            e.Property(x => x.WebhookId).HasMaxLength(32);
+            e.Property(x => x.WebhookToken).HasMaxLength(128);
+            e.Property(x => x.Code).HasMaxLength(16);
+            e.Property(x => x.LinkedByDiscordUserId).HasMaxLength(32);
+            e.Property(x => x.GuildId).HasMaxLength(32);
+            e.Property(x => x.ChannelId).HasMaxLength(32);
+            e.Property(x => x.Label).HasMaxLength(128);
+            e.Property(x => x.ViewKey).HasMaxLength(64).IsRequired();
+            e.Property(x => x.LastError).HasMaxLength(512);
         });
 
         b.Entity<Team>(e =>

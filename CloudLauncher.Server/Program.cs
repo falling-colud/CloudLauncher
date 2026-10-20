@@ -4,6 +4,7 @@ using System.Threading.RateLimiting;
 using CloudLauncher.Server;
 using CloudLauncher.Server.Auth;
 using CloudLauncher.Server.Data;
+using CloudLauncher.Server.Discord;
 using CloudLauncher.Server.Net;
 using CloudLauncher.Server.Storage;
 using CloudLauncher.Shared;
@@ -110,6 +111,24 @@ builder.Services.AddScoped<ContentBundlePermissionResolver>();
 builder.Services.AddScoped<ActivityWriter>();
 // Wakes the launchers waiting on a pack's planning boards when one stores a change.
 builder.Services.AddSingleton<CloudLauncher.Server.Controllers.PlanChangeSignals>();
+// Planning boards in Discord channels: the pictures, the publisher that keeps each linked channel
+// current, and the /plan command when a Discord app is configured (see Discord/DiscordOptions.cs).
+var discordOptions = builder.Configuration.GetSection("Discord").Get<DiscordOptions>() ?? new DiscordOptions();
+builder.Services.AddSingleton(discordOptions);
+builder.Services.AddMemoryCache();
+// No request logging: a webhook's URL carries its token, and HttpClient logs URLs at Information.
+builder.Services.AddHttpClient(DiscordRest.HttpClientName, c => c.Timeout = TimeSpan.FromSeconds(40)).RemoveAllLoggers();
+builder.Services.AddHttpClient(PlanAssets.HttpClientName, c =>
+{
+    c.Timeout = TimeSpan.FromSeconds(15);
+    c.DefaultRequestHeaders.UserAgent.ParseAdd("CloudLauncher/1.0 (contact@cloudlauncher.co)");
+});
+builder.Services.AddSingleton<DiscordRest>();
+builder.Services.AddSingleton<DiscordGateway>();
+builder.Services.AddSingleton<PlanAssets>();
+builder.Services.AddSingleton<DiscordPlanPublisher>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DiscordPlanPublisher>());
+builder.Services.AddHostedService<CloudLauncher.Server.Controllers.DiscordCommandRegistrar>();
 // Deletes old refresh tokens and abandoned Google sign-ins.
 builder.Services.AddHostedService<AuthMaintenance>();
 // Upload quota checks, the pending-upload ledger and the unused-file cleanup job.
@@ -170,6 +189,18 @@ builder.Services.AddRateLimiter(options =>
                 Window = TimeSpan.FromMinutes(1),
                 QueueLimit = 0
             }));
+
+    // The public board viewer polls and fetches pictures; Discord's interaction calls come from a
+    // handful of Discord addresses. Generous, but bounded.
+    options.AddPolicy(RateLimitPolicies.PlanView, httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 300,
+                Window = TimeSpan.FromMinutes(1),
+                QueueLimit = 0
+            }));
 });
 
 builder.Services.AddControllers();
@@ -177,7 +208,11 @@ builder.Services.AddEndpointsApiExplorer();
 
 builder.WebHost.ConfigureKestrel(o =>
 {
-    o.ListenAnyIP(5000);
+    // App:LoopbackOnly is for test runs on a desktop: nothing outside the machine can connect, and
+    // Windows asks no firewall question.
+    var port = builder.Configuration.GetValue("App:ListenPort", 5000);
+    if (builder.Configuration.GetValue("App:LoopbackOnly", false)) o.ListenLocalhost(port);
+    else o.ListenAnyIP(port);
     o.Limits.MaxRequestBodySize = 200L * 1024 * 1024; // 200 MB per blob upload
     o.AddServerHeader = false;
 });
@@ -261,6 +296,48 @@ app.Use(async (context, next) =>
     }
     await next();
 });
+
+// The live planning-board viewer: /plans/view/<token> is a page, and its data sits under the same
+// address (PlanViewController). Inside Discord the page runs as the app's Activity from
+// /discord-activity/ (not /activity, which is the activity feed's API), where Discord's proxy serves
+// everything from the one mapped folder: the viewer's files and fonts are aliased here, and its API
+// routes carry the alias themselves (endpoint routing has already run by this point).
+app.Use(async (context, next) =>
+{
+    var request = context.Request;
+    if (HttpMethods.IsGet(request.Method) && IsViewerPage(request.Path.Value))
+    {
+        var page = app.Environment.WebRootFileProvider.GetFileInfo("plans/viewer.html");
+        if (page.Exists)
+        {
+            context.Response.ContentType = "text/html; charset=utf-8";
+            context.Response.Headers.CacheControl = "no-cache";
+            await context.Response.SendFileAsync(page);
+            return;
+        }
+    }
+    if (request.Path.StartsWithSegments(SecurityHeadersMiddleware.ActivityPath, out var rest)
+        && (rest.StartsWithSegments("/plans") || rest.StartsWithSegments("/fonts")))
+    {
+        context.Items[SecurityHeadersMiddleware.ActivityItem] = true;
+        request.Path = rest;
+    }
+    // Discord's proxy may ask for the mapped folder itself, without the slash: a redirect would send
+    // the Activity's frame off discordsays.com, so the page is served right there.
+    else if (request.Path.Equals(SecurityHeadersMiddleware.ActivityPath, StringComparison.OrdinalIgnoreCase))
+    {
+        request.Path = SecurityHeadersMiddleware.ActivityPath + "/index.html";
+    }
+    await next();
+});
+
+static bool IsViewerPage(string? path)
+{
+    const string prefix = "/plans/view/";
+    if (path is null || !path.StartsWith(prefix, StringComparison.Ordinal)) return false;
+    var token = path[prefix.Length..].TrimEnd('/');
+    return token.Length > 0 && !token.Contains('/');
+}
 
 // text/html listed explicitly and not ranked below JSON: browsers send that, API clients don't.
 static bool PrefersHtml(HttpRequest request)

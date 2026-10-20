@@ -11,4 +11,9 @@ public static class RateLimitPolicies
     /// signing in. Search only answers prefix matches, but it still reveals account names, so it is
     /// capped.</remarks>
     public const string UserSearch = "user-search";
+
+    /// <summary>Per-IP throttle for the public planning-board viewer and Discord's interaction
+    /// endpoint: generous (a viewer polls and fetches pictures), but bounded, since neither needs an
+    /// account.</summary>
+    public const string PlanView = "plan-view";
 }

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>Planning boards · CloudLauncher</title>
+  <!-- Relative on purpose: inside Discord this page is served through Discord's proxy, which maps the
+       whole Activity onto /discord-activity/ of this server. -->
+  <link rel="stylesheet" href="plans/viewer.css?v=3">
+  <script type="module" src="activity.js?v=3"></script>
+</head>
+<body>
+  <header class="bar">
+    <span class="pack" id="pack">CloudLauncher</span>
+    <nav class="tabs" id="tabs" aria-label="Boards" role="tablist"></nav>
+    <div class="tools">
+      <span class="live" id="live" title="The board updates here as soon as it changes"><span>Live</span></span>
+      <button class="btn" id="fit" type="button" title="Fit the board on screen (0)">Fit</button>
+      <a class="btn" id="png" href="#" download title="Download this board as a picture">Picture</a>
+    </div>
+  </header>
+  <main class="stage" id="stage" aria-label="Planning board (drag to move, scroll or pinch to zoom)">
+    <div class="board" id="board"></div>
+    <p class="note" id="note"></p>
+  </main>
+</body>
+</html>
