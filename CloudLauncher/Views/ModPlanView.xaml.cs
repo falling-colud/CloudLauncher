@@ -4415,6 +4415,8 @@ public partial class ModPlanView : UserControl
     private void OnTools(object sender, RoutedEventArgs e)
     {
         var menu = new ContextMenu { PlacementTarget = sender as UIElement };
+        menu.Items.Add(Item("Show in Discord...", () => _ = ShowInDiscordAsync()));
+        menu.Items.Add(new Separator());
         menu.Items.Add(Item("Lay out a card per category", () => AutoFill(PlanGroupProperty.Category)));
         menu.Items.Add(Item("Lay out a card per priority", () => AutoFill(PlanGroupProperty.Priority)));
         menu.Items.Add(Item("Lay out a card per flag", () => AutoFill(PlanGroupProperty.Flag)));
@@ -4428,6 +4430,20 @@ public partial class ModPlanView : UserControl
         menu.Items.Add(Item("Snap everything to the grid", SnapEverythingToGrid));
         menu.Items.Add(Item("Clear this board", () => _ = ClearBoardAsync()));
         menu.IsOpen = true;
+    }
+
+    /// <summary>The channels this pack's boards are posted to in Discord (see <see cref="PlanDiscordCard"/>).
+    /// The server posts from its own copy of the boards, so this needs the account the pack lives on.</summary>
+    private async Task ShowInDiscordAsync()
+    {
+        if (_board is null) return;
+        if (_owner is null || !App.State.Api.IsSignedIn || App.State.Api.IsLocalPack(_packId))
+        {
+            PlanStatus.Text = "Boards can be shown in Discord once this instance is on your account.";
+            return;
+        }
+        var card = new PlanDiscordCard(_packId, _board.Id, _board.Name);
+        await _owner.ShowCardAsync(card, card.Completion, card.Cancel);
     }
 
     /// <summary>Drops a group card for every value of a property that isn't on the board yet,

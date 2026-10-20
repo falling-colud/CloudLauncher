@@ -32,7 +32,7 @@
                         MinHeight="0" Margin="6,0,0,0" Click="OnToggleArrowTool"
                         ToolTip="Draw arrows between cards: click a card, then the card it points to. Stays on until you click it again or press Esc."/>
                 <Button Content="Tools ▾" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
-                        Margin="10,0,0,0" Click="OnTools" ToolTip="Fill the board automatically, tidy it, snap it to the grid, or clear it"/>
+                        Margin="10,0,0,0" Click="OnTools" ToolTip="Show the boards in a Discord channel, fill the board automatically, tidy it, snap it to the grid, or clear it"/>
             </StackPanel>
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
