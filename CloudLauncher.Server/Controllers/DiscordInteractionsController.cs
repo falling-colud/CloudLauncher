@@ -87,9 +87,10 @@ public sealed class DiscordInteractionsController(
                 {
                     foreach (var link in links) await publisher.RemoveMessagesAsync(link, CancellationToken.None);
                 }, CancellationToken.None);
-                return Reply(links.Count == 1
+                var packs = links.Select(l => l.PackId).Distinct().Count();
+                return Reply(packs == 1
                     ? "Done: this channel no longer shows that pack's boards. Their messages are being taken down."
-                    : $"Done: this channel no longer shows {links.Count} packs' boards. Their messages are being taken down.");
+                    : $"Done: this channel no longer shows {packs} packs' boards. Their messages are being taken down.");
             }
             case "refresh":
             {
@@ -141,12 +142,14 @@ public sealed class DiscordInteractionsController(
         await db.SaveChangesAsync(ct);
         publisher.Wake();
         log.LogInformation("Discord link {Link} for pack {Pack} made in channel {Channel}", link.Id, link.PackId, channelId);
-        return Reply($"Linked **{PlanMessageBuilder.Escape(packName)}**. Its planning boards will show up here in a few seconds and follow every change.");
+        return Reply($"Linked **{PlanMessageBuilder.Escape(packName)}**. Its planning boards show up here in a moment, as one message you can flip through, and follow every change.");
     }
 
     private async Task<IActionResult> ComponentAsync(JsonElement interaction, CancellationToken ct)
     {
-        var id = interaction.GetProperty("data").GetProperty("custom_id").GetString();
+        var data = interaction.GetProperty("data");
+        var id = data.GetProperty("custom_id").GetString() ?? "";
+        if (Switch(interaction, data, id) is { } switched) return switched;
         if (id != PlanMessageBuilder.OpenActivityId) return Reply("That button is from an older version of this message.");
         if (options.ActivityEnabled) return Json(new JsonObject { ["type"] = 12 }); // launch the Activity
 
@@ -156,6 +159,44 @@ public sealed class DiscordInteractionsController(
         return link is null
             ? Reply("These boards aren't linked here any more.")
             : Reply($"Live board: {DiscordPlanPublisher.ViewUrl(app, link)}");
+    }
+
+    /// <summary>The board list and Previous/Next on the app's one message. Drawing the board can take
+    /// longer than Discord waits for an answer, so the answer is "the message will change" (deferred
+    /// update) and the publisher edits it a moment later. Anyone who can see the channel may switch:
+    /// the message is the channel's, like a shared slideshow.</summary>
+    private ContentResult? Switch(JsonElement interaction, JsonElement data, string id)
+    {
+        string? boardId = null;
+        int step;
+        string linkPart;
+        if (id.StartsWith(PlanMessageBuilder.SwitchBoardPrefix, StringComparison.Ordinal))
+        {
+            linkPart = id[PlanMessageBuilder.SwitchBoardPrefix.Length..];
+            step = 0;
+            if (data.TryGetProperty("values", out var values) && values.GetArrayLength() > 0) boardId = values[0].GetString();
+            if (boardId is null) return Json(new JsonObject { ["type"] = 6 });
+        }
+        else if (id.StartsWith(PlanMessageBuilder.PreviousPrefix, StringComparison.Ordinal))
+        {
+            linkPart = id[PlanMessageBuilder.PreviousPrefix.Length..];
+            step = -1;
+        }
+        else if (id.StartsWith(PlanMessageBuilder.NextPrefix, StringComparison.Ordinal))
+        {
+            linkPart = id[PlanMessageBuilder.NextPrefix.Length..];
+            step = 1;
+        }
+        else return null;
+
+        if (!Guid.TryParseExact(linkPart, "N", out var linkId) || ChannelOf(interaction) is not { } channelId)
+            return Reply("That button is from an older version of this message.");
+        _ = Task.Run(async () =>
+        {
+            try { await publisher.SwitchAsync(linkId, channelId, boardId, step, CancellationToken.None); }
+            catch (Exception e) { log.LogWarning(e, "Switching board on Discord link {Link} failed", linkId); }
+        }, CancellationToken.None);
+        return Json(new JsonObject { ["type"] = 6 }); // deferred update: the message changes in a moment
     }
 
     private static string? ChannelOf(JsonElement interaction) =>

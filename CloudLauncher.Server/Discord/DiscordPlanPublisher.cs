@@ -1,26 +1,33 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using CloudLauncher.Server.Auth;
 using CloudLauncher.Server.Data;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace CloudLauncher.Server.Discord;
 
 /// <summary>
-/// Keeps every linked Discord channel showing its pack's planning boards: one message per board,
-/// edited in place when that board changes, deleted when the board goes.
+/// Keeps every linked Discord channel showing its pack's planning boards, edited in place when a
+/// board changes.
 /// </summary>
 /// <remarks>
+/// <para>Two layouts (see <see cref="PlanMessageBuilder"/>). A link made by the app keeps one message
+/// for the whole pack, showing one board, which anyone in the channel can switch
+/// (<see cref="SwitchAsync"/>). A webhook link can't carry controls, so it keeps one message per
+/// board and deletes a board's message when the board goes.</para>
 /// <para>Polls rather than listening to <c>PlanChangeSignals</c>: the stored revision is the truth, so
 /// a restart, a missed signal or a Discord outage all end in the same catch-up, and a board is posted
 /// only once it has been left alone for <see cref="DiscordOptions.QuietSeconds"/> (a drag is one edit,
 /// not twenty).</para>
-/// <para>A board whose content hash hasn't moved keeps its message untouched, so editing one board
-/// doesn't re-upload the others' pictures. The state saved after every message means a crash
-/// part-way never posts a board twice.</para>
+/// <para>A message whose content hash hasn't moved is left untouched, so editing one board doesn't
+/// re-upload the others' pictures. The state saved after every message means a crash part-way never
+/// posts a board twice. One link is worked on by one thing at a time: a click on the board list and
+/// the regular pass take turns.</para>
 /// </remarks>
 public sealed class DiscordPlanPublisher(
     IServiceScopeFactory scopes,
@@ -35,6 +42,10 @@ public sealed class DiscordPlanPublisher(
 
     private readonly SemaphoreSlim _wake = new(0, 1);
     private readonly ConcurrentDictionary<Guid, DateTimeOffset> _backoff = new();
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _gates = new();
+
+    /// <summary>Recent board pictures, so switching back and forth doesn't draw them again.</summary>
+    private readonly MemoryCache _pictures = new(new MemoryCacheOptions { SizeLimit = 64L * 1024 * 1024 });
 
     /// <summary>Look again now (a link was made or a refresh asked for), not at the next tick.</summary>
     public void Wake()
@@ -50,6 +61,11 @@ public sealed class DiscordPlanPublisher(
 
     public static string NewViewKey() =>
         Convert.ToBase64String(RandomNumberGenerator.GetBytes(18)).Replace('+', '-').Replace('/', '_');
+
+    /// <summary>The board a link's message shows now (the app's one-message layout), or the first
+    /// board posted, or null before anything went up.</summary>
+    public static string? ShownBoard(PackDiscordLink link) =>
+        PostedBoard.Read(link.MessagesJson).FirstOrDefault(e => e.M.Length > 0)?.B;
 
     protected override async Task ExecuteAsync(CancellationToken stop)
     {
@@ -80,42 +96,79 @@ public sealed class DiscordPlanPublisher(
         }
     }
 
+    private sealed record LinkDue(Guid Id, long PublishedRevision, DateTimeOffset? PublishedAt, bool RefreshRequested,
+        long Revision, DateTimeOffset? UpdatedAt);
+
     private async Task PassAsync(CancellationToken ct)
     {
-        using var scope = scopes.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        List<LinkDue> links;
+        using (var scope = scopes.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            links = await (
+                from l in db.PackDiscordLinks.AsNoTracking()
+                where !l.Broken && (l.WebhookId != null || l.ChannelId != null)
+                join p in db.PackPlans on l.PackId equals p.PackId into plans
+                from p in plans.DefaultIfEmpty()
+                select new LinkDue(l.Id, l.PublishedRevision, l.PublishedAt, l.RefreshRequested,
+                    p == null ? 0 : p.Revision, p == null ? null : p.UpdatedAt)
+            ).ToListAsync(ct);
+        }
+
         var now = DateTimeOffset.UtcNow;
-
-        var links = await (
-            from l in db.PackDiscordLinks
-            where !l.Broken && (l.WebhookId != null || l.ChannelId != null)
-            join p in db.PackPlans on l.PackId equals p.PackId into plans
-            from p in plans.DefaultIfEmpty()
-            select new { Link = l, Revision = p == null ? 0 : p.Revision, UpdatedAt = p == null ? (DateTimeOffset?)null : p.UpdatedAt }
-        ).ToListAsync(ct);
-
         foreach (var x in links)
         {
-            var link = x.Link;
-            if (_backoff.TryGetValue(link.Id, out var until) && until > now && !link.RefreshRequested) continue;
-            if (x.Revision == link.PublishedRevision && !link.RefreshRequested) continue;
-            if (!link.RefreshRequested)
+            if (_backoff.TryGetValue(x.Id, out var until) && until > now && !x.RefreshRequested) continue;
+            if (x.Revision == x.PublishedRevision && !x.RefreshRequested) continue;
+            if (!x.RefreshRequested)
             {
                 if (x.UpdatedAt is { } changed && now - changed < TimeSpan.FromSeconds(options.QuietSeconds)) continue;
-                if (link.PublishedAt is { } last && now - last < TimeSpan.FromSeconds(options.MinIntervalSeconds)) continue;
+                if (x.PublishedAt is { } last && now - last < TimeSpan.FromSeconds(options.MinIntervalSeconds)) continue;
             }
+            await WithLinkAsync(x.Id, PublishAsync, ct);
+        }
+    }
 
+    /// <summary>Shows another board in a link's one message: <paramref name="boardId"/> when given (the
+    /// board list), else <paramref name="step"/> boards on (Previous/Next, wrapping round).</summary>
+    /// <param name="channelId">Where the click came from; a click from anywhere else changes nothing.</param>
+    public Task SwitchAsync(Guid linkId, string channelId, string? boardId, int step, CancellationToken ct) =>
+        WithLinkAsync(linkId, async (db, link, c) =>
+        {
+            if (link.Mode != "bot" || link.ChannelId != channelId) return;
+            var (plan, packName, boards) = await LoadAsync(db, link, c);
+            if (boards.Count == 0) return;
+            var index = Math.Max(0, boards.FindIndex(b => b.Id == ShownBoard(link)));
+            var target = boardId is not null
+                ? boards.FirstOrDefault(b => b.Id == boardId) ?? boards[index]
+                : boards[((index + step) % boards.Count + boards.Count) % boards.Count];
+            await ShowOneAsync(link, plan, packName, boards, target.Id, force: false, c);
+            await db.SaveChangesAsync(c);
+        }, ct);
+
+    /// <summary>Runs <paramref name="work"/> on a freshly read link, one at a time per link, and turns
+    /// Discord's refusals into the link's state.</summary>
+    private async Task WithLinkAsync(Guid linkId, Func<AppDbContext, PackDiscordLink, CancellationToken, Task> work,
+        CancellationToken ct)
+    {
+        var gate = _gates.GetOrAdd(linkId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try
+        {
+            using var scope = scopes.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var link = await db.PackDiscordLinks.FirstOrDefaultAsync(l => l.Id == linkId, ct);
+            if (link is null || link.Broken) return;
             try
             {
-                await PublishAsync(db, link, ct);
-                _backoff.TryRemove(link.Id, out _);
+                await work(db, link, ct);
+                _backoff.TryRemove(linkId, out _);
             }
             catch (DbUpdateConcurrencyException)
             {
                 // Unlinked while its boards were being posted: whatever went up is the unlink's to take
-                // down, and this pass has nothing more to do for it.
-                log.LogInformation("Discord link {Link} was removed during an update", link.Id);
-                db.ChangeTracker.Clear();
+                // down, and there is nothing more to do for it.
+                log.LogInformation("Discord link {Link} was removed during an update", linkId);
             }
             catch (DiscordApiException e) when (e.TargetGone)
             {
@@ -124,23 +177,34 @@ public sealed class DiscordPlanPublisher(
                 Fail(link, link.Mode == "webhook"
                     ? "The webhook was deleted, or no longer works. Link the channel again with a new one."
                     : "CloudLauncher can no longer post in that channel (it was deleted, or the app lost access).");
-                log.LogInformation("Discord link {Link} broken: {Message}", link.Id, e.Message);
-                await db.SaveChangesAsync(ct);
+                log.LogInformation("Discord link {Link} broken: {Message}", linkId, e.Message);
+                await SaveQuietlyAsync(db);
             }
             catch (Exception e) when (e is DiscordApiException or HttpRequestException or TaskCanceledException
                                           && !ct.IsCancellationRequested)
             {
                 var wait = e is DiscordApiException { RetryAfter: { } r } ? r : TimeSpan.FromMinutes(1);
-                _backoff[link.Id] = DateTimeOffset.UtcNow + wait;
+                _backoff[linkId] = DateTimeOffset.UtcNow + wait;
                 link.RefreshRequested = false;
                 Fail(link, "Discord didn't take the update; trying again shortly. " + Short(e.Message));
-                log.LogInformation("Discord link {Link} update failed, retrying in {Wait}: {Message}", link.Id, wait, e.Message);
-                await db.SaveChangesAsync(CancellationToken.None);
+                log.LogInformation("Discord link {Link} update failed, retrying in {Wait}: {Message}", linkId, wait, e.Message);
+                await SaveQuietlyAsync(db);
             }
+        }
+        finally
+        {
+            gate.Release();
         }
     }
 
-    private async Task PublishAsync(AppDbContext db, PackDiscordLink link, CancellationToken ct)
+    private async Task SaveQuietlyAsync(AppDbContext db)
+    {
+        try { await db.SaveChangesAsync(CancellationToken.None); }
+        catch (DbUpdateConcurrencyException) { /* the link was removed meanwhile */ }
+    }
+
+    private static async Task<(PackPlanDocument? Plan, string PackName, List<PlanBoardData> Boards)> LoadAsync(
+        AppDbContext db, PackDiscordLink link, CancellationToken ct)
     {
         var plan = await db.PackPlans.AsNoTracking().FirstOrDefaultAsync(p => p.PackId == link.PackId, ct);
         var packName = await db.Packs.AsNoTracking().Where(p => p.Id == link.PackId).Select(p => p.Name)
@@ -150,11 +214,110 @@ public sealed class DiscordPlanPublisher(
             .Where(b => link.BoardId is null || b.Id == link.BoardId)
             .Where(b => !b.IsEmpty)
             .ToList();
+        return (plan, packName, boards);
+    }
 
+    private async Task PublishAsync(AppDbContext db, PackDiscordLink link, CancellationToken ct)
+    {
+        var (plan, packName, boards) = await LoadAsync(db, link, ct);
+        if (link.Mode == "bot") await ShowOneAsync(link, plan, packName, boards, show: null, force: link.RefreshRequested, ct);
+        else await PostEachAsync(db, link, plan, packName, boards, ct);
+
+        link.PublishedRevision = plan?.Revision ?? 0;
+        link.PublishedAt = DateTimeOffset.UtcNow;
+        link.RefreshRequested = false;
+        link.LastError = boards.Count == 0
+            ? (plan is null
+                ? "This pack has no planning boards on the server yet. Open its planning page in CloudLauncher 0.9.8 or newer."
+                : "Every board this channel shows is empty, so there is nothing to post yet.")
+            : null;
+        link.LastErrorAt = link.LastError is null ? null : DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    // ── the app's layout: one message, one board at a time ──────────────────────
+
+    /// <summary>Brings the link's one message up to date, showing <paramref name="show"/> (or the board
+    /// it shows now, or the first). Every board keeps the time it last changed, for "updated ...".</summary>
+    private async Task ShowOneAsync(PackDiscordLink link, PackPlanDocument? plan, string packName,
+        List<PlanBoardData> boards, string? show, bool force, CancellationToken ct)
+    {
+        var state = PostedBoard.Read(link.MessagesJson);
+        var changedAt = plan?.UpdatedAt ?? DateTimeOffset.UtcNow;
+
+        // The one message is the first entry that has one. A link from before this layout had a message
+        // per board: those go.
+        var posted = state.Where(e => e.M.Length > 0).ToList();
+        var shown = posted.FirstOrDefault();
+        foreach (var extra in posted.Skip(1)) await DeleteQuietlyAsync(link, extra.M, ct);
+
+        var salt = $"{RenderVersion}|{packName}";
+        var entries = boards.Select(b =>
+        {
+            var hash = b.ContentHash(salt);
+            var before = state.FirstOrDefault(e => e.B == b.Id);
+            return new PostedBoard { B = b.Id, H = hash, T = before is not null && before.H == hash ? before.T : changedAt };
+        }).ToList();
+
+        if (boards.Count == 0)
+        {
+            if (shown is not null) await DeleteQuietlyAsync(link, shown.M, ct);
+            link.MessagesJson = PostedBoard.Write(entries);
+            return;
+        }
+
+        var board = boards.FirstOrDefault(b => b.Id == (show ?? shown?.B)) ?? boards[0];
+        var entry = entries.First(e => e.B == board.Id);
+        var choices = boards.Select(PlanMessageBuilder.BoardChoice.Of).ToList();
+        var viewUrl = ViewUrl(app, link);
+        var activity = options.ActivityEnabled && options.BotConfigured;
+        var view = Hash(entry.H, entry.T.ToUnixTimeSeconds(), viewUrl, activity,
+            string.Join('\u001e', choices.Select(c => $"{c.Id}\u001f{c.Name}\u001f{c.Detail}")));
+
+        var messageId = shown?.M;
+        if (messageId is not null && shown!.B == board.Id && shown.V == view && !force)
+        {
+            entry.M = messageId;
+            entry.V = view;
+            link.MessagesJson = PostedBoard.Write(entries);
+            return;
+        }
+
+        var png = await PictureAsync(board, packName, entry, ct);
+        var imageName = PlanMessageBuilder.ImageName(board, view);
+        var message = PlanMessageBuilder.Switcher(board, choices, packName, entry.T, imageName, viewUrl, link.Id, activity);
+        DiscordFile[] files = [new DiscordFile(imageName, png)];
+        if (messageId is null)
+        {
+            messageId = await PostAsync(link, message, files, ct);
+            log.LogInformation("Discord link {Link}: posted the boards message, showing {Board}", link.Id, board.Name);
+        }
+        else
+        {
+            try
+            {
+                await EditAsync(link, messageId, PlanMessageBuilder.ForEdit(message.DeepClone().AsObject()), files, ct);
+                log.LogInformation("Discord link {Link}: the boards message now shows {Board}", link.Id, board.Name);
+            }
+            catch (DiscordApiException e) when (e.MessageGone)
+            {
+                messageId = await PostAsync(link, message, files, ct);
+                log.LogInformation("Discord link {Link}: posted the boards message again (it was deleted)", link.Id);
+            }
+        }
+        entry.M = messageId;
+        entry.V = view;
+        link.MessagesJson = PostedBoard.Write(entries);
+    }
+
+    // ── the webhook layout: one message per board ───────────────────────────────
+
+    private async Task PostEachAsync(AppDbContext db, PackDiscordLink link, PackPlanDocument? plan, string packName,
+        List<PlanBoardData> boards, CancellationToken ct)
+    {
         var state = PostedBoard.Read(link.MessagesJson);
         var viewUrl = ViewUrl(app, link);
         var activity = link.Mode == "bot" && options.ActivityEnabled && options.BotConfigured;
-        var labels = await assets.ModLabelsAsync(boards, ct);
         var salt = $"{RenderVersion}|{packName}|{viewUrl}|{activity}";
         var changedAt = plan?.UpdatedAt ?? DateTimeOffset.UtcNow;
 
@@ -166,7 +329,11 @@ public sealed class DiscordPlanPublisher(
 
             // A redraw of an unchanged board keeps the time it really changed.
             var when = entry is not null && entry.H == hash ? entry.T : changedAt;
-            var (message, files) = await BuildAsync(board, packName, when, hash, viewUrl, activity, link, labels, ct);
+            var png = await PictureAsync(board, packName, new PostedBoard { B = board.Id, H = hash, T = when }, ct);
+            var imageName = PlanMessageBuilder.ImageName(board, hash);
+            var message = PlanMessageBuilder.Board(board, packName, when, imageName, viewUrl, activity,
+                asWebhook: link.Mode == "webhook");
+            DiscordFile[] files = [new DiscordFile(imageName, png)];
 
             if (entry is null)
             {
@@ -195,40 +362,34 @@ public sealed class DiscordPlanPublisher(
 
         foreach (var gone in state.Where(e => boards.All(b => b.Id != e.B)).ToList())
         {
-            try { await DeleteAsync(link, gone.M, ct); }
-            catch (DiscordApiException e) when (e.Status == 404) { /* already gone */ }
+            if (gone.M.Length > 0) await DeleteQuietlyAsync(link, gone.M, ct);
             state.Remove(gone);
             log.LogInformation("Discord link {Link}: took down the message of a board that is gone or empty", link.Id);
         }
-
         link.MessagesJson = PostedBoard.Write(state);
-        link.PublishedRevision = plan?.Revision ?? 0;
-        link.PublishedAt = DateTimeOffset.UtcNow;
-        link.RefreshRequested = false;
-        link.LastError = boards.Count == 0
-            ? (plan is null
-                ? "This pack has no planning boards on the server yet. Open its planning page in CloudLauncher 0.9.8 or newer."
-                : "Every board this channel shows is empty, so there is nothing to post yet.")
-            : null;
-        link.LastErrorAt = link.LastError is null ? null : DateTimeOffset.UtcNow;
-        await db.SaveChangesAsync(ct);
     }
 
-    private async Task<(JsonObject Message, DiscordFile[] Files)> BuildAsync(PlanBoardData board, string packName,
-        DateTimeOffset changedAt, string hash, string viewUrl, bool activity, PackDiscordLink link,
-        IReadOnlyDictionary<string, ModLabel> labels, CancellationToken ct)
+    // ── pictures and Discord calls ──────────────────────────────────────────────
+
+    /// <summary>A board's picture, drawn once per change (the entry's hash and time say which).</summary>
+    private async Task<byte[]> PictureAsync(PlanBoardData board, string packName, PostedBoard entry, CancellationToken ct)
     {
+        var key = (board.Id, entry.H, entry.T, packName);
+        if (_pictures.TryGetValue(key, out byte[]? cached) && cached is not null) return cached;
+
+        var labels = await assets.ModLabelsAsync([board], ct);
         var drawing = PlanBoardDrawing.Layout(board, labels);
         var icons = await assets.IconsAsync(drawing.IconUrls, ct);
         var cards = board.Nodes.Count(n => n.Kind != PlanNodeData.KindSection);
         var subtitle = $"{packName}  ·  {cards} card{(cards == 1 ? "" : "s")}  ·  updated "
-                       + changedAt.UtcDateTime.ToString("d MMM yyyy, HH:mm", CultureInfo.InvariantCulture) + " UTC";
+                       + entry.T.UtcDateTime.ToString("d MMM yyyy, HH:mm", CultureInfo.InvariantCulture) + " UTC";
         var png = drawing.Png(board.Name, subtitle, icons);
-        var imageName = PlanMessageBuilder.ImageName(board, hash);
-        var message = PlanMessageBuilder.Board(board, packName, changedAt, imageName, viewUrl, activity,
-            asWebhook: link.Mode == "webhook");
-        return (message, [new DiscordFile(imageName, png)]);
+        _pictures.Set(key, png, new MemoryCacheEntryOptions { Size = png.Length, SlidingExpiration = TimeSpan.FromHours(6) });
+        return png;
     }
+
+    private static string Hash(params object[] parts) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\u001d', parts))))[..24];
 
     private Task<string> PostAsync(PackDiscordLink link, JsonObject message, DiscordFile[] files, CancellationToken ct) =>
         link.Mode == "webhook"
@@ -245,12 +406,19 @@ public sealed class DiscordPlanPublisher(
             ? discord.DeleteWebhookMessageAsync(link.WebhookId!, link.WebhookToken!, messageId, ct)
             : discord.DeleteMessageAsync(link.ChannelId!, messageId, ct);
 
+    /// <summary>Deletes a message that may already be gone.</summary>
+    private async Task DeleteQuietlyAsync(PackDiscordLink link, string messageId, CancellationToken ct)
+    {
+        try { await DeleteAsync(link, messageId, ct); }
+        catch (DiscordApiException e) when (e.Status == 404) { /* already gone */ }
+    }
+
     /// <summary>Takes a link's messages down (it is being unlinked). Best effort: a message someone
     /// already deleted, or a channel that is gone, is simply skipped.</summary>
     public async Task<int> RemoveMessagesAsync(PackDiscordLink link, CancellationToken ct)
     {
         var removed = 0;
-        foreach (var entry in PostedBoard.Read(link.MessagesJson))
+        foreach (var entry in PostedBoard.Read(link.MessagesJson).Where(e => e.M.Length > 0))
         {
             try
             {
@@ -274,14 +442,16 @@ public sealed class DiscordPlanPublisher(
     private static string Short(string s) => s.Length > 200 ? s[..200] + "..." : s;
 }
 
-/// <summary>One board's message in a linked channel: board id, message id, the hash of what it
-/// shows and when that last changed. Stored as JSON on the link.</summary>
+/// <summary>A board as a linked channel has it: board id, the message showing it (empty when none
+/// does), the hash of its content and when that last changed, and (in the app's one-message layout)
+/// the hash of everything that message shows. Stored as JSON on the link.</summary>
 internal sealed class PostedBoard
 {
     public string B { get; set; } = "";
     public string M { get; set; } = "";
     public string H { get; set; } = "";
     public DateTimeOffset T { get; set; }
+    public string? V { get; set; }
 
     public static List<PostedBoard> Read(string? json)
     {
@@ -290,5 +460,9 @@ internal sealed class PostedBoard
         catch (JsonException) { return new(); }
     }
 
-    public static string Write(List<PostedBoard> boards) => JsonSerializer.Serialize(boards);
+    public static string Write(List<PostedBoard> boards) =>
+        JsonSerializer.Serialize(boards, new JsonSerializerOptions
+        {
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        });
 }

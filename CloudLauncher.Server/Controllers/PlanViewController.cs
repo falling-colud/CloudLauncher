@@ -147,7 +147,8 @@ public sealed class PlanViewController(
             {
                 token = DiscordPlanPublisher.ViewToken(x.Link),
                 pack = x.Pack,
-                boardId = x.Link.BoardId
+                // Open on the board the channel's message shows, since the button can't say which.
+                boardId = x.Link.BoardId ?? DiscordPlanPublisher.ShownBoard(x.Link)
             })
         });
     }
