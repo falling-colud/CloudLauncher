@@ -179,6 +179,10 @@ public sealed class GlobalPackService(
     /// <summary>Mod ids and version per jar, keyed by path and stamped by size and write time.</summary>
     private static readonly ConcurrentDictionary<string, JarInfo> JarCache = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>The mod ids a jar declares in its own metadata, through the same cache. Empty when the
+    /// jar can't be read. Used for the early-access marks (<see cref="PackModMetadata.EarlyAccess"/>).</summary>
+    public static IReadOnlySet<string> JarModIds(string jar) => JarMeta(jar).ModIds;
+
     /// <summary>The mod ids a jar declares (Fabric, Quilt, Forge and NeoForge metadata) and its
     /// version. Never throws.</summary>
     private static JarInfo JarMeta(string jar)

@@ -3,6 +3,31 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.11 - 2026-11-03
+
+- Mods can be marked Early access: right-click a mod in an instance and choose Early access, and
+  its row shows EARLY. The mark belongs to the mod rather than the file, so a newer jar of the same
+  mod keeps it, and it is saved with the instance.
+- Exporting a modpack leaves the early-access mods out unless "Include early-access mods" is
+  ticked, and the summary says how many were left out. Off, the export is a release; on, it is an
+  early version of the pack.
+- When some of the launcher's own files are missing from the folder it runs from (a copy unzipped
+  into Downloads that was later cleaned up, for example), it now says so when it opens and offers
+  to repair itself: it downloads the same version again, checks its signature and puts back only
+  the missing files. Before, it closed without warning the moment it needed one of them.
+
+## 0.9.10 - 2026-10-20
+
+- Planning boards can now be shown in a Discord channel. On the planning page, Tools > Show in
+  Discord links one: paste the channel's webhook URL (in Discord: the channel's settings,
+  Integrations, Webhooks) and every board is posted there as a picture of the board, with how far
+  along each section is. The messages follow every change to the boards by themselves, about ten
+  seconds after you stop editing, and each one has a button that opens the live boards in a
+  browser, where anyone in the channel can zoom and pan around. Tick "Only this board" to show
+  just the one you are on.
+- The same window lists the channels a pack's boards are shown in. Each can be redrawn or removed,
+  and removing one takes its board messages down.
+
 ## 0.9.9 - 2026-10-19
 
 - CurseForge modpacks with files the launcher isn't allowed to download (authors can switch off

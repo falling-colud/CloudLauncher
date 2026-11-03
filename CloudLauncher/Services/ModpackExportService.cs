@@ -27,7 +27,7 @@ public enum ModpackExportFormat
 /// dependencies.</param>
 /// <param name="Overrides">Which files under <c>game/</c> are copied into <c>overrides/</c>: whole
 /// folders, single files, or a folder minus some of its contents (see
-/// <see cref="ExportSelection"/>). Never includes <c>mods</c>; jars are decided by the two flags
+/// <see cref="ExportSelection"/>). Never includes <c>mods</c>; jars are decided by the three flags
 /// below.</param>
 /// <param name="IncludeDisabledMods">Take <c>.jar.disabled</c> files along, still switched off.</param>
 /// <param name="IncludeLocalMods">Take this PC's own jars from <c>local/mods</c> along, as ordinary
@@ -35,6 +35,9 @@ public enum ModpackExportFormat
 /// <param name="DestinationPath">The archive to write. Written to a temp file beside it and moved
 /// into place at the end, so a failed or cancelled export never leaves a half-written file
 /// here.</param>
+/// <param name="IncludeEarlyAccessMods">Take the mods marked early access along
+/// (<see cref="PackModMetadata.EarlyAccess"/>): an early version of the pack. Off, the export is a
+/// release and leaves them out.</param>
 public sealed record ExportOptions(
     PackDetail Pack,
     ModpackExportFormat Format,
@@ -45,7 +48,8 @@ public sealed record ExportOptions(
     ExportSelection Overrides,
     bool IncludeDisabledMods,
     bool IncludeLocalMods,
-    string DestinationPath);
+    string DestinationPath,
+    bool IncludeEarlyAccessMods = false);
 
 /// <summary>One step of an export, for a progress bar.</summary>
 /// <param name="Fraction">0 to 1, or negative while the step has no measurable length (asking the
@@ -118,6 +122,10 @@ public sealed class ExportModEntry
 
     public ModSide Side { get; set; }
 
+    /// <summary>Marked early access in the instance (<see cref="PackModMetadata.EarlyAccess"/>): left
+    /// out unless the export takes early-access mods.</summary>
+    public bool IsEarlyAccess { get; set; }
+
     /// <summary>The name a listed copy is installed under: always <c>.jar</c>.</summary>
     public string EnabledFileName =>
         FileName.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase) ? FileName[..^".disabled".Length] : FileName;
@@ -136,6 +144,7 @@ public sealed class ExportModEntry
 /// packed in only because the store could not be asked. Zero when the store answered.</param>
 /// <param name="ListedByName">CurseForge only: the part of <see cref="Downloaded"/> listed as
 /// CurseForge's file of the same name rather than these exact bytes.</param>
+/// <param name="EarlyAccessLeftOut">Early-access jars not exported because the option was off.</param>
 public readonly record struct ExportCounts(
     int Listed,
     int Bundled,
@@ -144,7 +153,8 @@ public readonly record struct ExportCounts(
     int DisabledLeftOut,
     int LocalLeftOut,
     int Unchecked,
-    int ListedByName = 0)
+    int ListedByName = 0,
+    int EarlyAccessLeftOut = 0)
 {
     /// <summary>Everything that goes into the file as a jar rather than as a download.</summary>
     public int PackedIn => Bundled + DisabledBundled;
@@ -177,10 +187,11 @@ public sealed class ExportPlan(
 
     public int DisabledCount => Mods.Count(m => !m.Enabled);
     public int LocalCount => Mods.Count(m => m.IsLocal);
+    public int EarlyAccessCount => Mods.Count(m => m.IsEarlyAccess);
 
     /// <summary>Whether this jar goes into an export with these options at all.</summary>
-    public static bool Included(ExportModEntry mod, bool includeDisabled, bool includeLocal) =>
-        (includeLocal || !mod.IsLocal) && (includeDisabled || mod.Enabled);
+    public static bool Included(ExportModEntry mod, bool includeDisabled, bool includeLocal, bool includeEarlyAccess) =>
+        (includeLocal || !mod.IsLocal) && (includeDisabled || mod.Enabled) && (includeEarlyAccess || !mod.IsEarlyAccess);
 
     /// <summary>True when the archive names this jar instead of carrying it.</summary>
     /// <remarks>A disabled jar is never listed in a .mrpack, whose <c>files[]</c> entries install as
@@ -193,13 +204,14 @@ public sealed class ExportPlan(
             ? mod.Enabled && mod.ModrinthFile is not null
             : mod.CurseForgeIds is not null;
 
-    public ExportCounts Count(ModpackExportFormat format, bool includeDisabled, bool includeLocal)
+    public ExportCounts Count(ModpackExportFormat format, bool includeDisabled, bool includeLocal, bool includeEarlyAccess)
     {
         int listed = 0, bundled = 0, disabledListed = 0, disabledBundled = 0, disabledOut = 0, localOut = 0, unchecked_ = 0;
-        var byName = 0;
+        int byName = 0, earlyOut = 0;
         var complete = CompleteFor(format);
         foreach (var mod in Mods)
         {
+            if (mod.IsEarlyAccess && !includeEarlyAccess) { earlyOut++; continue; }
             if (mod.IsLocal && !includeLocal) { localOut++; continue; }
             if (!mod.Enabled && !includeDisabled) { disabledOut++; continue; }
 
@@ -217,7 +229,7 @@ public sealed class ExportPlan(
             var packedAnyway = format == ModpackExportFormat.Modrinth && !mod.Enabled;
             if (!complete && identity is null && !packedAnyway) unchecked_++;
         }
-        return new ExportCounts(listed, bundled, disabledListed, disabledBundled, disabledOut, localOut, unchecked_, byName);
+        return new ExportCounts(listed, bundled, disabledListed, disabledBundled, disabledOut, localOut, unchecked_, byName, earlyOut);
     }
 
     /// <summary>The packs the file selection takes, listed and copied, for the format.</summary>
@@ -400,6 +412,11 @@ public sealed class ModpackExportService(
                 Path = path, FileName = name, Enabled = enabled, IsLocal = true, Size = size
             });
         }
+
+        // Early access is kept by mod id, so the jars are only opened when the pack marks any.
+        var earlyAccess = metadata.EarlyAccessIds(packId);
+        if (earlyAccess.Count > 0)
+            foreach (var entry in result) entry.IsEarlyAccess = earlyAccess.Overlaps(GlobalPackService.JarModIds(entry.Path));
 
         result.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.FileName, b.FileName));
         return result;
@@ -717,14 +734,16 @@ public sealed class ModpackExportService(
 
         report.Now(-1, $"Checking which mods are on {store}...");
         var plan = await BuildPlanAsync(options.Pack, options.Format, ct);
-        var counts = plan.Count(options.Format, options.IncludeDisabledMods, options.IncludeLocalMods);
+        var counts = plan.Count(options.Format, options.IncludeDisabledMods, options.IncludeLocalMods,
+                                options.IncludeEarlyAccessMods);
 
         if (counts.Unchecked > 0 && confirmGap is not null
             && !await confirmGap(new ExportIdentityGap(store, counts.Unchecked), ct))
             throw new OperationCanceledException("The export was cancelled before anything was written.");
 
         var mods = plan.Mods
-            .Where(m => ExportPlan.Included(m, options.IncludeDisabledMods, options.IncludeLocalMods))
+            .Where(m => ExportPlan.Included(m, options.IncludeDisabledMods, options.IncludeLocalMods,
+                                            options.IncludeEarlyAccessMods))
             .ToList();
         // Packs the selection takes and the store has: listed instead of copied (the copy is skipped).
         var listedPacks = plan.Packs

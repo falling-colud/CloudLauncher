@@ -160,6 +160,9 @@
                                 <CheckBox x:Name="LocalBox" Margin="0,6,0,0" Content="Include this PC's own mods (local/mods)"
                                           Checked="OnModOptionChanged" Unchecked="OnModOptionChanged"
                                           ToolTipService.ShowOnDisabled="True"/>
+                                <CheckBox x:Name="EarlyAccessBox" Margin="0,6,0,0" Content="Include early-access mods"
+                                          Checked="OnModOptionChanged" Unchecked="OnModOptionChanged"
+                                          ToolTipService.ShowOnDisabled="True"/>
                             </StackPanel>
                         </slate:SlateBorder>
 

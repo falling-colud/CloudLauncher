@@ -285,6 +285,11 @@
                                             <TextBlock Text="LOCKED" Style="{StaticResource PillText}"/>
                                         </slate:SlateBorder>
                                         <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                ToolTip="Early access - left out of released packs"
+                                                Visibility="{Binding Mod.IsEarlyAccess, Converter={StaticResource BoolVis}}">
+                                            <TextBlock Text="EARLY" Style="{StaticResource PillText}"/>
+                                        </slate:SlateBorder>
+                                        <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"
                                                 ToolTip="{Binding Mod.ConflictLabel}"
                                                 Visibility="{Binding Mod.HasConflict, Converter={StaticResource BoolVis}}">
                                             <TextBlock Text="CONFLICT" Style="{StaticResource PillText}"

@@ -322,7 +322,7 @@ public partial class ExportPackDialog : UserControl
                                  + "Download it first.";
             PlanBar.Visibility = Visibility.Collapsed;
             EntryListEmpty.Visibility = Visibility.Visible;
-            ApplyJarCounts(0, 0);
+            ApplyJarCounts(0, 0, 0);
             UpdateChrome();
             return;
         }
@@ -355,13 +355,13 @@ public partial class ExportPackDialog : UserControl
                 _tree.Add(new ExportTreeRow(node, 0, candidate));
             }
             RefreshRows();
-            ApplyJarCounts(mods.Count(m => !m.Enabled), mods.Count(m => m.IsLocal));
+            ApplyJarCounts(mods.Count(m => !m.Enabled), mods.Count(m => m.IsLocal), mods.Count(m => m.IsEarlyAccess));
         }
         catch (OperationCanceledException) { return; }
         catch (Exception ex)
         {
             AppLog.LogError(nameof(ExportPackDialog), ex);
-            ApplyJarCounts(0, 0);
+            ApplyJarCounts(0, 0, 0);
         }
 
         EntryListEmpty.Visibility = _roots.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -565,7 +565,7 @@ public partial class ExportPackDialog : UserControl
         return node;
     }
 
-    private void ApplyJarCounts(int disabled, int local)
+    private void ApplyJarCounts(int disabled, int local, int earlyAccess)
     {
         _disabledCount = disabled;
         DisabledBox.Content = disabled == 0 ? "Include disabled mods" : $"Include disabled mods ({disabled})";
@@ -577,6 +577,11 @@ public partial class ExportPackDialog : UserControl
         LocalBox.ToolTip = local == 0
             ? "This instance has no mods of its own in local/mods."
             : "Mods only this PC has, kept out of the shared instance. They go in as ordinary mods.";
+        EarlyAccessBox.Content = earlyAccess == 0 ? "Include early-access mods" : $"Include early-access mods ({earlyAccess})";
+        EarlyAccessBox.IsEnabled = earlyAccess > 0;
+        EarlyAccessBox.ToolTip = earlyAccess == 0
+            ? "No mod is marked early access in this instance (mod options > Early access)."
+            : "Ticked, this is an early version of the pack. Leave it off for a release: the marked mods stay out.";
         ApplyDisabledHint();
     }
 
@@ -656,7 +661,8 @@ public partial class ExportPackDialog : UserControl
             return;
         }
 
-        var counts = _plan.Count(format, DisabledBox.IsChecked == true, LocalBox.IsChecked == true);
+        var counts = _plan.Count(format, DisabledBox.IsChecked == true, LocalBox.IsChecked == true,
+                                 EarlyAccessBox.IsChecked == true);
         ModSummaryLabel.Text = SummaryLine(counts, store);
 
         if (counts.Unchecked > 0)
@@ -683,6 +689,7 @@ public partial class ExportPackDialog : UserControl
             var none = "No mods will go in";
             if (c.DisabledLeftOut > 0) none += $" · {c.DisabledLeftOut} disabled left out";
             if (c.LocalLeftOut > 0) none += $" · {c.LocalLeftOut} of this PC's own left out";
+            if (c.EarlyAccessLeftOut > 0) none += $" · {c.EarlyAccessLeftOut} early access left out";
             return none;
         }
 
@@ -694,6 +701,7 @@ public partial class ExportPackDialog : UserControl
         };
         if (c.DisabledLeftOut > 0) parts.Add($"{c.DisabledLeftOut} disabled left out");
         if (c.LocalLeftOut > 0) parts.Add($"{c.LocalLeftOut} of this PC's own left out");
+        if (c.EarlyAccessLeftOut > 0) parts.Add($"{c.EarlyAccessLeftOut} early access left out");
         return string.Join(" · ", parts);
     }
 
@@ -902,7 +910,8 @@ public partial class ExportPackDialog : UserControl
             _selection.Clone(),
             DisabledBox.IsChecked == true,
             LocalBox.IsChecked == true,
-            path);
+            path,
+            EarlyAccessBox.IsChecked == true);
 
         _acknowledgedGap = _warnedGap;
         var cts = new CancellationTokenSource();

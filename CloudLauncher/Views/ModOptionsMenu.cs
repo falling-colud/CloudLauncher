@@ -52,6 +52,7 @@ public static class ModOptionsMenu
     private const int IcUpload = 0xE898; // "Upload": publish a local jar as a hosted mod
     private const int IcChannel = 0xE8AB; // "Switch": which release channel updates come from
     private const int IcSize = 0xE9D9; // "BarChart": matches the three-bar meter on the cards
+    private const int IcEarly = 0xE823; // "Recent": early access, ahead of the released pack
 
     public static ContextMenu Build(PackMod mod, ModOptionsContext ctx) => Build(new[] { mod }, ctx);
 
@@ -225,6 +226,8 @@ public static class ModOptionsMenu
         menu.Items.Add(FlagToggle("Library", targets, ctx, m => m.IsLibrary, (m, v) => m.IsLibrary = v, Glyph(IcLibrary)));
         menu.Items.Add(FlagToggle("Testing", targets, ctx, m => m.IsTesting, (m, v) => m.IsTesting = v, Glyph(IcTesting)));
         menu.Items.Add(FlagToggle("Extra (optional)", targets, ctx, m => m.IsExtra, (m, v) => m.IsExtra = v, Glyph(IcAdd)));
+        if (!ModMetadataService.IsGlobalScope(ctx.PackId))
+            menu.Items.Add(EarlyAccessToggle(targets, ctx));
 
         // ── Incompatibility ──
         var anyIncompat = targets.Any(t =>
@@ -654,6 +657,28 @@ public static class ModOptionsMenu
             ApplyAll(targets, ctx, m => set(m, v));
             return targets.All(t => get(t.Meta));
         }, icon);
+    }
+
+    /// <summary>"Early access": the mod is shared with early versions of the pack and kept out of
+    /// released ones (<see cref="PackModMetadata.EarlyAccess"/>). The mark goes on the mod ids the jars
+    /// declare, so a jar that declares none can't carry it.</summary>
+    private static MenuItem EarlyAccessToggle(IReadOnlyList<PackMod> targets, ModOptionsContext ctx)
+    {
+        var markable = targets.Where(t => t.JarModIds.Count > 0).ToList();
+        var item = Toggle("Early access", markable.Count > 0 && markable.All(t => t.IsEarlyAccess), () =>
+        {
+            var on = !markable.All(t => t.IsEarlyAccess);
+            ctx.Inventory.Metadata.SetEarlyAccess(ctx.PackId, markable.SelectMany(t => t.JarModIds), on);
+            foreach (var t in markable) t.IsEarlyAccess = on;
+            ctx.OnChanged?.Invoke();
+            return on;
+        }, Glyph(IcEarly));
+        item.IsEnabled = markable.Count > 0;
+        item.ToolTip = markable.Count > 0
+            ? "Shared with the early versions of this pack and left out of released ones: an export leaves it out unless you tick \"Include early-access mods\"."
+            : "This jar declares no mod id, so it can't be marked.";
+        ToolTipService.SetShowOnDisabled(item, true);
+        return item;
     }
 
     private static MenuItem BuildHeader(IReadOnlyList<PackMod> targets)

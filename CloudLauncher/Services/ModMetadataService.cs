@@ -172,6 +172,34 @@ public sealed class ModMetadataService
         return global.Clone();
     }
 
+    // ── early access ───────────────────────────────────────────────────────────
+
+    /// <summary>The mod ids marked early access in this pack (<see cref="PackModMetadata.EarlyAccess"/>),
+    /// compared without regard to case.</summary>
+    public IReadOnlySet<string> EarlyAccessIds(Guid packId)
+    {
+        var doc = Load(packId);
+        lock (_lock) return new HashSet<string>(doc.EarlyAccess, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Marks or unmarks mods as early access by the mod ids their jars declare, and saves.</summary>
+    public void SetEarlyAccess(Guid packId, IEnumerable<string> modIds, bool earlyAccess)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            foreach (var raw in modIds)
+            {
+                var id = raw.Trim().ToLowerInvariant();
+                if (id.Length == 0) continue;
+                doc.EarlyAccess.RemoveAll(x => string.Equals(x, id, StringComparison.OrdinalIgnoreCase));
+                if (earlyAccess) doc.EarlyAccess.Add(id);
+            }
+            doc.EarlyAccess.Sort(StringComparer.Ordinal);
+        }
+        Save(packId);
+    }
+
     /// <summary>The auto-managed category that every library-marked mod belongs to.</summary>
     public const string LibraryCategory = "Library";
 

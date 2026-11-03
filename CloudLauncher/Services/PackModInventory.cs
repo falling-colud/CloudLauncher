@@ -167,6 +167,23 @@ public sealed class PackMod : INotifyPropertyChanged
     /// <summary>Held at its current version: bulk updates skip it. See
     /// <see cref="ModMeta.UpdateLocked"/>.</summary>
     public bool IsUpdateLocked => Meta.UpdateLocked;
+
+    private IReadOnlySet<string>? _jarModIds;
+
+    /// <summary>The mod ids the jar declares in its own metadata, read on first use. Empty when the jar
+    /// can't be read.</summary>
+    public IReadOnlySet<string> JarModIds => _jarModIds ??= GlobalPackService.JarModIds(FilePath);
+
+    private bool _earlyAccess;
+
+    /// <summary>Marked early access in this pack (<see cref="PackModMetadata.EarlyAccess"/>). Stamped on
+    /// by the inventory at load and by the options menu.</summary>
+    public bool IsEarlyAccess
+    {
+        get => _earlyAccess;
+        set { if (_earlyAccess != value) { _earlyAccess = value; Refresh(); } }
+    }
+
     public ModSide Side => Meta.Side;
     public bool IsSideRestricted => Meta.Side != ModSide.Both;
     public bool IsLocal => string.Equals(Folder, "local", StringComparison.OrdinalIgnoreCase);
@@ -548,6 +565,11 @@ public sealed class PackModInventory
                     foreach (var m in mods) m.DefaultSource = guess;
                 }
             }
+
+            // Early access is kept by mod id, so the jars are only opened when this pack marks any.
+            var earlyAccess = _metadata.EarlyAccessIds(packId);
+            if (earlyAccess.Count > 0)
+                foreach (var m in mods) m.IsEarlyAccess = earlyAccess.Overlaps(m.JarModIds);
 
             _added.Flush();
             return Sort(mods);

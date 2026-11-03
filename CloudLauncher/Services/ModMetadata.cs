@@ -267,4 +267,11 @@ public sealed class PackModMetadata
     /// <summary>Categories folded shut in the Graph view's category mode. Kept with the pack (rather
     /// than per machine) because it is part of how the pack is laid out, like the positions above.</summary>
     public List<string> CollapsedCategories { get; set; } = new();
+
+    /// <summary>Mods marked early access in this pack: shared with the people who get early versions
+    /// and kept out of released packs (an export leaves them out unless it is told to take them).</summary>
+    /// <remarks>Held by the mod id the jar itself declares (lower case), not by the
+    /// <see cref="Mods"/> key: an unreleased mod has no store id, so its key would be the file name,
+    /// and every new version of the jar would lose the mark.</remarks>
+    public List<string> EarlyAccess { get; set; } = new();
 }
