@@ -46,11 +46,19 @@ public static class UpdateVerifier
     public static UpdateVerification Verify(LauncherReleaseInfo? release) =>
         Verify(release, AppVersion.Current, TrustedKeys);
 
+    /// <summary>Checks <paramref name="release"/> like <see cref="Verify(LauncherReleaseInfo?)"/>, for
+    /// putting this launcher's own files back rather than updating it: the release has to be signed for
+    /// exactly the version that is running.</summary>
+    public static UpdateVerification VerifyReinstall(LauncherReleaseInfo? release) =>
+        Verify(release, AppVersion.Current, TrustedKeys, sameVersion: true);
+
     /// <summary>Checks that <paramref name="release"/> carries a manifest signed by one of
     /// <paramref name="trustedKeys"/>, in the expected format, for the version the release names, and
-    /// that the version is newer than <paramref name="running"/>.</summary>
+    /// that the version is newer than <paramref name="running"/> (with <paramref name="sameVersion"/>,
+    /// that it is the same one).</summary>
     public static UpdateVerification Verify(
-        LauncherReleaseInfo? release, Version running, IReadOnlyDictionary<string, string> trustedKeys)
+        LauncherReleaseInfo? release, Version running, IReadOnlyDictionary<string, string> trustedKeys,
+        bool sameVersion = false)
     {
         if (release is null) return Fail("there is no release");
         if (string.IsNullOrWhiteSpace(release.Manifest) || string.IsNullOrWhiteSpace(release.Signature)
@@ -79,8 +87,11 @@ public static class UpdateVerifier
         if (manifest is null) return Fail(why ?? "the manifest could not be read");
         if (!string.Equals(manifest.Version, release.Version?.Trim(), StringComparison.Ordinal))
             return Fail($"the manifest is for version {manifest.Version}, but the release says {release.Version}");
-        if (!Version.TryParse(manifest.Version, out var signed) || AppVersion.Rank(signed) <= AppVersion.Rank(running))
-            return Fail($"version {manifest.Version} is not newer than this launcher");
+        if (!Version.TryParse(manifest.Version, out var signed)
+            || (sameVersion ? AppVersion.Rank(signed) != AppVersion.Rank(running) : AppVersion.Rank(signed) <= AppVersion.Rank(running)))
+            return Fail(sameVersion
+                ? $"version {manifest.Version} is not the version of this launcher"
+                : $"version {manifest.Version} is not newer than this launcher");
 
         return new UpdateVerification(manifest, null);
     }
@@ -122,17 +133,71 @@ public static class UpdateVerifier
 
     /// <summary>True when <paramref name="signature"/> (DER) is a valid ECDSA P-256 / SHA-256 signature
     /// of <paramref name="data"/> by <paramref name="publicKey"/> (base64 SubjectPublicKeyInfo).</summary>
+    /// <remarks>The key and the signature are read by hand rather than with ImportSubjectPublicKeyInfo and
+    /// the DER signature format, which need System.Formats.Asn1: a launcher folder that has lost that
+    /// file must still be able to verify the release that repairs it. Both layouts are fixed for
+    /// P-256, and only strict DER is accepted, as before.</remarks>
     public static bool SignatureMatches(string publicKey, byte[] data, byte[] signature)
     {
         try
         {
-            using var key = ECDsa.Create();
-            key.ImportSubjectPublicKeyInfo(Convert.FromBase64String(publicKey), out _);
-            if (key.KeySize != 256) return false;
-            return key.VerifyData(data, signature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+            if (!TryReadP256PublicKey(Convert.FromBase64String(publicKey), out var point)
+                || !TryReadDerSignature(signature, out var rs))
+                return false;
+            using var key = ECDsa.Create(new ECParameters { Curve = ECCurve.NamedCurves.nistP256, Q = point });
+            return key.VerifyData(data, rs, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
         }
         catch (CryptographicException) { return false; }
         catch (FormatException) { return false; }
+    }
+
+    private const int P256FieldBytes = 32;
+
+    /// <summary>How every P-256 SubjectPublicKeyInfo starts: the ecPublicKey and prime256v1 object ids,
+    /// then a bit string holding an uncompressed point (0x04). X and Y follow, 32 bytes each.</summary>
+    private static ReadOnlySpan<byte> P256KeyPrefix =>
+    [
+        0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01,
+        0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04,
+    ];
+
+    private static bool TryReadP256PublicKey(byte[] spki, out ECPoint point)
+    {
+        point = default;
+        var prefix = P256KeyPrefix.Length;
+        if (spki.Length != prefix + 2 * P256FieldBytes || !spki.AsSpan(0, prefix).SequenceEqual(P256KeyPrefix))
+            return false;
+        point = new ECPoint { X = spki[prefix..(prefix + P256FieldBytes)], Y = spki[(prefix + P256FieldBytes)..] };
+        return true;
+    }
+
+    /// <summary>Turns a DER ECDSA signature, SEQUENCE { INTEGER r, INTEGER s }, into the 64 bytes of r
+    /// then s. Strict DER only: short lengths (a P-256 signature is at most 72 bytes), minimal positive
+    /// integers, nothing after them.</summary>
+    private static bool TryReadDerSignature(byte[] der, out byte[] rs)
+    {
+        rs = new byte[2 * P256FieldBytes];
+        if (der.Length < 8 || der[0] != 0x30 || der[1] != der.Length - 2) return false;
+        var at = 2;
+        return TryReadInteger(der, ref at, rs.AsSpan(0, P256FieldBytes))
+               && TryReadInteger(der, ref at, rs.AsSpan(P256FieldBytes))
+               && at == der.Length;
+    }
+
+    private static bool TryReadInteger(byte[] der, ref int at, Span<byte> into)
+    {
+        if (at + 2 > der.Length || der[at] != 0x02) return false;
+        int length = der[at + 1];
+        var start = at + 2;
+        if (length == 0 || length > P256FieldBytes + 1 || start + length > der.Length) return false;
+        var value = der.AsSpan(start, length);
+        if ((value[0] & 0x80) != 0) return false;                                        // negative
+        if (value.Length > 1 && value[0] == 0 && (value[1] & 0x80) == 0) return false;   // not minimal
+        if (value[0] == 0) value = value[1..];
+        if (value.Length > P256FieldBytes) return false;
+        value.CopyTo(into[(P256FieldBytes - value.Length)..]);
+        at = start + length;
+        return true;
     }
 
     private static UpdateVerification Fail(string reason) => new(null, reason);

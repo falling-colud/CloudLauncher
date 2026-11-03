@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -36,41 +37,65 @@ public static partial class AppLog
     /// <summary>The file being written to now.</summary>
     public static string LogFilePath => LogFile.CurrentPath;
 
+    /// <remarks>Never throws: it runs inside catch blocks and in the crash backstops, where an exception
+    /// of its own turns a fault that was being handled into a crash. 0.9.10 closed that way whenever its
+    /// folder had lost the regular-expression library.</remarks>
     public static void Log(string message)
     {
-        var now = DateTimeOffset.Now;
-        var clean = Redact(message);
-        // Invariant 24-hour clock, unlike the rest of the UI: log lines get pasted into issues and
-        // compared with server logs, so they should read the same for everyone.
-        var line = $"[{TimeFormat.LogClock(now)}] {clean}";
-        lock (_lock)
+        try
         {
-            _lines.Enqueue(line);
-            while (_lines.Count > MaxLines) _lines.Dequeue();
+            var now = DateTimeOffset.Now;
+            var clean = Redact(message);
+            // Invariant 24-hour clock, unlike the rest of the UI: log lines get pasted into issues and
+            // compared with server logs, so they should read the same for everyone.
+            var line = $"[{TimeFormat.LogClock(now)}] {clean}";
+            lock (_lock)
+            {
+                _lines.Enqueue(line);
+                while (_lines.Count > MaxLines) _lines.Dequeue();
+            }
+            LogFile.Append(now, clean);
+            var app = Application.Current;
+            if (app is null) return;
+            if (app.Dispatcher.CheckAccess()) MessageAppended?.Invoke(line);
+            else app.Dispatcher.BeginInvoke(DispatcherPriority.Background, (Action)(() => MessageAppended?.Invoke(line)));
         }
-        LogFile.Append(now, clean);
-        var app = Application.Current;
-        if (app is null) return;
-        if (app.Dispatcher.CheckAccess()) MessageAppended?.Invoke(line);
-        else app.Dispatcher.BeginInvoke(DispatcherPriority.Background, (Action)(() => MessageAppended?.Invoke(line)));
+        catch
+        {
+            // The log is never a reason to fail.
+        }
+        finally
+        {
+            // Once, after the line that found it: why the lines from here on may be cut short.
+            if (_patternsFailure is not null && Interlocked.Exchange(ref _patternsFailure, null) is { } failure)
+                Log("log", $"The patterns that keep credentials out of this log could not be loaded ({failure}). " +
+                           "Until the launcher restarts, a line that might hold one is cut off before it.");
+        }
     }
 
     public static void Log(string source, string message) => Log($"[{source}] {message}");
 
-    /// <summary>Convenience for logging exceptions with stack.</summary>
+    /// <summary>Convenience for logging exceptions with stack. Never throws, like <see cref="Log(string)"/>.</summary>
     public static void LogError(string context, Exception ex)
     {
-        Log($"ERROR in {context}: {ex.GetType().Name}: {ex.Message}");
-        var inner = ex.InnerException;
-        var depth = 1;
-        while (inner is not null && depth < 5)
+        try
         {
-            Log($"  caused by: {inner.GetType().Name}: {inner.Message}");
-            inner = inner.InnerException;
-            depth++;
+            Log($"ERROR in {context}: {ex.GetType().Name}: {ex.Message}");
+            var inner = ex.InnerException;
+            var depth = 1;
+            while (inner is not null && depth < 5)
+            {
+                Log($"  caused by: {inner.GetType().Name}: {inner.Message}");
+                inner = inner.InnerException;
+                depth++;
+            }
+            if (ex.StackTrace is { Length: > 0 } trace)
+                Log("  trace:\n" + trace);
         }
-        if (ex.StackTrace is { Length: > 0 } trace)
-            Log("  trace:\n" + trace);
+        catch
+        {
+            // An exception whose own Message or StackTrace throws: there is nothing left to log.
+        }
     }
 
     /// <summary>Writes every queued line to the file now. Called on exit and before a crash is
@@ -89,17 +114,48 @@ public static partial class AppLog
         ["eyJ", "bearer", "token", "password", "passwd", "api-key", "api_key", "apikey", "cf-key", "secret"],
         StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Set once the patterns have failed to run; the rest of the run masks without them.</summary>
+    private static bool _patternsUnavailable;
+
+    /// <summary>What made the patterns fail, until <see cref="Log(string)"/> has written it down.</summary>
+    private static string? _patternsFailure;
+
     /// <summary>
     /// Masks anything in <paramref name="text"/> that looks like a credential: JWTs, bearer tokens,
     /// token, key and password values, Minecraft's <c>--accessToken</c> argument, and 64-character
     /// base64 strings shaped like the server's refresh tokens.
     /// </summary>
+    /// <remarks>Never throws. When the patterns cannot run (the regular-expression library would not
+    /// load, in a launcher folder that lost files), <see cref="RedactWithoutPatterns"/> masks more
+    /// bluntly instead, for the rest of the run.</remarks>
     public static string Redact(string? text)
     {
         if (string.IsNullOrEmpty(text)) return text ?? "";
         var hinted = text.AsSpan().ContainsAny(SecretHints);
         if (!hinted && text.Length < OpaqueTokenLength) return text;
 
+        if (!_patternsUnavailable)
+        {
+            try
+            {
+                return RedactWithPatterns(text, hinted);
+            }
+            catch (Exception ex)
+            {
+                _patternsUnavailable = true;
+                _patternsFailure = ex.GetType().Name;
+            }
+        }
+        return RedactWithoutPatterns(text, hinted);
+    }
+
+    /// <summary>The pattern pass of <see cref="Redact"/>.</summary>
+    /// <remarks>A method of its own that is never inlined: the regular-expression types are only
+    /// resolved when this one is compiled, so a library that fails to load throws at the call in
+    /// <see cref="Redact"/>, where it is caught, rather than while Redact itself is being compiled.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static string RedactWithPatterns(string text, bool hinted)
+    {
         if (hinted)
         {
             text = JwtPattern().Replace(text, Masked);
@@ -112,6 +168,46 @@ public static partial class AppLog
             text = OpaqueTokenPattern().Replace(text, m => LooksRandom(m.ValueSpan) ? Masked : m.Value);
         return text;
     }
+
+    /// <summary><see cref="Redact"/> without the patterns: a line that may hold a credential keeps only
+    /// what comes before the first of <see cref="SecretHints"/>, and opaque tokens are found by hand.</summary>
+    /// <remarks>Everything the patterns mask starts at or after one of those hints, so the cut leaves out
+    /// at least as much as they would have.</remarks>
+    private static string RedactWithoutPatterns(string text, bool hinted)
+    {
+        if (hinted) text = text[..text.AsSpan().IndexOfAny(SecretHints)] + "[redacted to the end of the line]";
+        return MaskOpaqueTokens(text);
+    }
+
+    /// <summary><see cref="OpaqueTokenPattern"/> written out: a run of exactly 64 base64 characters
+    /// with no base64 character or '=' on either side, masked when it <see cref="LooksRandom"/>.</summary>
+    private static string MaskOpaqueTokens(string text)
+    {
+        if (text.Length < OpaqueTokenLength) return text;
+        StringBuilder? masked = null;
+        var copied = 0;
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (!IsBase64Char(text[i])) { i++; continue; }
+            var start = i;
+            while (i < text.Length && IsBase64Char(text[i])) i++;
+            // The run cannot grow, so its neighbours are not base64; the pattern also refuses '='.
+            if (i - start == OpaqueTokenLength
+                && (start == 0 || text[start - 1] != '=')
+                && (i == text.Length || text[i] != '=')
+                && LooksRandom(text.AsSpan(start, OpaqueTokenLength)))
+            {
+                masked ??= new StringBuilder(text.Length);
+                masked.Append(text, copied, start - copied).Append(Masked);
+                copied = i;
+            }
+        }
+        return masked is null ? text : masked.Append(text, copied, text.Length - copied).ToString();
+    }
+
+    private static bool IsBase64Char(char c) =>
+        c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '+' or '/';
 
     /// <summary>A JWT or JWE: a base64url JSON header ("eyJ") and two to four more dot-separated
     /// parts.</summary>

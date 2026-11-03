@@ -33,6 +33,7 @@ public sealed class UpdateService
     private readonly ApiClient _api;
     private readonly string _work;
     private readonly string _failureReport;
+    private readonly string _repairReport;
 
     /// <summary>Held from the first download until this process exits, so a second click, or a second
     /// update dialog, can't start another updater on the same work folder.</summary>
@@ -71,19 +72,25 @@ public sealed class UpdateService
 
     /// <param name="workRoot">Scratch folder for the download; a test can point it elsewhere.</param>
     /// <param name="failureReportPath">Where the updater leaves its log when an update fails. Outside
-    /// the work folder, which the next attempt deletes.</param>
+    /// the work folder, which the next attempt deletes. A failed repair leaves its log beside it.</param>
     public UpdateService(ApiClient api, string? workRoot = null, string? failureReportPath = null)
     {
         _api = api;
         _work = workRoot ?? Path.Combine(Path.GetTempPath(), "CloudLauncherUpdate");
         _failureReport = failureReportPath ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CloudLauncher", "update-failed.log");
-        LastUpdateFailed = ReportFailedUpdate();
+        _repairReport = Path.Combine(Path.GetDirectoryName(_failureReport) ?? "", "repair-failed.log");
+        LastUpdateFailed = ReportFailure(_failureReport, "The last update could not be installed. The updater's log:\n");
+        LastRepairFailed = ReportFailure(_repairReport, "The last repair did not finish. The repairer's log:\n");
     }
 
     /// <summary>True when the previous update did not install. Its log has been copied into the app
     /// log.</summary>
     public bool LastUpdateFailed { get; }
+
+    /// <summary>True when the previous <see cref="RepairAsync"/> did not finish. Its log has been copied
+    /// into the app log.</summary>
+    public bool LastRepairFailed { get; }
 
     public Task<LauncherReleaseInfo?> GetLatestAsync(CancellationToken ct = default) =>
         _api.GetLatestLauncherAsync(ct);
@@ -181,32 +188,112 @@ public sealed class UpdateService
 
             var scriptPath = Path.Combine(_work, "apply-update.ps1");
             await File.WriteAllTextAsync(scriptPath, UpdaterScript, ct);
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{scriptPath}\" " +
-                            $"-LauncherPid {launcherPid} -Source \"{sourceRoot}\" -Dest \"{installDir}\" " +
-                            $"-Exe \"{exePath}\" -Report \"{_failureReport}\" -Backup \"{backupDir}\" " +
-                            $"-LockName \"{UpdaterLockName(installDir)}\"",
-                UseShellExecute = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                CreateNoWindow = true
-            };
-            Process.Start(psi);
+            StartScript(scriptPath,
+                $"-LauncherPid {launcherPid} -Source \"{sourceRoot}\" -Dest \"{installDir}\" " +
+                $"-Exe \"{exePath}\" -Report \"{_failureReport}\" -Backup \"{backupDir}\" " +
+                $"-LockName \"{UpdaterLockName(installDir)}\"");
             started = true;
-
-            // Until the updater holds its lock, a launcher started now would not know to stay away.
-            var waited = Stopwatch.StartNew();
-            while (!UpdateInProgress(installDir) && waited.Elapsed < TimeSpan.FromSeconds(15))
-                await Task.Delay(100, CancellationToken.None);
-            if (!UpdateInProgress(installDir))
-                AppLog.Log("update", "The updater had not started after 15 s; closing anyway.");
+            await WaitForLockAsync(installDir);
         }
         finally
         {
             if (!started) Applying.Release();
         }
+    }
+
+    /// <summary>Puts back this launcher's files that are missing from the folder it runs from (see
+    /// <see cref="InstallCheck"/>): downloads this version's own signed package again and starts the
+    /// repairer, which copies in only what is missing and opens the launcher again. The caller shuts
+    /// the application down once this returns.</summary>
+    /// <exception cref="UpdateVerificationException">The package could not be proven to be this
+    /// version's signed release. Nothing was changed.</exception>
+    public async Task RepairAsync(IProgress<double>? progress = null, CancellationToken ct = default)
+    {
+        var releases = await _api.GetLauncherReleasesAsync(ct);
+        var own = releases.FirstOrDefault(r =>
+                      Version.TryParse(r.Version, out var v) && AppVersion.Rank(v) == AppVersion.Rank(AppVersion.Current))
+                  ?? throw new InvalidOperationException(
+                      $"CloudLauncher {AppVersion.CurrentString} is not on the server, so it cannot be repaired from there.");
+        var check = AppSettings.IsSecureServerUrl(_api.ServerUrl)
+            ? UpdateVerifier.VerifyReinstall(own)
+            : new UpdateVerification(null, $"repairs are only downloaded over https, and the server address is {_api.ServerUrl}");
+        if (!check.IsValid || check.Manifest is not { } manifest)
+            throw Refused(check.Failure ?? "the release could not be verified", "Repair");
+
+        var exePath = Process.GetCurrentProcess().MainModule?.FileName
+                      ?? Path.Combine(InstallCheck.InstallDir, "CloudLauncher.exe");
+        await StartRepairerAsync(manifest, InstallCheck.InstallDir, exePath, Environment.ProcessId, progress, ct);
+    }
+
+    /// <summary>Downloads and verifies the package, and starts the repairer for
+    /// <paramref name="installDir"/>, which waits for <paramref name="launcherPid"/> to exit. Returns
+    /// once the repairer holds its lock.</summary>
+    /// <remarks>Unlike an update, nothing is unpacked in this process: the repairer unpacks with Windows
+    /// PowerShell's own .NET, because the files this one would unpack with can be among the missing ones
+    /// (System.IO.Compression was, the first time). Shares the updater's lock and work folder, so only
+    /// one of the two runs at a time.</remarks>
+    internal async Task StartRepairerAsync(UpdateManifest manifest, string installDir, string exePath,
+        int launcherPid, IProgress<double>? progress, CancellationToken ct)
+    {
+        if (!await Applying.WaitAsync(0, ct))
+            throw new InvalidOperationException("An update is already being downloaded.");
+        var started = false;
+        try
+        {
+            if (UpdateInProgress(installDir))
+                throw new InvalidOperationException(
+                    "An update is already being installed. The launcher opens by itself when it is done.");
+
+            if (Directory.Exists(_work)) Directory.Delete(_work, recursive: true);
+            Directory.CreateDirectory(_work);
+
+            var zipPath = Path.Combine(_work, "package.zip");
+            try
+            {
+                await DownloadVerifiedAsync(manifest, zipPath, progress, ct);
+            }
+            catch
+            {
+                // Never leave a package behind that has not been proven.
+                try { Directory.Delete(_work, recursive: true); }
+                catch (Exception ex) { AppLog.LogError("update", ex); }
+                throw;
+            }
+
+            var scriptPath = Path.Combine(_work, "repair-install.ps1");
+            await File.WriteAllTextAsync(scriptPath, RepairScript, ct);
+            StartScript(scriptPath,
+                $"-LauncherPid {launcherPid} -Package \"{zipPath}\" -Dest \"{installDir}\" " +
+                $"-Exe \"{exePath}\" -Report \"{_repairReport}\" -LockName \"{UpdaterLockName(installDir)}\"");
+            started = true;
+            await WaitForLockAsync(installDir);
+        }
+        finally
+        {
+            if (!started) Applying.Release();
+        }
+    }
+
+    /// <summary>Runs <paramref name="scriptPath"/> in a hidden Windows PowerShell.</summary>
+    private static void StartScript(string scriptPath, string arguments) =>
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = "powershell.exe",
+            Arguments = $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{scriptPath}\" {arguments}",
+            UseShellExecute = true,
+            WindowStyle = ProcessWindowStyle.Hidden,
+            CreateNoWindow = true
+        });
+
+    /// <summary>Waits up to 15 s for the script just started on <paramref name="installDir"/> to take its
+    /// lock: until it holds it, a launcher started now would not know to stay away.</summary>
+    private static async Task WaitForLockAsync(string installDir)
+    {
+        var waited = Stopwatch.StartNew();
+        while (!UpdateInProgress(installDir) && waited.Elapsed < TimeSpan.FromSeconds(15))
+            await Task.Delay(100, CancellationToken.None);
+        if (!UpdateInProgress(installDir))
+            AppLog.Log("update", "The updater had not started after 15 s; closing anyway.");
     }
 
     /// <summary>Copies every installed file that the package in <paramref name="sourceRoot"/> would
@@ -289,22 +376,22 @@ public sealed class UpdateService
         return sourceRoot;
     }
 
-    private static UpdateVerificationException Refused(string reason)
+    private static UpdateVerificationException Refused(string reason, string what = "Update")
     {
-        AppLog.Log("update", $"Update refused: {reason}.");
+        AppLog.Log("update", $"{what} refused: {reason}.");
         return new UpdateVerificationException(reason);
     }
 
-    /// <summary>Copies the updater's log into the app log when the last update did not install.
-    /// Once: the report is deleted after it has been read.</summary>
-    private bool ReportFailedUpdate()
+    /// <summary>Copies a helper script's log into the app log, under <paramref name="heading"/>, when its
+    /// last run failed. Once: the report is deleted after it has been read.</summary>
+    private static bool ReportFailure(string report, string heading)
     {
         try
         {
-            if (!File.Exists(_failureReport)) return false;
-            var log = File.ReadAllText(_failureReport).TrimEnd();
-            File.Delete(_failureReport);
-            AppLog.Log("update", "The last update could not be installed. The updater's log:\n" + log);
+            if (!File.Exists(report)) return false;
+            var log = File.ReadAllText(report).TrimEnd();
+            File.Delete(report);
+            AppLog.Log("update", heading + log);
             return true;
         }
         catch (Exception ex)
@@ -405,6 +492,85 @@ public sealed class UpdateService
 
         Log "copy ok; relaunching $Exe"
         Remove-Item -LiteralPath $Backup -Recurse -Force
+        if ($Report) { Remove-Item -LiteralPath $Report -Force }
+        Release-Lock
+        Start-Process -FilePath $Exe -WorkingDirectory $Dest
+        """;
+
+    // Waits for the launcher to exit, unpacks the package next to itself, copies in the files the
+    // install folder no longer has, then relaunches. Windows PowerShell's own .NET does the unpacking,
+    // so it works however much of the launcher's folder is gone.
+    //
+    // robocopy /XC /XN /XO copies only files that are missing from the folder. A file the folder still
+    // has is left as it is, even one that differs from the package: the folder can be Downloads, where
+    // a LICENSE.txt may belong to something else. Nothing is replaced, so nothing is backed up. /XX keeps
+    // everything else in the folder out of the copy and its output.
+    //
+    // It takes the updater's lock (-LockName), with the same rules, and opens the launcher again
+    // whether or not the copy worked: a launcher still missing files offers the repair again. On
+    // failure the log goes to -Report for the next start to show. Keep this ASCII, like the updater.
+    private const string RepairScript = """
+        param(
+          [int]$LauncherPid,
+          [string]$Package,
+          [string]$Dest,
+          [string]$Exe,
+          [string]$Report,
+          [string]$LockName
+        )
+        $ErrorActionPreference = 'SilentlyContinue'
+        $work = [System.IO.Path]::GetDirectoryName($PSCommandPath)
+        $log = Join-Path $work 'repair-install.log'
+        function Log($m) { "{0:o}  {1}" -f (Get-Date), $m | Out-File -FilePath $log -Append -Encoding utf8 }
+
+        $lock = New-Object System.Threading.Mutex($false, $LockName)
+        $owned = $false
+        try { $owned = $lock.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) {
+          Log 'an update or repair of this folder is already running; this one stops'
+          exit 0
+        }
+        function Release-Lock { try { $lock.ReleaseMutex() } catch {}; $lock.Dispose() }
+
+        function Stop-Repair([string]$Why, [bool]$Relaunch) {
+          Log $Why
+          if ($Report) {
+            New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($Report)) | Out-Null
+            Copy-Item -LiteralPath $log -Destination $Report -Force
+          }
+          Release-Lock
+          if ($Relaunch) { Start-Process -FilePath $Exe -WorkingDirectory $Dest }
+          exit 1
+        }
+
+        try { Wait-Process -Id $LauncherPid -Timeout 120 } catch {}
+        if (Get-Process -Id $LauncherPid -ErrorAction SilentlyContinue) {
+          Stop-Repair 'the launcher did not exit, so nothing was changed' $false
+        }
+
+        $staging = Join-Path $work 'staging'
+        try {
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($Package, $staging)
+        } catch {
+          Stop-Repair ('the package could not be unpacked: ' + $_.Exception.Message) $true
+        }
+        # A package that wraps everything in one top-level folder is copied from inside it.
+        $source = $staging
+        $top = @(Get-ChildItem -LiteralPath $staging -Force)
+        if ($top.Count -eq 1 -and $top[0].PSIsContainer) { $source = $top[0].FullName }
+
+        $out = & robocopy $source $Dest /E /XC /XN /XO /XX /R:3 /W:2 /NDL /NP /NJH /NJS
+        $code = $LASTEXITCODE
+        Log ("copy exit $code, " + @($out | Where-Object { $_ -match 'New File' }).Count + ' file(s) put back')
+        if ($code -ge 8) {
+          $out | Where-Object { $_ -match 'ERROR' } | Select-Object -First 4 | ForEach-Object { Log ('  ' + $_.Trim()) }
+          Stop-Repair 'the missing files could not be copied back' $true
+        }
+
+        Log "repair ok; relaunching $Exe"
+        Remove-Item -LiteralPath $staging -Recurse -Force
+        Remove-Item -LiteralPath $Package -Force
         if ($Report) { Remove-Item -LiteralPath $Report -Force }
         Release-Lock
         Start-Process -FilePath $Exe -WorkingDirectory $Dest

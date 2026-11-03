@@ -133,7 +133,7 @@ public partial class MainWindow : Window, IDialogHost
         // syncing), and the Account button offers the sign-in page.
         NavigateToPacks();
 
-        _ = CheckForLauncherUpdateAsync();
+        _ = CheckFilesThenUpdatesAsync();
     }
 
     /// <summary>Applies the global launcher scale as a layout zoom on the whole window, and keeps the
@@ -148,6 +148,21 @@ public partial class MainWindow : Window, IDialogHost
             if (chrome is not null) chrome.CaptionHeight = 40 * s;
         }
         catch { /* frozen chrome: caption buttons still work via IsHitTestVisibleInChrome */ }
+    }
+
+    /// <summary>On launch: a folder missing some of the launcher's files is offered a repair first (see
+    /// <see cref="InstallCheck"/>), and the update check follows unless the repair has started, which
+    /// closes the launcher.</summary>
+    private async Task CheckFilesThenUpdatesAsync()
+    {
+        if (InstallCheck.Missing.Count > 0)
+        {
+            // After the first paint, so the offer does not open over an empty window.
+            await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Background);
+            RepairDialog.Offer(this, InstallCheck.Missing);
+            if (RepairDialog.RepairStarted) return;
+        }
+        await CheckForLauncherUpdateAsync();
     }
 
     private bool _updatePrompted;

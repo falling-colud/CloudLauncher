@@ -41,12 +41,21 @@ public partial class App : Application
         {
             AppLog.LogError("UI", args.Exception);
             AppLog.Flush();
+            args.Handled = true; // keep the app alive for recoverable UI faults
+            // A file of the launcher's own that has gone missing is not a fault that goes away: offer
+            // to put it back instead.
+            if (Views.RepairDialog.OfferAfter(args.Exception)) return;
+            var what = string.IsNullOrWhiteSpace(args.Exception.Message) && Views.RepairDialog.MissingFileName(args.Exception) is { } file
+                ? $"A file CloudLauncher needs is missing ({file}). Close and reopen it to put its files back."
+                : args.Exception.Message;
             MessageBox.Show(
-                $"Something went wrong:\n\n{args.Exception.Message}\n\n"
+                $"Something went wrong:\n\n{what}\n\n"
                 + "The details are in the launcher log (Settings, About, Open logs folder).",
                 "CloudLauncher", MessageBoxButton.OK, MessageBoxImage.Warning);
-            args.Handled = true; // keep the app alive for recoverable UI faults
         };
+
+        // Logged now; the main window offers to repair once it is up (see InstallCheck).
+        InstallCheck.Run();
 
         UseTheSystemLocaleForDatesAndTimes();
         RemoveLegacyBrowserSettings();
