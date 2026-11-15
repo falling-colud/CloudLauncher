@@ -148,6 +148,7 @@ public static class PlanMessageBuilder
             ? Plural(cards, "card")
             : $"{Plural(sections, "section")}, no cards yet");
         if (total > 0) facts.Add($"{done} of {total} done");
+        if (board.HasDrawing) facts.Add("drawn on");
         facts.Add($"updated <t:{changedAt.ToUnixTimeSeconds()}:R>");
         return string.Join("  ·  ", facts);
     }

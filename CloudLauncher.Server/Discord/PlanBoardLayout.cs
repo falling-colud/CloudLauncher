@@ -1,3 +1,4 @@
+using CloudLauncher.Shared;
 using SkiaSharp;
 
 namespace CloudLauncher.Server.Discord;
@@ -76,7 +77,149 @@ internal sealed class PlanBoardLayout
                 default: DrawNoteCard(n); break;
             }
         }
+        DrawInk();
         foreach (var r in _rect.Values) Grow(r);
+    }
+
+    // ── drawing ─────────────────────────────────────────────────────────────────
+
+    /// <summary>What was drawn on the board, over the cards as in the launcher: the highlighter's lines
+    /// first, under the pen's.</summary>
+    private void DrawInk()
+    {
+        if (_board.Strokes is not { Count: > 0 } strokes) return;
+        foreach (var s in strokes.Where(s => s.Highlighter)) DrawStroke(s);
+        foreach (var s in strokes.Where(s => !s.Highlighter)) DrawStroke(s);
+    }
+
+    /// <summary>One stroke. A pen's pressure changes the width along the line, which a single stroked
+    /// path can't do, so the line is drawn as short runs, each at its own width; their round ends overlap
+    /// where they meet, which opaque ink hides. A highlighter is see-through and one width, so it is one
+    /// path (overlapping runs would show darker at every join).</summary>
+    private void DrawStroke(PlanStrokeData s)
+    {
+        var points = PlanInkCodec.Decode(s.Points);
+        if (points.Count == 0) return;
+        var colour = PlanColours.Parse(s.Color) ?? PlanColours.Text;
+        var width = Math.Max(0.1, s.Width);
+
+        if (points.Count == 1)
+        {
+            var p = points[0];
+            var r = (float)(width * (s.Highlighter ? 1 : PlanInkCodec.PressureScale(p.Pressure)) / 2);
+            _ops.Add(new CircleOp((float)p.X, (float)p.Y, r, s.Highlighter ? PlanColours.WithAlpha(colour, 0.5) : colour));
+            Grow(SKRect.Create((float)p.X - r, (float)p.Y - r, r * 2, r * 2));
+            return;
+        }
+
+        if (s.Highlighter)
+        {
+            AddInkRun(points, 0, points.Count - 1, PlanColours.WithAlpha(colour, 0.5), (float)width);
+            return;
+        }
+
+        var even = points.Max(p => p.Pressure) - points.Min(p => p.Pressure) < 0.04f;
+        if (even)
+        {
+            AddInkRun(points, 0, points.Count - 1, colour, (float)(width * PlanInkCodec.PressureScale(points[0].Pressure)));
+            return;
+        }
+
+        // Pressure: the smoothed line sampled every few units, then cut into runs wherever the width has
+        // moved more than a few percent, each run drawn at its average width. Steps that small don't show,
+        // and a run shares its first sample with the one before, so the line has no gaps.
+        var samples = SmoothSamples(points, step: 3);
+        var runStart = 0;
+        for (var i = 1; i < samples.Count; i++)
+        {
+            var w0 = samples[runStart].W;
+            var last = i == samples.Count - 1;
+            if (!last && Math.Abs(samples[i].W - w0) <= w0 * 0.06 && i - runStart < 64) continue;
+            var path = new PlanPath().MoveTo(samples[runStart].X, samples[runStart].Y);
+            var sum = 0f;
+            for (var k = runStart + 1; k <= i; k++)
+            {
+                path.LineTo(samples[k].X, samples[k].Y);
+                sum += samples[k].W;
+            }
+            var w = (float)(width * sum / (i - runStart));
+            _ops.Add(new StrokeOp(path, colour, Math.Max(0.1f, w)));
+            var b = path.Bounds();
+            if (!b.IsEmpty) Grow(SKRect.Create(b.Left - w / 2, b.Top - w / 2, b.Width + w, b.Height + w));
+            runStart = i;
+        }
+    }
+
+    /// <summary>The stroke's smoothed line (through the midpoints, each point the control, as
+    /// <see cref="AddInkRun"/> draws it) as samples about <paramref name="step"/> apart, each with its
+    /// width factor from the pen's pressure.</summary>
+    private static List<(float X, float Y, float W)> SmoothSamples(List<InkPoint> points, double step)
+    {
+        var samples = new List<(float X, float Y, float W)>();
+        void Add(double x, double y, double pressure) =>
+            samples.Add(((float)x, (float)y, (float)PlanInkCodec.PressureScale((float)pressure)));
+
+        if (points.Count == 2)
+        {
+            var (a, b) = (points[0], points[1]);
+            var n = Math.Clamp((int)Math.Ceiling(Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y)) / step), 1, 2000);
+            for (var k = 0; k <= n; k++)
+            {
+                var t = (double)k / n;
+                Add(a.X + (b.X - a.X) * t, a.Y + (b.Y - a.Y) * t, a.Pressure + (b.Pressure - a.Pressure) * t);
+            }
+            return samples;
+        }
+
+        // Quadratic pieces: from the previous midpoint, controlled by point i, to the next midpoint (the
+        // first piece starts at the first point, the last ends at the last point).
+        var startX = points[0].X; var startY = points[0].Y; double startP = points[0].Pressure;
+        Add(startX, startY, startP);
+        for (var i = 1; i < points.Count - 1; i++)
+        {
+            var c = points[i];
+            var next = points[i + 1];
+            var lastPiece = i == points.Count - 2;
+            double endX = lastPiece ? next.X : (c.X + next.X) / 2, endY = lastPiece ? next.Y : (c.Y + next.Y) / 2;
+            double endP = lastPiece ? next.Pressure : (c.Pressure + next.Pressure) / 2.0;
+            var length = Math.Sqrt((c.X - startX) * (c.X - startX) + (c.Y - startY) * (c.Y - startY))
+                         + Math.Sqrt((endX - c.X) * (endX - c.X) + (endY - c.Y) * (endY - c.Y));
+            var n = Math.Clamp((int)Math.Ceiling(length / step), 1, 2000);
+            for (var k = 1; k <= n; k++)
+            {
+                var t = (double)k / n;
+                double u = 1 - t;
+                Add(u * u * startX + 2 * u * t * c.X + t * t * endX,
+                    u * u * startY + 2 * u * t * c.Y + t * t * endY,
+                    u * u * startP + 2 * u * t * c.Pressure + t * t * endP);
+            }
+            (startX, startY, startP) = (endX, endY, endP);
+        }
+        return samples;
+    }
+
+    /// <summary>Points <paramref name="from"/> to <paramref name="to"/> as one smooth path: straight
+    /// between two points, otherwise through the midpoints with each point as the control (the launcher
+    /// fits curves the same way, near enough at this scale).</summary>
+    private void AddInkRun(List<InkPoint> points, int from, int to, uint colour, float width)
+    {
+        var path = new PlanPath().MoveTo((float)points[from].X, (float)points[from].Y);
+        if (to - from == 1) path.LineTo((float)points[to].X, (float)points[to].Y);
+        else
+        {
+            for (var i = from + 1; i < to; i++)
+            {
+                var p = points[i];
+                var q = points[i + 1];
+                var mx = (float)((p.X + q.X) / 2);
+                var my = (float)((p.Y + q.Y) / 2);
+                if (i + 1 == to) path.QuadTo((float)p.X, (float)p.Y, (float)q.X, (float)q.Y);
+                else path.QuadTo((float)p.X, (float)p.Y, mx, my);
+            }
+        }
+        _ops.Add(new StrokeOp(path, colour, Math.Max(0.1f, width)));
+        var b = path.Bounds();
+        if (!b.IsEmpty) Grow(SKRect.Create(b.Left - width / 2, b.Top - width / 2, b.Width + width, b.Height + width));
     }
 
     // ── sizes ───────────────────────────────────────────────────────────────────

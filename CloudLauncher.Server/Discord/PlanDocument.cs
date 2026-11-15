@@ -39,7 +39,13 @@ public sealed class PlanBoardData
     public List<PlanNodeData> Nodes { get; set; } = new();
     public List<PlanEdgeData> Edges { get; set; } = new();
 
-    [JsonIgnore] public bool IsEmpty => Nodes.Count == 0;
+    /// <summary>What has been drawn on the board with a pen or the mouse (launcher 0.9.12 on), oldest
+    /// first. Null on boards nobody has drawn on.</summary>
+    public List<PlanStrokeData>? Strokes { get; set; }
+
+    [JsonIgnore] public bool HasDrawing => Strokes is { Count: > 0 };
+
+    [JsonIgnore] public bool IsEmpty => Nodes.Count == 0 && !HasDrawing;
 
     public PlanNodeData? Node(string? id) => id is null ? null : Nodes.FirstOrDefault(n => n.Id == id);
 
@@ -64,6 +70,11 @@ public sealed class PlanBoardData
         foreach (var e in Edges)
             sb.Append(e.FromId).Append('>').Append(e.ToId).Append(e.Label).Append(e.Color).Append(e.Style)
               .Append(e.FromAnchor?.X).Append(e.FromAnchor?.Y).Append(e.ToAnchor?.X).Append(e.ToAnchor?.Y).Append(';');
+        // Only boards with a drawing hash it, so every other board keeps the hash it was posted under.
+        if (HasDrawing)
+            foreach (var s in Strokes!)
+                sb.Append('~').Append(s.Id).Append(s.Color).Append(',').Append(s.Width).Append(s.Highlighter ? 'h' : 'p')
+                  .Append(s.Points);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())))[..24];
     }
 }
@@ -156,6 +167,19 @@ public sealed class PlanAnchorData
 {
     public double X { get; set; }
     public double Y { get; set; }
+}
+
+/// <summary>A line drawn on a board (<c>PlanStroke</c>): its look and its points, packed by
+/// <see cref="CloudLauncher.Shared.PlanInkCodec"/>.</summary>
+public sealed class PlanStrokeData
+{
+    public string Id { get; set; } = "";
+    /// <summary><c>#RRGGBB</c>, or null for the look's text colour.</summary>
+    public string? Color { get; set; }
+    /// <summary>The width at normal pressure, in board units.</summary>
+    public double Width { get; set; } = 3;
+    public bool Highlighter { get; set; }
+    public string Points { get; set; } = "";
 }
 
 /// <summary>The placeholder statuses, as the launcher names and colours them
