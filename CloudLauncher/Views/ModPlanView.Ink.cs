@@ -69,6 +69,10 @@ public partial class ModPlanView
     private readonly Path _inkLasso = new() { IsHitTestVisible = false, Visibility = Visibility.Collapsed };
     private readonly Ellipse _eraserRing = new() { IsHitTestVisible = false, Visibility = Visibility.Collapsed };
 
+    /// <summary>Where the pen or the mouse will draw, while it hovers: a dot of the line's own colour and
+    /// width. It stands in for a pointer (there is none while drawing), and goes the moment a line starts.</summary>
+    private readonly Ellipse _penDot = new() { IsHitTestVisible = false, Visibility = Visibility.Collapsed };
+
     /// <summary>Each stroke's WPF ink and outline, by stroke id. Strokes are immutable, so an entry stays
     /// good until its stroke is replaced.</summary>
     private readonly Dictionary<string, InkEntry> _inkCache = new(StringComparer.Ordinal);
@@ -173,6 +177,7 @@ public partial class ModPlanView
         InkHost.Children.Add(_inkSelectionVisual);
         InkHost.Children.Add(_inkLasso);
         InkHost.Children.Add(_eraserRing);
+        InkHost.Children.Add(_penDot);
 
         InkSurface.StylusDown += OnInkStylusDown;
         InkSurface.StylusMove += OnInkStylusMove;
@@ -186,7 +191,11 @@ public partial class ModPlanView
         InkSurface.MouseMove += OnInkMouseMove;
         InkSurface.MouseUp += OnInkMouseUp;
         InkSurface.LostMouseCapture += OnInkLostMouseCapture;
-        InkSurface.MouseLeave += (_, _) => { if (_ink is null) HideEraserRing(); };
+        InkSurface.MouseLeave += (_, _) =>
+        {
+            HidePenDot();
+            if (_ink is null) HideEraserRing();
+        };
 
         // The back of the pen erases even while drawing is off: its hover anywhere over the board hands
         // the next press to the drawing surface.
@@ -212,6 +221,7 @@ public partial class ModPlanView
         Panel.SetZIndex(_inkSelectionVisual, 1);
         Panel.SetZIndex(_inkLasso, 2);
         Panel.SetZIndex(_eraserRing, 3);
+        Panel.SetZIndex(_penDot, 3);
         BuildInkPalette();
         ApplyInkVisibility();
 
@@ -251,7 +261,11 @@ public partial class ModPlanView
             }
             RefreshTouchTablets();
         }
-        else ClearInkSelection();
+        else
+        {
+            ClearInkSelection();
+            HidePenDot();
+        }
 
         _drawMode = on;
         DrawToolButton.Style = (Style)FindResource(on ? "AccentButton" : "SubtleButton");
@@ -294,9 +308,9 @@ public partial class ModPlanView
         else if (at is { } p && InSelectionBox(ToBoard(p))) cursor = Cursors.SizeAll;
         else cursor = _inkTool switch
         {
-            InkTool.Eraser => Cursors.None, // the ring shows where it rubs
             InkTool.Select => Cursors.Cross,
-            _ => Cursors.Pen
+            // No pointer over the line being drawn: the pen's dot (or the eraser's ring) shows where it lands.
+            _ => Cursors.None
         };
         if (!_drawMode) cursor = Cursors.None; // only the back of the pen gets here: the ring
         InkSurface.Cursor = cursor;
@@ -359,6 +373,7 @@ public partial class ModPlanView
     private void OnInkStylusDown(object sender, StylusDownEventArgs e)
     {
         e.Handled = true;
+        HidePenDot();
         var device = e.StylusDevice;
         var at = e.GetPosition(InkSurface);
         if (DeviceOf(device) == InkDevice.Touch)
@@ -440,6 +455,8 @@ public partial class ModPlanView
         {
             if (device.Inverted || (_drawMode && _inkTool == InkTool.Eraser)) ShowEraserRing(at);
             else HideEraserRing();
+            if (device.Inverted) HidePenDot();
+            else ShowPenDot(at);
             UpdateInkCursor(at);
         }
     }
@@ -447,6 +464,7 @@ public partial class ModPlanView
     private void OnInkStylusOutOfRange(object sender, StylusEventArgs e)
     {
         e.Handled = true;
+        HidePenDot();
         if (_ink is null) HideEraserRing();
     }
 
@@ -491,6 +509,7 @@ public partial class ModPlanView
     {
         e.Handled = true;
         if (e.StylusDevice is not null) return; // a pen or finger: already taken as stylus input
+        HidePenDot();
         var at = e.GetPosition(InkSurface);
         if (e.ChangedButton == MouseButton.Middle && _ink is null)
         {
@@ -517,6 +536,7 @@ public partial class ModPlanView
         }
         if (_ink is not null) return;
         if (_drawMode && _inkTool == InkTool.Eraser) ShowEraserRing(at);
+        ShowPenDot(at);
         UpdateInkCursor(at);
     }
 
@@ -1260,6 +1280,7 @@ public partial class ModPlanView
             _eraserRing.StrokeThickness = 1.25 / Zoom;
         }
         if (_inkLasso.Visibility == Visibility.Visible) _inkLasso.StrokeThickness = 1.5 / Zoom;
+        HidePenDot(); // the next hover puts it back at the new size
     }
 
     /// <summary>Everything drawn on the board, in board units (empty when there is nothing).</summary>
@@ -1311,6 +1332,29 @@ public partial class ModPlanView
 
     private void HideEraserRing() => _eraserRing.Visibility = Visibility.Collapsed;
 
+    /// <summary>The hover dot, for the pen and the highlighter only, and not over the selected lines
+    /// (a press there moves them).</summary>
+    private void ShowPenDot(Point screen)
+    {
+        if (!_drawMode || _ink is not null || _inkTool is not (InkTool.Pen or InkTool.Highlighter) || InSelectionBox(ToBoard(screen)))
+        {
+            HidePenDot();
+            return;
+        }
+        var (highlighter, color, widthPx) = ToolLook();
+        var d = Math.Max(3, widthPx) / Zoom;
+        var at = ToBoard(screen);
+        _penDot.Width = _penDot.Height = d;
+        _penDot.Fill = new SolidColorBrush(InkColor(color, highlighter));
+        _penDot.Stroke = Res("TextTertiaryBrush");
+        _penDot.StrokeThickness = 1 / Zoom;
+        Canvas.SetLeft(_penDot, at.X - d / 2);
+        Canvas.SetTop(_penDot, at.Y - d / 2);
+        _penDot.Visibility = Visibility.Visible;
+    }
+
+    private void HidePenDot() => _penDot.Visibility = Visibility.Collapsed;
+
     // ── commands ────────────────────────────────────────────────────────────────
 
     private void SetInkTool(InkTool tool)
@@ -1321,6 +1365,7 @@ public partial class ModPlanView
         SaveInkSettings();
         if (tool is InkTool.Pen or InkTool.Highlighter or InkTool.Eraser) ClearInkSelection();
         if (tool != InkTool.Eraser) HideEraserRing();
+        HidePenDot();
         ApplyPenLook();
         UpdateInkPalette();
         UpdateInkCursor(null);

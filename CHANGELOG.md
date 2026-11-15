@@ -3,6 +3,12 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.13 - 2026-11-15
+
+- No pointer over the pen while drawing on a planning board any more. While the pen (or the mouse)
+  hovers, a small dot in the line's own colour and width shows where it will land, and it goes the
+  moment you start drawing.
+
 ## 0.9.12 - 2026-11-15
 
 - Planning boards can be drawn on. Draw (or the D key) turns it on: the pen, the mouse or a finger

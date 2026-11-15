@@ -140,6 +140,23 @@ public static class InkScenario
         Check("drawing on: the surface takes presses and the palette shows",
             surface.IsHitTestVisible && palette.Visibility == Visibility.Visible);
 
+        // ── no pointer over the line: a dot while hovering, nothing once drawing ──
+        Call("SetInkTool", Kind("InkTool", "Pen"));
+        Check("no pointer icon while drawing with the pen", surface.Cursor == Cursors.None, $"cursor={surface.Cursor}");
+        var dot = Field<System.Windows.Shapes.Ellipse>("_penDot");
+        Call("ShowPenDot", Screen(500, 500));
+        Check("hovering shows a dot the pen's width where it will land", dot.Visibility == Visibility.Visible
+            && Math.Abs(dot.Width - 4) < 1e-6 && Math.Abs(Canvas.GetLeft(dot) - 498) < 1e-6, $"w={dot.Width} x={Canvas.GetLeft(dot)}");
+        Call("BeginInkGesture", Kind("InkTool", "Pen"), Kind("InkDevice", "Mouse"), 7, Screen(500, 500), Pts([(500.0, 500.0, 0.5f)]));
+        Call("ShowPenDot", Screen(510, 500));
+        Check("...and none once the line starts", dot.Visibility != Visibility.Visible);
+        Call("EndInkGesture", true);
+        Call("SetInkTool", Kind("InkTool", "Eraser"));
+        Call("ShowPenDot", Screen(500, 500));
+        Check("no pen dot with the eraser (its ring shows instead)", dot.Visibility != Visibility.Visible
+            && surface.Cursor == Cursors.None);
+        Call("SetInkTool", Kind("InkTool", "Pen"));
+
         // ── a pen stroke with pressure ──
         var wave = Enumerable.Range(0, 80).Select(i =>
             (60.0 + i * 5, 330 + 18 * Math.Sin(i / 6.0), (float)(0.2 + 0.7 * i / 79.0))).ToList();
