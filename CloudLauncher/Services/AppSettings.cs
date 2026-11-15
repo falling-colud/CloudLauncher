@@ -239,6 +239,33 @@ public sealed partial class AppSettings
     /// <summary>Whether the Planning board draws its grid and snaps cards to it. Applies to every board.</summary>
     public bool PlanGridEnabled { get; set; } = true;
 
+    // Drawing on planning boards (ModPlanView.Ink.cs). Editing preferences, so they live here and hold
+    // for every board, like the grid; what is drawn is saved on the board itself.
+
+    /// <summary>The drawing tool last picked: "pen", "highlighter", "eraser" or "select".</summary>
+    public string PlanInkTool { get; set; } = "pen";
+
+    /// <summary>The pen's colour as <c>#RRGGBB</c>; null = the look's text colour.</summary>
+    public string? PlanInkPenColor { get; set; }
+
+    /// <summary>The highlighter's colour as <c>#RRGGBB</c>.</summary>
+    public string? PlanInkHighlighterColor { get; set; } = "#E3B341";
+
+    /// <summary>Which of the three widths each tool draws with: 0 fine, 1 medium, 2 bold.</summary>
+    public int PlanInkPenSize { get; set; } = 1;
+    public int PlanInkHighlighterSize { get; set; } = 1;
+    public int PlanInkEraserSize { get; set; } = 1;
+
+    /// <summary>The eraser (the tool, and the back of the pen) takes whole strokes rather than only the
+    /// part it passes over.</summary>
+    public bool PlanInkEraseWholeStrokes { get; set; }
+
+    /// <summary>While drawing, a finger draws too instead of moving the board.</summary>
+    public bool PlanInkTouchDraws { get; set; }
+
+    /// <summary>Drawings are hidden on every board (they are still there, and come back with the switch).</summary>
+    public bool PlanInkHidden { get; set; }
+
     /// <summary>Release channel for mod downloads and updates when the pack has none of its own:
     /// "alpha" = newest whatever its channel, "beta" = releases and betas, "release" = stable only.
     /// See <see cref="ModUpdateChannel"/>.</summary>

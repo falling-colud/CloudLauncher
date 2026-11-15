@@ -197,6 +197,7 @@ public partial class ModPlanView : UserControl
         InitializeComponent();
         GridBackdrop.Child = _gridLines;
         GridToggle.IsChecked = GridOn;
+        InitInk(); // drawing on the board (ModPlanView.Ink.cs)
         Viewport.SizeChanged += (_, _) => { SyncGrid(); SyncLinkView(); };
         // Every way the view moves (wheel, buttons, drag, fit, jump to a section) ends in these two.
         ZoomT.Changed += (_, _) => SyncLinkView();
@@ -322,7 +323,8 @@ public partial class ModPlanView : UserControl
     /// out from under the pointer.</summary>
     private bool BusyEditing =>
         _railEditing || _dragNode is not null || _resizeNode is not null || _linkFrom is not null || _marquee
-        || _panning || Keyboard.FocusedElement is System.Windows.Controls.Primitives.TextBoxBase box && IsAncestorOf(box);
+        || _panning || _ink is not null || _pinch is not null
+        || Keyboard.FocusedElement is System.Windows.Controls.Primitives.TextBoxBase box && IsAncestorOf(box);
 
     private void ApplyRemoteWhenIdle()
     {
@@ -332,7 +334,8 @@ public partial class ModPlanView : UserControl
         _remotePending = false;
 
         string Content() => _board is null ? "" :
-            System.Text.Json.JsonSerializer.Serialize(new BoardSnapshot(_board.Nodes, _board.Edges), HistoryJson);
+            System.Text.Json.JsonSerializer.Serialize(new BoardSnapshot(_board.Nodes, _board.Edges), HistoryJson)
+            + string.Concat((_board.Strokes ?? new()).Select(s => $"|{s.Id}:{s.Color}:{s.Width}:{s.Highlighter}:{s.Points}"));
         var before = Content();
         var openId = _board?.Id;
 
@@ -422,10 +425,10 @@ public partial class ModPlanView : UserControl
     }
 
     // ── undo / redo ─────────────────────────────────────────────────────────────
-    // Snapshot history of the board's nodes and edges (JSON, so ids and edges survive intact). Pan,
-    // zoom and section auto-height aren't part of it; they're view or derived state.
+    // Snapshot history of the board's nodes and edges (JSON, so ids and edges survive intact), and of
+    // its drawing. Pan, zoom and section auto-height aren't part of it; they're view or derived state.
 
-    private readonly List<string> _history = new();
+    private readonly List<HistoryStep> _history = new();
     private int _histIndex = -1;
     private bool _restoring;
     private string? _historyBoardId;
@@ -435,18 +438,34 @@ public partial class ModPlanView : UserControl
 
     private sealed record BoardSnapshot(List<PlanNode> Nodes, List<PlanEdge> Edges);
 
+    /// <summary>One undo step: the cards and links as JSON, and the drawn strokes as the objects
+    /// themselves. Strokes never change in place (see <see cref="PlanStroke"/>), so every step can hold
+    /// the same ones instead of a copy of their points, and a board drawn on for an hour still keeps a
+    /// cheap history.</summary>
+    private sealed record HistoryStep(string Json, PlanStroke[] Strokes);
+
     private void RecordHistory()
     {
         if (_board is null || _restoring) return;
         var json = System.Text.Json.JsonSerializer.Serialize(new BoardSnapshot(_board.Nodes, _board.Edges), HistoryJson);
-        if (_histIndex >= 0 && _histIndex < _history.Count && _history[_histIndex] == json) return; // nothing changed
+        var strokes = _board.Strokes?.ToArray() ?? [];
+        if (_histIndex >= 0 && _histIndex < _history.Count)
+        {
+            var current = _history[_histIndex];
+            if (current.Json == json)
+            {
+                if (current.Strokes.SequenceEqual(strokes, ReferenceEqualityComparer.Instance)) return; // nothing changed
+                json = current.Json; // a drawing step: share the cards' JSON with the step before
+            }
+        }
 
         // Adding a new state after some undos throws away the redo tail.
         if (_histIndex < _history.Count - 1)
             _history.RemoveRange(_histIndex + 1, _history.Count - 1 - _histIndex);
-        _history.Add(json);
+        _history.Add(new HistoryStep(json, strokes));
         if (_history.Count > HistoryLimit) _history.RemoveAt(0);
         _histIndex = _history.Count - 1;
+        UpdateInkPalette();
     }
 
     /// <summary>Starts the undo history fresh at the board's current state (called when a board
@@ -460,33 +479,35 @@ public partial class ModPlanView : UserControl
 
     private void Undo()
     {
-        if (_histIndex <= 0) return;
+        if (_histIndex <= 0 || _ink is not null) return; // never in the middle of a line
         _histIndex--;
         RestoreSnapshot(_history[_histIndex]);
     }
 
     private void Redo()
     {
-        if (_histIndex >= _history.Count - 1) return;
+        if (_histIndex >= _history.Count - 1 || _ink is not null) return;
         _histIndex++;
         RestoreSnapshot(_history[_histIndex]);
     }
 
-    private void RestoreSnapshot(string json)
+    private void RestoreSnapshot(HistoryStep step)
     {
         if (_board is null) return;
-        var snap = System.Text.Json.JsonSerializer.Deserialize<BoardSnapshot>(json, HistoryJson);
+        var snap = System.Text.Json.JsonSerializer.Deserialize<BoardSnapshot>(step.Json, HistoryJson);
         if (snap is null) return;
 
         _restoring = true;
         _board.Nodes = snap.Nodes;
         _board.Edges = snap.Edges;
+        _board.Strokes = step.Strokes.Length > 0 ? step.Strokes.ToList() : null;
         _selected.RemoveWhere(id => _board.Node(id) is null);
         _restoring = false;
 
         Save();      // persist the restored state without recording a new checkpoint
-        Rebuild();
-        PlanStatus.Text = "";
+        Rebuild();   // redraws the drawing too, only where it changed
+        PlanStatus.Text = _drawMode ? DrawPrompt : "";
+        UpdateInkPalette();
     }
 
     // ── the board rail ──────────────────────────────────────────────────────────
@@ -1276,13 +1297,22 @@ public partial class ModPlanView : UserControl
         Save();
     }
 
-    /// <summary>Tells the link layer which part of the board is on screen.</summary>
+    /// <summary>Tells the link and drawing layers which part of the board is on screen.</summary>
     private void SyncLinkView()
     {
         var z = ZoomT.ScaleX;
-        if (_linkLayer is null || z <= 0 || Viewport.ActualWidth <= 0) return;
-        _linkLayer.SetView(new Rect(-PanT.X / z, -PanT.Y / z, Viewport.ActualWidth / z, Viewport.ActualHeight / z), z);
+        if (z <= 0 || Viewport.ActualWidth <= 0) return;
+        var view = new Rect(-PanT.X / z, -PanT.Y / z, Viewport.ActualWidth / z, Viewport.ActualHeight / z);
+        _linkLayer?.SetView(view, z);
+        _inkLayer.SetView(view, z);
+        if (Math.Abs(z - _inkZoomSeen) > 1e-9)
+        {
+            _inkZoomSeen = z;
+            RefreshInkZoomDependent();
+        }
     }
+
+    private double _inkZoomSeen = -1;
 
     private void RestoreViewport()
     {
@@ -1347,12 +1377,19 @@ public partial class ModPlanView : UserControl
         RefreshSectionCounts();
         UpdatePlaceholderSummary();
 
-        EmptyHint.Visibility = _board.IsEmpty ? Visibility.Visible : Visibility.Collapsed;
+        EmptyHint.Visibility = _board.IsEmpty && !_drawMode ? Visibility.Visible : Visibility.Collapsed;
         PlanStatus.ToolTip = null; // only HintIfOffGrid's line carries one
         PlanStatus.Text = _board.IsEmpty
             ? ""
             : $"{_board.Nodes.Count} card{(_board.Nodes.Count == 1 ? "" : "s")}" +
-              (_board.Edges.Count > 0 ? $"  ·  {_board.Edges.Count} link{(_board.Edges.Count == 1 ? "" : "s")}" : "");
+              (_board.Edges.Count > 0 ? $"  ·  {_board.Edges.Count} link{(_board.Edges.Count == 1 ? "" : "s")}" : "") +
+              (_board.HasDrawing ? "  ·  drawn on" : "");
+        if (_drawMode) PlanStatus.Text = DrawPrompt;
+
+        // The drawing lives outside the canvas (it isn't rebuilt with the cards): only what changed redraws.
+        SyncInk();
+        RefreshInkSelectionVisual();
+        UpdateInkPalette();
 
         // Clearing the canvas took a half-drawn arrow's dashed line with it: put it back, unless its start
         // card is gone (deleted, undone away, or on a board that's no longer showing).
@@ -3333,6 +3370,7 @@ public partial class ModPlanView : UserControl
     /// one go.</summary>
     private void SetArrowTool(bool on)
     {
+        if (on && _drawMode) SetDrawMode(false); // one tool at a time: arrows want the cards clickable
         _arrowTool = on;
         if (!on) CancelPendingArrow();
         else if (_arrowFrom is null) ClearSelection(); // a selection outline would read as a picked start card
@@ -3407,6 +3445,9 @@ public partial class ModPlanView : UserControl
     private void OnViewportPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         _swallowArrowUp = false;
+        // Drawing (or the back of the pen about to erase): presses belong to the drawing surface and its
+        // palette, never to the cards underneath.
+        if (_drawMode || InkSurface.IsHitTestVisible) return;
         var target = ArrowTargetAt(e.GetPosition(BoardCanvas));
 
         if (ArrowModeActive)
@@ -4428,6 +4469,11 @@ public partial class ModPlanView : UserControl
         menu.Items.Add(new Separator());
         menu.Items.Add(Item("Tidy up (grid the loose cards)", TidyLooseCards));
         menu.Items.Add(Item("Snap everything to the grid", SnapEverythingToGrid));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Item(_drawMode ? "Stop drawing" : "Draw on the board", () => SetDrawMode(!_drawMode), gesture: "D"));
+        menu.Items.Add(Radio("Show drawings", !InkHidden, ToggleInkHidden));
+        menu.Items.Add(Item("Clear the drawing...", () => _ = ClearDrawingAsync(), enabled: _board?.HasDrawing == true));
+        menu.Items.Add(new Separator());
         menu.Items.Add(Item("Clear this board", () => _ = ClearBoardAsync()));
         menu.IsOpen = true;
     }
@@ -4628,12 +4674,18 @@ public partial class ModPlanView : UserControl
     private async Task ClearBoardAsync()
     {
         if (_board is null || _owner is null || _board.IsEmpty) return;
+        var what = _board.Nodes.Count > 0 || !_board.HasDrawing
+            ? $"all {_board.Nodes.Count} card(s){(_board.HasDrawing ? " and the drawing" : "")}"
+            : "the drawing";
         if (!await AppDialog.ConfirmAsync(_owner, "Clear board",
-                $"Remove all {_board.Nodes.Count} card(s) from '{_board.Name}'?", "Clear", "Cancel", danger: true))
+                $"Remove {what} from '{_board.Name}'?", "Clear", "Cancel", danger: true))
             return;
+        EndInkGesture(cancel: true);
         _board.Nodes.Clear();
         _board.Edges.Clear();
+        _board.Strokes = null;
         _selected.Clear();
+        _inkSelected.Clear();
         Commit();
         Rebuild();
     }
@@ -4650,6 +4702,11 @@ public partial class ModPlanView : UserControl
     private void OnViewportMouseDown(object sender, MouseButtonEventArgs e)
     {
         Viewport.Focus();
+        if (_drawMode || _pinch is not null)
+        {
+            e.Handled = true; // a two-finger zoom, or the drawing palette's own background
+            return;
+        }
         if (ArrowModeActive)
         {
             // While drawing arrows, empty canvas only pans (so a far-off target can still be
@@ -4687,6 +4744,7 @@ public partial class ModPlanView : UserControl
 
     private void OnViewportMouseMove(object sender, MouseEventArgs e)
     {
+        if (_drawMode || _pinch is not null) return; // no card hover marks under the drawing surface
         if (_marquee) { UpdateMarquee(e.GetPosition(BoardCanvas)); return; }
         if (_panning)
         {
@@ -4782,6 +4840,7 @@ public partial class ModPlanView : UserControl
 
     private void OnViewportRightClick(object sender, MouseButtonEventArgs e)
     {
+        if (_drawMode) { e.Handled = true; return; } // the drawing surface has its own menu
         var at = e.GetPosition(BoardCanvas);
         var menu = new ContextMenu { PlacementTarget = Viewport };
 
@@ -4835,6 +4894,8 @@ public partial class ModPlanView : UserControl
     private void OnViewportWheel(object sender, MouseWheelEventArgs e)
     {
         e.Handled = true;
+        // Zooming in the middle of a line would bend it: the points so far are on screen, not on the board.
+        if (_ink is { Kind: not InkGestureKind.Pan } || _pinch is not null) return;
         var m = e.GetPosition(Viewport);
         var oldS = ZoomT.ScaleX;
         var newS = Math.Clamp(oldS * (e.Delta > 0 ? 1.12 : 1 / 1.12), 0.2, 3.0);
@@ -4868,7 +4929,10 @@ public partial class ModPlanView : UserControl
 
     private void FitToView()
     {
-        if (_rect.Count == 0)
+        // The cards and whatever is drawn around them.
+        var all = InkBounds();
+        foreach (var r in _rect.Values) all.Union(r);
+        if (all.IsEmpty)
         {
             ZoomT.ScaleX = ZoomT.ScaleY = 1;
             PanT.X = PanT.Y = 0;
@@ -4877,8 +4941,8 @@ public partial class ModPlanView : UserControl
             return;
         }
 
-        double minX = _rect.Values.Min(r => r.X), minY = _rect.Values.Min(r => r.Y);
-        double maxX = _rect.Values.Max(r => r.Right), maxY = _rect.Values.Max(r => r.Bottom);
+        double minX = all.X, minY = all.Y;
+        double maxX = all.Right, maxY = all.Bottom;
         double w = Math.Max(40, maxX - minX), h = Math.Max(40, maxY - minY);
         double vw = Math.Max(40, Viewport.ActualWidth), vh = Math.Max(40, Viewport.ActualHeight);
 
@@ -4912,8 +4976,13 @@ public partial class ModPlanView : UserControl
 
     /// <summary>The grid's lines use the theme's tertiary text colour, faint, so they suit
     /// whichever look is on (Slate or Classic, dark or light).</summary>
-    private void OnThemeChanged() =>
+    private void OnThemeChanged()
+    {
         _gridLines.Ink = (TryFindResource("TextTertiaryBrush") as SolidColorBrush)?.Color ?? Color.FromRgb(0x8A, 0x94, 0xA6);
+        // Lines drawn in the default ink take the look's text colour: a new look redraws them.
+        SyncInk();
+        RefreshInkSelectionVisual();
+    }
 
     /// <summary>The ruled backdrop, drawn in screen space rather than as a tile the canvas transform
     /// scales. A 1 px pen in a scaled tile blurs unevenly at any zoom but 100%; here every line is one
@@ -5030,7 +5099,11 @@ public partial class ModPlanView : UserControl
         // Never eat keys while a note card (or any text field) is being edited.
         if (Keyboard.FocusedElement is TextBox) { base.OnPreviewKeyDown(e); return; }
 
-        if (Keyboard.Modifiers == ModifierKeys.Control && e.Key is Key.Z)
+        if (HandleInkKey(e))
+        {
+            e.Handled = true;
+        }
+        else if (Keyboard.Modifiers == ModifierKeys.Control && e.Key is Key.Z)
         {
             Undo();
             e.Handled = true;
@@ -5098,6 +5171,7 @@ public partial class ModPlanView : UserControl
         var edges = _board.Edges.Where(e => ids.Contains(e.FromId) && ids.Contains(e.ToId)).ToList();
         _clipboard = System.Text.Json.JsonSerializer.Serialize(
             new BoardSnapshot(picked.ToList(), edges), HistoryJson);
+        _inkClipboardNewer = false; // Ctrl+V now pastes these cards, not lines copied before them
         PlanStatus.Text = $"Copied {picked.Count} card(s).";
     }
 

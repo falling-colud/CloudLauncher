@@ -15,6 +15,8 @@
 
                 <Border Width="1" Margin="10,4" Background="{DynamicResource BorderBrush}"/>
 
+                <!-- The card tools, put away while drawing (the drawing palette has the tools then). -->
+                <StackPanel x:Name="CardTools" Orientation="Horizontal">
                 <Button Content="Mod" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
                         Click="OnAddModCard" ToolTip="Add a card for one specific mod"/>
                 <Button Content="Placeholder" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
@@ -31,6 +33,11 @@
                 <Button x:Name="ArrowToolButton" Content="Arrow" Style="{StaticResource SubtleButton}" Padding="11,5"
                         MinHeight="0" Margin="6,0,0,0" Click="OnToggleArrowTool"
                         ToolTip="Draw arrows between cards: click a card, then the card it points to. Stays on until you click it again or press Esc."/>
+                </StackPanel>
+                <!-- Drawing on the board (ModPlanView.Ink.cs). The back of a pen erases without it. -->
+                <Button x:Name="DrawToolButton" Content="Draw" Style="{StaticResource SubtleButton}" Padding="11,5"
+                        MinHeight="0" Margin="6,0,0,0" Click="OnToggleDraw"
+                        ToolTip="Draw on the board with a pen, the mouse or a finger (D). Flip the pen over to erase, any time. Stays on until you click it again or press Esc."/>
                 <Button Content="Tools ▾" Style="{StaticResource SubtleButton}" Padding="11,5" MinHeight="0"
                         Margin="10,0,0,0" Click="OnTools" ToolTip="Show the boards in a Discord channel, fill the board automatically, tidy it, snap it to the grid, or clear it"/>
             </StackPanel>
@@ -129,6 +136,13 @@
                         </Canvas.RenderTransform>
                     </Canvas>
 
+                    <!-- What is drawn on the board, over the cards. Shares the canvas's transform (set in
+                    code) but not its children, which every rebuild clears. -->
+                    <Canvas x:Name="InkHost" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Top"/>
+
+                    <!-- Takes the pen, the mouse and fingers while drawing, and the back of the pen at any time. -->
+                    <local:PlanInkSurface x:Name="InkSurface"/>
+
                     <!-- shown only while the board has nothing on it -->
                     <StackPanel x:Name="EmptyHint" IsHitTestVisible="False"
                                 HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="380">
@@ -136,8 +150,17 @@
                                    HorizontalAlignment="Center" Margin="0,0,0,6"/>
                         <TextBlock Style="{StaticResource Caption}" Foreground="{DynamicResource TextTertiaryBrush}"
                                    TextAlignment="Center" TextWrapping="Wrap"
-                                   Text="Add mods with the Mod button above, add a live group card for a category or priority, and connect them with arrows: turn on Arrow above and click one card then another, or drag the dot on a card's edge. Double-click anywhere for a note, right-click for everything else. Drop cards onto a section and they move with it; shift-drag to select a group."/>
+                                   Text="Add mods with the Mod button above, add a live group card for a category or priority, and connect them with arrows: turn on Arrow above and click one card then another, or drag the dot on a card's edge. Double-click anywhere for a note, right-click for everything else. Drop cards onto a section and they move with it; shift-drag to select a group. Turn on Draw to sketch on the board with a pen, the mouse or a finger."/>
                     </StackPanel>
+
+                    <!-- The drawing tools, while drawing (built in ModPlanView.Ink.cs). Wraps onto a second row
+                    in a narrow window. -->
+                    <slate:SlateBorder x:Name="InkPalette" Visibility="Collapsed"
+                            HorizontalAlignment="Center" VerticalAlignment="Top" Margin="12,10,12,0"
+                            Background="{DynamicResource Surface2Brush}" BorderBrush="{DynamicResource BorderStrongBrush}"
+                            BorderThickness="1" CornerRadius="8" Padding="5,3" slate:SlateBorder.Shadow="True">
+                        <WrapPanel x:Name="InkPaletteRow" Orientation="Horizontal" VerticalAlignment="Center"/>
+                    </slate:SlateBorder>
                 </Grid>
             </slate:SlateBorder>
         </Grid>

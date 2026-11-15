@@ -134,7 +134,11 @@ internal sealed class TiledCachedLayer : FrameworkElement
     // ── content ─────────────────────────────────────────────────────────────
 
     /// <summary>Replaces what the layer draws. Tiles in view are redrawn straight away.</summary>
-    public void SetContent(IReadOnlyList<(Geometry Geometry, Ink Ink)> items)
+    /// <param name="changed">Where the new content differs from what is drawn now, in canvas units,
+    /// when the caller knows: then only the tiles over it are redrawn and the rest keep their bitmaps,
+    /// which is what lets a drawing grow one stroke at a time without the whole screen redrawing. Null
+    /// redraws everything.</param>
+    public void SetContent(IReadOnlyList<(Geometry Geometry, Ink Ink)> items, Rect? changed = null)
     {
         _geos = new Geometry[items.Count];
         _inks = new Ink[items.Count];
@@ -176,8 +180,23 @@ internal sealed class TiledCachedLayer : FrameworkElement
                 }
         }
 
-        ClearTiles();
+        if (changed is { IsEmpty: false } area && _tile > 0) DropTiles(area);
+        else if (changed is not { IsEmpty: true }) ClearTiles(); // an empty change leaves every tile as it is
         Realize();
+    }
+
+    /// <summary>Forgets the tiles that overlap <paramref name="area"/>, so the next
+    /// <see cref="Realize"/> draws them again from the current content.</summary>
+    private void DropTiles(Rect area)
+    {
+        area.Inflate(1, 1); // anti-aliasing reaches a pixel past what changed
+        foreach (var key in _tiles.Keys.ToList())
+        {
+            var rect = new Rect(key.Col * _tile, key.Row * _tile, _tile, _tile);
+            if (!rect.IntersectsWith(area)) continue;
+            if (_tiles[key] is { } gone) _visuals.Remove(gone);
+            _tiles.Remove(key);
+        }
     }
 
     /// <summary>Adds a quadratic Bézier as pieces no longer than <see cref="PieceLength"/>.</summary>

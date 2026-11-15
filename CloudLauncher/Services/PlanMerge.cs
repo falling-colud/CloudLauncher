@@ -9,7 +9,7 @@ namespace CloudLauncher.Services;
 /// two people working on different cards (or different boards) both keep their work.
 /// </summary>
 /// <remarks>
-/// <para>Rules, applied to each board, card and arrow by id: changed on one side only, that side wins;
+/// <para>Rules, applied to each board, card, arrow and drawn stroke by id: changed on one side only, that side wins;
 /// changed on both, this PC wins (it is the one about to send); deleted on one side and untouched on
 /// the other, it goes; deleted on one side but edited on the other, the edit stays.</para>
 /// <para>Some fields are this PC's own view and never count as a change: the board that was open
@@ -63,6 +63,8 @@ public static class PlanMerge
     }
 
     private static string Key(PlanEdge e) => JsonSerializer.Serialize(e, Opts);
+
+    private static string Key(PlanStroke s) => JsonSerializer.Serialize(s, Opts);
 
     /// <summary>Folds <paramref name="remote"/> into <paramref name="local"/>.</summary>
     /// <param name="baseDoc">The copy both last agreed on; null on a PC that has never synced this
@@ -151,6 +153,10 @@ public static class PlanMerge
         };
         merged.Nodes = MergeItems(bb.Nodes, lb.Nodes, rb.Nodes, n => n.Id, Key);
         merged.Edges = MergeItems(bb.Edges, lb.Edges, rb.Edges, e => e.Id, Key);
+        // Strokes merge one by one like cards, so two people drawing on one board at once both keep
+        // their lines, and a stroke one of them erased goes for both.
+        var strokes = MergeItems(bb.Strokes ?? new(), lb.Strokes ?? new(), rb.Strokes ?? new(), s => s.Id, Key);
+        merged.Strokes = strokes.Count > 0 ? strokes : null;
 
         // What one side deleted can leave the other side's arrows and memberships pointing at nothing.
         var ids = merged.Nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal);

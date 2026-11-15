@@ -319,6 +319,54 @@ public sealed class PlanEdge
     };
 }
 
+/// <summary>A line drawn on a board with a pen, the mouse or a finger (see ModPlanView.Ink.cs).</summary>
+/// <remarks>
+/// <para>Never changed in place. Moving, recolouring or resizing a stroke swaps in a new object with the
+/// same <see cref="Id"/>, so a live sync sees that stroke changed; the pieces the eraser leaves get ids
+/// of their own. That lets every step of the board's undo history hold the same stroke objects instead
+/// of a copy of their points.</para>
+/// <para>An older launcher keeps a board's strokes untouched in <see cref="PlanBoard.Extra"/> and writes
+/// them back as they were, so a board drawn on here survives being edited there.</para>
+/// </remarks>
+public sealed class PlanStroke
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+
+    /// <summary><c>#RRGGBB</c>, or null for the look's text colour, so the default ink reads on a dark
+    /// board and a light one alike.</summary>
+    public string? Color { get; set; }
+
+    /// <summary>The line's width at normal pressure, in board units.</summary>
+    public double Width { get; set; } = 3;
+
+    /// <summary>A highlighter stroke: half see-through, under the pen strokes, one width throughout.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Highlighter { get; set; }
+
+    /// <summary>The points, packed by <see cref="CloudLauncher.Shared.PlanInkCodec"/>.</summary>
+    public string Points { get; set; } = "";
+
+    /// <summary>Fields this launcher doesn't know, from a newer one sharing the board. Kept and written
+    /// back unchanged, so a live sync between two versions can't strip them.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+
+    /// <summary>The same stroke with other points (moved, or a piece of it), keeping its look.</summary>
+    public PlanStroke WithPoints(string points, bool sameId) => new()
+    {
+        Id = sameId ? Id : Guid.NewGuid().ToString("N"),
+        Color = Color, Width = Width, Highlighter = Highlighter, Points = points,
+        Extra = Extra is null ? null : new Dictionary<string, JsonElement>(Extra)
+    };
+
+    /// <summary>The same stroke in another colour or width.</summary>
+    public PlanStroke WithLook(string? color, double width) => new()
+    {
+        Id = Id, Color = color, Width = width, Highlighter = Highlighter, Points = Points,
+        Extra = Extra is null ? null : new Dictionary<string, JsonElement>(Extra)
+    };
+}
+
 /// <summary>One planning board (one "page" in the planning tab).</summary>
 public sealed class PlanBoard
 {
@@ -331,6 +379,10 @@ public sealed class PlanBoard
 
     public List<PlanNode> Nodes { get; set; } = new();
     public List<PlanEdge> Edges { get; set; } = new();
+
+    /// <summary>What has been drawn on the board, oldest first (later strokes draw on top). Null while
+    /// nothing is, and then left out of the JSON, so a board without drawings is stored as before.</summary>
+    public List<PlanStroke>? Strokes { get; set; }
 
     /// <summary>One-time flag: set once section membership has been migrated from the old
     /// position-based model to explicit <see cref="PlanNode.SectionId"/>.</summary>
@@ -347,7 +399,10 @@ public sealed class PlanBoard
     public Dictionary<string, JsonElement>? Extra { get; set; }
 
     [JsonIgnore]
-    public bool IsEmpty => Nodes.Count == 0 && Edges.Count == 0;
+    public bool IsEmpty => Nodes.Count == 0 && Edges.Count == 0 && !HasDrawing;
+
+    [JsonIgnore]
+    public bool HasDrawing => Strokes is { Count: > 0 };
 
     public PlanNode? Node(string? id) => id is null ? null : Nodes.FirstOrDefault(n => n.Id == id);
 }

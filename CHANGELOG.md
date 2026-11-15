@@ -3,6 +3,26 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.12 - 2026-11-15
+
+- Planning boards can be drawn on. Draw (or the D key) turns it on: the pen, the mouse or a finger
+  then draw on the board, over the cards, and a palette at the top holds a pen, a highlighter, an
+  eraser and a select tool, eight colours, three widths, undo and redo. The pen draws thicker the
+  harder you press, and a line drawn zoomed out is as thick on screen as one drawn at 100%.
+- The back of the pen erases, any time you flip it, drawing or not. The eraser takes the part of a
+  line it passes over, or whole lines if you tick that in the palette's menu. Holding the pen's
+  side button while drawing selects instead of drawing.
+- Select picks lines by drawing a loop round them, or by tapping one: drag them to move them,
+  press Delete (or the bin on the palette) to remove them, or pick a colour or a width to change
+  them. Ctrl+C, Ctrl+V and Ctrl+D copy, paste and duplicate them.
+- While drawing, one finger moves the board and two fingers zoom it; "Draw with a finger too" in
+  the palette's menu makes a finger draw instead. Outside drawing, two fingers zoom the board as
+  well.
+- Drawings are saved with the board, sync live to your other PCs and the pack's editors with the
+  rest of it, undo with Ctrl+Z, and show in the board's Discord message and in the live viewer in
+  the browser. Tools > Show drawings hides them on every board, and Tools > Clear the drawing rubs
+  out one board's.
+
 ## 0.9.11 - 2026-11-03
 
 - Mods can be marked Early access: right-click a mod in an instance and choose Early access, and

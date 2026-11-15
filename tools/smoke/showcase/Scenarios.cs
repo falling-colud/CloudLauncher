@@ -14,6 +14,7 @@ public static class Scenarios
             case "logs": Logs(); break;
             case "manual-downloads": ManualDownloads(); break;
             case "open": Open(); break;
+            case "planning-ink": InkScenario.Run(); break;
             case "files":
             {
                 // The instance page's Files tab (Hearthstone has logs and a crash report on disk).
