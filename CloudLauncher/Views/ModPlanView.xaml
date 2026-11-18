@@ -6,12 +6,16 @@
              Background="Transparent" Focusable="True">
     <DockPanel>
         <!-- ───────────────────────────── toolbar ───────────────────────────── -->
-        <Grid DockPanel.Dock="Top" Margin="0,0,0,10">
-            <StackPanel Orientation="Horizontal">
+        <Grid x:Name="Toolbar" DockPanel.Dock="Top" Margin="0,0,0,10">
+            <StackPanel x:Name="ToolbarLeft" Orientation="Horizontal" HorizontalAlignment="Left">
                 <!-- The board's name. The rail on the left is the board switcher. -->
                 <TextBlock x:Name="BoardTitle" Style="{StaticResource H3}" VerticalAlignment="Center"
                            MaxWidth="210" TextTrimming="CharacterEllipsis"
                            ToolTip="The board being edited - switch or rename it in the rail on the left"/>
+                <!-- Whether this board goes to the pack's Discord channels (ModPlanView.Discord.cs). Only
+                there while a channel shows the pack's boards. -->
+                <CheckBox x:Name="DiscordToggle" Content="Discord" VerticalAlignment="Center" Margin="12,0,0,0"
+                          Visibility="Collapsed" Click="OnDiscordToggled" ToolTipService.ShowOnDisabled="True"/>
 
                 <Border Width="1" Margin="10,4" Background="{DynamicResource BorderBrush}"/>
 
@@ -42,7 +46,9 @@
                         Margin="10,0,0,0" Click="OnTools" ToolTip="Show the boards in a Discord channel, fill the board automatically, tidy it, snap it to the grid, or clear it"/>
             </StackPanel>
 
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <!-- The status line in here is the part that gives way when the row is short: it trims to the
+            room the left side leaves (ModPlanView.FitPlanStatus) instead of running under those buttons. -->
+            <StackPanel x:Name="ToolbarRight" Orientation="Horizontal" HorizontalAlignment="Right">
                 <!-- Whether the boards are live on the server (ModPlanView.ShowSyncState). Hidden for an
                 instance that is only on this PC. -->
                 <StackPanel x:Name="SyncBadge" Orientation="Horizontal" VerticalAlignment="Center"

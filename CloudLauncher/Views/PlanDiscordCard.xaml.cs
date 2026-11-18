@@ -20,14 +20,19 @@ public partial class PlanDiscordCard : UserControl
     private readonly TaskCompletionSource _done = new();
     private readonly Guid _packId;
     private readonly string _boardId;
+    private readonly IReadOnlyList<(string Id, string Name)> _keptOut;
     private PackDiscordInfo? _info;
     private bool _busy;
 
-    public PlanDiscordCard(Guid packId, string boardId, string boardName)
+    /// <param name="keptOut">The pack's boards whose Discord tick is off (at the top of the board on the
+    /// planning page): no channel shows them.</param>
+    public PlanDiscordCard(Guid packId, string boardId, string boardName,
+        IReadOnlyList<(string Id, string Name)>? keptOut = null)
     {
         InitializeComponent();
         _packId = packId;
         _boardId = boardId;
+        _keptOut = keptOut ?? [];
         OnlyBoardBox.Content = $"Only this board ({boardName})";
         Loaded += async (_, _) =>
         {
@@ -73,7 +78,23 @@ public partial class PlanDiscordCard : UserControl
         LinkBox.Visibility = links.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         EmptyLabel.Text = links.Count > 0 ? "" : "Not shown in any channel yet.";
         EmptyLabel.Visibility = links.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
+        KeptOutLabel.Text = KeptOutLine();
+        KeptOutLabel.Visibility = links.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    /// <summary>Under the channels: how to leave a board out of them, and which boards are left out.</summary>
+    private string KeptOutLine()
+    {
+        const string how = "To leave a board out of Discord, untick Discord at the top of the board.";
+        if (_keptOut.Count == 0) return how;
+        var names = _keptOut.Select(b => b.Name).ToList();
+        var list = names.Count <= 4 ? string.Join(", ", names) : string.Join(", ", names.Take(3)) + $" and {names.Count - 3} more";
+        return $"{how} Left out now: {list}.";
+    }
+
+    /// <summary>How many boards the link would show but for their Discord tick.</summary>
+    private int KeptOutOf(PackDiscordLinkDto link) =>
+        _keptOut.Count(b => link.BoardId is null || b.Id == link.BoardId);
 
     private FrameworkElement Row(PackDiscordLinkDto link)
     {
@@ -106,14 +127,23 @@ public partial class PlanDiscordCard : UserControl
         return row;
     }
 
-    private static string StateLine(PackDiscordLinkDto link) => link.State switch
+    private string StateLine(PackDiscordLinkDto link) => link.State switch
     {
         "pending" => $"Waiting for /plan link code:{link.Code} in a channel"
                      + (link.CodeExpiresAt is { } at ? $" (until {at.ToLocalTime():t})" : ""),
         "broken" => "Stopped: " + (link.LastError ?? "the channel can't be posted to any more."),
+        // This PC's ticks first: they may be newer than what the server last posted from.
+        _ when link.BoardId is not null && KeptOutOf(link) > 0 =>
+            "Its board is kept out of Discord: tick Discord at the top of the board to show it here",
         _ when link.PublishedAt is null => "Posting the boards...",
         _ when link.LastError is { } error => error,
-        _ => link.BoardId is null ? "Every board, kept up to date" : "Kept up to date"
+        _ when link.BoardId is not null => "Kept up to date",
+        _ => KeptOutOf(link) switch
+        {
+            0 => "Every board, kept up to date",
+            1 => "Every board but one, kept up to date",
+            var n => $"Every board but {n}, kept up to date"
+        }
     };
 
     private Button LinkButtonFor(string text, string tip, Action click)

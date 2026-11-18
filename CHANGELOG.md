@@ -3,6 +3,21 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.14 - 2026-11-18
+
+- While a pack's planning boards are shown in a Discord channel, each board has a Discord tick at
+  the top, beside its name. Untick it and that board stays out of Discord: its message comes down
+  (or the channel's one message moves on to another board), it leaves the board list there, and
+  the live view in the browser and the Activity stop showing it too. Tick it again and it goes
+  back up. The tick syncs with the board to your other PCs and the pack's editors, a copy of a
+  board keeps it, and Ctrl+Z never changes it.
+- Boards kept out of Discord have a small crossed-out eye in the boards rail, and Tools > Show in
+  Discord says which boards are left out of the channels.
+- Categories in the boards rail can be dragged into a new order: drag a category's heading and its
+  boards come with it. Holding a drag near the top or bottom of the rail scrolls it, for boards too.
+- In a narrow window the planning toolbar's status message now shortens to the room it has
+  instead of running under the buttons.
+
 ## 0.9.13 - 2026-11-15
 
 - No pointer over the pen while drawing on a planning board any more. While the pen (or the mouse)

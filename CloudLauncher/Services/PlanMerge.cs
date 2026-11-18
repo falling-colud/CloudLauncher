@@ -147,6 +147,7 @@ public static class PlanMerge
             Id = lb.Id,
             Name = Field(bb.Name, lb.Name, rb.Name) ?? lb.Name,
             Category = Field(bb.Category, lb.Category, rb.Category),
+            ShowInDiscord = lb.ShowInDiscord == bb.ShowInDiscord ? rb.ShowInDiscord : lb.ShowInDiscord,
             SectionMembershipSet = lb.SectionMembershipSet || rb.SectionMembershipSet,
             PanX = lb.PanX, PanY = lb.PanY, Zoom = lb.Zoom,
             Extra = rb.Extra ?? lb.Extra

@@ -184,13 +184,17 @@ public partial class ModPlanView : UserControl
     /// finishes: a canvas rebuild redrawing the rail underneath would take the box with it.</summary>
     private bool _railEditing;
 
-    // rail drag-reorder
+    // rail drag-reorder: a board row, or a category heading, which carries its whole group
     private PlanBoard? _railPressBoard;
+    private string? _railPressCategory;
     private FrameworkElement? _railPressRow;
     private Point _railPressAt;
     private RailInsertion? _railLine;
     private string? _railDropCategory;
     private PlanBoard? _railDropAfter;
+    /// <summary>Where a dragged category heading would land, as a position in the category list as it
+    /// stands (what <see cref="ModPlanService.MoveBoardCategory"/> takes); -1 while none is dragged.</summary>
+    private int _railDropCategoryAt = -1;
 
     public ModPlanView()
     {
@@ -199,6 +203,17 @@ public partial class ModPlanView : UserControl
         GridToggle.IsChecked = GridOn;
         InitInk(); // drawing on the board (ModPlanView.Ink.cs)
         Viewport.SizeChanged += (_, _) => { SyncGrid(); SyncLinkView(); };
+        Toolbar.SizeChanged += (_, _) => FitPlanStatus();
+        ToolbarLeft.SizeChanged += (_, _) => FitPlanStatus();
+        ToolbarRight.SizeChanged += (_, _) => FitPlanStatus();
+        // A rail drag is watched from the whole list rather than the pressed row, so a press near the
+        // edge of a short row (a category heading is one line) still lifts it once the pointer has
+        // slipped off; any release in the view ends the press.
+        // Forgotten on every press first, so the row's own handler (which runs after this one) is the
+        // only one that can start a press.
+        RailList.PreviewMouseMove += OnRailRowMove;
+        PreviewMouseLeftButtonDown += (_, _) => ForgetRailPress();
+        PreviewMouseLeftButtonUp += (_, _) => ForgetRailPress();
         // Every way the view moves (wheel, buttons, drag, fit, jump to a section) ends in these two.
         ZoomT.Changed += (_, _) => SyncLinkView();
         PanT.Changed += (_, _) => SyncLinkView();
@@ -227,6 +242,7 @@ public partial class ModPlanView : UserControl
             App.State.PlanSync.StateChanged -= OnSyncStateChanged;
             App.State.PlanSync.StateChanged += OnSyncStateChanged;
             EnsureSyncWatch();
+            _ = LoadDiscordLinksAsync(); // a channel may have been linked since the page was last open
         };
         Unloaded += (_, _) =>
         {
@@ -286,6 +302,7 @@ public partial class ModPlanView : UserControl
         HintIfOffGrid();
         AnnouncePlaceholderMatches(); // after the grid hint: a mod turning up matters more
         EnsureSyncWatch();
+        _ = LoadDiscordLinksAsync(); // whether to show the boards' Discord tick (ModPlanView.Discord.cs)
     }
 
     // ── live sync ───────────────────────────────────────────────────────────────
@@ -358,9 +375,30 @@ public partial class ModPlanView : UserControl
             PlanStatus.Text = "The board that was open was deleted elsewhere.";
     }
 
+    /// <summary>The widest the status line is ever allowed (as the XAML had it).</summary>
+    private const double PlanStatusMaxWidth = 360;
+
+    /// <summary>Gives the toolbar's status line only the room the rest of the row leaves, so in a narrow
+    /// panel a long message trims instead of running under the card buttons. Everything else in the
+    /// row keeps its size.</summary>
+    /// <remarks>Measured from the other controls, never from the status line itself, so the new width
+    /// it settles on doesn't move the answer and the size changes it causes end there.</remarks>
+    private void FitPlanStatus()
+    {
+        if (!IsLoaded) return;
+        var others = ToolbarRight.Children.OfType<FrameworkElement>()
+            .Where(e => !ReferenceEquals(e, PlanStatus) && e.Visibility != Visibility.Collapsed)
+            .Sum(e => e.ActualWidth + e.Margin.Left + e.Margin.Right);
+        var room = Toolbar.ActualWidth - ToolbarLeft.ActualWidth - others - PlanStatus.Margin.Right - 16;
+        var width = Math.Clamp(Math.Floor(room), 0, PlanStatusMaxWidth);
+        if (Math.Abs(PlanStatus.MaxWidth - width) >= 1) PlanStatus.MaxWidth = width;
+    }
+
     private void OnSyncStateChanged(Guid packId)
     {
-        if (packId == _packId) ShowSyncState();
+        if (packId != _packId) return;
+        ShowSyncState();
+        UpdateDiscordToggle(); // view only: the tick can't be changed from here
     }
 
     private void ShowSyncState()
@@ -529,7 +567,9 @@ public partial class ModPlanView : UserControl
     /// board that can't draw its row mustn't take the canvas down with it.</remarks>
     private void RefreshBoardRail()
     {
-        if (!IsInitialized || _railEditing) return; // an open name box owns the rail until it commits
+        if (!IsInitialized) return;
+        UpdateDiscordToggle(); // the open board's Discord tick, at the top beside its name
+        if (_railEditing) return; // an open name box owns the rail until it commits
         try { BuildBoardRail(); }
         catch (Exception ex) { AppLog.LogError(nameof(ModPlanView), ex); }
     }
@@ -623,12 +663,28 @@ public partial class ModPlanView : UserControl
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(3) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         grid.Children.Add(new CloudLauncher.Controls.SlateBorder
         {
             Background = current ? Res("AccentBrush") : Brushes.Transparent,
             CornerRadius = new CornerRadius(2), Margin = new Thickness(0, 5, 8, 5)
         });
+
+        // Kept out of the pack's Discord channels (its Discord tick is off), so that shows without
+        // opening every board. Only while a channel would show it otherwise.
+        if (!board.ShowInDiscord && InDiscordChannel(board))
+        {
+            var keptOut = new TextBlock
+            {
+                Text = char.ConvertFromUtf32(0xED1A), // Hide
+                FontFamily = IconFont, FontSize = 11, Foreground = Res("TextTertiaryBrush"),
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0),
+                ToolTip = Tip("Kept out of Discord - tick Discord at the top of the board to show it there")
+            };
+            Grid.SetColumn(keptOut, 2);
+            grid.Children.Add(keptOut);
+        }
 
         var name = new TextBlock
         {
@@ -647,7 +703,7 @@ public partial class ModPlanView : UserControl
             Text = board.Nodes.Count == 0 ? "" : board.Nodes.Count.ToString(),
             FontSize = 10.5, Foreground = Res("TextTertiaryBrush"), VerticalAlignment = VerticalAlignment.Center
         };
-        Grid.SetColumn(count, 2);
+        Grid.SetColumn(count, 3);
         grid.Children.Add(count);
 
         row.Child = grid;
@@ -662,15 +718,7 @@ public partial class ModPlanView : UserControl
         };
         row.MouseRightButtonUp += (_, e) => { e.Handled = true; ShowBoardMenu(board, row, boardCount); };
 
-        row.PreviewMouseLeftButtonDown += (_, e) =>
-        {
-            _railPressBoard = board;
-            _railPressRow = row;
-            _railPressAt = e.GetPosition(this);
-        };
-        row.PreviewMouseLeftButtonUp += (_, _) => ForgetRailPress();
-        row.MouseLeave += (_, _) => ForgetRailPress();
-        row.PreviewMouseMove += OnRailRowMove;
+        row.PreviewMouseLeftButtonDown += (_, e) => PressRail(row, board, null, e.GetPosition(this));
         return row;
     }
 
@@ -686,7 +734,7 @@ public partial class ModPlanView : UserControl
             Cursor = key is null ? Cursors.Arrow : Cursors.Hand,
             ToolTip = Tip(key is null
                 ? "Boards that aren't in a category - drop one here to take it out of the one it is in"
-                : $"{label} - click to fold, right-click to rename, reorder or delete")
+                : $"{label} - click to fold, drag to reorder, right-click for everything else")
         };
 
         var grid = new Grid();
@@ -732,6 +780,9 @@ public partial class ModPlanView : UserControl
                 RefreshBoardRail();
             };
             row.MouseRightButtonUp += (_, e) => { e.Handled = true; ShowCategoryMenu(key, row, categories); };
+            // Dragging the heading carries the whole category, its boards with it. "Uncategorized"
+            // isn't a category and stays last, so it has no drag.
+            row.PreviewMouseLeftButtonDown += (_, e) => PressRail(row, null, key, e.GetPosition(this));
         }
         return row;
     }
@@ -1074,40 +1125,77 @@ public partial class ModPlanView : UserControl
     // a drag needs vertical intent, since these rows switch board on click and a sideways twitch
     // shouldn't lift a board out of the list.
 
+    private const string CategoryDragFormat = "CloudLauncher.PlanBoardCategory";
+
+    private void PressRail(FrameworkElement row, PlanBoard? board, string? category, Point at)
+    {
+        _railPressBoard = board;
+        _railPressCategory = category;
+        _railPressRow = row;
+        _railPressAt = at;
+    }
+
     private void ForgetRailPress()
     {
         _railPressBoard = null;
+        _railPressCategory = null;
         _railPressRow = null;
     }
 
     private void OnRailRowMove(object sender, MouseEventArgs e)
     {
-        if (_railPressBoard is not { } board || _railPressRow is not { } row) return;
+        if (_railPressRow is null) return;
         if (e.LeftButton != MouseButtonState.Pressed) { ForgetRailPress(); return; }
+        if (TakeRailDrag(e.GetPosition(this)) is not { } drag) return;
+        try { DragDrop.DoDragDrop(drag.Row, drag.Data, DragDropEffects.Move); }
+        finally { ClearRailInsertion(); }
+    }
 
-        var now = e.GetPosition(this);
-        if (Math.Abs(now.Y - _railPressAt.Y) < Math.Max(6, SystemParameters.MinimumVerticalDragDistance)) return;
+    /// <summary>The drag a held press turns into once the pointer has moved far enough up or down:
+    /// the pressed board, or the pressed category heading with its boards. Null while it hasn't.</summary>
+    /// <param name="now">Where the pointer is, against this view.</param>
+    private (FrameworkElement Row, DataObject Data)? TakeRailDrag(Point now)
+    {
+        if (_railPressRow is not { } row) return null;
+        if (Math.Abs(now.Y - _railPressAt.Y) < Math.Max(6, SystemParameters.MinimumVerticalDragDistance)) return null;
 
         // The press has to have landed on the row that is about to travel: a rebuild can finish under
         // a held button and slide a different board under the cursor.
         var origin = TranslatePoint(_railPressAt, row);
-        if (origin.Y < 0 || origin.Y > row.ActualHeight) { ForgetRailPress(); return; }
+        if (!row.IsVisible || origin.Y < 0 || origin.Y > row.ActualHeight) { ForgetRailPress(); return null; }
 
+        var data = _railPressBoard is { } board ? new DataObject(BoardDragFormat, board.Id)
+            : _railPressCategory is { } category ? new DataObject(CategoryDragFormat, category)
+            : null;
         // Cleared before the blocking DoDragDrop, which pumps messages: a handler running during
         // the drag would otherwise see a stale press and start a second drag.
         ForgetRailPress();
-        try { DragDrop.DoDragDrop(row, new DataObject(BoardDragFormat, board.Id), DragDropEffects.Move); }
-        finally { ClearRailInsertion(); }
+        return data is null ? null : (row, data);
     }
 
     private void OnRailDragOver(object sender, DragEventArgs e)
     {
+        e.Handled = true;
+        var at = e.GetPosition(RailScroll).Y;
+        var isCategory = e.Data.GetDataPresent(CategoryDragFormat);
         // A mod dragged out of the palette below is not a board: say so rather than drawing an
         // insertion line for a drop the rail would not accept.
-        if (!e.Data.GetDataPresent(BoardDragFormat)) { e.Effects = DragDropEffects.None; e.Handled = true; return; }
+        if (!isCategory && !e.Data.GetDataPresent(BoardDragFormat)) { e.Effects = DragDropEffects.None; return; }
         e.Effects = DragDropEffects.Move;
-        e.Handled = true;
-        ComputeRailDrop(RailContentY(e.GetPosition(RailScroll).Y));
+        ScrollRailNearEdge(at);
+        if (isCategory) ComputeRailCategoryDrop(RailContentY(at));
+        else ComputeRailDrop(RailContentY(at));
+    }
+
+    /// <summary>Holding a drag near the top or bottom of the rail scrolls it, so a board or category
+    /// can be carried past what fits on screen. Drag-over keeps arriving while the pointer rests.</summary>
+    private void ScrollRailNearEdge(double scrollerY)
+    {
+        const double edge = 28, step = 14;
+        if (scrollerY < edge && RailScroll.VerticalOffset > 0)
+            RailScroll.ScrollToVerticalOffset(RailScroll.VerticalOffset - step);
+        else if (scrollerY > RailScroll.ActualHeight - edge && RailScroll.VerticalOffset < RailScroll.ScrollableHeight)
+            RailScroll.ScrollToVerticalOffset(RailScroll.VerticalOffset + step);
     }
 
     /// <summary>The pointer left the rail, but only if it really did.</summary>
@@ -1124,7 +1212,20 @@ public partial class ModPlanView : UserControl
     {
         var cat = _railDropCategory;
         var after = _railDropAfter;
+        var categoryAt = _railDropCategoryAt;
         ClearRailInsertion();
+
+        if (e.Data.GetData(CategoryDragFormat) is string moved)
+        {
+            e.Handled = true;
+            if (categoryAt < 0) return; // never shown where it would land
+            // A position in the list as it stands; the service allows for the heading leaving its old
+            // place, and regroups the boards to follow.
+            try { Plans.MoveBoardCategory(_packId, moved, categoryAt); }
+            catch (Exception ex) { AppLog.LogError(nameof(ModPlanView), ex); }
+            RefreshBoardRail();
+            return;
+        }
 
         if (e.Data.GetData(BoardDragFormat) is not string id) return;
         var board = Plans.Boards(_packId).FirstOrDefault(b => b.Id == id);
@@ -1197,6 +1298,55 @@ public partial class ModPlanView : UserControl
         ShowRailInsertion(lineY);
     }
 
+    /// <summary>Works out where a dragged category heading would land and draws the line there. Each
+    /// category is a block, its heading and its boards: over the top half of one the dragged heading
+    /// goes before it, over the bottom half after it. "Uncategorized" isn't a category and always
+    /// stays last, so a drop on or under it puts the category at the end.</summary>
+    private void ComputeRailCategoryDrop(double y)
+    {
+        var blocks = RailCategoryBlocks();
+        var real = blocks.Where(b => b.Category is not null).ToList();
+        var at = real.Count;
+        for (var i = 0; i < real.Count; i++)
+            if (y < (real[i].Top + real[i].Bottom) / 2) { at = i; break; }
+
+        // In the gap above the heading it would land before, or under the last category's block.
+        double lineY;
+        if (at < real.Count)
+        {
+            var index = blocks.IndexOf(real[at]);
+            lineY = index == 0 ? 1 : (blocks[index - 1].Bottom + real[at].Top) / 2;
+        }
+        else if (real.Count > 0)
+        {
+            var index = blocks.IndexOf(real[^1]);
+            lineY = index + 1 < blocks.Count
+                ? (real[^1].Bottom + blocks[index + 1].Top) / 2
+                : real[^1].Bottom + RailRowGap / 2;
+        }
+        else lineY = 1;
+
+        _railDropCategoryAt = real.Count == 0 ? -1 : at;
+        ShowRailInsertion(lineY);
+    }
+
+    /// <summary>The rail's category blocks top to bottom: each heading (null for "Uncategorized"),
+    /// where it starts, and where the last row under it ends, in the row host's coordinates.</summary>
+    private List<(string? Category, double Top, double Bottom)> RailCategoryBlocks()
+    {
+        var blocks = new List<(string? Category, double Top, double Bottom)>();
+        var headers = _railHeaders.ToDictionary(h => h.Row, h => h.Category);
+        foreach (var child in RailList.Children.OfType<FrameworkElement>())
+        {
+            if (!child.IsVisible) continue;
+            var top = RailTop(child);
+            var bottom = top + child.ActualHeight;
+            if (headers.TryGetValue(child, out var category)) blocks.Add((category, top, bottom));
+            else if (blocks.Count > 0) blocks[^1] = (blocks[^1].Category, blocks[^1].Top, Math.Max(blocks[^1].Bottom, bottom));
+        }
+        return blocks;
+    }
+
     private void ShowRailInsertion(double y)
     {
         // The row host's own adorner layer, so the line scrolls with the rows it is pointing between.
@@ -1210,6 +1360,7 @@ public partial class ModPlanView : UserControl
     {
         _railDropCategory = null;
         _railDropAfter = null;
+        _railDropCategoryAt = -1;
         if (_railLine is null) return;
         AdornerLayer.GetAdornerLayer(_railLine.AdornedElement)?.Remove(_railLine);
         _railLine = null;
@@ -4488,8 +4639,11 @@ public partial class ModPlanView : UserControl
             PlanStatus.Text = "Boards can be shown in Discord once this instance is on your account.";
             return;
         }
-        var card = new PlanDiscordCard(_packId, _board.Id, _board.Name);
+        var keptOut = Plans.Boards(_packId).Where(b => !b.ShowInDiscord).Select(b => (b.Id, b.Name)).ToList();
+        var card = new PlanDiscordCard(_packId, _board.Id, _board.Name, keptOut);
         await _owner.ShowCardAsync(card, card.Completion, card.Cancel);
+        // A channel may have been linked or removed there: the Discord tick follows.
+        await LoadDiscordLinksAsync(force: true);
     }
 
     /// <summary>Drops a group card for every value of a property that isn't on the board yet,

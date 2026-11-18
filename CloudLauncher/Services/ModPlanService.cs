@@ -171,8 +171,9 @@ public sealed class ModPlanService
         return board;
     }
 
-    /// <summary>Copies a board (cards, links, viewport and category) under a new name. Cards get new
-    /// ids and links are remapped, so the copy shares nothing with the original.</summary>
+    /// <summary>Copies a board (cards, links, viewport, category and Discord tick) under a new name.
+    /// Cards get new ids and links are remapped, so the copy shares nothing with the original.</summary>
+    /// <remarks>A copy of a board kept out of Discord stays out: copying mustn't post it.</remarks>
     public PlanBoard DuplicateBoard(Guid packId, PlanBoard source)
     {
         var doc = Load(packId);
@@ -180,6 +181,7 @@ public sealed class ModPlanService
         {
             Name = UniqueName(doc, source.Name + " copy"),
             Category = source.Category,
+            ShowInDiscord = source.ShowInDiscord,
             PanX = source.PanX, PanY = source.PanY, Zoom = source.Zoom
         };
 

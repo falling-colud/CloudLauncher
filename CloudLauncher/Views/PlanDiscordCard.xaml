@@ -20,6 +20,9 @@
                 <StackPanel x:Name="LinkList"/>
             </slate:SlateBorder>
             <TextBlock x:Name="EmptyLabel" Style="{StaticResource Caption}" Text="Loading..."/>
+            <!--  How to leave a board out, and which ones are (PlanDiscordCard.KeptOutLine).  -->
+            <TextBlock x:Name="KeptOutLabel" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="2,8,0,0"
+                       Visibility="Collapsed"/>
 
             <!--  A channel through its webhook: works on any server, nothing to install.  -->
             <TextBlock Style="{StaticResource H3}" Text="Add a channel" Margin="0,18,0,6"/>

@@ -388,6 +388,15 @@ public sealed class PlanBoard
     /// position-based model to explicit <see cref="PlanNode.SectionId"/>.</summary>
     public bool SectionMembershipSet { get; set; }
 
+    /// <summary>The board's Discord tick, at the top of the board while one of the pack's Discord
+    /// channels shows it. Unticked, the server keeps the board out of every channel, and out of the
+    /// live view and the Activity their messages open. Boards from older launchers read as ticked.</summary>
+    /// <remarks>Always written, true or false. An older launcher keeps the field among its unknown ones
+    /// and, merging a board both sides changed, takes those from the server's copy: written only when
+    /// false, a board ticked again elsewhere would arrive without it, and that launcher would put its own
+    /// stale "false" back.</remarks>
+    public bool ShowInDiscord { get; set; } = true;
+
     /// <summary>Saved viewport so a board reopens where it was left.</summary>
     public double PanX { get; set; }
     public double PanY { get; set; }

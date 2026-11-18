@@ -169,6 +169,17 @@ public static class FakeWorld
         }
     }
 
+    /// <summary>The boards the launcher last stored for a pack, as it sent them; null before any.</summary>
+    public static string? StoredPlans(Guid packId)
+    {
+        lock (PlanDocs) return PlanDocs.TryGetValue($"packs/{packId}/plans", out var cur) ? cur.Json : null;
+    }
+
+    // ── Discord channels showing a pack's boards ─────────────────────────────
+
+    /// <summary>The channels each pack's boards are posted to, set by a scenario; none by default.</summary>
+    public static readonly Dictionary<Guid, List<PackDiscordLinkDto>> DiscordLinks = new();
+
     // ── routing ──────────────────────────────────────────────────────────────
 
     /// <summary>Answers one request, or null for a 404.</summary>
@@ -244,6 +255,12 @@ public static class FakeWorld
                         Now - b.Age - TimeSpan.FromDays(60), Now - b.Age, b.MyPermissions, [], Collabs(b), Teams(b),
                         b.ShareLink && b.Owner == Mara ? "tok-link-shaders" : null);
             }
+        }
+        if (parts.Length == 3 && parts[0] == "packs" && parts[2] == "discord" && Guid.TryParse(parts[1], out var linkedPack))
+        {
+            lock (DiscordLinks)
+                return new PackDiscordInfo(true, null,
+                    DiscordLinks.TryGetValue(linkedPack, out var links) ? links.ToList() : new List<PackDiscordLinkDto>());
         }
         if (parts.Length == 3 && parts[0] == "bundles" && parts[2] == "invitations" && Guid.TryParse(parts[1], out var bid)
             && HostedItems.FirstOrDefault(h => h.Id == bid) is { Owner: var owner } && owner == Mara)
