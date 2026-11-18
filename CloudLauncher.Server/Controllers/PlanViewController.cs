@@ -178,14 +178,10 @@ public sealed class PlanViewController(
         return (drawing, icons);
     }
 
-    private static List<PlanBoardData> Boards(PackDiscordLink link, string? json)
-    {
-        var doc = json is null ? null : PlanDocData.TryParse(json);
-        return (doc?.Boards ?? new List<PlanBoardData>())
-            .Where(b => link.BoardId is null || b.Id == link.BoardId)
-            .Where(b => !b.IsEmpty)
-            .ToList();
-    }
+    /// <summary>What the link's channel shows, so a board kept out of Discord can't be opened from
+    /// there either.</summary>
+    private static List<PlanBoardData> Boards(PackDiscordLink link, string? json) =>
+        PlanDocData.ShownIn(json is null ? null : PlanDocData.TryParse(json), link.BoardId);
 
     private async Task<PackDiscordLink?> FindAsync(string token, CancellationToken ct)
     {

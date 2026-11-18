@@ -19,7 +19,8 @@ namespace CloudLauncher.Server.Discord;
 /// <para>Two layouts (see <see cref="PlanMessageBuilder"/>). A link made by the app keeps one message
 /// for the whole pack, showing one board, which anyone in the channel can switch
 /// (<see cref="SwitchAsync"/>). A webhook link can't carry controls, so it keeps one message per
-/// board and deletes a board's message when the board goes.</para>
+/// board and deletes a board's message when the board goes. A board whose Discord tick is off counts
+/// as gone for every channel (<see cref="PlanDocData.ShownIn"/>).</para>
 /// <para>Polls rather than listening to <c>PlanChangeSignals</c>: the stored revision is the truth, so
 /// a restart, a missed signal or a Discord outage all end in the same catch-up, and a board is posted
 /// only once it has been left alone for <see cref="DiscordOptions.QuietSeconds"/> (a drag is one edit,
@@ -136,7 +137,7 @@ public sealed class DiscordPlanPublisher(
         WithLinkAsync(linkId, async (db, link, c) =>
         {
             if (link.Mode != "bot" || link.ChannelId != channelId) return;
-            var (plan, packName, boards) = await LoadAsync(db, link, c);
+            var (plan, packName, boards, _) = await LoadAsync(db, link, c);
             if (boards.Count == 0) return;
             var index = Math.Max(0, boards.FindIndex(b => b.Id == ShownBoard(link)));
             var target = boardId is not null
@@ -203,23 +204,21 @@ public sealed class DiscordPlanPublisher(
         catch (DbUpdateConcurrencyException) { /* the link was removed meanwhile */ }
     }
 
-    private static async Task<(PackPlanDocument? Plan, string PackName, List<PlanBoardData> Boards)> LoadAsync(
+    /// <summary>The pack's boards as the channel shows them (<see cref="PlanDocData.ShownIn"/>), and how
+    /// many more it would show but for their Discord tick.</summary>
+    private static async Task<(PackPlanDocument? Plan, string PackName, List<PlanBoardData> Boards, int KeptOut)> LoadAsync(
         AppDbContext db, PackDiscordLink link, CancellationToken ct)
     {
         var plan = await db.PackPlans.AsNoTracking().FirstOrDefaultAsync(p => p.PackId == link.PackId, ct);
         var packName = await db.Packs.AsNoTracking().Where(p => p.Id == link.PackId).Select(p => p.Name)
             .FirstOrDefaultAsync(ct) ?? "Modpack";
         var doc = plan is null ? null : PlanDocData.TryParse(plan.Json);
-        var boards = (doc?.Boards ?? new List<PlanBoardData>())
-            .Where(b => link.BoardId is null || b.Id == link.BoardId)
-            .Where(b => !b.IsEmpty)
-            .ToList();
-        return (plan, packName, boards);
+        return (plan, packName, PlanDocData.ShownIn(doc, link.BoardId), PlanDocData.KeptOutOf(doc, link.BoardId));
     }
 
     private async Task PublishAsync(AppDbContext db, PackDiscordLink link, CancellationToken ct)
     {
-        var (plan, packName, boards) = await LoadAsync(db, link, ct);
+        var (plan, packName, boards, keptOut) = await LoadAsync(db, link, ct);
         if (link.Mode == "bot") await ShowOneAsync(link, plan, packName, boards, show: null, force: link.RefreshRequested, ct);
         else await PostEachAsync(db, link, plan, packName, boards, ct);
 
@@ -229,7 +228,11 @@ public sealed class DiscordPlanPublisher(
         link.LastError = boards.Count == 0
             ? (plan is null
                 ? "This pack has no planning boards on the server yet. Open its planning page in CloudLauncher 0.9.8 or newer."
-                : "Every board this channel shows is empty, so there is nothing to post yet.")
+                : keptOut > 0
+                    ? (link.BoardId is null
+                        ? "Every board with something on it is kept out of Discord (its Discord tick is off), so there is nothing to post."
+                        : "This channel's board is kept out of Discord (its Discord tick is off), so there is nothing to post.")
+                    : "Every board this channel shows is empty, so there is nothing to post yet.")
             : null;
         link.LastErrorAt = link.LastError is null ? null : DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);

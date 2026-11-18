@@ -29,6 +29,23 @@ public sealed class PlanDocData
         try { return JsonSerializer.Deserialize<PlanDocData>(json, Options); }
         catch (JsonException) { return null; }
     }
+
+    /// <summary>The boards a linked channel shows, in the launcher's order: the link's one board or
+    /// every board, without the empty ones and the ones kept out of Discord.</summary>
+    /// <remarks>The one place that decides it, for the channel's messages, the live view their buttons
+    /// open and the Activity alike: a board kept out of the channel must not be one click away from
+    /// it either.</remarks>
+    public static List<PlanBoardData> ShownIn(PlanDocData? doc, string? onlyBoardId) =>
+        Candidates(doc, onlyBoardId).Where(b => b.ShowInDiscord).ToList();
+
+    /// <summary>How many boards the channel would show if their Discord tick were on.</summary>
+    public static int KeptOutOf(PlanDocData? doc, string? onlyBoardId) =>
+        Candidates(doc, onlyBoardId).Count(b => !b.ShowInDiscord);
+
+    private static IEnumerable<PlanBoardData> Candidates(PlanDocData? doc, string? onlyBoardId) =>
+        (doc?.Boards ?? new List<PlanBoardData>())
+        .Where(b => onlyBoardId is null || b.Id == onlyBoardId)
+        .Where(b => !b.IsEmpty);
 }
 
 public sealed class PlanBoardData
@@ -42,6 +59,10 @@ public sealed class PlanBoardData
     /// <summary>What has been drawn on the board with a pen or the mouse (launcher 0.9.12 on), oldest
     /// first. Null on boards nobody has drawn on.</summary>
     public List<PlanStrokeData>? Strokes { get; set; }
+
+    /// <summary>The board's Discord tick on the launcher's planning page (0.9.14 on). Unticked, no
+    /// linked channel shows it. Boards from older launchers don't have it and are shown.</summary>
+    public bool ShowInDiscord { get; set; } = true;
 
     [JsonIgnore] public bool HasDrawing => Strokes is { Count: > 0 };
 
