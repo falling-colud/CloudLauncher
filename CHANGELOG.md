@@ -3,6 +3,24 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.15 - 2026-11-19
+
+- Drawing on a planning board with a pen on a touch screen is steadier. While the pen is near the
+  screen, the hand holding it no longer moves or zooms the board, and the touchpad's scrolling and
+  clicks do nothing on the board either. The pen always draws, whatever fingers were doing, and a
+  palm that lands a moment before the pen and nudges the board is put back as the pen arrives.
+- A finger that lifted off the board somewhere else could stay down as far as the board knew. The
+  next finger then zoomed the board as if something were pressing the screen, or the board stayed
+  stuck in a move with a four-way arrow under the pen, which wouldn't draw. Fingers are now
+  followed over the whole page and let go of as soon as Windows has them up.
+- The pointer under the pen while drawing is the board's (none, for the pen and the highlighter),
+  not that of whatever the mouse last touched, so no stray arrow or hand turns up over the line.
+- A finger can no longer leave a line that vanishes as it lifts.
+- With "Draw with a finger too" on, a second finger touching down while the first has been drawing
+  for a moment is taken for a resting hand, and the line is kept. Two fingers landing together
+  still zoom.
+- A quick pen stroke over the board is never taken for a Windows flick.
+
 ## 0.9.14 - 2026-11-18
 
 - While a pack's planning boards are shown in a Discord channel, each board has a Discord tick at

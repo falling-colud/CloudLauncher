@@ -74,14 +74,18 @@ public sealed class PlanInkSurface : Decorator
 
     /// <summary>
     /// The pen's live line. It draws only when the board says a pen press here starts a line
-    /// (<see cref="Inking"/>), and never for a finger or inside the drawing palette.
+    /// (<see cref="Inking"/>), only for a pen it knows (<see cref="SetPenTablets"/>), so never for a
+    /// finger, and never inside the drawing palette.
     /// </summary>
     /// <remarks>These overrides run on the pen thread, before the UI thread has seen the press, so they
-    /// decide from flags the UI thread keeps up to date rather than by asking the board.</remarks>
+    /// decide from flags the UI thread keeps up to date rather than by asking the board. The pens are a
+    /// list of the tablets that may draw rather than of the touch screens that may not: a tablet Windows
+    /// adds later (a touch screen back from sleep under a new id) then draws nothing here, instead of a
+    /// finger's line that the board, panning meanwhile, never keeps.</remarks>
     public sealed class PenRenderer : DynamicRenderer
     {
         private volatile bool _inking;
-        private volatile int[] _touchTablets = [];
+        private volatile int[] _penTablets = [];
         private volatile Rect[] _keepOut = [];
         private readonly ConcurrentDictionary<int, byte> _skipped = new();
         private readonly ConcurrentDictionary<int, byte> _drawing = new();
@@ -99,16 +103,28 @@ public sealed class PlanInkSurface : Decorator
             set => _inking = value;
         }
 
-        /// <summary>The touch screens: a finger never draws through the renderer.</summary>
-        public void SetTouchTablets(int[] ids) => _touchTablets = ids;
+        /// <summary>The pen tablets: only their presses draw through the renderer.</summary>
+        public void SetPenTablets(int[] ids) => _penTablets = ids;
+
+        public bool IsPenTablet(int id) => Array.IndexOf(_penTablets, id) >= 0;
 
         /// <summary>Areas of the surface (the palette) where a press is meant for something on top.</summary>
         public void SetKeepOut(Rect[] areas) => _keepOut = areas;
 
+        /// <summary>Whether a press of this tablet's, first touching at <paramref name="at"/>, gets the live line.</summary>
+        public bool StartsLine(int tabletDeviceId, Point? at)
+        {
+            if (!_inking || !IsPenTablet(tabletDeviceId)) return false;
+            if (at is not { } p) return true;
+            foreach (var r in _keepOut)
+                if (r.Contains(p)) return false;
+            return true;
+        }
+
         protected override void OnStylusDown(RawStylusInput rawStylusInput)
         {
             var id = rawStylusInput.StylusDeviceId;
-            if (!_inking || Array.IndexOf(_touchTablets, rawStylusInput.TabletDeviceId) >= 0 || InKeepOut(rawStylusInput))
+            if (!StartsLine(rawStylusInput.TabletDeviceId, FirstPoint(rawStylusInput)))
             {
                 _drawing.TryRemove(id, out _);
                 _skipped[id] = 0;
@@ -133,16 +149,11 @@ public sealed class PlanInkSurface : Decorator
             base.OnStylusUp(rawStylusInput);
         }
 
-        private bool InKeepOut(RawStylusInput input)
+        private Point? FirstPoint(RawStylusInput input)
         {
-            var areas = _keepOut;
-            if (areas.Length == 0) return false;
+            if (_keepOut.Length == 0) return null;
             var points = input.GetStylusPoints();
-            if (points.Count == 0) return false;
-            var p = new Point(points[0].X, points[0].Y);
-            foreach (var r in areas)
-                if (r.Contains(p)) return true;
-            return false;
+            return points.Count == 0 ? null : new Point(points[0].X, points[0].Y);
         }
 
         /// <summary>Takes back the line the pen is drawing, when the press turned out to be for something

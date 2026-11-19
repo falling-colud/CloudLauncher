@@ -290,23 +290,24 @@ public static class InkScenario
         Check("P picks the pen again", Press(Key.P) && Field<object>("_inkTool").ToString() == "Pen");
 
         // ── a finger moves the board; two zoom it ──
-        var touches = Field<Dictionary<int, Point>>("_touches");
         Call("SetDrawMode", true);
         var z0 = Zoom;
         var c0 = new Point(400, 300);
-        touches[101] = new Point(350, 300);
-        touches[102] = new Point(450, 300);
-        Call("StartPinch");
+        static StylusPointCollection Touch(double x, double y) => new([new StylusPoint(x, y, 0.5f)]);
+        Func<bool> down = () => true;
+        Call("FingerDown", 101, new Point(350, 300), Touch(350, 300), down);
+        Call("FingerDown", 102, new Point(450, 300), Touch(450, 300), down);
         var boardUnder = new Point((c0.X - PanT.X) / z0, (c0.Y - PanT.Y) / z0);
-        touches[101] = new Point(300, 320);
-        touches[102] = new Point(500, 320);
-        Call("UpdatePinch");
+        Call("FingerMove", 101, new Point(300, 320), Touch(300, 320));
+        Call("FingerMove", 102, new Point(500, 320), Touch(500, 320));
         var underNow = new Point((400 - PanT.X) / Zoom, (320 - PanT.Y) / Zoom);
         Check("spreading two fingers twice as far doubles the zoom", Math.Abs(Zoom - z0 * 2) < 1e-6, $"zoom={Zoom}");
         Check("...and the point between them stays under them", (underNow - boardUnder).Length < 1e-6,
             $"{boardUnder} vs {underNow}");
-        touches.Clear();
-        typeof(ModPlanView).GetField("_pinch", F)!.SetValue(_view, null);
+        Call("FingerUp", 101, Touch(300, 320));
+        Call("FingerUp", 102, Touch(500, 320));
+        Check("...and lifting both lets go of the board", typeof(ModPlanView).GetField("_pinch", F)!.GetValue(_view) is null
+            && typeof(ModPlanView).GetField("_ink", F)!.GetValue(_view) is null);
         ZoomT.ScaleX = ZoomT.ScaleY = 1;
         PanT.X = PanT.Y = 0;
 

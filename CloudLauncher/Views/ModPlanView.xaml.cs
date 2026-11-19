@@ -133,6 +133,7 @@ public partial class ModPlanView : UserControl
 
     // pan
     private bool _panning;
+    private bool _panByFinger; // a finger, as the mouse: a pen arriving ends it (ModPlanView.Ink.cs)
     private Point _panStart;
     private double _panOrigX, _panOrigY;
 
@@ -346,6 +347,7 @@ public partial class ModPlanView : UserControl
     private void ApplyRemoteWhenIdle()
     {
         if (!_remotePending) return;
+        ReapGestures(); // a finger's move whose lift went missing would hold changes off for good
         if (BusyEditing) { _remoteRetry.Stop(); _remoteRetry.Start(); return; }
         _remoteRetry.Stop();
         _remotePending = false;
@@ -4856,6 +4858,7 @@ public partial class ModPlanView : UserControl
     private void OnViewportMouseDown(object sender, MouseButtonEventArgs e)
     {
         Viewport.Focus();
+        ReapGestures(); // a pinch whose fingers WPF no longer has would block this press
         if (_drawMode || _pinch is not null)
         {
             e.Handled = true; // a two-finger zoom, or the drawing palette's own background
@@ -4889,11 +4892,13 @@ public partial class ModPlanView : UserControl
     private void BeginPan(MouseButtonEventArgs e)
     {
         _panning = true;
+        _panByFinger = e.StylusDevice?.TabletDevice?.Type == TabletDeviceType.Touch;
         _panStart = e.GetPosition(Viewport);
         _panOrigX = PanT.X;
         _panOrigY = PanT.Y;
         Viewport.CaptureMouse();
-        Viewport.Cursor = Cursors.SizeAll;
+        // A finger has no pointer to show; a four-way arrow set for it would only turn up under the pen.
+        if (!_panByFinger) Viewport.Cursor = Cursors.SizeAll;
     }
 
     private void OnViewportMouseMove(object sender, MouseEventArgs e)
@@ -5048,6 +5053,10 @@ public partial class ModPlanView : UserControl
     private void OnViewportWheel(object sender, MouseWheelEventArgs e)
     {
         e.Handled = true;
+        // With the pen near the screen a wheel is a palm on the touchpad (its two-finger scroll or pinch),
+        // which would zoom the board out from under the pen.
+        if (PenNear) return;
+        ReapGestures();
         // Zooming in the middle of a line would bend it: the points so far are on screen, not on the board.
         if (_ink is { Kind: not InkGestureKind.Pan } || _pinch is not null) return;
         var m = e.GetPosition(Viewport);

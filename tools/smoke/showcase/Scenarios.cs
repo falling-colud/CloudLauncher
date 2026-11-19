@@ -17,6 +17,7 @@ public static class Scenarios
             case "planning-ink": InkScenario.Run(); break;
             case "planning-discord": DiscordScenario.Run(); break;
             case "planning-rail-drag": RailDragScenario.Run(); break;
+            case "planning-pen-touch": PenTouchScenario.Run(); break;
             case "files":
             {
                 // The instance page's Files tab (Hearthstone has logs and a crash report on disk).

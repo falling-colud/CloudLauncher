@@ -15,6 +15,8 @@ namespace CloudLauncher.Views;
 //
 // - Draw (toolbar, or D) turns drawing on. The pen, the mouse and (if asked) a finger then draw with the
 //   palette's tool; a finger otherwise moves the board, two fingers zoom it, and the wheel zooms as ever.
+// - The pen comes first: while it is near the screen, fingers, the palm and the touchpad do nothing on
+//   the board (see "who has the board" below).
 // - The back of the pen erases at any time, drawing or not, and so does the pen's side button held down
 //   (it selects instead while drawing, like a lasso).
 // - What is drawn is stored on the board (PlanBoard.Strokes) in board units, so it pans, zooms, syncs and
@@ -86,9 +88,22 @@ public partial class ModPlanView
 
     private InkGesture? _ink;
 
-    /// <summary>Fingers down on the drawing surface, by stylus device id, where they are now.</summary>
-    private readonly Dictionary<int, Point> _touches = new();
+    /// <summary>Fingers the board follows itself (all of them while drawing, and palms while not), by
+    /// stylus device id.</summary>
+    private readonly Dictionary<int, Finger> _fingers = new();
     private Pinch? _pinch;
+
+    /// <summary>The board as it was when fingers began moving it, and when, so a move a pen interrupts
+    /// right away (a palm that landed first) can be taken back.</summary>
+    private (long At, double Zoom, double PanX, double PanY)? _fingersBegan;
+
+    /// <summary>When a pen was last seen anywhere on the page, and the last pen (for WPF's own word on
+    /// whether it is still in range, while it hovers without moving).</summary>
+    private long _penSeenAt = long.MinValue / 2;
+    private StylusDevice? _pen;
+
+    /// <summary>Milliseconds, swapped by the tests.</summary>
+    private Func<long> _ticks = () => Environment.TickCount64;
 
     /// <summary>Strokes copied with Ctrl+C, and whether they were copied after the last cards were (then
     /// Ctrl+V pastes them rather than the cards).</summary>
@@ -124,9 +139,24 @@ public partial class ModPlanView
         public Vector Moved;
         public bool Changed;
         public double PanX, PanY;
+        /// <summary>When it began (<see cref="_ticks"/>).</summary>
+        public long Began;
     }
 
     private sealed record Pinch(int A, int B, Point A0, Point B0, double Zoom, double PanX, double PanY);
+
+    /// <summary>A finger on the board.</summary>
+    private sealed class Finger
+    {
+        public required int Id;
+        public Point At;
+        /// <summary>Taken for the hand that holds the pen (or a finger too many): followed until it lifts,
+        /// so it can't start anything, and used for nothing.</summary>
+        public bool Ignored;
+        /// <summary>WPF's own record that the contact is still on the glass, for a finger whose lift went
+        /// somewhere this page never saw.</summary>
+        public Func<bool> Down = () => true;
+    }
 
     // ── settings ────────────────────────────────────────────────────────────────
 
@@ -202,12 +232,24 @@ public partial class ModPlanView
         Viewport.PreviewStylusInRange += OnViewportStylusHover;
         Viewport.PreviewStylusInAirMove += OnViewportStylusHover;
         Viewport.PreviewStylusOutOfRange += OnViewportStylusOutOfRange;
+        // A quick pen stroke on the board is a stroke, never a Windows flick (a back or scroll command
+        // and its icon). The drawing surface turns off the rest while drawing (PlanInkSurface).
+        Stylus.SetIsFlicksEnabled(Viewport, false);
 
         // Two fingers zoom the board while drawing is off too (one still pans it, through the mouse).
         Viewport.PreviewTouchDown += OnViewportTouchDown;
         Viewport.PreviewTouchMove += OnViewportTouchMove;
         Viewport.PreviewTouchUp += OnViewportTouchUp;
         Viewport.LostTouchCapture += OnViewportLostTouch;
+
+        // Where the pen is, and the fingers the board follows, seen from the whole page whoever handles
+        // them: a finger that slides off the board onto the palette still lifts here.
+        AddHandler(Stylus.PreviewStylusInRangeEvent, new StylusEventHandler(OnPagePenSeen), true);
+        AddHandler(Stylus.PreviewStylusInAirMoveEvent, new StylusEventHandler(OnPagePenSeen), true);
+        AddHandler(Stylus.PreviewStylusDownEvent, new StylusDownEventHandler(OnPageStylusDown), true);
+        AddHandler(Stylus.PreviewStylusMoveEvent, new StylusEventHandler(OnPageStylusMove), true);
+        AddHandler(Stylus.PreviewStylusUpEvent, new StylusEventHandler(OnPageStylusUp), true);
+        AddHandler(Stylus.PreviewStylusOutOfRangeEvent, new StylusEventHandler(OnPageStylusOutOfRange), true);
 
         InkPalette.SizeChanged += (_, _) => UpdatePaletteKeepOut();
         InkSurface.SizeChanged += (_, _) => UpdatePaletteKeepOut();
@@ -225,19 +267,21 @@ public partial class ModPlanView
         BuildInkPalette();
         ApplyInkVisibility();
 
-        Loaded += (_, _) => RefreshTouchTablets();
+        Loaded += (_, _) => RefreshPenTablets();
     }
 
-    private void RefreshTouchTablets()
+    /// <summary>Tells the live renderer which tablets are pens. Asked again whenever a pen the list
+    /// lacks shows up (Windows can add a tablet, or bring one back under a new id, at any time).</summary>
+    private void RefreshPenTablets()
     {
         try
         {
             var ids = new List<int>();
             foreach (TabletDevice t in Tablet.TabletDevices)
-                if (t.Type == TabletDeviceType.Touch) ids.Add(t.Id);
-            InkSurface.Renderer.SetTouchTablets(ids.ToArray());
+                if (t.Type == TabletDeviceType.Stylus) ids.Add(t.Id);
+            InkSurface.Renderer.SetPenTablets(ids.ToArray());
         }
-        catch { /* no tablet stack: nothing draws through the renderer anyway */ }
+        catch { InkSurface.Renderer.SetPenTablets([]); /* no tablet stack: the board draws every line itself */ }
     }
 
     // ── draw mode ───────────────────────────────────────────────────────────────
@@ -250,6 +294,7 @@ public partial class ModPlanView
     {
         if (on == _drawMode) return;
         EndInkGesture(cancel: true);
+        EndBoardMoves();
         if (on)
         {
             if (ArrowModeActive) SetArrowTool(false);
@@ -259,7 +304,7 @@ public partial class ModPlanView
                 InkSettings.PlanInkHidden = false; // drawing on hidden lines would be drawing blind
                 SaveInkSettings();
             }
-            RefreshTouchTablets();
+            RefreshPenTablets();
         }
         else
         {
@@ -304,7 +349,9 @@ public partial class ModPlanView
     {
         Cursor cursor;
         if (_ink is { Kind: InkGestureKind.Move }) cursor = Cursors.SizeAll;
-        else if (_ink is { Kind: InkGestureKind.Pan }) cursor = Cursors.SizeAll;
+        // The four-way arrow for the mouse's middle-button move only: a finger has no pointer, and one
+        // shown for it would sit under the pen.
+        else if (_ink is { Kind: InkGestureKind.Pan, Device: InkDevice.Mouse }) cursor = Cursors.SizeAll;
         else if (at is { } p && InSelectionBox(ToBoard(p))) cursor = Cursors.SizeAll;
         else cursor = _inkTool switch
         {
@@ -342,12 +389,12 @@ public partial class ModPlanView
     }
 
     /// <summary>Whether a pen tip pressed where it hovers now starts a line, for the live renderer.</summary>
-    private void UpdatePenInking(StylusDevice device, Point at)
+    private void UpdatePenInking(bool inverted, bool barrel, Point at)
     {
         if (_penLookStale) ApplyPenLook();
         InkSurface.Renderer.Inking = _drawMode && _ink is null
             && _inkTool is InkTool.Pen or InkTool.Highlighter
-            && !device.Inverted && !BarrelDown(device)
+            && !inverted && !barrel
             && !InSelectionBox(ToBoard(at));
     }
 
@@ -366,32 +413,237 @@ public partial class ModPlanView
     private static InkDevice DeviceOf(StylusDevice device) =>
         device.TabletDevice?.Type == TabletDeviceType.Touch ? InkDevice.Touch : InkDevice.Pen;
 
+    // ── who has the board ───────────────────────────────────────────────────────
+    // The pen comes first. While one is near the screen (in range, or out of it for less than
+    // PalmGraceMs), whatever else touches the board is taken for the hand that holds it: a finger that
+    // lands then is ignored until it lifts, and so are the mouse's buttons and wheel over the board (a
+    // palm on the touchpad). A pen arriving ends what fingers were doing with the board, and takes back
+    // a move they only just began (a palm that landed a moment before the pen).
+    //
+    // The fingers the board follows are seen from the whole page, not the drawing surface only, and are
+    // checked against WPF's own record of each contact: a finger whose lift never came here would
+    // otherwise hold the board in a move the pen can't get into, or pinch with the next finger (the board
+    // zooming as if something pressed the screen). They are never captured: in WPF every pen and finger
+    // shares the mouse's capture, so a finger letting go of it would take it from a pen drawing then.
+
+    private const int PalmGraceMs = 600;
+    private const int TakeBackMs = 500;
+    /// <summary>How long WPF's word that the pen is still in range counts with no news from the pen.</summary>
+    private const int PenStillMs = 10_000;
+    /// <summary>A finger's line this young (or this short) when a second finger lands goes, for a pinch;
+    /// an older one stays a line, and the second finger is taken for a resting hand.</summary>
+    private const int YoungLineMs = 300;
+    private const double YoungLinePx = 24;
+
+    /// <summary>A pen is near the screen, or was a moment ago.</summary>
+    private bool PenNear
+    {
+        get
+        {
+            var since = _ticks() - _penSeenAt;
+            if (since < PalmGraceMs) return true;
+            if (since >= PenStillMs) return false;
+            try { return _pen is { InRange: true }; }
+            catch { return false; }
+        }
+    }
+
+    /// <summary>A pen showed up somewhere on the page: the fingers give the board up to it.</summary>
+    private void PenSeen(StylusDevice? device)
+    {
+        _penSeenAt = _ticks();
+        if (device is not null) _pen = device;
+        YieldToPen();
+    }
+
+    /// <summary>The pen left: fingers count again once <see cref="PalmGraceMs"/> have gone by. (The live
+    /// renderer keeps its word for the pen's return: a quick stroke right as it comes back draws at once,
+    /// and no finger draws through it whatever it says.)</summary>
+    private void PenLeft()
+    {
+        _penSeenAt = _ticks();
+        HidePenDot();
+        if (_ink is null) HideEraserRing();
+    }
+
+    /// <summary>Ends what fingers are doing with the board, for the pen. Every finger still down is from
+    /// then on taken for the hand holding it.</summary>
+    private void YieldToPen()
+    {
+        var busy = _ink is { Device: InkDevice.Touch } || _pinch is not null || _viewTouches.Count > 0
+                   || (_panning && _panByFinger);
+        foreach (var f in _fingers.Values)
+        {
+            if (f.Ignored) continue;
+            f.Ignored = true;
+            busy = true;
+        }
+        if (!busy) return;
+
+        var began = _fingersBegan;
+        _fingersBegan = null;
+        _viewTouches.Clear();
+        _pinch = null;
+        if (_ink is { Device: InkDevice.Touch }) EndInkGesture(cancel: true);
+        if (_panning && _panByFinger)
+        {
+            // Drawing off, a finger is the mouse and was moving the board.
+            _panning = false;
+            if (Viewport.IsMouseCaptured) Viewport.ReleaseMouseCapture();
+            Viewport.Cursor = Cursors.Arrow;
+        }
+        if (began is { } b && _ticks() - b.At < TakeBackMs)
+        {
+            // A palm that landed just before the pen: the board goes back to where it was.
+            ZoomT.ScaleX = ZoomT.ScaleY = b.Zoom;
+            PanT.X = b.PanX;
+            PanT.Y = b.PanY;
+            SyncGrid();
+            RefreshInkZoomDependent();
+        }
+        StashViewport();
+    }
+
+    /// <summary>Ends every move of the board in progress, as drawing goes on or off; fingers still down
+    /// are left alone until they lift.</summary>
+    private void EndBoardMoves()
+    {
+        foreach (var f in _fingers.Values) f.Ignored = true;
+        _fingersBegan = null;
+        _viewTouches.Clear();
+        if (_pinch is not null)
+        {
+            _pinch = null;
+            StashViewport();
+        }
+        if (_marquee) EndMarquee();
+        if (_panning)
+        {
+            _panning = false;
+            if (Viewport.IsMouseCaptured) Viewport.ReleaseMouseCapture();
+            Viewport.Cursor = Cursors.Arrow;
+            StashViewport();
+        }
+    }
+
+    /// <summary>Before anything new starts on the board: what fingers left behind is cleared away.</summary>
+    private void ReapGestures()
+    {
+        ReapFingers();
+        ReapViewTouches();
+    }
+
+    private static Func<bool> StillDown(StylusDevice device) => () =>
+    {
+        try { return !device.InAir && device.InRange; }
+        catch { return false; }
+    };
+
+    /// <summary>Whether a point of the board's viewport is on the board itself (not on the palette).</summary>
+    private bool OnBoard(Point inViewport)
+    {
+        if (inViewport.X < 0 || inViewport.Y < 0 || inViewport.X > Viewport.ActualWidth || inViewport.Y > Viewport.ActualHeight)
+            return false;
+        if (!InkPalette.IsVisible) return true;
+        try
+        {
+            var palette = InkPalette.TransformToVisual(Viewport).TransformBounds(new Rect(InkPalette.RenderSize));
+            return !palette.Contains(inViewport);
+        }
+        catch (InvalidOperationException) { return true; }
+    }
+
+    // ── the page's view of pens and fingers ─────────────────────────────────────
+    // Preview handlers on the whole view that see every event, handled or not. They only watch the pen;
+    // fingers the board follows they take wherever they go, so none becomes a touch or the mouse.
+
+    private void OnPagePenSeen(object sender, StylusEventArgs e)
+    {
+        if (DeviceOf(e.StylusDevice) == InkDevice.Pen) PenSeen(e.StylusDevice);
+    }
+
+    private void OnPageStylusDown(object sender, StylusDownEventArgs e)
+    {
+        var device = e.StylusDevice;
+        if (DeviceOf(device) == InkDevice.Pen)
+        {
+            PenSeen(device);
+            return;
+        }
+        // While drawing, a finger on the board is the drawing surface's (OnInkStylusDown). With drawing
+        // off, one landing while the pen is near is a palm, kept from becoming a touch or the mouse.
+        if (_drawMode || e.Handled || !PenNear || !OnBoard(e.GetPosition(Viewport))) return;
+        ReapFingers();
+        _fingers[device.Id] = new Finger { Id = device.Id, At = e.GetPosition(InkSurface), Ignored = true, Down = StillDown(device) };
+        e.Handled = true;
+    }
+
+    private void OnPageStylusMove(object sender, StylusEventArgs e)
+    {
+        var device = e.StylusDevice;
+        if (DeviceOf(device) == InkDevice.Pen)
+        {
+            PenSeen(device);
+            return;
+        }
+        if (!_fingers.ContainsKey(device.Id)) return;
+        e.Handled = true; // the board's, wherever it is now
+        FingerMove(device.Id, e.GetPosition(InkSurface), e.GetStylusPoints(InkSurface));
+    }
+
+    private void OnPageStylusUp(object sender, StylusEventArgs e)
+    {
+        var device = e.StylusDevice;
+        if (DeviceOf(device) == InkDevice.Pen)
+        {
+            PenSeen(device);
+            return;
+        }
+        if (!_fingers.ContainsKey(device.Id)) return;
+        e.Handled = true;
+        FingerUp(device.Id, e.GetStylusPoints(InkSurface));
+    }
+
+    private void OnPageStylusOutOfRange(object sender, StylusEventArgs e)
+    {
+        var device = e.StylusDevice;
+        if (DeviceOf(device) == InkDevice.Pen) PenLeft();
+        else FingerUp(device.Id, null);
+    }
+
     // ── pen input ───────────────────────────────────────────────────────────────
-    // Every stylus event on the surface is marked handled: WPF then makes no mouse event of it, so a
-    // stroke can never also click, drag or pan what is under it.
+    // Every press, move and lift on the surface is marked handled: WPF then makes no mouse event of it,
+    // so a stroke can never also click, drag or pan what is under it. (Fingers are followed from the
+    // page, above; only their press starts here.)
 
     private void OnInkStylusDown(object sender, StylusDownEventArgs e)
     {
         e.Handled = true;
-        HidePenDot();
         var device = e.StylusDevice;
         var at = e.GetPosition(InkSurface);
         if (DeviceOf(device) == InkDevice.Touch)
         {
-            FingerDown(device, at, e.GetStylusPoints(InkSurface));
+            FingerDown(device.Id, at, e.GetStylusPoints(InkSurface), StillDown(device));
             return;
         }
+        PenDown(device.Id, device.Inverted, BarrelDown(device), at, e.GetStylusPoints(InkSurface),
+            InkSurface.Renderer.Drawing(device.Id));
+        if (_ink is { Device: InkDevice.Pen } g && g.DeviceId == device.Id) device.Capture(InkSurface);
+    }
+
+    /// <summary>The pen touched the board: it draws (or erases, or selects), whatever else was going on.</summary>
+    private void PenDown(int id, bool inverted, bool barrel, Point at, StylusPointCollection points, bool rendererDrew)
+    {
+        HidePenDot();
+        PenSeen(null); // the fingers' move ends here, if the page didn't end it already
+        ReapGestures();
+        // Whatever is still under way gives way: the mouse's line, or one of this pen's whose lift never
+        // reached the board.
+        if (_ink is not null) EndInkGesture(cancel: false);
 
         var renderer = InkSurface.Renderer;
-        var rendererDrew = renderer.Drawing(device.Id);
-        if (_ink is not null || _pinch is not null)
-        {
-            if (rendererDrew) renderer.Abort(); // one gesture at a time
-            return;
-        }
-
         InkTool tool;
-        if (device.Inverted) tool = InkTool.Eraser;              // the back of the pen
+        if (inverted) tool = InkTool.Eraser;              // the back of the pen
         else if (!_drawMode)
         {
             // Only the back of the pen gets here with drawing off; the tip after a flip just stops it.
@@ -400,62 +652,77 @@ public partial class ModPlanView
             UpdateInkSurface();
             return;
         }
-        else if (BarrelDown(device)) tool = _inkTool == InkTool.Eraser ? InkTool.Eraser : InkTool.Select;
+        else if (barrel) tool = _inkTool == InkTool.Eraser ? InkTool.Eraser : InkTool.Select;
         else tool = _inkTool;
 
-        BeginInkGesture(tool, InkDevice.Pen, device.Id, at, e.GetStylusPoints(InkSurface));
+        BeginInkGesture(tool, InkDevice.Pen, id, at, points);
         if (_ink is { Kind: InkGestureKind.Draw } g)
         {
             // The renderer decided from the hover; if it missed this one, draw it here instead.
             if (!rendererDrew) ShowWetLine(g);
         }
         else if (rendererDrew) renderer.Abort();
-        if (_ink is not null) device.Capture(InkSurface);
     }
 
     private void OnInkStylusMove(object sender, StylusEventArgs e)
     {
         e.Handled = true;
         var device = e.StylusDevice;
-        if (DeviceOf(device) == InkDevice.Touch)
-        {
-            FingerMove(device, e.GetPosition(InkSurface), e.GetStylusPoints(InkSurface));
-            return;
-        }
-        if (_ink is { Device: InkDevice.Pen } g && g.DeviceId == device.Id)
-            InkGestureMove(e.GetStylusPoints(InkSurface));
+        if (DeviceOf(device) == InkDevice.Pen) PenMove(device.Id, e.GetStylusPoints(InkSurface));
     }
 
     private void OnInkStylusUp(object sender, StylusEventArgs e)
     {
         e.Handled = true;
         var device = e.StylusDevice;
-        if (DeviceOf(device) == InkDevice.Touch)
-        {
-            FingerUp(device, e.GetPosition(InkSurface), e.GetStylusPoints(InkSurface));
-            return;
-        }
-        if (_ink is { Device: InkDevice.Pen } g && g.DeviceId == device.Id)
-        {
-            InkGestureMove(e.GetStylusPoints(InkSurface));
-            EndInkGesture(cancel: false);
-        }
+        if (DeviceOf(device) == InkDevice.Touch) return;
+        PenUp(device.Id, e.GetStylusPoints(InkSurface));
         // Also after a stroke Esc cancelled midway: the pen kept the surface captured until now.
         if (ReferenceEquals(device.Captured, InkSurface)) device.Capture(null);
     }
 
+    private void PenMove(int id, StylusPointCollection points)
+    {
+        if (_ink is { Device: InkDevice.Pen } g && g.DeviceId == id) InkGestureMove(points);
+    }
+
+    private void PenUp(int id, StylusPointCollection points)
+    {
+        if (_ink is not { Device: InkDevice.Pen } g || g.DeviceId != id) return;
+        InkGestureMove(points);
+        EndInkGesture(cancel: false);
+    }
+
     private void OnInkStylusHover(object sender, StylusEventArgs e)
     {
-        e.Handled = true; // no mouse moves from a hovering pen: they would light up the cards underneath
         var device = e.StylusDevice;
-        if (DeviceOf(device) == InkDevice.Touch) return;
-        var at = e.GetPosition(InkSurface);
-        UpdatePenInking(device, at);
+        if (DeviceOf(device) == InkDevice.Touch)
+        {
+            e.Handled = true;
+            return;
+        }
+        // While drawing, the hover goes on to WPF's mouse, which so follows the pen and takes the pointer
+        // from the surface under it (none, for the pen and the highlighter). Marked handled, the mouse
+        // stayed wherever it last was, and the pen showed that element's pointer instead: an arrow, a
+        // hand, a card's four-way arrow. With drawing off only the back of the pen gets here, and its
+        // hover must not light up the cards underneath.
+        if (!_drawMode) e.Handled = true;
+        if (device.TabletDevice is { } tablet && !InkSurface.Renderer.IsPenTablet(tablet.Id)) RefreshPenTablets();
+        PenHover(device.Id, device.Inverted, BarrelDown(device), e.GetPosition(InkSurface));
+    }
+
+    /// <summary>The pen in the air over the board: its dot or the eraser's ring, and what a press there
+    /// would do.</summary>
+    private void PenHover(int id, bool inverted, bool barrel, Point at)
+    {
+        // In the air, the pen has lifted: a line whose lift never reached the board ends here.
+        if (_ink is { Device: InkDevice.Pen } g && g.DeviceId == id) EndInkGesture(cancel: false);
+        UpdatePenInking(inverted, barrel, at);
         if (_ink is null)
         {
-            if (device.Inverted || (_drawMode && _inkTool == InkTool.Eraser)) ShowEraserRing(at);
+            if (inverted || (_drawMode && _inkTool == InkTool.Eraser)) ShowEraserRing(at);
             else HideEraserRing();
-            if (device.Inverted) HidePenDot();
+            if (inverted) HidePenDot();
             else ShowPenDot(at);
             UpdateInkCursor(at);
         }
@@ -463,9 +730,7 @@ public partial class ModPlanView
 
     private void OnInkStylusOutOfRange(object sender, StylusEventArgs e)
     {
-        e.Handled = true;
-        HidePenDot();
-        if (_ink is null) HideEraserRing();
+        if (!_drawMode) e.Handled = true; // (the page saw it go: OnPageStylusOutOfRange)
     }
 
     /// <summary>Taps, holds and flicks are handled here so none of them turns into a mouse click on the
@@ -479,7 +744,7 @@ public partial class ModPlanView
 
     private void OnInkLostStylusCapture(object sender, StylusEventArgs e)
     {
-        if (_ink is { Device: InkDevice.Pen }) EndInkGesture(cancel: false);
+        if (_ink is { Device: InkDevice.Pen } g && g.DeviceId == e.StylusDevice.Id) EndInkGesture(cancel: false);
     }
 
     // ── the back of the pen, drawing off ────────────────────────────────────────
@@ -504,11 +769,15 @@ public partial class ModPlanView
     }
 
     // ── mouse input ─────────────────────────────────────────────────────────────
+    // With the pen near the screen the mouse's buttons do nothing on the board: that is a palm on the
+    // touchpad (a Surface's sits right under the screen in its studio pose).
 
     private void OnInkMouseDown(object sender, MouseButtonEventArgs e)
     {
         e.Handled = true;
         if (e.StylusDevice is not null) return; // a pen or finger: already taken as stylus input
+        if (PenNear) return;
+        ReapGestures();
         HidePenDot();
         var at = e.GetPosition(InkSurface);
         if (e.ChangedButton == MouseButton.Middle && _ink is null)
@@ -534,7 +803,7 @@ public partial class ModPlanView
             else InkGestureMove(MousePoints(at));
             return;
         }
-        if (_ink is not null) return;
+        if (_ink is not null || PenNear) return;
         if (_drawMode && _inkTool == InkTool.Eraser) ShowEraserRing(at);
         ShowPenDot(at);
         UpdateInkCursor(at);
@@ -555,7 +824,7 @@ public partial class ModPlanView
             }
             return;
         }
-        if (e.ChangedButton == MouseButton.Right && _drawMode) ShowInkMenu(at);
+        if (e.ChangedButton == MouseButton.Right && _drawMode && !PenNear) ShowInkMenu(at);
     }
 
     private void OnInkLostMouseCapture(object sender, MouseEventArgs e)
@@ -565,65 +834,121 @@ public partial class ModPlanView
 
     private static StylusPointCollection MousePoints(Point at) => new([new StylusPoint(at.X, at.Y, 0.5f)]);
 
-    // ── touch ───────────────────────────────────────────────────────────────────
+    // ── fingers, drawing ────────────────────────────────────────────────────────
     // While drawing, one finger moves the board (or draws, if asked) and two zoom it.
 
-    private void FingerDown(StylusDevice device, Point at, StylusPointCollection points)
+    private void FingerDown(int id, Point at, StylusPointCollection points, Func<bool> down)
     {
-        if (_ink is { Device: InkDevice.Pen or InkDevice.Mouse }) return; // a palm while the pen draws
-        _touches[device.Id] = at;
-        device.Capture(InkSurface);
-        if (_touches.Count == 1)
+        ReapGestures();
+        var finger = new Finger { Id = id, At = at, Down = down };
+        _fingers[id] = finger; // an id Windows hands out again is a new finger
+        if (PenNear || _ink is { Device: InkDevice.Pen or InkDevice.Mouse })
         {
+            finger.Ignored = true; // the hand holding the pen
+            return;
+        }
+
+        var active = _fingers.Values.Where(f => !f.Ignored).ToList();
+        if (active.Count == 1)
+        {
+            _fingersBegan ??= (_ticks(), Zoom, PanT.X, PanT.Y);
             if (_drawMode && InkSettings.PlanInkTouchDraws)
             {
-                BeginInkGesture(_inkTool, InkDevice.Touch, device.Id, at, TouchPoints(points));
+                BeginInkGesture(_inkTool, InkDevice.Touch, id, at, TouchPoints(points));
                 if (_ink is { Kind: InkGestureKind.Draw } g) ShowWetLine(g);
             }
-            else BeginPan(InkDevice.Touch, device.Id, at);
+            else BeginPan(InkDevice.Touch, id, at);
+            return;
         }
-        else if (_touches.Count == 2)
+        if (active.Count == 2 && _pinch is null)
         {
-            // A second finger turns whatever the first began into a pinch: a line it started is taken back.
+            // Two fingers landing together pinch, and a line the first had only just begun goes. One the
+            // first finger has been drawing for a while stays a line: this finger is a resting hand.
+            if (_ink is { Device: InkDevice.Touch, Kind: not InkGestureKind.Pan } line && !YoungLine(line))
+            {
+                finger.Ignored = true;
+                return;
+            }
+            var first = active.First(f => f.Id != id);
             EndInkGesture(cancel: true);
-            StartPinch();
+            _pinch = new Pinch(first.Id, id, first.At, at, Zoom, PanT.X, PanT.Y);
+            return;
         }
+        finger.Ignored = true; // a third finger changes nothing
     }
 
-    private void FingerMove(StylusDevice device, Point at, StylusPointCollection points)
+    private bool YoungLine(InkGesture g)
     {
-        if (!_touches.ContainsKey(device.Id)) return;
-        _touches[device.Id] = at;
-        if (_pinch is not null) UpdatePinch();
-        else if (_ink is { Device: InkDevice.Touch } g && g.DeviceId == device.Id)
+        if (_ticks() - g.Began < YoungLineMs || g.Points is not { } points) return true;
+        foreach (var p in points)
+            if ((new Point(p.X, p.Y) - g.StartScreen).Length >= YoungLinePx) return false;
+        return true;
+    }
+
+    private void FingerMove(int id, Point at, StylusPointCollection points)
+    {
+        if (!_fingers.TryGetValue(id, out var f)) return;
+        f.At = at;
+        if (f.Ignored) return;
+        if (_pinch is { } p)
+        {
+            if ((p.A == id || p.B == id) && _fingers.TryGetValue(p.A, out var a) && _fingers.TryGetValue(p.B, out var b))
+                UpdatePinch(a.At, b.At);
+            return;
+        }
+        if (_ink is { Device: InkDevice.Touch } g && g.DeviceId == id)
         {
             if (g.Kind == InkGestureKind.Pan) PanTo(at);
             else InkGestureMove(TouchPoints(points));
         }
     }
 
-    private void FingerUp(StylusDevice device, Point at, StylusPointCollection points)
+    private void FingerUp(int id, StylusPointCollection? points)
     {
-        if (!_touches.Remove(device.Id)) return;
-        device.Capture(null);
-        if (_pinch is not null)
+        if (!_fingers.Remove(id, out var f)) return;
+        if (!f.Ignored) LetGoOf(f, points);
+        if (_fingers.Count == 0 && _viewTouches.Count == 0) _fingersBegan = null;
+    }
+
+    /// <summary>What a finger that lifted (or turned out to be gone) was doing ends.</summary>
+    private void LetGoOf(Finger f, StylusPointCollection? points)
+    {
+        if (_pinch is { } p && (p.A == f.Id || p.B == f.Id))
         {
-            if (_touches.Count >= 2) return;
             _pinch = null;
             StashViewport();
             // The finger still down carries on moving the board from where it is.
-            if (_touches.Count == 1)
-            {
-                var (id, p) = _touches.First();
-                BeginPan(InkDevice.Touch, id, p);
-            }
+            var other = p.A == f.Id ? p.B : p.A;
+            if (_fingers.TryGetValue(other, out var o) && !o.Ignored && _ink is null) BeginPan(InkDevice.Touch, other, o.At);
             return;
         }
-        if (_ink is { Device: InkDevice.Touch } g && g.DeviceId == device.Id)
+        if (_ink is { Device: InkDevice.Touch } g && g.DeviceId == f.Id)
         {
-            if (g.Kind != InkGestureKind.Pan) InkGestureMove(TouchPoints(points));
+            if (g.Kind != InkGestureKind.Pan && points is { Count: > 0 }) InkGestureMove(TouchPoints(points));
             EndInkGesture(cancel: false);
         }
+    }
+
+    /// <summary>Lets go of fingers that WPF says have left the glass, though their lift never came here,
+    /// and of a move or pinch that has lost its finger.</summary>
+    private void ReapFingers()
+    {
+        foreach (var f in _fingers.Values.ToList())
+        {
+            bool down;
+            try { down = f.Down(); }
+            catch { down = false; }
+            if (down) continue;
+            _fingers.Remove(f.Id);
+            if (!f.Ignored) LetGoOf(f, null);
+        }
+        if (_ink is { Device: InkDevice.Touch } g && !_fingers.ContainsKey(g.DeviceId)) EndInkGesture(cancel: false);
+        if (_drawMode && _pinch is { } p && (!_fingers.ContainsKey(p.A) || !_fingers.ContainsKey(p.B)))
+        {
+            _pinch = null;
+            StashViewport();
+        }
+        if (_fingers.Count == 0 && _viewTouches.Count == 0) _fingersBegan = null;
     }
 
     /// <summary>A finger presses evenly: its points draw at the stroke's own width.</summary>
@@ -634,16 +959,10 @@ public partial class ModPlanView
         return flat;
     }
 
-    private void StartPinch()
+    /// <summary>Zooms and moves the board to follow two fingers from where the pinch began.</summary>
+    private void UpdatePinch(Point a, Point b)
     {
-        if (_touches.Count < 2) return;
-        var pair = _touches.Take(2).ToArray();
-        _pinch = new Pinch(pair[0].Key, pair[1].Key, pair[0].Value, pair[1].Value, Zoom, PanT.X, PanT.Y);
-    }
-
-    private void UpdatePinch()
-    {
-        if (_pinch is not { } p || !_touches.TryGetValue(p.A, out var a) || !_touches.TryGetValue(p.B, out var b)) return;
+        if (_pinch is not { } p) return;
         var c0 = new Point((p.A0.X + p.B0.X) / 2, (p.A0.Y + p.B0.Y) / 2);
         var c1 = new Point((a.X + b.X) / 2, (a.Y + b.Y) / 2);
         var d0 = Math.Max(8, (p.A0 - p.B0).Length);
@@ -658,18 +977,24 @@ public partial class ModPlanView
         RefreshInkZoomDependent();
     }
 
+    // ── fingers, drawing off ────────────────────────────────────────────────────
     // Outside drawing a finger is the mouse (WPF promotes the first one), which pans the empty board. A
     // second finger landing while the first is on the empty board turns that into a pinch. (The first
     // finger's mouse press can arrive late, after Windows has ruled out a press-and-hold; the board's
-    // mouse handlers ignore it while a pinch is on.)
-    private readonly Dictionary<int, Point> _viewTouches = new();
+    // mouse handlers ignore it while a pinch is on.) A palm never gets here (OnPageStylusDown).
+    private readonly Dictionary<int, (TouchDevice Device, Point At)> _viewTouches = new();
     private bool _firstTouchOnBoard;
 
     private void OnViewportTouchDown(object? sender, TouchEventArgs e)
     {
         if (_drawMode) return;
-        if (_viewTouches.Count == 0) _firstTouchOnBoard = ReferenceEquals(e.OriginalSource, Viewport);
-        _viewTouches[e.TouchDevice.Id] = e.GetTouchPoint(InkSurface).Position;
+        ReapGestures();
+        if (_viewTouches.Count == 0)
+        {
+            _firstTouchOnBoard = ReferenceEquals(e.OriginalSource, Viewport);
+            _fingersBegan ??= (_ticks(), Zoom, PanT.X, PanT.Y);
+        }
+        _viewTouches[e.TouchDevice.Id] = (e.TouchDevice, e.GetTouchPoint(InkSurface).Position);
         if (_viewTouches.Count != 2 || !_firstTouchOnBoard || _pinch is not null
             || _dragNode is not null || _resizeNode is not null || _linkFrom is not null || _marquee)
             return;
@@ -681,37 +1006,53 @@ public partial class ModPlanView
             Viewport.Cursor = Cursors.Arrow;
         }
         var pair = _viewTouches.Take(2).ToArray();
-        _pinch = new Pinch(pair[0].Key, pair[1].Key, pair[0].Value, pair[1].Value, Zoom, PanT.X, PanT.Y);
+        _pinch = new Pinch(pair[0].Key, pair[1].Key, pair[0].Value.At, pair[1].Value.At, Zoom, PanT.X, PanT.Y);
         e.TouchDevice.Capture(Viewport);
         e.Handled = true;
     }
 
     private void OnViewportTouchMove(object? sender, TouchEventArgs e)
     {
-        if (_drawMode || !_viewTouches.ContainsKey(e.TouchDevice.Id)) return;
-        _viewTouches[e.TouchDevice.Id] = e.GetTouchPoint(InkSurface).Position;
+        if (_drawMode || !_viewTouches.TryGetValue(e.TouchDevice.Id, out var t)) return;
+        _viewTouches[e.TouchDevice.Id] = (t.Device, e.GetTouchPoint(InkSurface).Position);
         if (_pinch is not { } p) return;
         if (_viewTouches.TryGetValue(p.A, out var a) && _viewTouches.TryGetValue(p.B, out var b))
-        {
-            _touches[p.A] = a;
-            _touches[p.B] = b;
-            UpdatePinch();
-        }
+            UpdatePinch(a.At, b.At);
         e.Handled = e.TouchDevice.Id != p.A; // the first finger is the mouse: leave it its own events
     }
 
-    private void OnViewportTouchUp(object? sender, TouchEventArgs e)
+    private void OnViewportTouchUp(object? sender, TouchEventArgs e) => ViewTouchGone(e.TouchDevice.Id);
+
+    private void OnViewportLostTouch(object? sender, TouchEventArgs e) => ViewTouchGone(e.TouchDevice.Id);
+
+    private void ViewTouchGone(int id)
     {
-        if (!_viewTouches.Remove(e.TouchDevice.Id)) return;
-        if (_pinch is { } p && !_drawMode && (e.TouchDevice.Id == p.A || e.TouchDevice.Id == p.B))
+        if (!_viewTouches.Remove(id)) return;
+        if (_pinch is { } p && !_drawMode && (id == p.A || id == p.B))
         {
             _pinch = null;
-            _touches.Clear();
+            StashViewport();
+        }
+        if (_viewTouches.Count == 0 && _fingers.Count == 0) _fingersBegan = null;
+    }
+
+    /// <summary>Lets go of touches WPF no longer has, whose lift never reached the board, and of a pinch
+    /// that has lost one.</summary>
+    private void ReapViewTouches()
+    {
+        foreach (var (id, t) in _viewTouches.ToList())
+        {
+            bool active;
+            try { active = t.Device.IsActive; }
+            catch { active = false; }
+            if (!active) ViewTouchGone(id);
+        }
+        if (!_drawMode && _pinch is { } p && (!_viewTouches.ContainsKey(p.A) || !_viewTouches.ContainsKey(p.B)))
+        {
+            _pinch = null;
             StashViewport();
         }
     }
-
-    private void OnViewportLostTouch(object? sender, TouchEventArgs e) => _viewTouches.Remove(e.TouchDevice.Id);
 
     // ── gestures ────────────────────────────────────────────────────────────────
 
@@ -719,7 +1060,7 @@ public partial class ModPlanView
     {
         if (_board is null) return;
         var board = ToBoard(at);
-        var g = new InkGesture { Device = device, DeviceId = deviceId, StartScreen = at, LastBoard = board };
+        var g = new InkGesture { Device = device, DeviceId = deviceId, StartScreen = at, LastBoard = board, Began = _ticks() };
 
         // A press inside the selected lines moves them, whatever the tool (the eraser still rubs).
         if (tool != InkTool.Eraser && _inkSelected.Count > 0 && InSelectionBox(board))
@@ -864,7 +1205,7 @@ public partial class ModPlanView
         _ink = new InkGesture
         {
             Kind = InkGestureKind.Pan, Device = device, DeviceId = deviceId, StartScreen = at,
-            PanX = PanT.X, PanY = PanT.Y
+            PanX = PanT.X, PanY = PanT.Y, Began = _ticks()
         };
         UpdateInkSurface();
     }
