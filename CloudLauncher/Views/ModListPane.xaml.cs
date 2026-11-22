@@ -109,6 +109,16 @@ public partial class ModListPane : UserControl
         ModItems.ItemsSource = _visible;
         if (Resources["CategoryBrush"] is ModListCategoryBrushConverter converter)
             converter.Lookup = name => CategoryBrushFor(name);
+
+        // A tag pill's two tones are worked out from the look in force (TagPillBrushConverter) rather
+        // than bound to a resource, so rows that show tags build theirs again when the look changes.
+        Loaded += (_, _) => { ThemeService.Changed -= RedrawTagPills; ThemeService.Changed += RedrawTagPills; };
+        Unloaded += (_, _) => ThemeService.Changed -= RedrawTagPills;
+    }
+
+    private void RedrawTagPills()
+    {
+        foreach (var row in All) row.Mod.RedrawTags();
     }
 
     /// <summary>Everything the scan found, before the pane narrows it. The page's load diffs into

@@ -1,4 +1,5 @@
-﻿using System.Text.Json.Serialization;
+﻿using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace CloudLauncher.Services;
 
@@ -149,6 +150,13 @@ public sealed class ModMeta
     /// board.</summary>
     public string? Note { get; set; }
 
+    /// <summary>Fields this launcher doesn't know, from a newer one that saved the pack. Kept and
+    /// written back unchanged, so an older launcher never strips what a newer one added.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+
+    /// <remarks>An entry holding only fields this launcher doesn't know is not default: dropping it
+    /// (see <see cref="ModMetadataService.StoreMeta"/>) would drop them.</remarks>
     [JsonIgnore]
     public bool IsDefault =>
         Categories.Count == 0 && Priority == 0 && ContentSize == 0 && Side == ModSide.Both &&
@@ -156,7 +164,8 @@ public sealed class ModMeta
         !UpdateIncompatible && !UpdateIncompatibleWithUnknown && !UpdateLocked && PinnedVersionId is null &&
         UpdateChannel is null &&
         ManualDependencies.Count == 0 && !IsExtra && PreferredSource is null &&
-        string.IsNullOrWhiteSpace(Note);
+        string.IsNullOrWhiteSpace(Note) &&
+        Extra is not { Count: > 0 };
 
     public ModMeta Clone() => new()
     {
@@ -176,7 +185,8 @@ public sealed class ModMeta
         ManualDependencies = new List<string>(ManualDependencies),
         IsExtra = IsExtra,
         PreferredSource = PreferredSource,
-        Note = Note
+        Note = Note,
+        Extra = Extra is null ? null : new Dictionary<string, JsonElement>(Extra)
     };
 }
 
@@ -214,7 +224,28 @@ public sealed class CustomCategory
     /// <summary>Built-in, auto-managed category (e.g. "Library"): always present, can't be renamed or
     /// deleted.</summary>
     public bool Builtin { get; set; }
+
+    /// <summary>Fields this launcher doesn't know, kept and written back (see <see cref="ModMeta.Extra"/>).</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
 }
+
+/// <summary>A tag a pack defines for its mods, as stored in <see cref="PackModMetadata.TagDefs"/>: its
+/// name and the <c>#RRGGBB</c> its pill is drawn in.</summary>
+/// <remarks>Not a <see cref="CustomCategory"/>: that one always writes <c>Builtin</c>, and the tools
+/// that read tags from the file are written against exactly <c>Name</c> and <c>Color</c>.</remarks>
+public sealed class ModTagDef
+{
+    public string Name { get; set; } = "";
+    public string? Color { get; set; }
+
+    /// <summary>Fields this launcher doesn't know, kept and written back (see <see cref="ModMeta.Extra"/>).</summary>
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+}
+
+/// <summary>A tag as the rest of the launcher sees it: a copy of its name and colour, so a list row or
+/// a menu never holds on to the stored document's own objects.</summary>
+public sealed record ModTag(string Name, string? Color);
 
 /// <summary>Pack-wide toggles for the management system (the "Advanced Settings" tab).</summary>
 public sealed class ModAdvancedSettings
@@ -236,6 +267,10 @@ public sealed class ModAdvancedSettings
     /// (<see cref="AppSettings.ModVersionChannel"/>); a mod's own <see cref="ModMeta.UpdateChannel"/>
     /// overrides both. See <see cref="ModUpdateChannel"/>.</summary>
     public string? UpdateChannel { get; set; }
+
+    /// <summary>Settings this launcher doesn't know, kept and written back (see <see cref="ModMeta.Extra"/>).</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
 }
 
 /// <summary>Root document persisted to <c>game/.cloudlauncher/mods.json</c> and synced to
@@ -268,10 +303,147 @@ public sealed class PackModMetadata
     /// than per machine) because it is part of how the pack is laid out, like the positions above.</summary>
     public List<string> CollapsedCategories { get; set; } = new();
 
+    // ── tags ──
+    // TagDefs and Tags are read by tools outside the launcher (a pack's editions are built from them),
+    // so their shape is a contract: PascalCase keys, mod ids in lower case, in this order ahead of
+    // EarlyAccess. Both are null until the pack has something to say, and null is not written, so a
+    // pack without tags keeps the file it always had. Once a key is in the file it stays, even empty:
+    // a reader takes a present "Tags" for the truth and a missing one for a launcher too old to know
+    // tags. They are read leniently (see the converters below), because one wrong value in a key a
+    // tool or a person wrote by hand must never cost the whole file.
+    // A mod's Side is no part of this: it is ModMeta.Side, under the mod's key in Mods, and nowhere
+    // else. A "Sides" key that a file may hold is not the launcher's: like every key it doesn't know,
+    // it is kept in Extra and written back as it was, and it gives no mod a side.
+
+    /// <summary>The tags this pack defines for its mods, in the order menus and pills show them.
+    /// A pack that defines none has no Tags menu.</summary>
+    [JsonConverter(typeof(ModTagDefsConverter))]
+    public List<ModTagDef>? TagDefs { get; set; }
+
+    /// <summary>Which mods carry which tags: mod id -> the names of its tags, in
+    /// <see cref="TagDefs"/> order.</summary>
+    /// <remarks>Keyed by the mod id the jar itself declares (lower case), like
+    /// <see cref="EarlyAccess"/> and for the same reason. A jar that declares several ids carries a tag
+    /// when any of them does; the launcher writes it under every one.</remarks>
+    [JsonConverter(typeof(ModTagMapConverter))]
+    public SortedDictionary<string, List<string>>? Tags { get; set; }
+
     /// <summary>Mods marked early access in this pack: shared with the people who get early versions
     /// and kept out of released packs (an export leaves them out unless it is told to take them).</summary>
     /// <remarks>Held by the mod id the jar itself declares (lower case), not by the
     /// <see cref="Mods"/> key: an unreleased mod has no store id, so its key would be the file name,
     /// and every new version of the jar would lose the mark.</remarks>
     public List<string> EarlyAccess { get; set; } = new();
+
+    /// <summary>Top-level keys this launcher doesn't know, from a newer one that saved the pack. Kept
+    /// and written back unchanged (after the known keys), so an older launcher never strips what a
+    /// newer one added.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+}
+
+/// <summary>Reads <see cref="PackModMetadata.TagDefs"/> without ever failing the file: a list of
+/// <c>{"Name", "Color"}</c> objects, where a bare string is taken as a name and anything else is
+/// skipped. Fields it doesn't know stay with their tag.</summary>
+internal sealed class ModTagDefsConverter : JsonConverter<List<ModTagDef>>
+{
+    public override List<ModTagDef> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        using var doc = JsonDocument.ParseValue(ref reader);
+        var defs = new List<ModTagDef>();
+        if (doc.RootElement.ValueKind != JsonValueKind.Array) return defs;
+
+        foreach (var item in doc.RootElement.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                defs.Add(new ModTagDef { Name = item.GetString() ?? "" });
+                continue;
+            }
+            if (item.ValueKind != JsonValueKind.Object) continue;
+
+            var def = new ModTagDef();
+            foreach (var field in item.EnumerateObject())
+            {
+                var text = field.Value.ValueKind == JsonValueKind.String ? field.Value.GetString() : null;
+                if (string.Equals(field.Name, nameof(ModTagDef.Name), StringComparison.OrdinalIgnoreCase))
+                    def.Name = text ?? "";
+                else if (string.Equals(field.Name, nameof(ModTagDef.Color), StringComparison.OrdinalIgnoreCase))
+                    def.Color = text;
+                else
+                    (def.Extra ??= new())[field.Name] = field.Value.Clone();   // outlives the document
+            }
+            defs.Add(def);
+        }
+        return defs;
+    }
+
+    public override void Write(Utf8JsonWriter writer, List<ModTagDef> value, JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        foreach (var def in value)
+        {
+            writer.WriteStartObject();
+            writer.WriteString(nameof(ModTagDef.Name), def.Name);
+            if (def.Color is not null) writer.WriteString(nameof(ModTagDef.Color), def.Color);
+            if (def.Extra is not null)
+                foreach (var (name, element) in def.Extra)
+                {
+                    writer.WritePropertyName(name);
+                    element.WriteTo(writer);
+                }
+            writer.WriteEndObject();
+        }
+        writer.WriteEndArray();
+    }
+}
+
+/// <summary>Reads <see cref="PackModMetadata.Tags"/> without ever failing the file: mod id -> list of
+/// tag names. Ids are lower-cased (two spellings of one id are merged), a single name written as a
+/// string counts as a list of one, and anything else is skipped. Written sorted by mod id, so the file
+/// doesn't reshuffle between saves.</summary>
+internal sealed class ModTagMapConverter : JsonConverter<SortedDictionary<string, List<string>>>
+{
+    public override SortedDictionary<string, List<string>> Read(ref Utf8JsonReader reader, Type typeToConvert,
+        JsonSerializerOptions options)
+    {
+        using var doc = JsonDocument.ParseValue(ref reader);
+        var map = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object) return map;
+
+        foreach (var entry in doc.RootElement.EnumerateObject())
+        {
+            var id = entry.Name.Trim().ToLowerInvariant();
+            if (id.Length == 0) continue;
+
+            IEnumerable<JsonElement> values = entry.Value.ValueKind switch
+            {
+                JsonValueKind.Array => entry.Value.EnumerateArray(),
+                JsonValueKind.String => [entry.Value],
+                _ => []
+            };
+            foreach (var value in values)
+            {
+                if (value.ValueKind != JsonValueKind.String) continue;
+                var name = value.GetString()?.Trim();
+                if (string.IsNullOrEmpty(name)) continue;
+                if (!map.TryGetValue(id, out var names)) map[id] = names = new List<string>();
+                if (!names.Contains(name, StringComparer.OrdinalIgnoreCase)) names.Add(name);
+            }
+        }
+        return map;
+    }
+
+    public override void Write(Utf8JsonWriter writer, SortedDictionary<string, List<string>> value,
+        JsonSerializerOptions options)
+    {
+        writer.WriteStartObject();
+        foreach (var (id, names) in value)
+        {
+            writer.WriteStartArray(id);
+            foreach (var name in names) writer.WriteStringValue(name);
+            writer.WriteEndArray();
+        }
+        writer.WriteEndObject();
+    }
 }

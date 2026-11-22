@@ -180,8 +180,28 @@ public sealed class GlobalPackService(
     private static readonly ConcurrentDictionary<string, JarInfo> JarCache = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The mod ids a jar declares in its own metadata, through the same cache. Empty when the
-    /// jar can't be read. Used for the early-access marks (<see cref="PackModMetadata.EarlyAccess"/>).</summary>
+    /// jar can't be read. Used for everything a pack keeps by mod id: the early-access marks
+    /// (<see cref="PackModMetadata.EarlyAccess"/>) and tags.</summary>
     public static IReadOnlySet<string> JarModIds(string jar) => JarMeta(jar).ModIds;
+
+    /// <summary>The <c>modId</c> of every <c>[[mods]]</c> block of a mods.toml: one jar can declare
+    /// several mods. A <c>modId</c> under <c>[[dependencies.*]]</c> is what the jar needs, not what it is.</summary>
+    /// <remarks>Read the way the pack tools outside the launcher read it (blocks start at a line
+    /// opening with <c>[[</c>, a block's first double-quoted <c>modId</c> counts), so both agree on
+    /// which ids a jar has: a tag is put on every id of a jar and taken off every id.</remarks>
+    internal static List<string> TomlModIds(string text)
+    {
+        var ids = new List<string>();
+        var blocks = Regex.Split(text, @"^\s*\[\[", RegexOptions.Multiline);
+        for (var i = 1; i < blocks.Length; i++)
+        {
+            var close = blocks[i].IndexOf("]]", StringComparison.Ordinal);
+            if (close < 0 || blocks[i][..close].Trim() != "mods") continue;
+            if (Regex.Match(blocks[i][(close + 2)..], @"^\s*modId\s*=\s*""([^""]+)""", RegexOptions.Multiline) is { Success: true } m)
+                ids.Add(m.Groups[1].Value);
+        }
+        return ids;
+    }
 
     /// <summary>The mod ids a jar declares (Fabric, Quilt, Forge and NeoForge metadata) and its
     /// version. Never throws.</summary>
@@ -212,8 +232,11 @@ public sealed class GlobalPackService(
             {
                 if (zip.GetEntry(name) is not { } entry) continue;
                 var text = ReadText(entry);
-                // The first [[mods]] block is the jar's own mod; later modId lines are dependencies.
-                if (Regex.Match(text, @"^\s*modId\s*=\s*""([^""]+)""", RegexOptions.Multiline) is { Success: true } m)
+                // Every [[mods]] block is a mod of this jar; modId lines elsewhere are dependencies.
+                var declared = TomlModIds(text);
+                if (declared.Count > 0) ids.UnionWith(declared);
+                // A file with no such block still gives its first modId, as it always has.
+                else if (Regex.Match(text, @"^\s*modId\s*=\s*""([^""]+)""", RegexOptions.Multiline) is { Success: true } m)
                     ids.Add(m.Groups[1].Value);
                 if (version is null
                     && Regex.Match(text, @"^\s*version\s*=\s*""([^""$]+)""", RegexOptions.Multiline) is { Success: true } vm)

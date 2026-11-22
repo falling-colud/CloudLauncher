@@ -91,14 +91,25 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             UiScale.Changed -= ApplyModScale;   // re-apply the mod-list zoom live when the slider moves
             UiScale.Changed += ApplyModScale;
             ApplyModScale();
+            ThemeService.Changed -= RedrawTagPills;
+            ThemeService.Changed += RedrawTagPills;
             // Hooked on the window, as on the Instances screen, so the shortcuts work wherever focus is.
             if (Window.GetWindow(this) is { } w) { w.PreviewKeyDown -= OnShellKeyDown; w.PreviewKeyDown += OnShellKeyDown; }
         };
         Unloaded += (_, _) =>
         {
             UiScale.Changed -= ApplyModScale;
+            ThemeService.Changed -= RedrawTagPills;
             if (Window.GetWindow(this) is { } w) w.PreviewKeyDown -= OnShellKeyDown;
         };
+    }
+
+    /// <summary>A tag pill's two tones are worked out from the look in force (see
+    /// <see cref="TagPillBrushConverter"/>) rather than bound to a resource, so the rows that show tags
+    /// build theirs again when the look changes.</summary>
+    private void RedrawTagPills()
+    {
+        foreach (var mod in _all) mod.RedrawTags();
     }
 
     // ── keyboard shortcuts ────────────────────────────────────────────────────────
@@ -410,8 +421,51 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
 
     private ListScrollAnchor Anchor => _scrollAnchor ??= new ListScrollAnchor(ModItems);
 
+    /// <summary>Marks the flag filter's "Early access" entry, which sits with the pack's tags.</summary>
+    private static readonly object EarlyAccessFilter = new();
+
+    /// <summary>How many entries the XAML gave the flag filter; the pack's tags come after them.</summary>
+    private int _fixedFlagFilters = -1;
+
+    /// <summary>
+    /// Keeps the end of the flag filter in step with the pack's tags: "Tag: name" for each, then Early
+    /// access, which the Tags menu shows as one more. A pack without tags gets neither, so its filter
+    /// is what it always was.
+    /// </summary>
+    /// <remarks>Runs at the top of every <see cref="ApplyFilterSort"/> and does nothing unless the
+    /// tags changed. A filter set on a tag that was renamed or removed goes back to "All mods".</remarks>
+    private void SyncTagFilter()
+    {
+        if (_fixedFlagFilters < 0) _fixedFlagFilters = FlagFilterBox.Items.Count;
+
+        var tags = App.State.ModMetadata.TagDefs(_pack.Id);
+        var wanted = tags.Select(t => (Label: "Tag: " + t.Name, Key: (object)t.Name)).ToList();
+        if (tags.Count > 0) wanted.Add((ModMetadataService.EarlyAccessTagName, EarlyAccessFilter));
+
+        var shown = FlagFilterBox.Items.OfType<ComboBoxItem>().Skip(_fixedFlagFilters).Select(i => i.Tag);
+        if (shown.SequenceEqual(wanted.Select(w => w.Key))) return;
+
+        var picked = (FlagFilterBox.SelectedItem as ComboBoxItem)?.Tag;
+        var wasRebuilding = _rebuildingFilters;
+        _rebuildingFilters = true;   // the box's SelectionChanged must not start a second re-sort
+        try
+        {
+            while (FlagFilterBox.Items.Count > _fixedFlagFilters)
+                FlagFilterBox.Items.RemoveAt(FlagFilterBox.Items.Count - 1);
+            foreach (var (label, key) in wanted)
+                FlagFilterBox.Items.Add(new ComboBoxItem { Content = label, Tag = key });
+
+            if (picked is not null)   // the filter was on a tag: stay on it if it is still there
+                FlagFilterBox.SelectedItem =
+                    FlagFilterBox.Items.OfType<ComboBoxItem>().FirstOrDefault(i => Equals(i.Tag, picked))
+                    ?? FlagFilterBox.Items[0];
+        }
+        finally { _rebuildingFilters = wasRebuilding; }
+    }
+
     private void ApplyFilterSort()
     {
+        SyncTagFilter();
         IEnumerable<PackMod> q = _all;
 
         var query = SearchBox.Text?.Trim();
@@ -421,6 +475,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
                 || m.VersionLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
                 || m.SourceLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
                 || m.CategoriesLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
+                || m.TagsLabel.Contains(query, StringComparison.OrdinalIgnoreCase)
                 // so typing "large" narrows to the pack-defining mods
                 || (m.ContentSize > 0 && m.ContentSizeLabel.Contains(query, StringComparison.OrdinalIgnoreCase))
                 // Match words in the mod's note too.
@@ -450,6 +505,10 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             8 => q.Where(m => m.Side == ModSide.Server),
             _ => q
         };
+        // Past the fixed flags the box lists the pack's tags (see SyncTagFilter).
+        var tagFilter = (FlagFilterBox.SelectedItem as ComboBoxItem)?.Tag;
+        if (ReferenceEquals(tagFilter, EarlyAccessFilter)) q = q.Where(m => m.IsEarlyAccess);
+        else if (tagFilter is string tagName) q = q.Where(m => m.HasTag(tagName));
 
         var cmp = StringComparer.OrdinalIgnoreCase;
         var rev = _reverseSort;

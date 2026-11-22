@@ -184,6 +184,34 @@ public sealed class PackMod : INotifyPropertyChanged
         set { if (_earlyAccess != value) { _earlyAccess = value; Refresh(); } }
     }
 
+    private IReadOnlyList<ModTag> _tags = Array.Empty<ModTag>();
+
+    /// <summary>The pack's tags this mod carries (<see cref="PackModMetadata.Tags"/>): every tag on any
+    /// of the mod ids its jar declares, in the order the pack defines them. Stamped on by the inventory
+    /// at load and again after a tag is set, renamed, recoloured or removed.</summary>
+    public IReadOnlyList<ModTag> Tags
+    {
+        get => _tags;
+        set { if (!_tags.SequenceEqual(value)) { _tags = value; Refresh(); } }
+    }
+
+    public bool HasTag(string name) =>
+        _tags.Any(t => string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Makes whatever shows <see cref="Tags"/> build them again. A tag pill's colours are
+    /// worked out from the look in force rather than bound to a resource, so a list calls this when
+    /// the look changes.</summary>
+    /// <remarks>Hands out a new list object with the same tags: an items control only rebuilds its
+    /// items for a different one.</remarks>
+    public void RedrawTags()
+    {
+        if (_tags.Count == 0) return;
+        _tags = _tags.ToArray();
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Tags)));
+    }
+
+    public string TagsLabel => _tags.Count == 0 ? "" : string.Join(", ", _tags.Select(t => t.Name));
+
     public ModSide Side => Meta.Side;
     public bool IsSideRestricted => Meta.Side != ModSide.Both;
     public bool IsLocal => string.Equals(Folder, "local", StringComparison.OrdinalIgnoreCase);
@@ -379,6 +407,7 @@ public sealed class PackMod : INotifyPropertyChanged
         // else.
         if (ConflictLabel is { Length: > 0 } conflict) sb.AppendLine(conflict);
         if (Meta.Categories.Count > 0) sb.AppendLine("Categories: " + string.Join(", ", Meta.Categories));
+        if (_tags.Count > 0) sb.AppendLine("Tags: " + TagsLabel);
         if (RequiredDependencies.Count > 0) sb.AppendLine($"Dependencies: {RequiredDependencies.Count}");
         if (HasUpdate)
             sb.AppendLine($"Update available > {LatestVersion!.VersionNumber}" +
@@ -571,9 +600,21 @@ public sealed class PackModInventory
             if (earlyAccess.Count > 0)
                 foreach (var m in mods) m.IsEarlyAccess = earlyAccess.Overlaps(m.JarModIds);
 
+            // So are tags: every jar's ids are read here, off the UI thread, only for a pack that has
+            // tags. The first tag set from a menu then finds them read already.
+            if (_metadata.HasTags(packId)) StampTags(packId, mods);
+
             _added.Flush();
             return Sort(mods);
         }, ct);
+    }
+
+    /// <summary>Puts each mod's tags on it (<see cref="PackMod.Tags"/>) from the pack's metadata.
+    /// Called at load, and by whoever changes a tag, for the mods that are on screen.</summary>
+    public void StampTags(Guid packId, IEnumerable<PackMod> mods)
+    {
+        if (ModMetadataService.IsGlobalScope(packId)) return;   // tags belong to a pack
+        foreach (var m in mods) m.Tags = _metadata.TagsFor(packId, m.JarModIds);
     }
 
     /// <summary>Second pass: resolve each jar's CurseForge/Modrinth identity (hashing + cached
@@ -747,6 +788,17 @@ public sealed class PackModInventory
     {
         _metadata.SetMeta(packId, mod.CandidateKeys, mod.Meta);
         mod.Refresh();
+    }
+
+    /// <summary>Puts a tag on these mods or takes it off, with one write, and updates what each row
+    /// shows. Mods whose jar declares no mod id are skipped: there is nothing to hang a tag on.</summary>
+    /// <param name="alsoShown">Other loaded mods to re-read tags for: a second jar that declares one
+    /// of the same mod ids carries the tag too.</param>
+    public void SetTag(Guid packId, IReadOnlyList<PackMod> mods, string tag, bool on,
+        IEnumerable<PackMod>? alsoShown = null)
+    {
+        _metadata.SetTag(packId, mods.SelectMany(m => m.JarModIds), tag, on);
+        StampTags(packId, alsoShown is null ? mods : mods.Union(alsoShown));
     }
 
     /// <summary>

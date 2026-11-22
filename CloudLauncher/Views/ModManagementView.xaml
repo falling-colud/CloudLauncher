@@ -19,6 +19,7 @@
         <local:NotEmptyToVisibilityConverter x:Key="NotEmptyVis"/>
         <local:ModSideLabelConverter x:Key="SideLabel"/>
         <local:CategoryToBrushConverter x:Key="CategoryBrush"/>
+        <local:TagPillBrushConverter x:Key="TagPillBrush"/>
 
         <!-- Note chip on a card: muted when empty, accent (with the note as its tooltip) when set -->
         <Style x:Key="NoteButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
@@ -404,6 +405,27 @@
                                                                 Visibility="{Binding IsEarlyAccess, Converter={StaticResource BoolVis}}">
                                                             <TextBlock Text="EARLY" Style="{StaticResource PillText}"/>
                                                         </slate:SlateBorder>
+                                                        <!-- The pack's own tags (right-click > Tags), each in the colour the
+                                                             pack gave it. The converter works the two tones out the way the
+                                                             built-in tag pills get theirs, so they read on any look. -->
+                                                        <ItemsControl ItemsSource="{Binding Tags}" Focusable="False"
+                                                                      VerticalAlignment="Center">
+                                                            <ItemsControl.ItemsPanel>
+                                                                <ItemsPanelTemplate>
+                                                                    <StackPanel Orientation="Horizontal"/>
+                                                                </ItemsPanelTemplate>
+                                                            </ItemsControl.ItemsPanel>
+                                                            <ItemsControl.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <slate:SlateBorder Style="{StaticResource Pill}" Margin="6,0,0,0"
+                                                                            Background="{Binding Color, Converter={StaticResource TagPillBrush}, ConverterParameter=Background}">
+                                                                        <TextBlock Text="{Binding Name}" Style="{StaticResource PillText}"
+                                                                                   MaxWidth="160" TextTrimming="CharacterEllipsis"
+                                                                                   Foreground="{Binding Color, Converter={StaticResource TagPillBrush}, ConverterParameter=Foreground}"/>
+                                                                    </slate:SlateBorder>
+                                                                </DataTemplate>
+                                                            </ItemsControl.ItemTemplate>
+                                                        </ItemsControl>
                                                         <!-- A recorded mod-to-mod incompatibility the user set from the
                                                              options menu. The tooltip names the other mod; the card's own
                                                              tooltip repeats it in the flag list. -->

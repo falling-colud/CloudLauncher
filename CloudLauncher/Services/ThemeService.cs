@@ -762,9 +762,19 @@ public static class ThemeService
     /// pushed far enough from the surface to read.</summary>
     private static void Pill(Application app, string prefix, Color hue, Color surface, bool dark)
     {
-        SetBrushWithAlpha(app, prefix + "BgBrush", hue, dark ? (byte)0x33 : (byte)0x26);
-        SetBrush(app, prefix + "FgBrush", Readable(hue, surface));
+        var (background, foreground) = PillTones(hue, surface, dark);
+        SetBrush(app, prefix + "BgBrush", background);
+        SetBrush(app, prefix + "FgBrush", foreground);
     }
+
+    private static (Color Background, Color Foreground) PillTones(Color hue, Color surface, bool dark) =>
+        (WithAlpha(hue, dark ? (byte)0x33 : (byte)0x26), Readable(hue, surface));
+
+    /// <summary>The two tones of a pill in a hue the user picked (a pack's own tag), worked out as the
+    /// built-in tag pills' are, against the look in force. They are colours, not resources: whoever
+    /// paints with them asks again when <see cref="Changed"/> fires.</summary>
+    public static (Color Background, Color Foreground) PillTones(Color hue) =>
+        PillTones(hue, _scrimBase, Luminance(_scrimBase) < 0.5);
 
     /// <summary>The nearest version of <paramref name="colour"/> that can be read on
     /// <paramref name="background"/>: an accent dark enough to sit behind white text is not

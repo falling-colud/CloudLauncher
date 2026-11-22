@@ -36,9 +36,10 @@ public sealed class ModOptionsContext
 }
 
 /// <summary>
-/// Builds the mod options menu for one or more mods. With several targets, flag, priority, side and
-/// category changes apply to all of them, a toggle shows its check mark only when every target has
-/// it, and single-mod actions (open page, reveal, update to version, dependencies) are hidden.
+/// Builds the mod options menu for one or more mods. With several targets, flag, priority, side,
+/// category and tag changes apply to all of them, a toggle shows its check mark only when every
+/// target has it, and single-mod actions (open page, reveal, update to version, dependencies) are
+/// hidden.
 /// </summary>
 public static class ModOptionsMenu
 {
@@ -53,6 +54,7 @@ public static class ModOptionsMenu
     private const int IcChannel = 0xE8AB; // "Switch": which release channel updates come from
     private const int IcSize = 0xE9D9; // "BarChart": matches the three-bar meter on the cards
     private const int IcEarly = 0xE823; // "Recent": early access, ahead of the released pack
+    private const int IcEdit = 0xE70F;  // "Edit": manage the pack's tags
 
     public static ContextMenu Build(PackMod mod, ModOptionsContext ctx) => Build(new[] { mod }, ctx);
 
@@ -227,7 +229,12 @@ public static class ModOptionsMenu
         menu.Items.Add(FlagToggle("Testing", targets, ctx, m => m.IsTesting, (m, v) => m.IsTesting = v, Glyph(IcTesting)));
         menu.Items.Add(FlagToggle("Extra (optional)", targets, ctx, m => m.IsExtra, (m, v) => m.IsExtra = v, Glyph(IcAdd)));
         if (!ModMetadataService.IsGlobalScope(ctx.PackId))
-            menu.Items.Add(EarlyAccessToggle(targets, ctx));
+        {
+            // A pack that defines tags gets the Tags section, with Early access in it as one more tag.
+            // Every other pack keeps Early access here, where it has always been, and nothing else.
+            var tags = ctx.Inventory.Metadata.TagDefs(ctx.PackId);
+            menu.Items.Add(tags.Count > 0 ? BuildTags(targets, ctx, tags) : EarlyAccessToggle(targets, ctx));
+        }
 
         // ── Incompatibility ──
         var anyIncompat = targets.Any(t =>
@@ -680,6 +687,224 @@ public static class ModOptionsMenu
         ToolTipService.SetShowOnDisabled(item, true);
         return item;
     }
+
+    // ── tags ────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The Tags section, only built for a pack that defines tags: a check item per tag, the
+    /// early-access mark as one more, then what manages the pack's tags.
+    /// </summary>
+    /// <remarks>
+    /// A tag goes on the mod ids a jar declares, as the early-access mark does, so the tag items
+    /// behave like <see cref="EarlyAccessToggle"/>: checked only when every target that can be tagged
+    /// has the tag, a click sets them all the other way with one save, the menu stays open, and a jar
+    /// that declares no mod id is left out (the items are disabled when no target has one).
+    /// </remarks>
+    private static MenuItem BuildTags(IReadOnlyList<PackMod> targets, ModOptionsContext ctx, IReadOnlyList<ModTag> tags)
+    {
+        // The check marks are read off the rows, so the rows are brought up to date first: another
+        // view may have changed a tag since this list was loaded.
+        ctx.Inventory.StampTags(ctx.PackId, targets);
+        var taggable = targets.Where(t => t.JarModIds.Count > 0).ToList();
+        var parent = Parent("Tags", Glyph(IcTag), null);
+
+        // One mod's tags beside "Tags", kept current while the submenu is open. Nothing for a
+        // selection, as on Category.
+        void Summarise() => parent.InputGestureText = targets.Count > 1 ? "" : TagSummary(targets[0]);
+
+        foreach (var tag in tags)
+            parent.Items.Add(TagToggle(tag, targets, taggable, ctx, Summarise));
+
+        var early = EarlyAccessToggle(targets, ctx);
+        early.Click += (_, _) => Summarise();   // runs after the toggle's own handler, added first
+        parent.Items.Add(early);
+
+        parent.Items.Add(new Separator());
+        parent.Items.Add(Item("New tag...", () => { _ = AddTagAsync(targets, ctx); }, Glyph(IcAdd)));
+        parent.Items.Add(BuildTagEditor(tags, ctx));
+
+        Summarise();
+        return parent;
+    }
+
+    /// <summary>What one mod carries, for the gesture text beside "Tags".</summary>
+    private static string TagSummary(PackMod mod)
+    {
+        var names = mod.Tags.Select(t => t.Name).ToList();
+        if (mod.IsEarlyAccess) names.Add(ModMetadataService.EarlyAccessTagName);
+        return string.Join(", ", names);
+    }
+
+    private static MenuItem TagToggle(ModTag tag, IReadOnlyList<PackMod> targets, IReadOnlyList<PackMod> taggable,
+        ModOptionsContext ctx, Action afterToggle)
+    {
+        var name = tag.Name;
+        bool AllHave() => taggable.Count > 0 && taggable.All(t => t.HasTag(name));
+
+        var item = Toggle(MenuText(name), AllHave(), () =>
+        {
+            ctx.Inventory.SetTag(ctx.PackId, taggable, name, !AllHave(), ctx.AllMods);
+            ctx.OnChanged?.Invoke();
+            afterToggle();
+            return AllHave();
+        }, Swatch(tag.Color));
+
+        item.IsEnabled = taggable.Count > 0;
+        ToolTipService.SetShowOnDisabled(item, true);
+        if (taggable.Count == 0)
+        {
+            item.ToolTip = targets.Count == 1
+                ? "This jar declares no mod id, so it can't be tagged."
+                : "None of these jars declares a mod id, so they can't be tagged.";
+            return item;
+        }
+
+        // Right-click a tag to rename it, as on a category (left-click still toggles it).
+        var skipped = targets.Count - taggable.Count;
+        item.ToolTip = skipped == 0
+            ? "Right-click to rename"
+            : $"Right-click to rename\n{skipped} of the {targets.Count} selected jars declare no mod id and stay untagged.";
+        item.PreviewMouseRightButtonDown += (s, e) =>
+        {
+            e.Handled = true;
+            CloseMenu((DependencyObject)s);
+            _ = RenameTagAsync(name, ctx);
+        };
+        return item;
+    }
+
+    /// <summary>"Edit tags": each of the pack's tags with Rename, Colour and Remove.</summary>
+    private static MenuItem BuildTagEditor(IReadOnlyList<ModTag> tags, ModOptionsContext ctx)
+    {
+        var parent = Parent("Edit tags", Glyph(IcEdit), null);
+        foreach (var tag in tags)
+        {
+            var name = tag.Name;
+            var entry = new MenuItem { Header = MenuText(name), Icon = Swatch(tag.Color) };
+            entry.Items.Add(Item("Rename...", () => { _ = RenameTagAsync(name, ctx); }));
+            entry.Items.Add(BuildTagColorMenu(tag, ctx));
+            entry.Items.Add(new Separator());
+            entry.Items.Add(Item("Remove...", () => { _ = RemoveTagAsync(name, ctx); }));
+            parent.Items.Add(entry);
+        }
+        return parent;
+    }
+
+    /// <summary>The shared accents with a tick on the tag's own, as the Categories page offers them,
+    /// and the full picker where there is a window to show it in. No "No colour": a tag's pill is
+    /// what tells it from the next one.</summary>
+    private static MenuItem BuildTagColorMenu(ModTag tag, ModOptionsContext ctx)
+    {
+        var parent = new MenuItem { Header = "Colour" };
+        foreach (var (label, hex) in AccentPalette.Colors)
+        {
+            var picked = hex;
+            var item = new MenuItem
+            {
+                Header = label,
+                InputGestureText = string.Equals(tag.Color, hex, StringComparison.OrdinalIgnoreCase) ? "✓" : "",
+                Icon = Swatch(hex)
+            };
+            item.Click += (_, _) => ApplyTagColor(tag.Name, picked, ctx);
+            parent.Items.Add(item);
+        }
+        if (ctx.Owner is MainWindow)
+        {
+            parent.Items.Add(new Separator());
+            parent.Items.Add(Item("Custom...", () => { _ = PickTagColorAsync(tag, ctx); }));
+        }
+        return parent;
+    }
+
+    /// <summary>Asks for a name, defines the tag with the next unused accent as its colour, and puts
+    /// it on the mods the menu was opened on, as "New category..." does.</summary>
+    private static async Task AddTagAsync(IReadOnlyList<PackMod> targets, ModOptionsContext ctx)
+    {
+        var input = await PromptAsync(ctx, "New tag", "Tag name", "");
+        if (string.IsNullOrWhiteSpace(input)) return;
+
+        if (ctx.Inventory.Metadata.AddTag(ctx.PackId, input) is not { } tag)
+        {
+            await TellAsync(ctx, "New tag", ReservedNameMessage);
+            return;
+        }
+        var taggable = targets.Where(t => t.JarModIds.Count > 0).ToList();
+        ctx.Inventory.SetTag(ctx.PackId, taggable, tag.Name, true, ctx.AllMods);
+        ctx.OnChanged?.Invoke();
+    }
+
+    /// <summary>Renames a tag pack-wide; the rows that show it follow.</summary>
+    private static async Task RenameTagAsync(string oldName, ModOptionsContext ctx)
+    {
+        var input = await PromptAsync(ctx, "Rename tag", "New tag name", oldName);
+        if (string.IsNullOrWhiteSpace(input)) return;
+
+        var newName = ModMetadataService.CleanTagName(input);
+        if (string.Equals(newName, oldName, StringComparison.Ordinal)) return;
+        if (!ctx.Inventory.Metadata.RenameTag(ctx.PackId, oldName, input))
+        {
+            await TellAsync(ctx, "Rename tag", newName is null
+                ? ReservedNameMessage
+                : $"This pack already has a tag called '{newName}'.");
+            return;
+        }
+        TagsEdited(ctx);
+    }
+
+    private const string ReservedNameMessage =
+        "\"" + ModMetadataService.EarlyAccessTagName + "\" is already in this menu, so a tag can't have that name.";
+
+    /// <summary>Removes a tag from the pack, after saying how many mods lose it.</summary>
+    private static async Task RemoveTagAsync(string name, ModOptionsContext ctx)
+    {
+        var carrying = ctx.AllMods.Count(m => m.HasTag(name));
+        if (ctx.Owner is not null && !await AppDialog.ConfirmAsync(ctx.Owner, "Remove tag",
+                carrying == 0
+                    ? $"Remove the tag '{name}' from this pack?"
+                    : $"Remove the tag '{name}' from this pack and take it off {carrying} mod(s)?\n\nThe mods themselves aren't touched.",
+                "Remove", "Cancel", danger: true))
+            return;
+
+        if (ctx.Inventory.Metadata.RemoveTag(ctx.PackId, name)) TagsEdited(ctx);
+    }
+
+    private static void ApplyTagColor(string name, string hex, ModOptionsContext ctx)
+    {
+        if (ctx.Inventory.Metadata.SetTagColor(ctx.PackId, name, hex)) TagsEdited(ctx);
+    }
+
+    /// <summary>The full colour picker, seeded with the colours the pack's tags already use.</summary>
+    private static async Task PickTagColorAsync(ModTag tag, ModOptionsContext ctx)
+    {
+        if (ctx.Owner is not MainWindow host) return;
+        var inUse = ctx.Inventory.Metadata.TagDefs(ctx.PackId)
+            .Select(t => t.Color).Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c!).ToList();
+        var picked = await ColorPickerDialog.ShowAsync(host, $"Colour for '{tag.Name}'", tag.Color, inUse, allowNone: false);
+        if (picked is { Hex: { } hex }) ApplyTagColor(tag.Name, hex, ctx);
+    }
+
+    /// <summary>After a tag was renamed, recoloured or removed: every loaded row shows its tags as
+    /// they are now, then the view is told.</summary>
+    private static void TagsEdited(ModOptionsContext ctx)
+    {
+        ctx.Inventory.StampTags(ctx.PackId, ctx.AllMods);
+        ctx.OnChanged?.Invoke();
+    }
+
+    /// <summary>A message card, where the menu has a window to show one in.</summary>
+    private static Task TellAsync(ModOptionsContext ctx, string title, string message) =>
+        ctx.Owner is MainWindow host ? AppDialog.MessageAsync(host, title, message) : Task.CompletedTask;
+
+    /// <summary>A name the user typed, as a menu header: a menu reads "_" as "underline the next
+    /// letter", so a literal one is doubled.</summary>
+    private static string MenuText(string name) => name.Replace("_", "__");
+
+    /// <summary>A tag's colour as a menu icon, the size of the Categories page's swatches.</summary>
+    private static FrameworkElement Swatch(string? hex) => new CloudLauncher.Controls.SlateBorder
+    {
+        Width = 12, Height = 12, CornerRadius = new CornerRadius(3),
+        Background = AccentPalette.Brush(hex, Res("BorderStrongBrush"))
+    };
 
     private static MenuItem BuildHeader(IReadOnlyList<PackMod> targets)
     {

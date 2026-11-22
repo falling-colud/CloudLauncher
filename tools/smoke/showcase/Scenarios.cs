@@ -19,6 +19,7 @@ public static class Scenarios
             case "planning-rail-drag": RailDragScenario.Run(); break;
             case "planning-pen-touch": PenTouchScenario.Run(); break;
             case "background": BackgroundScenario.Run(); break;
+            case "tags": TagsScenario.Run(); break;
             case "files":
             {
                 // The instance page's Files tab (Hearthstone has logs and a crash report on disk).

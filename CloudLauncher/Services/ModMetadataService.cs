@@ -96,6 +96,7 @@ public sealed class ModMetadataService
                 {
                     doc = JsonSerializer.Deserialize<PackModMetadata>(File.ReadAllText(path), JsonOpts) ?? new();
                     Migrate(doc);
+                    TidyTags(doc);
                 }
                 catch { doc = new PackModMetadata(); }
             }
@@ -198,6 +199,270 @@ public sealed class ModMetadataService
             doc.EarlyAccess.Sort(StringComparer.Ordinal);
         }
         Save(packId);
+    }
+
+    // ── tags ───────────────────────────────────────────────────────────────────
+    //
+    // A pack can define tags of its own for its mods (PackModMetadata.TagDefs) and put them on mods
+    // (PackModMetadata.Tags). Like the early-access mark they go on the mod ids the jars declare, so a
+    // new version of a jar keeps its tags and a tool can match them to files without asking a store.
+    // What the tags mean is the pack's business: the launcher shows them, and tools read them from
+    // mods.json (PackModMetadata says what that file must look like).
+
+    /// <summary>What the Tags menu calls the early-access mark, which it lists as one more tag. A
+    /// pack's own tag can't have this name: the menu would show two.</summary>
+    public const string EarlyAccessTagName = "Early access";
+
+    /// <summary>The tags this pack defines, in the order they are shown. Empty for a pack without
+    /// tags, which is what keeps the Tags menu out of it.</summary>
+    public IReadOnlyList<ModTag> TagDefs(Guid packId)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+            return doc.TagDefs is { Count: > 0 } defs ? defs.Select(Snapshot).ToList() : [];
+    }
+
+    /// <summary>A tag name as it is stored: trimmed, runs of spaces made one. Null when it can't be a
+    /// tag's name (empty, or <see cref="EarlyAccessTagName"/>).</summary>
+    public static string? CleanTagName(string? name)
+    {
+        var clean = string.Join(' ', (name ?? "").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return clean.Length == 0 || string.Equals(clean, EarlyAccessTagName, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : clean;
+    }
+
+    /// <summary>Defines a tag, or returns the one of that name the pack already has (names differ by
+    /// more than case). Null when the name can't be used or this is not a pack.</summary>
+    /// <param name="color"><c>#RRGGBB</c>; null or anything else takes the first palette colour no
+    /// tag of this pack uses yet, so every tag has one.</param>
+    public ModTag? AddTag(Guid packId, string name, string? color = null)
+    {
+        if (IsGlobalScope(packId) || CleanTagName(name) is not { } clean) return null;
+        var doc = Load(packId);
+        ModTag added;
+        lock (_lock)
+        {
+            if (FindTag(doc, clean) is { } existing) return Snapshot(existing);
+            EnsureTagKeys(doc);
+            var def = new ModTagDef { Name = clean, Color = CleanColor(color) ?? NextTagColor(doc.TagDefs!) };
+            doc.TagDefs!.Add(def);
+            added = Snapshot(def);
+        }
+        Save(packId);
+        return added;
+    }
+
+    /// <summary>Renames a tag, on every mod that carries it too. False when the pack has no such tag,
+    /// the new name can't be used, or another tag already has it (tags are never merged: what a tag
+    /// means is the pack's, and two meanings must not become one by a typo).</summary>
+    public bool RenameTag(Guid packId, string oldName, string newName)
+    {
+        if (CleanTagName(newName) is not { } clean) return false;
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            if (FindTag(doc, oldName) is not { } def) return false;
+            if (FindTag(doc, clean) is { } other && !ReferenceEquals(other, def)) return false;
+            if (string.Equals(def.Name, clean, StringComparison.Ordinal)) return true;
+
+            var previous = def.Name;
+            def.Name = clean;
+            if (doc.Tags is { } tags)
+                foreach (var names in tags.Values)
+                    for (var i = 0; i < names.Count; i++)
+                        if (string.Equals(names[i], previous, StringComparison.OrdinalIgnoreCase)) names[i] = clean;
+        }
+        Save(packId);
+        return true;
+    }
+
+    /// <summary>Removes a tag from the pack and takes it off every mod. False when the pack has no
+    /// such tag.</summary>
+    public bool RemoveTag(Guid packId, string name)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            if (FindTag(doc, name) is not { } def) return false;
+            doc.TagDefs!.Remove(def);
+            if (doc.Tags is { } tags)
+                foreach (var id in tags.Keys.ToList())
+                {
+                    tags[id].RemoveAll(t => string.Equals(t, def.Name, StringComparison.OrdinalIgnoreCase));
+                    if (tags[id].Count == 0) tags.Remove(id);
+                }
+        }
+        Save(packId);
+        return true;
+    }
+
+    /// <summary>Sets a tag's colour. False when the pack has no such tag or the colour is not
+    /// <c>#RRGGBB</c>.</summary>
+    public bool SetTagColor(Guid packId, string name, string? color)
+    {
+        if (CleanColor(color) is not { } clean) return false;
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            if (FindTag(doc, name) is not { } def) return false;
+            if (string.Equals(def.Color, clean, StringComparison.Ordinal)) return true;
+            def.Color = clean;
+        }
+        Save(packId);
+        return true;
+    }
+
+    /// <summary>The tags a jar carries: every tag on any of the mod ids it declares, in the order the
+    /// pack defines them.</summary>
+    /// <param name="modIds">The ids the jar declares, in any casing (<see cref="PackMod.JarModIds"/>).</param>
+    public IReadOnlyList<ModTag> TagsFor(Guid packId, IEnumerable<string> modIds)
+    {
+        var doc = Load(packId);
+        lock (_lock)
+        {
+            if (doc.Tags is not { Count: > 0 } tags) return [];
+
+            HashSet<string>? carried = null;
+            foreach (var raw in modIds)
+                if (tags.TryGetValue(CleanModId(raw), out var names))
+                    (carried ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase)).UnionWith(names);
+            if (carried is null) return [];
+
+            var found = new List<ModTag>(carried.Count);
+            if (doc.TagDefs is { } defs)
+                foreach (var def in defs)
+                    if (carried.Remove(def.Name)) found.Add(Snapshot(def));
+            // A name with no definition can't get here through the launcher (TidyTags defines it at
+            // load); if one does, it is shown rather than hidden.
+            foreach (var name in carried.Order(StringComparer.OrdinalIgnoreCase)) found.Add(new ModTag(name, null));
+            return found;
+        }
+    }
+
+    /// <summary>True when the pack has tags to show on its mods: the mod list then reads every jar's
+    /// mod ids, which it otherwise leaves alone.</summary>
+    public bool HasTags(Guid packId)
+    {
+        var doc = Load(packId);
+        lock (_lock) return doc.TagDefs is { Count: > 0 } || doc.Tags is { Count: > 0 };
+    }
+
+    /// <summary>Puts a tag on mods or takes it off, by the mod ids their jars declare, with one write
+    /// for the whole selection. Only a tag the pack defines can be set.</summary>
+    /// <returns>True when anything changed.</returns>
+    public bool SetTag(Guid packId, IEnumerable<string> modIds, string tag, bool on)
+    {
+        var doc = Load(packId);
+        // The ids come lazily from the jars: read them before the lock is taken, not under it.
+        var ids = modIds.Select(CleanModId).Where(id => id.Length > 0).Distinct().ToList();
+        var changed = false;
+        lock (_lock)
+        {
+            if (FindTag(doc, tag) is not { } def) return false;
+            EnsureTagKeys(doc);
+            var tags = doc.Tags!;
+            foreach (var id in ids)
+            {
+                tags.TryGetValue(id, out var names);
+                var has = names is not null && names.Contains(def.Name, StringComparer.OrdinalIgnoreCase);
+                if (on == has) continue;
+
+                if (on)
+                {
+                    names ??= tags[id] = new List<string>();
+                    names.Add(def.Name);
+                    SortByDefinition(doc.TagDefs!, names);
+                }
+                else
+                {
+                    names!.RemoveAll(n => string.Equals(n, def.Name, StringComparison.OrdinalIgnoreCase));
+                    if (names.Count == 0) tags.Remove(id);
+                }
+                changed = true;
+            }
+        }
+        if (changed) Save(packId);
+        return changed;
+    }
+
+    private static ModTag Snapshot(ModTagDef def) => new(def.Name, def.Color);
+
+    private static ModTagDef? FindTag(PackModMetadata doc, string? name) =>
+        doc.TagDefs?.FirstOrDefault(d => string.Equals(d.Name, name?.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    private static string CleanModId(string? id) => (id ?? "").Trim().ToLowerInvariant();
+
+    /// <summary><c>#RRGGBB</c> in upper case, or null for anything else.</summary>
+    private static string? CleanColor(string? color)
+    {
+        var hex = color?.Trim().TrimStart('#');
+        return hex is { Length: 6 } && hex.All(Uri.IsHexDigit) ? "#" + hex.ToUpperInvariant() : null;
+    }
+
+    /// <summary>The first shared accent no tag uses yet, going round once they are all taken: the
+    /// rule new categories get their colour by.</summary>
+    private static string NextTagColor(List<ModTagDef> defs)
+    {
+        var palette = Views.AccentPalette.Colors;
+        foreach (var (_, hex) in palette)
+            if (!defs.Any(d => string.Equals(d.Color, hex, StringComparison.OrdinalIgnoreCase))) return hex;
+        return palette[defs.Count % palette.Length].Hex;
+    }
+
+    /// <summary>Puts a mod's tag names in the order the pack defines its tags.</summary>
+    private static void SortByDefinition(List<ModTagDef> defs, List<string> names)
+    {
+        if (names.Count < 2) return;
+        int Rank(string name)
+        {
+            var i = defs.FindIndex(d => string.Equals(d.Name, name, StringComparison.OrdinalIgnoreCase));
+            return i < 0 ? int.MaxValue : i;
+        }
+        var ordered = names.OrderBy(Rank).ToList();   // a stable sort: unknown names keep their order
+        names.Clear();
+        names.AddRange(ordered);
+    }
+
+    /// <summary>Makes both tag keys present, which is what gets them written from now on.</summary>
+    /// <remarks>Called when a pack starts using tags, never just for reading: a pack without tags
+    /// keeps a mods.json without these keys.</remarks>
+    private static void EnsureTagKeys(PackModMetadata doc)
+    {
+        doc.TagDefs ??= new List<ModTagDef>();
+        doc.Tags ??= new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+    }
+
+    /// <summary>Tidies the tag keys of a document that was just read, so the rest of the service can
+    /// rely on them: every tag has a name and names differ by more than case; every tag a mod carries
+    /// is defined (a file written by hand may tag mods without saying what the tags are: each such
+    /// name gets a definition and a colour, so it shows up and can be managed) and spelled as its
+    /// definition spells it; and a pack with tags has both keys.</summary>
+    private static void TidyTags(PackModMetadata doc)
+    {
+        if (doc.TagDefs is { } defs)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var def in defs) def.Name = (def.Name ?? "").Trim();
+            defs.RemoveAll(d => d.Name.Length == 0 || !seen.Add(d.Name));   // the first of a name stays
+        }
+
+        if (doc.Tags is { Count: > 0 } tags)
+        {
+            var known = doc.TagDefs ??= new List<ModTagDef>();
+            foreach (var names in tags.Values)
+            {
+                for (var i = 0; i < names.Count; i++)
+                {
+                    var def = known.FirstOrDefault(d => string.Equals(d.Name, names[i], StringComparison.OrdinalIgnoreCase));
+                    if (def is null) known.Add(def = new ModTagDef { Name = names[i], Color = NextTagColor(known) });
+                    names[i] = def.Name;
+                }
+                SortByDefinition(known, names);
+            }
+        }
+
+        if (doc.TagDefs is { Count: > 0 }) EnsureTagKeys(doc);
     }
 
     /// <summary>The auto-managed category that every library-marked mod belongs to.</summary>

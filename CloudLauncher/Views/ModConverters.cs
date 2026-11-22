@@ -86,6 +86,35 @@ public sealed class CategoryToBrushConverter : IValueConverter
 }
 
 /// <summary>
+/// A tag's <c>#RRGGBB</c> -> one of the two brushes its pill is painted with: pass "Background" or
+/// "Foreground" as the parameter.
+/// </summary>
+/// <remarks>
+/// The tones come from <see cref="ThemeService.PillTones(Color)"/>, the rule the built-in tag pills
+/// follow (a wash of the hue behind text pushed far enough from the surface to read), so a colour the
+/// user picked reads on a light theme as on a dark one. A tag without a usable colour gets the plain
+/// pill. The brushes depend on the look in force, so a list that shows tags re-reads its rows when
+/// <see cref="ThemeService.Changed"/> fires.
+/// </remarks>
+public sealed class TagPillBrushConverter : IValueConverter
+{
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        var foreground = string.Equals(parameter as string, "Foreground", StringComparison.OrdinalIgnoreCase);
+        if (ThemeService.TryParse(value as string) is not { } hue)
+            return Application.Current.Resources[foreground ? "TextSecondaryBrush" : "Surface4Brush"];
+
+        var tones = ThemeService.PillTones(Color.FromRgb(hue.R, hue.G, hue.B));
+        var brush = new SolidColorBrush(foreground ? tones.Foreground : tones.Background);
+        brush.Freeze();
+        return brush;
+    }
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => Binding.DoNothing;
+}
+
+/// <summary>
 /// Icon URL -> a cached, downscaled <see cref="ImageSource"/> from <see cref="ModIconCache"/>.
 /// The <c>ConverterParameter</c> is the on-screen icon width in DIPs; the cache decodes at 2x that.
 /// </summary>

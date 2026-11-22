@@ -26,10 +26,12 @@ public partial class ColorPickerDialog : UserControl
     private bool _syncing;        // guards the hex box <-> sliders round trip
     private bool _draggingShade, _draggingHue;
 
-    public ColorPickerDialog(string title, string? initial, IEnumerable<string>? presets = null)
+    /// <param name="allowNone">False leaves "No colour" out, for something that always has one.</param>
+    public ColorPickerDialog(string title, string? initial, IEnumerable<string>? presets = null, bool allowNone = true)
     {
         InitializeComponent();
         TitleLabel.Text = title;
+        if (!allowNone) ClearButton.Visibility = Visibility.Collapsed;
 
         var start = ParseHex(initial) ?? Color.FromRgb(0x5B, 0x9D, 0xF9);
         (_hue, _sat, _val) = ToHsv(start);
@@ -46,11 +48,11 @@ public partial class ColorPickerDialog : UserControl
     public void Cancel() => _tcs.TrySetResult(null);
 
     /// <summary>Shows the picker over the main window. Null means cancelled; a result with a null
-    /// hex means the user chose "No colour".</summary>
+    /// hex means the user chose "No colour" (never, with <paramref name="allowNone"/> false).</summary>
     public static async Task<ColorChoice?> ShowAsync(MainWindow host, string title, string? initial,
-        IEnumerable<string>? presets = null)
+        IEnumerable<string>? presets = null, bool allowNone = true)
     {
-        var card = new ColorPickerDialog(title, initial, presets);
+        var card = new ColorPickerDialog(title, initial, presets, allowNone);
         await host.ShowCardAsync(card, card.Result, card.Cancel);
         return card.Result.Result;
     }
