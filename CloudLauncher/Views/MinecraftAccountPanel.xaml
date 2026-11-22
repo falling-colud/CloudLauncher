@@ -4,7 +4,7 @@
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Minecraft accounts"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="22,18,22,28">
 

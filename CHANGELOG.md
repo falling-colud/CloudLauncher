@@ -3,6 +3,18 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.16 - 2026-11-22
+
+- A background picture of your own: Settings > Appearance > Background image. Pick a screenshot or
+  any picture and it sits behind the whole launcher, under a wash of the launcher's own colour so
+  text stays easy to read. Pages, the sidebar and the title bar show it; cards, menus and text boxes
+  stay solid. It works with Slate, Vanilla and Classic.
+- Place it the way Windows places a wallpaper (Fill, Fit, Stretch, Tile or Center), choose how much
+  it is dimmed, and blur it if you like, the way Minecraft blurs the world behind its menus.
+- The picture is copied into the launcher's own folder, so moving or deleting your file afterwards
+  does no harm. Remove puts the plain background back and leaves your file alone. A photo taken with
+  the phone on its side comes out upright.
+
 ## 0.9.15 - 2026-11-19
 
 - Drawing on a planning board with a pen on a touch screen is steadier. While the pen is near the

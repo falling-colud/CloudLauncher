@@ -4,7 +4,7 @@
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:views="clr-namespace:CloudLauncher.Views"
       Title="Resource packs"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
 
     <!--  The standard six-row page (header, actions, divider, strip, content, status), laid out
     like Worlds and Shaders so matching buttons sit in the same places. Lists every resource pack

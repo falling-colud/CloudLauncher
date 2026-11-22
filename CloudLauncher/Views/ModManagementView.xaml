@@ -5,7 +5,7 @@
       xmlns:local="clr-namespace:CloudLauncher.Views"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       xmlns:sys="clr-namespace:System;assembly=System.Runtime"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <Page.Resources>
         <!-- How wide a row's name/meta block may get before the row's buttons start. Replaced at load
              from Settings > Mods; DynamicResource is what lets a change reach the rows already built. -->

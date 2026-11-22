@@ -4,7 +4,7 @@
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Account"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <ScrollViewer VerticalScrollBarVisibility="Auto" anim:Animate.SmoothScroll="True">
         <StackPanel Margin="18">
 

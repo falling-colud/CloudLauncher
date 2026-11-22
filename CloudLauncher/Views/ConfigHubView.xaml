@@ -5,7 +5,7 @@
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       xmlns:v="clr-namespace:CloudLauncher.Views"
       Title="Config &amp; scripts"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <Page.Resources>
         <!-- One chip in the kind strip. Selection is themed here rather than on the row object so a
              live theme change repaints it; a Brush stored on the row would keep the old colour. -->

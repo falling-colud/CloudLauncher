@@ -4,7 +4,7 @@
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:local="clr-namespace:CloudLauncher.Views"
       Title="Settings"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <Page.Resources>
         <!--  One accent swatch: the colour in a pixel-cornered tile, ringed when it is the one in use.  -->
         <Style x:Key="AccentSwatchButton" TargetType="Button">
@@ -369,6 +369,89 @@
                             <TextBlock x:Name="ThemeHint" Style="{StaticResource Caption}" VerticalAlignment="Center"
                                        TextWrapping="Wrap" Margin="0,0,12,0"/>
                         </DockPanel>
+                    </StackPanel>
+
+                    <!--  The background picture works with both styles, so it sits below both panels.  -->
+                    <Border Height="1" Background="{DynamicResource BorderSubtleBrush}" Margin="0,12,0,16"/>
+
+                    <DockPanel Margin="0,0,0,14">
+                        <TextBlock DockPanel.Dock="Left" Text="Background image" Width="150" Margin="0,4,0,0"
+                                   Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Top"/>
+                        <DockPanel>
+                            <!--  The picture at the window's shape, or "None".  -->
+                            <Border DockPanel.Dock="Left" Width="128" Height="72" Margin="0,0,14,0" VerticalAlignment="Top"
+                                    BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
+                                    Background="{DynamicResource Surface0Brush}" ClipToBounds="True">
+                                <Grid>
+                                    <Image x:Name="BackgroundPreview" Stretch="UniformToFill"
+                                           RenderOptions.BitmapScalingMode="HighQuality"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="BackgroundPreviewNone" Text="None" Style="{StaticResource Caption}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                            <StackPanel VerticalAlignment="Center">
+                                <WrapPanel>
+                                    <Button x:Name="ChooseBackgroundButton" Content="Choose image..." Click="OnChooseBackground"
+                                            Margin="0,0,8,6"
+                                            ToolTip="A picture of your own behind the whole launcher. It is copied, so moving or deleting your file later does no harm."/>
+                                    <Button x:Name="RemoveBackgroundButton" Content="Remove" Click="OnRemoveBackground"
+                                            Style="{StaticResource SubtleButton}" Margin="0,0,8,6"
+                                            ToolTip="Back to the plain background. Your own file is not touched."/>
+                                </WrapPanel>
+                                <TextBlock x:Name="BackgroundHint" Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </DockPanel>
+
+                    <StackPanel x:Name="BackgroundOptionsPanel">
+                        <DockPanel Margin="0,0,0,6">
+                            <TextBlock DockPanel.Dock="Left" Text="Fit" Width="150" Margin="0,7,0,0"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Top"/>
+                            <WrapPanel x:Name="BackgroundFitOptions">
+                                <RadioButton Style="{StaticResource SegmentRadio}" GroupName="BackgroundFit" Tag="Fill"
+                                             Content="Fill" MinWidth="64" Margin="0,0,8,8" Checked="OnBackgroundFitChanged"
+                                             ToolTip="Covers the whole window; whatever does not fit its shape is cut off"/>
+                                <RadioButton Style="{StaticResource SegmentRadio}" GroupName="BackgroundFit" Tag="Fit"
+                                             Content="Fit" MinWidth="64" Margin="0,0,8,8" Checked="OnBackgroundFitChanged"
+                                             ToolTip="All of the picture, with bands where the window is a different shape"/>
+                                <RadioButton Style="{StaticResource SegmentRadio}" GroupName="BackgroundFit" Tag="Stretch"
+                                             Content="Stretch" MinWidth="64" Margin="0,0,8,8" Checked="OnBackgroundFitChanged"
+                                             ToolTip="Covers the window, squeezed to its shape"/>
+                                <RadioButton Style="{StaticResource SegmentRadio}" GroupName="BackgroundFit" Tag="Tile"
+                                             Content="Tile" MinWidth="64" Margin="0,0,8,8" Checked="OnBackgroundFitChanged"
+                                             ToolTip="Repeated at its own size: for patterns and textures"/>
+                                <RadioButton Style="{StaticResource SegmentRadio}" GroupName="BackgroundFit" Tag="Center"
+                                             Content="Center" MinWidth="64" Margin="0,0,8,8" Checked="OnBackgroundFitChanged"
+                                             ToolTip="At its own size, in the middle of the window"/>
+                            </WrapPanel>
+                        </DockPanel>
+
+                        <DockPanel Margin="0,0,0,8">
+                            <TextBlock DockPanel.Dock="Left" Text="Dim" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="BackgroundDimLabel" DockPanel.Dock="Right" MinWidth="90" TextAlignment="Right"
+                                       VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
+                            <Slider x:Name="BackgroundDimSlider" Minimum="0" Maximum="90" TickFrequency="5"
+                                    IsSnapToTickEnabled="True"
+                                    ValueChanged="OnBackgroundDimChanged" VerticalAlignment="Center" Margin="0,0,16,0"
+                                    ToolTip="How much of the launcher's own colour lies over the picture. More is calmer and easier to read over."/>
+                        </DockPanel>
+
+                        <DockPanel Margin="0,0,0,8">
+                            <TextBlock DockPanel.Dock="Left" Text="Blur" Width="150"
+                                       Foreground="{DynamicResource TextSecondaryBrush}" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="BackgroundBlurLabel" DockPanel.Dock="Right" MinWidth="90" TextAlignment="Right"
+                                       VerticalAlignment="Center" FontWeight="SemiBold" Foreground="{DynamicResource AccentTextBrush}"/>
+                            <Slider x:Name="BackgroundBlurSlider" Minimum="0" Maximum="10" TickFrequency="1"
+                                    IsSnapToTickEnabled="True" TickPlacement="BottomRight"
+                                    ValueChanged="OnBackgroundBlurChanged" VerticalAlignment="Center" Margin="0,0,16,0"
+                                    ToolTip="Softens the picture so it stays in the background, the way Minecraft blurs the world behind its menus"/>
+                        </DockPanel>
+
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="150,0,0,0"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"
+                                   Text="Pages, the sidebar and the title bar show the picture; cards and menus stay solid so their text stays easy to read."/>
                     </StackPanel>
                 </StackPanel>
             </slate:SlateBorder>

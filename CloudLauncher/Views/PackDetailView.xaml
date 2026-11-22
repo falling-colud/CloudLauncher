@@ -5,7 +5,7 @@
       xmlns:local="clr-namespace:CloudLauncher.Views"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Instance"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>

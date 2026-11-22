@@ -24,7 +24,8 @@
 
             <!--  Page background within the navigator frame  -->
             <Style TargetType="Page">
-                <Setter Property="Background" Value="{DynamicResource Surface0Brush}"/>
+                <!--  Surface0Brush itself, or see-through over a background picture (ThemeService.ApplyBackdrop).  -->
+                <Setter Property="Background" Value="{DynamicResource PageBackgroundBrush}"/>
                 <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
                 <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
             </Style>

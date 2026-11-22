@@ -4,7 +4,7 @@
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:local="clr-namespace:CloudLauncher.Views"
       Title="World"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>

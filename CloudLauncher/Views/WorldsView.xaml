@@ -4,7 +4,7 @@
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:v="clr-namespace:CloudLauncher.Views"
       Title="Worlds"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
 
     <!--  Standard six-row page: header / actions / divider / strip / content / status.
     Every world on this PC, grouped into folders you make (they work as on the Instances page);

@@ -3,7 +3,7 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       Title="Shader pack"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <!--  The shader pack's own page, laid out like the resource pack's: a hero card, an Overview
     tab with the editable part, and an Instances tab listing where the pack goes. The page states
     what differs: an instance loads only one shader pack, and an instance without Iris loads

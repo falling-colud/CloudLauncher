@@ -26,11 +26,14 @@ public partial class SettingsPanel : Page
         {
             Refresh();
             Window.GetWindow(this)!.PreviewKeyDown += OnShellKeyDown;
+            ThemeService.BackdropChanged -= OnBackdropChanged;
+            ThemeService.BackdropChanged += OnBackdropChanged;
         };
         Unloaded += (_, _) =>
         {
             // Events raised while the page is torn down are not user changes.
             _suppress = true;
+            ThemeService.BackdropChanged -= OnBackdropChanged;
             if (Window.GetWindow(this) is { } w) w.PreviewKeyDown -= OnShellKeyDown;
         };
     }
@@ -144,6 +147,7 @@ public partial class SettingsPanel : Page
             UpdateRateLabel.Text = UpdateRateText(s.EffectiveModUpdateChecksPerSecond);
             RefreshThemeControls();
             RefreshLookControls();
+            RefreshBackgroundControls();
             PacksFolderLabel.Text = s.PacksRoot;
             PacksFolderHint.Text = Directory.Exists(s.PacksRoot)
                 ? "New instances are created here. Existing ones stay where they are unless you move them."
@@ -701,6 +705,141 @@ public partial class SettingsPanel : Page
         App.State.Settings.Look = new LookSettings();
         ApplyLookChange();
         StatusLabel.Text = "Slate options reset to the defaults.";
+    }
+
+    // ── appearance: background image ─────────────────────────────────────────
+
+    private BackgroundImageSettings BackgroundPicture => App.State.Settings.BackgroundImage ??= new BackgroundImageSettings();
+
+    /// <summary>Shows the picture, its options and its state. Also runs when a picture finishes loading
+    /// (<see cref="ThemeService.BackdropChanged"/>), so it guards its own control events.</summary>
+    private void RefreshBackgroundControls()
+    {
+        var was = _suppress;
+        _suppress = true;
+        try
+        {
+            var bg = BackgroundPicture;
+            var picture = bg.IsOn ? BackgroundImageService.Get(bg) : default;
+            var preview = bg.IsOn ? BackgroundImageService.Preview(bg) : null;
+            BackgroundPreview.Source = preview;
+            BackgroundPreviewNone.Text = !bg.IsOn ? "None" : picture.Error is not null ? "Can't show" : preview is null ? "Opening..." : "";
+            BackgroundPreviewNone.Visibility = preview is null ? Visibility.Visible : Visibility.Collapsed;
+            RemoveBackgroundButton.Visibility = bg.IsOn ? Visibility.Visible : Visibility.Collapsed;
+            ChooseBackgroundButton.Content = bg.IsOn ? "Change image..." : "Choose image...";
+            BackgroundOptionsPanel.Visibility = bg.IsOn ? Visibility.Visible : Visibility.Collapsed;
+
+            BackgroundHint.Text = !bg.IsOn
+                ? "A screenshot or any picture of your own, behind the whole launcher."
+                : picture.Error is { } error
+                    ? error
+                    : preview is null
+                        ? "Opening the picture..."
+                        : (string.IsNullOrWhiteSpace(bg.Source) ? "" : bg.Source + "  ·  ")
+                          + $"{Math.Round(preview.Width)} × {Math.Round(preview.Height)}";
+
+            var fit = bg.EffectiveFit;
+            foreach (var child in BackgroundFitOptions.Children)
+                if (child is RadioButton option)
+                    option.IsChecked = string.Equals(option.Tag as string, fit, StringComparison.Ordinal);
+            BackgroundDimSlider.Value = bg.EffectiveDim;
+            BackgroundDimLabel.Text = DimText(bg.EffectiveDim);
+            BackgroundBlurSlider.Value = bg.EffectiveBlur;
+            BackgroundBlurLabel.Text = BlurText(bg.EffectiveBlur);
+        }
+        finally { _suppress = was; }
+    }
+
+    private static string DimText(int percent) => percent <= 0 ? "None" : $"{percent}%";
+
+    private static string BlurText(int steps) => steps <= 0 ? "Off" : $"{steps} / {BackgroundImageSettings.MaxBlur}";
+
+    private void OnBackdropChanged()
+    {
+        if (IsLoaded) RefreshBackgroundControls();
+    }
+
+    private async void OnChooseBackground(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = "Choose a background image",
+            Filter = BackgroundImageService.PickerFilter,
+            CheckFileExists = true,
+        };
+        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
+
+        ChooseBackgroundButton.IsEnabled = false;
+        BackgroundHint.Text = "Opening the picture...";
+        try
+        {
+            var name = await BackgroundImageService.ImportAsync(dialog.FileName);
+            var bg = BackgroundPicture;
+            bg.File = name;
+            bg.Source = Path.GetFileName(dialog.FileName);
+            App.State.Settings.Save();
+            // The old copy goes only once the settings point at the new one.
+            BackgroundImageService.RemoveOthers(name);
+            ThemeService.ApplyBackdrop(App.State.Settings);
+            StatusLabel.Text = "Background image set.";
+        }
+        catch (InvalidDataException ex)
+        {
+            RefreshBackgroundControls();
+            BackgroundHint.Text = ex.Message;
+            return;
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError("background", ex);
+            RefreshBackgroundControls();
+            BackgroundHint.Text = "Could not use that picture: " + ex.Message;
+            return;
+        }
+        finally { ChooseBackgroundButton.IsEnabled = true; }
+        RefreshBackgroundControls();
+    }
+
+    private void OnRemoveBackground(object sender, RoutedEventArgs e)
+    {
+        var bg = BackgroundPicture;
+        bg.File = null;
+        bg.Source = null;
+        App.State.Settings.Save();
+        BackgroundImageService.RemoveOthers(null);
+        ThemeService.ApplyBackdrop(App.State.Settings);
+        RefreshBackgroundControls();
+        StatusLabel.Text = "Background image removed. Your own file was not touched.";
+    }
+
+    private void OnBackgroundFitChanged(object sender, RoutedEventArgs e)
+    {
+        if (_suppress || sender is not RadioButton { Tag: string fit }) return;
+        BackgroundPicture.Fit = fit;
+        ApplyBackgroundChange();
+    }
+
+    private void OnBackgroundDimChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (BackgroundDimLabel is not null) BackgroundDimLabel.Text = DimText((int)BackgroundDimSlider.Value);
+        if (_suppress) return;
+        BackgroundPicture.Dim = (int)BackgroundDimSlider.Value;
+        ApplyBackgroundChange();
+    }
+
+    private void OnBackgroundBlurChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (BackgroundBlurLabel is not null) BackgroundBlurLabel.Text = BlurText((int)BackgroundBlurSlider.Value);
+        if (_suppress) return;
+        BackgroundPicture.Blur = (int)BackgroundBlurSlider.Value;
+        ApplyBackgroundChange();
+    }
+
+    /// <summary>Saves and repaints only the backdrop: no palette change, so nothing else redraws.</summary>
+    private void ApplyBackgroundChange()
+    {
+        App.State.Settings.Save();
+        ThemeService.ApplyBackdrop(App.State.Settings);
     }
 
     // ── default Java ─────────────────────────────────────────────────────────

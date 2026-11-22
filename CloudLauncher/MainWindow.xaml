@@ -58,6 +58,16 @@
 
     <Border x:Name="RootBorder" Background="{DynamicResource Surface0Brush}"
             BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+      <Grid>
+        <!--  The background picture (Settings > Appearance > Background image) under a wash of the base
+        colour, both set by ThemeService.ApplyBackdrop and empty without a picture. Outside the scaled
+        grid, so the launcher's zoom does not resize it. Pages, the title bar and the sidebar let it
+        through; cards, menus and text boxes stay solid.  -->
+        <Grid x:Name="BackdropLayer" IsHitTestVisible="False" ClipToBounds="True">
+            <Rectangle Fill="{DynamicResource BackdropImageBrush}"/>
+            <Rectangle Fill="{DynamicResource BackdropScrimBrush}"/>
+        </Grid>
+
         <Grid>
             <Grid.LayoutTransform>
                 <ScaleTransform x:Name="RootScale"/>
@@ -76,7 +86,7 @@
 
             <!-- ════════════════ TITLE BAR ════════════════ -->
             <Border Grid.Row="0" Grid.ColumnSpan="2"
-                    Background="{DynamicResource TitleBarBrush}"
+                    Background="{DynamicResource WindowTitleBarBrush}"
                     BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="0,0,0,1">
                 <DockPanel LastChildFill="True">
@@ -141,7 +151,7 @@
             <!-- Every row inside is a Grid with a fixed 60 px icon column and a flexible label
             column, so the icons stay put when the sidebar collapses (60 px) or expands (240 px). -->
             <Border Grid.Row="2" Grid.Column="0"
-                    Background="{DynamicResource Surface1Brush}"
+                    Background="{DynamicResource SidebarBrush}"
                     BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
                 <DockPanel x:Name="Sidebar">
 
@@ -402,7 +412,7 @@
                 <Frame x:Name="MainFrame" Grid.Column="0"
                        NavigationUIVisibility="Hidden"
                        anim:Animate.PageTransition="True"
-                       Background="{DynamicResource Surface0Brush}"/>
+                       Background="{DynamicResource PageBackgroundBrush}"/>
 
                 <!--  Drag splitter between master and side panel  -->
                 <GridSplitter x:Name="PanelSplitter"
@@ -442,12 +452,12 @@
 
                 <Grid x:Name="SidePanelHost" Grid.Column="2"
                       Visibility="Collapsed">
-                    <Border Background="{DynamicResource Surface1Brush}"
+                    <Border Background="{DynamicResource PageBackgroundBrush}"
                             BorderBrush="{DynamicResource BorderBrush}"
                             BorderThickness="0,0,0,0">
                         <Frame x:Name="SideFrame" NavigationUIVisibility="Hidden"
                                anim:Animate.PageTransition="True"
-                               Background="{DynamicResource Surface0Brush}"/>
+                               Background="{DynamicResource PageBackgroundBrush}"/>
                     </Border>
                     <StackPanel Orientation="Vertical"
                                 HorizontalAlignment="Right"
@@ -493,5 +503,6 @@
             <Grid x:Name="DialogLayer" Grid.Row="0" Grid.RowSpan="3" Grid.Column="0" Grid.ColumnSpan="2"
                   Panel.ZIndex="100" Visibility="Collapsed"/>
         </Grid>
+      </Grid>
     </Border>
 </Window>

@@ -79,6 +79,7 @@ public static class ThemeService
             var app = Application.Current;
             if (app is null) return;
             ApplyClassicPalette(app, theme);
+            if (_backdropSettings is { } settings) ApplyBackdrop(settings);
             Changed?.Invoke();
         }
         catch (Exception ex) { AppLog.LogError("theme", ex); }
@@ -109,6 +110,8 @@ public static class ThemeService
         // Slate's popups get a hard pixel shadow from SlateBorder instead of a soft blur.
         app.Resources["PopupShadowEffect"] = look.IsSlate ? null : ClassicPopupShadow();
         LookState.Current.Update(look, shadow);
+        // After the palette: the page and chrome brushes are derived from the surfaces just set.
+        ApplyBackdrop(settings);
 
         // Self-drawn shapes do not repaint on a resource change the way brushes do; see SlateBorder.
         foreach (Window window in app.Windows)
@@ -122,6 +125,7 @@ public static class ThemeService
         theme ??= new ThemeSettings();
         var accent  = Parse(theme.Accent,  Default.Accent);
         var surface = Parse(theme.Surface, Default.Surface);
+        _scrimBase = surface;
 
         // Which way "away from the background" is: a dark base lightens, a light base darkens.
         var dark = Luminance(surface) < 0.5;
@@ -229,6 +233,7 @@ public static class ThemeService
     private static void ApplySlatePalette(Application app, Color accent)
     {
         var bg = Hex("#161615");
+        _scrimBase = bg;
         SetBrush(app, "Surface0Brush",      bg);
         SetBrush(app, "Surface1Brush",      Hex("#191918"));
         SetBrush(app, "Surface2Brush",      Hex("#1D1D1C"));
@@ -291,6 +296,8 @@ public static class ThemeService
     private static void ApplyVanillaPalette(Application app, Color accent)
     {
         var bg = Hex("#1E1E1E");
+        // A plain wash over a picture, not the stone: modern Minecraft dims its menu backgrounds the same way.
+        _scrimBase = bg;
         app.Resources["Surface0Brush"] = StoneTexture(bg, seed: 7);
         app.Resources["Surface1Brush"] = StoneTexture(Hex("#181818"), seed: 11);
         SetBrush(app, "Surface2Brush",      Hex("#262626"));
@@ -472,6 +479,131 @@ public static class ThemeService
         RenderOptions.SetBitmapScalingMode(brush, BitmapScalingMode.NearestNeighbor);
         brush.Freeze();
         return brush;
+    }
+
+    // ── background picture ──
+
+    /// <summary>How much of the title bar's and the sidebar's colour stays over a background picture:
+    /// enough to read them as the window's frame, little enough that the picture runs on beneath.</summary>
+    private const double ChromeOpacity = 0.62;
+
+    /// <summary>The colour the wash over a background picture is made of: the deepest surface of the
+    /// palette in use, as a plain colour (Vanilla's surface is a texture).</summary>
+    private static Color _scrimBase = Color.FromRgb(0x16, 0x16, 0x15);
+
+    /// <summary>The settings the backdrop was last applied with, for re-applying when a picture that was
+    /// still loading arrives.</summary>
+    private static AppSettings? _backdropSettings;
+
+    /// <summary>The picture on screen. Kept while a new one (or a new blur level) is made, so changing a
+    /// setting never flashes the window empty.</summary>
+    private static System.Windows.Media.Imaging.BitmapSource? _backdropShown;
+
+    /// <summary>Raised after the background picture's resources change: a picture arrived, failed or was
+    /// turned off. The Settings page updates its preview from it.</summary>
+    public static event Action? BackdropChanged;
+
+    static ThemeService()
+    {
+        BackgroundImageService.Ready += () =>
+        {
+            if (_backdropSettings is { } settings) ApplyBackdrop(settings);
+        };
+    }
+
+    /// <summary>
+    /// Puts the background picture, or none, into the resources the main window's backdrop layer, the
+    /// pages, the title bar, the sidebar and the status bars paint with. <see cref="ApplyLook"/> calls it
+    /// after every palette change; the background settings call it alone, since nothing else changes.
+    /// </summary>
+    /// <remarks>
+    /// <para>Without a picture each brush is the palette's own (<c>PageBackgroundBrush</c> is the very
+    /// <c>Surface0Brush</c> object, the Vanilla stone included), so the launcher looks exactly as it did.
+    /// With one, pages turn transparent, the title bar, the sidebar and the status bars keep
+    /// <see cref="ChromeOpacity"/> of their colour, and a wash of the base colour at the Dim strength lies
+    /// over the picture. Cards, menus, inputs and the description views stay solid.</para>
+    /// <para>A picture that is still being decoded leaves the window looking as usual: the wash lies over
+    /// the window's own background until it comes. A picture that fails shows the plain look, and
+    /// Settings says why.</para>
+    /// </remarks>
+    public static void ApplyBackdrop(AppSettings settings)
+    {
+        try { ApplyBackdropCore(settings); }
+        catch (Exception ex) { AppLog.LogError("theme", ex); }
+        BackdropChanged?.Invoke();
+    }
+
+    private static void ApplyBackdropCore(AppSettings settings)
+    {
+        var app = Application.Current;
+        if (app is null) return;
+        _backdropSettings = settings;
+
+        var background = settings.BackgroundImage ?? new BackgroundImageSettings();
+        var picture = background.IsOn ? BackgroundImageService.Get(background) : default;
+        var on = background.IsOn && picture.Error is null;
+
+        var surface0 = app.Resources["Surface0Brush"] as Brush ?? Frozen(_scrimBase);
+        var surface1 = app.Resources["Surface1Brush"] as Brush ?? surface0;
+        var titleBar = app.Resources["TitleBarBrush"] as Brush ?? surface1;
+
+        if (!on)
+        {
+            _backdropShown = null;
+            app.Resources["PageBackgroundBrush"] = surface0;
+            app.Resources["WindowTitleBarBrush"] = titleBar;
+            app.Resources["SidebarBrush"] = surface1;
+            app.Resources["StatusBarBrush"] = surface1;
+            app.Resources["BackdropImageBrush"] = null;
+            app.Resources["BackdropScrimBrush"] = Brushes.Transparent;
+            return;
+        }
+
+        app.Resources["PageBackgroundBrush"] = Brushes.Transparent;
+        app.Resources["WindowTitleBarBrush"] = WithOpacity(titleBar, ChromeOpacity);
+        app.Resources["SidebarBrush"] = WithOpacity(surface1, ChromeOpacity);
+        app.Resources["StatusBarBrush"] = WithOpacity(surface1, ChromeOpacity);
+        var alpha = (byte)Math.Round(background.EffectiveDim / 100.0 * 255);
+        app.Resources["BackdropScrimBrush"] = Frozen(WithAlpha(_scrimBase, alpha));
+
+        if (picture.Bitmap is not null) _backdropShown = picture.Bitmap;
+        app.Resources["BackdropImageBrush"] = _backdropShown is { } shown
+            ? BackdropBrush(shown, background.EffectiveFit)
+            : null;
+    }
+
+    /// <summary>The picture as a brush for the backdrop layer, placed the way the Windows wallpaper
+    /// setting of the same name places it. Center and Tile use the picture's own pixel size.</summary>
+    private static Brush BackdropBrush(System.Windows.Media.Imaging.BitmapSource bitmap, string fit)
+    {
+        var brush = new ImageBrush(bitmap) { AlignmentX = AlignmentX.Center, AlignmentY = AlignmentY.Center };
+        switch (fit)
+        {
+            case BackgroundImageSettings.FitFit: brush.Stretch = Stretch.Uniform; break;
+            case BackgroundImageSettings.StretchFit: brush.Stretch = Stretch.Fill; break;
+            case BackgroundImageSettings.CenterFit: brush.Stretch = Stretch.None; break;
+            case BackgroundImageSettings.TileFit:
+                brush.Stretch = Stretch.Fill;
+                brush.TileMode = TileMode.Tile;
+                brush.ViewportUnits = BrushMappingMode.Absolute;
+                brush.Viewport = new Rect(0, 0, bitmap.Width, bitmap.Height);
+                break;
+            default: brush.Stretch = Stretch.UniformToFill; break;
+        }
+        // Shrinking a 4K picture into a window shimmers with the default filter.
+        RenderOptions.SetBitmapScalingMode(brush, BitmapScalingMode.HighQuality);
+        brush.Freeze();
+        return brush;
+    }
+
+    /// <summary>A frozen copy of <paramref name="brush"/> drawn at <paramref name="opacity"/> of its
+    /// strength. Works for every kind of brush, so a gradient title bar stays a gradient.</summary>
+    private static Brush WithOpacity(Brush brush, double opacity)
+    {
+        var copy = brush.CloneCurrentValue();
+        copy.Opacity = brush.Opacity * opacity;
+        copy.Freeze();
+        return copy;
     }
 
     // ── typography ──

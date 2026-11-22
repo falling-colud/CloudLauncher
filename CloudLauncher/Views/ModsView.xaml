@@ -5,7 +5,7 @@
       xmlns:views="clr-namespace:CloudLauncher.Views"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Mods"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
 
     <!--  Header, actions, divider, filter strip, tabs, status. The page has the per-pack hub's shape
     over every mod on this PC: the hub's launcher-wide surfaces are the tabs here, with the same

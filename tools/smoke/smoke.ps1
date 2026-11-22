@@ -25,6 +25,10 @@
     WebView2 folder that does not exist, so it never touches the real profile, the real server or a
     store.
 
+    With CL_SMOKE_BACKGROUND set to a picture file, the profile starts with that picture as its
+    background (Settings, Appearance), so the run proves the launcher opens and walks every page
+    with one set.
+
 .EXAMPLE
     ./publish-release.ps1 -Version 1.8.4
     ./tools/smoke/smoke.ps1

@@ -5,7 +5,7 @@
       xmlns:v="clr-namespace:CloudLauncher.Views"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Storage"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <Page.Resources>
         <v:BoolToVisibilityConverter x:Key="BoolVis"/>
         <v:NotEmptyToVisibilityConverter x:Key="NotEmptyVis"/>

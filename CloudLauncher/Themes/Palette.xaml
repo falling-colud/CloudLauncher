@@ -105,6 +105,15 @@
         <GradientStop Color="#FF161014" Offset="1"/>
     </LinearGradientBrush>
 
+    <!--  What pages, the main window's title bar and sidebar, and page status bars paint with.
+    ThemeService.ApplyBackdrop sets them: the brushes above without a background picture, see-through
+    with one. The backdrop pair is the picture and the wash of the base colour over it.  -->
+    <SolidColorBrush x:Key="PageBackgroundBrush" Color="{StaticResource Surface0Color}"/>
+    <SolidColorBrush x:Key="WindowTitleBarBrush" Color="#FF12151D"/>
+    <SolidColorBrush x:Key="SidebarBrush" Color="{StaticResource Surface1Color}"/>
+    <SolidColorBrush x:Key="StatusBarBrush" Color="{StaticResource Surface1Color}"/>
+    <SolidColorBrush x:Key="BackdropScrimBrush" Color="Transparent"/>
+
     <!--  Log view defaults; ThemeService re-derives these from the user's colours at startup.
     Separate from the surfaces because a log wants a flatter background and fixed level colours.  -->
     <SolidColorBrush x:Key="LogBackgroundBrush" Color="#FF07090C"/>

@@ -4,7 +4,7 @@
       xmlns:slate="clr-namespace:CloudLauncher.Controls"
       xmlns:views="clr-namespace:CloudLauncher.Views"
       Title="Shaders"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
 
     <!--  Same six-row layout as Worlds and Resource packs (header, actions, divider, strip, content,
     status), so buttons sit in the same places. Rows are grouped into user folders and each has a

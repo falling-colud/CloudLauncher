@@ -428,6 +428,10 @@ public sealed partial class AppSettings
     /// <summary>The launcher's look: the Slate style (default) and its options, or Classic.</summary>
     public LookSettings Look { get; set; } = new();
 
+    /// <summary>A picture of the user's own behind the launcher window, for every style. Kept apart
+    /// from <see cref="Look"/> so neither style's Reset takes it away.</summary>
+    public BackgroundImageSettings BackgroundImage { get; set; } = new();
+
     /// <summary>Text files the built-in editor has been told to keep open across sessions, newest first.</summary>
     public List<string> RecentEditedFiles { get; set; } = new();
 
@@ -1358,6 +1362,65 @@ public sealed class LookSettings
     public bool IsVanilla => string.Equals(Skin, VanillaSkin, StringComparison.OrdinalIgnoreCase);
 
     public LookSettings Clone() => (LookSettings)MemberwiseClone();
+}
+
+/// <summary>The background picture (Settings, Appearance, Background image): a picture behind the
+/// whole window, under a wash of the launcher's own background colour. Pages, the sidebar and the
+/// title bar let it through; cards, menus and text boxes stay solid so text stays readable.</summary>
+/// <remarks>The chosen file is copied into <see cref="Folder"/>, so moving or deleting the original
+/// does not take the background away. Fit is a string rather than an enum for the same reason as
+/// <see cref="LookSettings"/>: a hand-edited value falls back instead of failing the whole file.</remarks>
+public sealed class BackgroundImageSettings
+{
+    public const string FillFit = "Fill", FitFit = "Fit", StretchFit = "Stretch", TileFit = "Tile", CenterFit = "Center";
+    public static readonly string[] Fits = [FillFit, FitFit, StretchFit, TileFit, CenterFit];
+
+    public const int DefaultDim = 60, MaxDim = 90;
+    public const int MaxBlur = 10;
+
+    /// <summary>The copy's file name in <see cref="Folder"/>, or null for no picture.</summary>
+    public string? File { get; set; }
+
+    /// <summary>The name the picture had when it was chosen, shown in Settings to say which one it is.</summary>
+    public string? Source { get; set; }
+
+    /// <summary>How the picture covers the window, as in the Windows wallpaper settings: <c>Fill</c>
+    /// (default: covers it, cropping what does not fit), <c>Fit</c> (all of it, with bands),
+    /// <c>Stretch</c>, <c>Tile</c> or <c>Center</c> (its own size).</summary>
+    public string Fit { get; set; } = FillFit;
+
+    /// <summary>How much of the launcher's background colour lies over the picture, in percent, from 0
+    /// to <see cref="MaxDim"/>. Higher is calmer and easier to read over.</summary>
+    public int Dim { get; set; } = DefaultDim;
+
+    /// <summary>Blur, from 0 (sharp) to <see cref="MaxBlur"/>, in steps of the picture's size, so it
+    /// looks the same whatever its resolution.</summary>
+    public int Blur { get; set; }
+
+    /// <summary>The folder chosen pictures are copied into, beside settings.json.</summary>
+    public static string Folder => Path.Combine(AppSettings.DataRootPath, "backgrounds");
+
+    [JsonIgnore]
+    public bool IsOn => !string.IsNullOrWhiteSpace(File);
+
+    /// <summary>Where the copy is. Only the file name of <see cref="File"/> counts, so a hand-edited
+    /// value cannot point outside <see cref="Folder"/>.</summary>
+    [JsonIgnore]
+    public string? FullPath => IsOn && Path.GetFileName(File!.Trim()) is { Length: > 0 } name
+        ? Path.Combine(Folder, name)
+        : null;
+
+    /// <summary><see cref="Fit"/>, or <see cref="FillFit"/> for a value this version does not know.</summary>
+    [JsonIgnore]
+    public string EffectiveFit => Fits.FirstOrDefault(f => string.Equals(f, Fit?.Trim(), StringComparison.OrdinalIgnoreCase)) ?? FillFit;
+
+    [JsonIgnore]
+    public int EffectiveDim => Math.Clamp(Dim, 0, MaxDim);
+
+    [JsonIgnore]
+    public int EffectiveBlur => Math.Clamp(Blur, 0, MaxBlur);
+
+    public BackgroundImageSettings Clone() => (BackgroundImageSettings)MemberwiseClone();
 }
 
 /// <summary>Per-world preferences stored locally. A world lives in one pack's game/saves folder,

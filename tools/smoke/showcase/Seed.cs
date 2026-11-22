@@ -62,6 +62,20 @@ public static class Seed
             }));
         }
 
+        // CL_SMOKE_BACKGROUND=<picture>: the profile starts with that picture as its background, blurred,
+        // so a run proves the launcher opens with one set (it is copied in the way Settings copies it).
+        if (Environment.GetEnvironmentVariable("CL_SMOKE_BACKGROUND") is { Length: > 0 } picture && File.Exists(picture))
+        {
+            var folder = Path.Combine(profileDir, "backgrounds");
+            Directory.CreateDirectory(folder);
+            var name = "background-smoke" + Path.GetExtension(picture).ToLowerInvariant();
+            File.Copy(picture, Path.Combine(folder, name), overwrite: true);
+            settings["BackgroundImage"] = new Dictionary<string, object>
+            {
+                ["File"] = name, ["Source"] = Path.GetFileName(picture), ["Fit"] = "Fill", ["Dim"] = 60, ["Blur"] = 2,
+            };
+        }
+
         File.WriteAllText(Path.Combine(profileDir, "settings.json"),
             JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
 

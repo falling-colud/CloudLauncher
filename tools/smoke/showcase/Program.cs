@@ -63,7 +63,7 @@ public static class Program
                         <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
                     </Style>
                     <Style TargetType="Page">
-                        <Setter Property="Background" Value="{DynamicResource Surface0Brush}"/>
+                        <Setter Property="Background" Value="{DynamicResource PageBackgroundBrush}"/>
                         <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
                         <Setter Property="FontFamily" Value="{DynamicResource UiFont}"/>
                     </Style>

@@ -5,7 +5,7 @@
       xmlns:views="clr-namespace:CloudLauncher.Views"
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       Title="Data pack browser"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>

@@ -2083,8 +2083,9 @@
         <Setter Property="SnapsToDevicePixels" Value="True"/>
     </Style>
 
+    <!--  StatusBarBrush is Surface1Brush, or partly see-through over a background picture.  -->
     <Style x:Key="PageStatusBar" TargetType="Border">
-        <Setter Property="Background" Value="{DynamicResource Surface1Brush}"/>
+        <Setter Property="Background" Value="{DynamicResource StatusBarBrush}"/>
         <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
         <Setter Property="BorderThickness" Value="0,1,0,0"/>
         <Setter Property="Padding" Value="24,8"/>

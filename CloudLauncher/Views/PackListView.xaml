@@ -5,7 +5,7 @@
       xmlns:anim="clr-namespace:CloudLauncher.Animations"
       xmlns:views="clr-namespace:CloudLauncher.Views"
       Title="Instances"
-      Background="{DynamicResource Surface0Brush}">
+      Background="{DynamicResource PageBackgroundBrush}">
     <!-- Reference page for the master-page layout. Shared measurements come from Style keys in
     Themes/Controls.xaml (PageHeaderPanel, PageFilterBar, PageDivider, PageStatusBar,
     HeaderActionButton, HeaderIconButton, ToolbarIconButton), so copies stay consistent.
