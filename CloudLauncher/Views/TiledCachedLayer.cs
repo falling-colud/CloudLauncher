@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Threading;
@@ -48,6 +49,16 @@ internal sealed class TiledCachedLayer : FrameworkElement
 
         public Brush? Fill { get; }
         public Pen? Pen { get; }
+
+        /// <summary>Whether this ink's items are drawn one by one rather than as one group per tile: a
+        /// solid fill with no outline (a drawn line's shape) covers what it covers the same either way.</summary>
+        /// <remarks>A group costs far more to hand to WPF than it looks: to place a tile it asks the
+        /// group's bounds, and a group works them out by copying every member into a PathGeometry of
+        /// figure and segment objects. A tile of a few hundred drawn lines made tens of megabytes of
+        /// them each time a stroke landed in it. A see-through fill (the highlighter) or an outline (a
+        /// curve cut into pieces) stays grouped, so overlaps don't darken and pieces join without a
+        /// mark.</remarks>
+        public bool DrawsAlone => Pen is null && Fill is SolidColorBrush { Color.A: 255, Opacity: >= 1 };
 
         private static Brush? Faded(Brush? brush, double opacity)
         {
@@ -151,7 +162,7 @@ internal sealed class TiledCachedLayer : FrameworkElement
             var (geo, ink) = items[i];
             _geos[i] = geo;
             _inks[i] = ink;
-            var b = geo.Bounds;
+            var b = BoundsOf(geo);
             if (b.IsEmpty) { _bounds[i] = Rect.Empty; continue; }
             // Half the pen plus a pixel of anti-aliasing, so no stroke is left out of a tile it touches.
             var pad = (ink.Pen?.Thickness ?? 0) / 2 + 1;
@@ -393,16 +404,6 @@ internal sealed class TiledCachedLayer : FrameworkElement
             }
         if (picked is null) return null;
 
-        // In the order the items were given, so what overlaps draws the same way from tile to tile.
-        var groups = new Dictionary<Ink, GeometryGroup>(ReferenceEqualityComparer.Instance);
-        foreach (var (ink, ids) in picked)
-        {
-            ids.Sort();
-            var group = new GeometryGroup { FillRule = FillRule.Nonzero };
-            foreach (var i in ids) group.Children.Add(_geos[i]);
-            groups[ink] = group;
-        }
-
         var clip = new RectangleGeometry(rect);
         clip.Freeze();
         var cache = new BitmapCache { RenderAtScale = _tileZoom, SnapsToDevicePixels = true, EnableClearType = false };
@@ -411,9 +412,18 @@ internal sealed class TiledCachedLayer : FrameworkElement
         using (var dc = visual.RenderOpen())
         {
             dc.PushClip(clip);
+            // In the order the items were given, so what overlaps draws the same way from tile to tile.
             foreach (var ink in _inkOrder)
             {
-                if (!groups.TryGetValue(ink, out var group)) continue;
+                if (!picked.TryGetValue(ink, out var ids)) continue;
+                ids.Sort();
+                if (ink.DrawsAlone)
+                {
+                    foreach (var i in ids) dc.DrawGeometry(ink.Fill, null, _geos[i]);
+                    continue;
+                }
+                var group = new GeometryGroup { FillRule = FillRule.Nonzero };
+                foreach (var i in ids) group.Children.Add(_geos[i]);
                 group.Freeze();
                 dc.DrawGeometry(ink.Fill, ink.Pen, group);
             }
@@ -421,4 +431,18 @@ internal sealed class TiledCachedLayer : FrameworkElement
         }
         return visual;
     }
+
+    /// <summary>An item's bounds, worked out once per geometry: callers hand the same frozen geometry
+    /// back on every change (a drawing's strokes), and WPF walks a geometry's whole outline for its
+    /// bounds each time it is asked.</summary>
+    private static Rect BoundsOf(Geometry geometry)
+    {
+        if (!geometry.IsFrozen) return geometry.Bounds;
+        if (KnownBounds.TryGetValue(geometry, out var known)) return known.Value;
+        var bounds = geometry.Bounds;
+        KnownBounds.AddOrUpdate(geometry, new StrongBox<Rect>(bounds));
+        return bounds;
+    }
+
+    private static readonly ConditionalWeakTable<Geometry, StrongBox<Rect>> KnownBounds = new();
 }

@@ -150,6 +150,42 @@ public static class FakeWorld
     // Program, not the real 25 s, to keep runs short).
 
     static readonly Dictionary<string, (long Rev, string? Json)> PlanDocs = new();
+    static int _planPuts, _planFull, _planEmpty;
+    static long _planFullBytes;
+
+    /// <summary>Puts a pack's boards on the server as if stored there already, at a revision.</summary>
+    public static void SeedPlans(Guid packId, long rev, string json)
+    {
+        lock (PlanDocs) PlanDocs[$"packs/{packId}/plans"] = (rev, json);
+    }
+
+    static int _planDelivered;
+    static long _planDeliveredBytes;
+
+    public static void ResetPlanCounters()
+    {
+        lock (PlanDocs) _planPuts = _planFull = _planEmpty = _planDelivered = 0;
+        lock (PlanDocs) _planFullBytes = _planDeliveredBytes = 0;
+    }
+
+    /// <summary>A whole document reached the launcher (the connection took all of it).</summary>
+    public static void NotePlansDelivered(long bytes)
+    {
+        lock (PlanDocs) { _planDelivered++; _planDeliveredBytes += bytes; }
+    }
+
+    /// <summary>Stores, whole documents answered (and their size), empty answers, and whole documents
+    /// that actually reached the launcher, since the reset.</summary>
+    public static (int Puts, int Full, long FullBytes, int Empty, int Delivered, long DeliveredBytes) PlanCounters()
+    {
+        lock (PlanDocs) return (_planPuts, _planFull, _planFullBytes, _planEmpty, _planDelivered, _planDeliveredBytes);
+    }
+
+    /// <summary>The revision a pack's boards are at on this server (0 before any).</summary>
+    public static long PlanRevision(string path)
+    {
+        lock (PlanDocs) return PlanDocs.TryGetValue(path, out var cur) ? cur.Rev : 0;
+    }
 
     public static (int Status, object? Body) Plans(string method, string path, NameValueCollection q, string body)
     {
@@ -160,10 +196,16 @@ public static class FakeWorld
                 ? new(0, null, null)
                 : new(cur.Rev, Now, JsonDocument.Parse(cur.Json).RootElement.Clone());
             if (method == "GET")
-                return long.TryParse(q["after"], out var after) && after == cur.Rev ? (204, null) : (200, Doc());
+            {
+                if (long.TryParse(q["after"], out var after) && after == cur.Rev) { _planEmpty++; return (204, null); }
+                _planFull++;
+                _planFullBytes += cur.Json?.Length ?? 0;
+                return (200, Doc());
+            }
             if (method != "PUT") return (404, null);
             var req = JsonSerializer.Deserialize<PutPackPlansRequest>(body, Json)!;
             if (req.BaseRevision != cur.Rev) return (409, Doc());
+            _planPuts++;
             PlanDocs[path] = (cur.Rev + 1, req.Plans.GetRawText());
             return (200, new PackPlansStored(cur.Rev + 1, Now));
         }

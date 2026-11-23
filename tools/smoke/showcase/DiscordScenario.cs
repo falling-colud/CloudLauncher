@@ -145,7 +145,9 @@ public static class DiscordScenario
 
         Click(Toggle, false);
         Check("unticked: the board is kept out", !Board.ShowInDiscord);
-        Check("unticked: saved to plans.json", File.ReadAllText(file).Contains("\"ShowInDiscord\": false"));
+        App.State.ModPlans.Flush(Pack); // the file follows a burst of changes a moment later
+        Check("unticked: saved to plans.json",
+            ModPlanService.Parse(File.ReadAllText(file))?.Boards.FirstOrDefault(b => b.Id == Board.Id)?.ShowInDiscord == false);
         Check("unticked: the status line says so", Status == "Kept out of Discord.", Status);
         var status = (TextBlock)_view.FindName("PlanStatus");
         var buttonsEnd = ((FrameworkElement)_view.FindName("ToolbarLeft")).ActualWidth;

@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Windows.Threading;
 
 namespace CloudLauncher.Services;
 
@@ -22,9 +23,10 @@ public sealed class ModPlanService
     private readonly Dictionary<Guid, PackPlans> _cache = new();
     private readonly object _lock = new();
 
+    /// <remarks>Not indented: the same text is the file, the copy sent to the server and the copy kept
+    /// as agreed with it, and a board drawn on for a few days is over a megabyte of it.</remarks>
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
-        WriteIndented = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
@@ -51,12 +53,92 @@ public sealed class ModPlanService
     }
 
     /// <summary>The pack's boards as they stand in memory, serialized as the file is.</summary>
+    /// <remarks>As of the last <see cref="Save"/>: every change to the boards is followed by one, and
+    /// the text is made once per change however many ask for it (the file, the sync).</remarks>
     public string CurrentJson(Guid packId)
     {
-        lock (_lock) return Serialize(Load(packId));
+        lock (_lock) return JsonOf(packId, Load(packId));
     }
 
     // ── load / save ──────────────────────────────────────────────────────────
+    // Saves come in bursts: every stroke of a handwritten word is one, and so is every card dropped in
+    // a row. Each used to write the whole file at once, on the UI thread, and a board drawn on for a few
+    // days is over a megabyte of JSON: several milliseconds and megabytes of garbage per stroke. Now a
+    // save marks the boards changed and tells the sync, and the file is written once the burst is over
+    // (SaveDelayMs after the last change, at most MaxSaveDelayMs after the first), or at once by Flush:
+    // when a board closes, before a pack upload reads the files, and when the launcher exits.
+
+    private const int SaveDelayMs = 700;
+    private const int MaxSaveDelayMs = 8000;
+
+    /// <summary>Bumped by every change to a pack's boards, so a serialized copy knows when it is stale.</summary>
+    private readonly Dictionary<Guid, long> _versions = new();
+
+    /// <summary>The last text made of each pack's boards: for which version, of which document.</summary>
+    private readonly Dictionary<Guid, (long Version, PackPlans Doc, string Json)> _json = new();
+
+    /// <summary>Packs whose file is behind their boards, and the timer that writes it.</summary>
+    private readonly Dictionary<Guid, PendingWrite> _pending = new();
+
+    private sealed class PendingWrite
+    {
+        public required long Since;
+        public required DispatcherTimer Timer;
+    }
+
+    private string JsonOf(Guid packId, PackPlans doc)
+    {
+        var version = _versions.GetValueOrDefault(packId);
+        if (_json.TryGetValue(packId, out var made) && made.Version == version && ReferenceEquals(made.Doc, doc))
+            return made.Json;
+        var json = Serialize(doc);
+        _json[packId] = (version, doc, json);
+        return json;
+    }
+
+    private void Changed(Guid packId) => _versions[packId] = _versions.GetValueOrDefault(packId) + 1;
+
+    /// <summary>Writes the boards of every pack with changes not yet on disk.</summary>
+    public void Flush()
+    {
+        List<Guid> packs;
+        lock (_lock) packs = _pending.Keys.ToList();
+        foreach (var packId in packs) Flush(packId);
+    }
+
+    /// <summary>Writes the pack's boards now if the file is behind them. From any thread: the boards
+    /// are read on the thread they are changed on.</summary>
+    public void Flush(Guid packId)
+    {
+        PendingWrite? pending;
+        lock (_lock) _pending.TryGetValue(packId, out pending);
+        if (pending is null) return;
+        if (!pending.Timer.Dispatcher.CheckAccess())
+        {
+            if (!pending.Timer.Dispatcher.HasShutdownStarted) pending.Timer.Dispatcher.Invoke(() => Flush(packId));
+            return;
+        }
+        lock (_lock) Flush(packId, force: true);
+    }
+
+    /// <summary>Puts the file's write off until the burst of changes is over. False when it can't
+    /// be put off (no dispatcher on this thread to come back on, or it has waited long enough).</summary>
+    private bool PutOffWrite(Guid packId)
+    {
+        if (Dispatcher.FromThread(Thread.CurrentThread) is not { } dispatcher) return false;
+        if (!_pending.TryGetValue(packId, out var pending))
+        {
+            var timer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
+                { Interval = TimeSpan.FromMilliseconds(SaveDelayMs) };
+            timer.Tick += (_, _) => Flush(packId);
+            _pending[packId] = pending = new PendingWrite { Since = Environment.TickCount64, Timer = timer };
+        }
+        else if (Environment.TickCount64 - pending.Since >= MaxSaveDelayMs || pending.Timer.Dispatcher != dispatcher)
+            return false;
+        pending.Timer.Stop();
+        pending.Timer.Start();
+        return true;
+    }
 
     private string? TryPlanPath(Guid packId)
     {
@@ -82,14 +164,23 @@ public sealed class ModPlanService
         }
     }
 
+    /// <summary>Records a change to the pack's boards: the sync hears of it at once, the file follows
+    /// once the changes stop coming (see <see cref="Flush()"/>).</summary>
     public void Save(Guid packId)
     {
         lock (_lock)
         {
-            if (!_cache.TryGetValue(packId, out var doc)) return;
-            if (!Write(packId, doc)) return;
+            if (!_cache.ContainsKey(packId) || TryPlanPath(packId) is null) return;
+            Changed(packId);
+            if (!PutOffWrite(packId)) Flush(packId, force: true);
         }
         Saved?.Invoke(packId);
+    }
+
+    private void Flush(Guid packId, bool force)
+    {
+        if (_pending.Remove(packId, out var pending)) pending.Timer.Stop();
+        if (force && _cache.TryGetValue(packId, out var doc)) Write(packId, doc);
     }
 
     private bool Write(Guid packId, PackPlans doc)
@@ -102,7 +193,7 @@ public sealed class ModPlanService
             // Temp file plus atomic rename, as for mods.json: a torn write would leave an unparseable
             // file, which Load() resets to empty, losing every board.
             var tmp = path + ".tmp";
-            File.WriteAllText(tmp, Serialize(doc));
+            File.WriteAllText(tmp, JsonOf(packId, doc));
             File.Move(tmp, path, overwrite: true);
             return true;
         }
@@ -116,6 +207,8 @@ public sealed class ModPlanService
         lock (_lock)
         {
             _cache[packId] = doc;
+            Changed(packId);
+            Flush(packId, force: false); // the merge holds this PC's changes too, and is written now
             Write(packId, doc);
         }
         Replaced?.Invoke(packId);
@@ -125,7 +218,13 @@ public sealed class ModPlanService
     /// (e.g. after a sync pulled a collaborator's boards).</summary>
     public void Invalidate(Guid packId)
     {
-        lock (_lock) { _cache.Remove(packId); }
+        lock (_lock)
+        {
+            Flush(packId, force: false);
+            _cache.Remove(packId);
+            _json.Remove(packId);
+            Changed(packId);
+        }
     }
 
     /// <summary>Called once a pack download has written the pack's files. Re-reads the boards from

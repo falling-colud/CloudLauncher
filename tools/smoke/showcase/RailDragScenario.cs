@@ -215,6 +215,7 @@ public static class RailDragScenario
         Check("...its boards come with it", Order() == "g1,g2,a1,a2,b1,u1", Order());
         Check("...the rail redraws in the new order", HeaderOrder() == "Gamma,Alpha,Beta,-", HeaderOrder());
         Check("...the line is gone", LineY() is null);
+        App.State.ModPlans.Flush(Pack); // the file follows a burst of changes a moment later
         var saved = ModPlanService.Parse(File.ReadAllText(file));
         Check("...saved to plans.json", saved is not null && string.Join(",", saved.BoardCategories) == "Gamma,Alpha,Beta",
             saved is null ? "(unreadable)" : string.Join(",", saved.BoardCategories));

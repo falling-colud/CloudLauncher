@@ -533,6 +533,7 @@ public sealed class PackFolderService(AppSettings settings, ApiClient api)
     {
         void Report(string m) { log?.Report(m); AppLog.Log("upload", m); }
 
+        _modPlans?.Flush(packId); // a board's last changes are in plans.json before it is read
         var gameDir = GameDir(packId);
         ProgressHub.Indeterminate(packId, "Building manifest...");
 

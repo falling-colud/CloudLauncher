@@ -268,6 +268,10 @@ public partial class ModPlanView
         ApplyInkVisibility();
 
         Loaded += (_, _) => RefreshPenTablets();
+        // Woken from sleep, the pen comes back under a new id: see ModPlanView.InkLog.cs.
+        WatchWake();
+        Loaded += (_, _) => { Woke -= OnWoke; Woke += OnWoke; };
+        Unloaded += (_, _) => Woke -= OnWoke;
     }
 
     /// <summary>Tells the live renderer which tablets are pens. Asked again whenever a pen the list
@@ -282,6 +286,7 @@ public partial class ModPlanView
             InkSurface.Renderer.SetPenTablets(ids.ToArray());
         }
         catch { InkSurface.Renderer.SetPenTablets([]); /* no tablet stack: the board draws every line itself */ }
+        NotePenTablets();
     }
 
     // ── draw mode ───────────────────────────────────────────────────────────────
@@ -310,6 +315,7 @@ public partial class ModPlanView
         {
             ClearInkSelection();
             HidePenDot();
+            LogInkSession();
         }
 
         _drawMode = on;
@@ -620,6 +626,7 @@ public partial class ModPlanView
     {
         e.Handled = true;
         var device = e.StylusDevice;
+        if (DeviceOf(device) == InkDevice.Pen) NoteInput(e.Timestamp);
         var at = e.GetPosition(InkSurface);
         if (DeviceOf(device) == InkDevice.Touch)
         {
@@ -658,6 +665,7 @@ public partial class ModPlanView
         BeginInkGesture(tool, InkDevice.Pen, id, at, points);
         if (_ink is { Kind: InkGestureKind.Draw } g)
         {
+            NoteLineStart(rendererDrew);
             // The renderer decided from the hover; if it missed this one, draw it here instead.
             if (!rendererDrew) ShowWetLine(g);
         }
@@ -668,7 +676,9 @@ public partial class ModPlanView
     {
         e.Handled = true;
         var device = e.StylusDevice;
-        if (DeviceOf(device) == InkDevice.Pen) PenMove(device.Id, e.GetStylusPoints(InkSurface));
+        if (DeviceOf(device) != InkDevice.Pen) return;
+        NoteInput(e.Timestamp);
+        PenMove(device.Id, e.GetStylusPoints(InkSurface));
     }
 
     private void OnInkStylusUp(object sender, StylusEventArgs e)
@@ -1160,9 +1170,11 @@ public partial class ModPlanView
             switch (g.Kind)
             {
                 case InkGestureKind.Draw:
+                    var began = System.Diagnostics.Stopwatch.GetTimestamp();
                     if (!cancel) FinishStroke(g);
                     if (g.Wet is not null) InkSurface.Wet.Strokes.Remove(g.Wet);
                     if (cancel && g.Device == InkDevice.Pen) InkSurface.Renderer.Abort();
+                    if (!cancel) NoteLineEnd(System.Diagnostics.Stopwatch.GetElapsedTime(began).TotalMilliseconds);
                     break;
                 case InkGestureKind.Erase:
                     // What was rubbed out is gone either way; one undo step brings it all back.

@@ -18,6 +18,7 @@ public static class Scenarios
             case "planning-discord": DiscordScenario.Run(); break;
             case "planning-rail-drag": RailDragScenario.Run(); break;
             case "planning-pen-touch": PenTouchScenario.Run(); break;
+            case "planning-ink-perf": InkPerfScenario.Run(); break;
             case "background": BackgroundScenario.Run(); break;
             case "tags": TagsScenario.Run(); break;
             case "files":

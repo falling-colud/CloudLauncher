@@ -1886,6 +1886,31 @@ public sealed partial class ApiClient
         return (await ReadAsync<PackPlansStored>(resp, ct), null);
     }
 
+    /// <summary><see cref="PutPackPlansAsync"/> for boards already serialized (compact): sent as they
+    /// are, the same body <see cref="PutPackPlansRequest"/> makes, without reading a megabyte-sized
+    /// document back into a JSON tree only to write it out again.</summary>
+    public async Task<(PackPlansStored? Stored, PackPlansDocument? Conflict)> PutPackPlansJsonAsync(
+        Guid packId, long baseRevision, string plansJson, CancellationToken ct = default)
+    {
+        RefuseIfLocal(packId);
+        await EnsureTokenAsync(ct);
+        var body = await Task.Run(() =>
+        {
+            var head = System.Text.Encoding.UTF8.GetBytes($"{{\"baseRevision\":{baseRevision},\"plans\":");
+            var bytes = new byte[head.Length + System.Text.Encoding.UTF8.GetByteCount(plansJson) + 1];
+            head.CopyTo(bytes, 0);
+            var n = System.Text.Encoding.UTF8.GetBytes(plansJson, bytes.AsSpan(head.Length));
+            bytes[head.Length + n] = (byte)'}';
+            return bytes;
+        }, ct);
+        using var content = new ByteArrayContent(body);
+        content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+        var resp = await _http.PutAsync($"packs/{packId}/plans", content, ct);
+        if (resp.StatusCode == HttpStatusCode.Conflict)
+            return (null, await ReadAsync<PackPlansDocument>(resp, ct, acceptConflict: true));
+        return (await ReadAsync<PackPlansStored>(resp, ct), null);
+    }
+
     // ── sync ─────────────────────────────────────────────────────────────────
 
     public async Task<PackManifest> GetManifestAsync(Guid packId, CancellationToken ct = default)

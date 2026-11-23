@@ -128,8 +128,15 @@ public static class Program
                             using var reader = new StreamReader(ctx.Request.InputStream);
                             (status, answer) = FakeWorld.Plans(ctx.Request.HttpMethod, path, ctx.Request.QueryString,
                                 await reader.ReadToEndAsync());
-                            if (status == 204 && ctx.Request.QueryString["wait"] is { } wait && wait != "0")
-                                await Task.Delay(2000);
+                            if (status == 204 && ctx.Request.QueryString["wait"] is { } wait && wait != "0"
+                                && long.TryParse(ctx.Request.QueryString["after"], out var after))
+                            {
+                                // As the real server does, a store landing meanwhile ends the wait with it.
+                                for (var waited = 0; waited < 2000 && FakeWorld.PlanRevision(path) == after; waited += 25)
+                                    await Task.Delay(25);
+                                if (FakeWorld.PlanRevision(path) != after)
+                                    (status, answer) = FakeWorld.Plans("GET", path, ctx.Request.QueryString, "");
+                            }
                         }
                         else answer = FakeWorld.Answer(ctx.Request.HttpMethod, path, ctx.Request.QueryString);
                     }
@@ -141,7 +148,16 @@ public static class Program
                     ctx.Response.StatusCode = status;
                     ctx.Response.ContentType = "application/json";
                     ctx.Response.ContentLength64 = bytes.Length;
-                    try { await ctx.Response.OutputStream.WriteAsync(bytes); ctx.Response.Close(); } catch { }
+                    try
+                    {
+                        // Counted once it has gone out whole: a launcher that gave up on the request
+                        // (its own store made the answer pointless) has closed the connection by then.
+                        if (status == 200 && path.EndsWith("/plans") && ctx.Request.HttpMethod == "GET") await Task.Delay(150);
+                        await ctx.Response.OutputStream.WriteAsync(bytes);
+                        ctx.Response.Close();
+                        if (status == 200 && path.EndsWith("/plans") && ctx.Request.HttpMethod == "GET") FakeWorld.NotePlansDelivered(bytes.Length);
+                    }
+                    catch { }
                     Log($"server {ctx.Request.HttpMethod} /{path}{ctx.Request.Url.Query} -> {status}");
                 });
             }

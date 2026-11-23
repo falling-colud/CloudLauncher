@@ -77,14 +77,28 @@ public partial class App : Application
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]
     private static void ExitNow()
     {
+        FlushBoards();
         AppLog.Flush();
         Environment.Exit(0);
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        FlushBoards();
         AppLog.Flush();
         base.OnExit(e);
+    }
+
+    /// <summary>Planning boards write their file a moment after the last change (ModPlanService):
+    /// whatever is still waiting goes to disk before the launcher does.</summary>
+    private static void FlushBoards()
+    {
+        try
+        {
+            State?.ModPlans.Flush();
+            State?.PlanSync.Flush();
+        }
+        catch (Exception ex) { AppLog.Log("plans", "Could not write the boards on exit: " + ex.Message); }
     }
 
     /// <summary>

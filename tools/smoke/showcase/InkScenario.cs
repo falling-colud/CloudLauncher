@@ -313,6 +313,7 @@ public static class InkScenario
 
         // ── the file and the sync ──
         Program.Pump(300);
+        App.State.ModPlans.Flush(FakeWorld.Hearthstone); // the file follows a burst of changes a moment later
         var json = System.IO.File.ReadAllText(file);
         Check("plans.json holds the strokes", json.Contains("\"Strokes\"") && json.Contains(s1.Id));
         var parsed = ModPlanService.Parse(json)!;

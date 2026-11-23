@@ -232,6 +232,8 @@ public partial class ModPlanView : UserControl
         {
             ThemeService.Changed -= OnThemeChanged;
             FlushViewportSave();
+            if (_packId != Guid.Empty) Plans.Flush(_packId); // the file catches up with the board as it closes
+            LogInkSession();
         };
         // Live sync with the server, only while the board is on screen. After the viewport flush above,
         // so letting go of the watch sends that save too.

@@ -33,8 +33,10 @@ public enum PlanSyncState
 /// <c>plans-sync.json</c> beside the pack's <c>game</c> folder, which never syncs). That is the base
 /// of the three-way merge in <see cref="PlanMerge"/> when both sides changed, and it is how an edit
 /// made offline is still sent later: the boards differ from that copy, so there is something to send.</para>
-/// <para>Everything runs on the UI thread, where the boards are edited: the network waits are
-/// awaited there and never block it.</para>
+/// <para>It runs on the UI thread, where the boards are edited: the network waits are awaited there
+/// and never block it. What reads or writes a whole document (checking a save for real changes, the
+/// agreed copy on disk) goes to a pool thread, since a drawn-on board is megabytes of JSON and the pen
+/// is on the UI thread.</para>
 /// </remarks>
 public sealed class PlanSyncService
 {
@@ -74,6 +76,22 @@ public sealed class PlanSyncService
         public bool Unavailable;
         public PlanSyncState State = PlanSyncState.Off;
         public DateTimeOffset? SyncedAt;
+        /// <summary>The request waiting on the server, cancelled when this PC stores: the store would
+        /// only come straight back through it, the whole document again.</summary>
+        public CancellationTokenSource? WaitCts;
+        /// <summary><see cref="PlanMerge.Comparable"/> of <see cref="BaseJson"/>, and the text it was made from.</summary>
+        public string? BaseKey;
+        public string? BaseKeyOf;
+        /// <summary>plans-sync.json is written off the UI thread, one write after another.</summary>
+        public Task BaseWrite = Task.CompletedTask;
+        public int BaseWrites;
+    }
+
+    /// <summary>Waits, briefly, for the agreed copies still being written (for the launcher's exit).</summary>
+    public void Flush()
+    {
+        try { Task.WaitAll(_state.Values.Select(s => s.BaseWrite).ToArray(), TimeSpan.FromSeconds(3)); }
+        catch { /* best-effort, like the writes themselves */ }
     }
 
     public PlanSyncState StateOf(Guid packId) => _state.TryGetValue(packId, out var s) ? s.State : PlanSyncState.Off;
@@ -161,10 +179,15 @@ public sealed class PlanSyncService
             for (var attempt = 0; attempt < 4; attempt++)
             {
                 var json = _plans.CurrentJson(packId);
-                var doc = ModPlanService.Parse(json);
-                if (doc is null) return;
-                if (s.BaseJson is { } baseJson && ModPlanService.Parse(baseJson) is { } agreed
-                    && PlanMerge.SameContent(agreed, doc))
+                var baseJson = s.BaseJson;
+                var known = baseJson is not null && ReferenceEquals(s.BaseKeyOf, baseJson) ? s.BaseKey : null;
+                // Whether anything real changed means reading both copies whole: a drawn-on board is
+                // megabytes of JSON, so that happens off the UI thread, where the pen is.
+                var check = await Task.Run(() => Compare(json, baseJson, known));
+                if (check.Doc is not { } doc) return;
+                if (baseJson is not null && ReferenceEquals(s.BaseJson, baseJson))
+                    (s.BaseKey, s.BaseKeyOf) = (check.BaseKey, baseJson);
+                if (check.Same)
                 {
                     SetState(packId, s, s.ViewOnly ? PlanSyncState.ViewOnly : PlanSyncState.Synced);
                     return;
@@ -179,12 +202,13 @@ public sealed class PlanSyncService
                 }
 
                 SetState(packId, s, PlanSyncState.Syncing);
-                using var body = JsonDocument.Parse(json);
-                var (stored, conflict) = await _api.PutPackPlansAsync(packId, s.Revision, body.RootElement);
+                s.WaitCts?.Cancel(); // see WatchLoopAsync: our own store mustn't come back whole
+                var (stored, conflict) = await _api.PutPackPlansJsonAsync(packId, s.Revision, json);
                 if (stored is not null)
                 {
                     s.Revision = stored.Revision;
                     s.BaseJson = json;
+                    (s.BaseKey, s.BaseKeyOf) = (check.Key, json);
                     SaveBase(packId, s);
                     SetState(packId, s, PlanSyncState.Synced);
                     return;
@@ -205,6 +229,18 @@ public sealed class PlanSyncService
     private static bool IsUntouched(PackPlans doc) =>
         doc.Boards.Count <= 1 && doc.BoardCategories.Count == 0
         && doc.Boards.All(b => b.IsEmpty && b.Name == "Plan" && b.Category is null);
+
+    /// <summary>The boards as text, read back, and whether they say anything the agreed copy doesn't.
+    /// Runs on a pool thread: it only reads the strings it is given.</summary>
+    /// <param name="baseKey">The agreed copy's <see cref="PlanMerge.Comparable"/> when already known.</param>
+    private static (PackPlans? Doc, string? Key, bool Same, string? BaseKey) Compare(string json, string? baseJson, string? baseKey)
+    {
+        if (ModPlanService.Parse(json) is not { } doc) return (null, null, false, baseKey);
+        var key = PlanMerge.Comparable(doc);
+        if (baseJson is null) return (doc, key, false, null);
+        baseKey ??= ModPlanService.Parse(baseJson) is { } agreed ? PlanMerge.Comparable(agreed) : null;
+        return (doc, key, baseKey is not null && key == baseKey, baseKey);
+    }
 
     // ── receiving ────────────────────────────────────────────────────────────
 
@@ -243,8 +279,23 @@ public sealed class PlanSyncService
                     if (s.State == PlanSyncState.Syncing) SetState(packId, s, PlanSyncState.Synced);
                 }
 
+                // A store from this PC ends the server's wait with the whole document, which is this
+                // PC's own boards (over a megabyte once drawn on): the send cancels the wait instead,
+                // and it is asked again from the revision the store made.
+                if (s.Sending && s.SendDone is { } sending) await sending.Task.WaitAsync(ct);
                 var asked = s.Revision;
-                var doc = await _api.GetPackPlansAsync(packId, asked, WaitSeconds, ct);
+                using var wait = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                s.WaitCts = wait;
+                PackPlansDocument? doc;
+                try { doc = await _api.GetPackPlansAsync(packId, asked, WaitSeconds, wait.Token); }
+                catch (OperationCanceledException) when (wait.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    continue;
+                }
+                finally
+                {
+                    if (ReferenceEquals(s.WaitCts, wait)) s.WaitCts = null;
+                }
                 backoff = TimeSpan.Zero;
                 if (s.State is PlanSyncState.Offline) SetState(packId, s, s.ViewOnly ? PlanSyncState.ViewOnly : PlanSyncState.Synced);
                 if (doc is null) continue;
@@ -363,16 +414,24 @@ public sealed class PlanSyncService
         catch { /* unreadable: treated as never synced, so the server's copy wins */ }
     }
 
+    /// <summary>Keeps the agreed copy on disk. Written off the UI thread (it is the whole document
+    /// again), each write after the one before, and one overtaken by a newer copy is skipped.</summary>
     private void SaveBase(Guid packId, PackSync s)
     {
         if (BasePath(packId) is not { } path) return;
-        try
+        var file = new BaseFile(s.Revision, s.BaseJson);
+        var number = ++s.BaseWrites;
+        s.BaseWrite = s.BaseWrite.ContinueWith(_ =>
         {
-            var tmp = path + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(new BaseFile(s.Revision, s.BaseJson)));
-            File.Move(tmp, path, overwrite: true);
-        }
-        catch { /* best-effort: worst case the next start merges without a base */ }
+            if (number != Volatile.Read(ref s.BaseWrites)) return;
+            try
+            {
+                var tmp = path + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(file));
+                File.Move(tmp, path, overwrite: true);
+            }
+            catch { /* best-effort: worst case the next start merges without a base */ }
+        }, TaskScheduler.Default);
     }
 
     private static void OnUi(Action action)
