@@ -1,0 +1,128 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="CloudLauncher.Views.InstancesPage">
+    <UserControl.Styles>
+        <!-- The instance cards (InstanceCard): a Slate card with the hard offset shadow of the Windows
+             launcher's Slate look, lifting a shade on hover. -->
+        <Style Selector="Border.instanceCard">
+            <Setter Property="Background" Value="{DynamicResource Surface2Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="BoxShadow" Value="3 3 0 0 #4D000000"/>
+        </Style>
+        <Style Selector="Border.instanceCard:pointerover">
+            <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderStrongBrush}"/>
+        </Style>
+        <Style Selector="Border.instanceCard:focus-visible">
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentTextBrush}"/>
+        </Style>
+        <Style Selector="Border.notice">
+            <Setter Property="Background" Value="{DynamicResource Surface1Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Padding" Value="14,8,8,8"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid RowDefinitions="Auto,Auto,Auto,Auto,*">
+        <!-- ── title ── -->
+        <DockPanel Grid.Row="0" Margin="28,22,28,0">
+            <TextBlock x:Name="CountText" DockPanel.Dock="Right" Classes="caption" VerticalAlignment="Bottom"
+                       Margin="12,0,0,5"/>
+            <TextBlock Classes="h1" Text="Instances"/>
+        </DockPanel>
+
+        <!-- ── actions: the page's one accent button first, utilities on the right ── -->
+        <Grid Grid.Row="1" Margin="28,16,28,0">
+            <!-- The search box takes the room up to its 240 first (100*), the gap the rest; on a narrow
+                 window it gives way down to 120. -->
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="100*" MinWidth="120" MaxWidth="256"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8">
+                <Button x:Name="CreateButton" Classes="primary" Click="OnCreate">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Classes="icon" Text="&#xE710;" FontSize="12"/>
+                        <TextBlock Text="Create Instance" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="ImportButton" Click="OnImport"
+                        ToolTip.Tip="Import a Modrinth .mrpack or a CurseForge .zip">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Classes="icon" Text="&#xE898;" FontSize="12"/>
+                        <TextBlock Text="Import" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </StackPanel>
+            <TextBox Grid.Column="2" x:Name="SearchBox" Margin="16,0,8,0" Watermark="Search Instances"
+                     VerticalContentAlignment="Center">
+                <TextBox.InnerLeftContent>
+                    <TextBlock Classes="icon" Text="&#xE721;" FontSize="12" Margin="10,0,2,0"
+                               Foreground="{DynamicResource TextTertiaryBrush}"/>
+                </TextBox.InnerLeftContent>
+            </TextBox>
+            <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                <Button Classes="icon" Content="&#xE838;" Click="OnOpenInstancesFolder"
+                        ToolTip.Tip="Open Instances Folder"/>
+                <Button x:Name="RefreshButton" Classes="icon" Content="&#xE72C;" Click="OnRefresh"
+                        ToolTip.Tip="Refresh (F5)"/>
+            </StackPanel>
+        </Grid>
+
+        <!-- ── divider, with a thin bar while a refresh someone asked for runs ── -->
+        <Panel Grid.Row="2" Margin="28,16,28,0" Height="2">
+            <Rectangle Classes="divider" VerticalAlignment="Top"/>
+            <ProgressBar x:Name="RefreshBar" IsIndeterminate="True" IsVisible="False" Height="2" MinHeight="2"
+                         Background="Transparent"/>
+        </Panel>
+
+        <!-- ── what the list is not showing: signed out, offline; the page's error line ── -->
+        <StackPanel Grid.Row="3" Margin="28,0,28,0">
+            <Border x:Name="SignedOutBar" Classes="notice" Margin="0,14,0,0" IsVisible="False">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="Sign In" Click="OnSignIn" Padding="14,4"/>
+                    <TextBlock Classes="icon" Text="&#xE753;" FontSize="14" Margin="0,0,12,0"
+                               Foreground="{DynamicResource TextTertiaryBrush}"/>
+                    <TextBlock Classes="muted" VerticalAlignment="Center" TextWrapping="Wrap"
+                               Text="Instances on your CloudLauncher account show here once you sign in."/>
+                </DockPanel>
+            </Border>
+            <Border x:Name="OfflineBar" Classes="notice" Margin="0,14,0,0" IsVisible="False">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Content="Try Again" Click="OnRefresh" Padding="14,4"/>
+                    <TextBlock Classes="icon" Text="&#xE7BA;" FontSize="14" Margin="0,0,12,0"
+                               Foreground="{DynamicResource WarningBrush}"/>
+                    <TextBlock x:Name="OfflineText" Classes="muted" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                </DockPanel>
+            </Border>
+            <TextBlock x:Name="StatusText" Classes="danger" TextWrapping="Wrap" Margin="0,12,0,0" IsVisible="False"/>
+        </StackPanel>
+
+        <!-- ── the cards, or what stands in for them ── -->
+        <Panel Grid.Row="4" Margin="0,16,0,0">
+            <ScrollViewer x:Name="ListScroll" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                <UniformGrid x:Name="CardGrid" Columns="4" ColumnSpacing="16" RowSpacing="16"
+                             Margin="28,0,28,24" VerticalAlignment="Top"/>
+            </ScrollViewer>
+
+            <StackPanel x:Name="StatePanel" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="440"
+                        Margin="28,0,28,60" Spacing="8" IsVisible="False">
+                <TextBlock x:Name="StateGlyph" Classes="icon" FontSize="34" HorizontalAlignment="Center"
+                           Margin="0,0,0,6" Foreground="{DynamicResource TextTertiaryBrush}"/>
+                <TextBlock x:Name="StateTitle" Classes="h2" HorizontalAlignment="Center" TextAlignment="Center"
+                           TextWrapping="Wrap"/>
+                <TextBlock x:Name="StateBody" Classes="muted" HorizontalAlignment="Center" TextAlignment="Center"
+                           TextWrapping="Wrap"/>
+                <ProgressBar x:Name="StateProgress" IsIndeterminate="True" Width="180" Margin="0,6,0,0"
+                             IsVisible="False"/>
+                <Button x:Name="StateButton" HorizontalAlignment="Center" Margin="0,10,0,0" Click="OnStateButton"/>
+            </StackPanel>
+        </Panel>
+    </Grid>
+</UserControl>

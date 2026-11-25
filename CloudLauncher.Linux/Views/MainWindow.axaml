@@ -1,0 +1,77 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="CloudLauncher.Views.MainWindow"
+        Title="CloudLauncher" Width="1180" Height="760" MinWidth="820" MinHeight="540"
+        WindowStartupLocation="CenterScreen" Icon="avares://cloudlauncher/Assets/cloudlauncher.png">
+    <Grid RowDefinitions="*,Auto">
+        <Grid ColumnDefinitions="208,*">
+            <!-- ── side rail ── -->
+            <Border Grid.Column="0" Background="{DynamicResource Surface1Brush}"
+                    BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,0,1,0">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Top" Margin="0,14,0,10">
+                        <StackPanel Orientation="Horizontal" Margin="18,0,0,16" Spacing="8">
+                            <Border Width="10" Height="10" Background="{DynamicResource AccentBrush}" VerticalAlignment="Center"/>
+                            <TextBlock Classes="brand" Text="CloudLauncher" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Button x:Name="NavInstances" Classes="nav" Click="OnNavInstances">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <TextBlock Classes="icon" Text="&#xE7C3;"/>
+                                <TextBlock Text="Instances" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="NavModpacks" Classes="nav" Click="OnNavModpacks">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <TextBlock Classes="icon" Text="&#xE896;"/>
+                                <TextBlock Text="Browse Modpacks" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Bottom" Margin="0,0,0,12">
+                        <Rectangle Classes="divider" Margin="12,0,12,8"/>
+                        <Button x:Name="NavAccount" Classes="nav" Click="OnNavAccount">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <TextBlock Classes="icon" Text="&#xE77B;"/>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock x:Name="AccountLabel" Text="Account" TextTrimming="CharacterEllipsis" MaxWidth="140"/>
+                                    <TextBlock x:Name="MinecraftLabel" Classes="caption" Text="No Minecraft account"
+                                               TextTrimming="CharacterEllipsis" MaxWidth="140"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="NavSettings" Classes="nav" Click="OnNavSettings">
+                            <StackPanel Orientation="Horizontal" Spacing="12">
+                                <TextBlock Classes="icon" Text="&#xE713;"/>
+                                <TextBlock Text="Settings" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <Panel/>
+                </DockPanel>
+            </Border>
+
+            <!-- ── page and the popup layer over it ── -->
+            <Panel Grid.Column="1">
+                <ContentControl x:Name="PageHost"/>
+                <Panel x:Name="CardLayer" IsVisible="False">
+                    <Border Background="{DynamicResource ScrimBrush}" PointerPressed="OnScrimPressed"/>
+                    <ContentControl x:Name="CardHost" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                    Margin="24"/>
+                </Panel>
+            </Panel>
+        </Grid>
+
+        <!-- ── status line: background work, offline ── -->
+        <Border Grid.Row="1" Background="{DynamicResource Surface1Brush}"
+                BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="14,5">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+                <TextBlock x:Name="StatusText" Grid.Column="0" Classes="caption" VerticalAlignment="Center"
+                           TextTrimming="CharacterEllipsis"/>
+                <ProgressBar x:Name="StatusProgress" Grid.Column="1" Width="160" Margin="12,0" IsVisible="False"
+                             VerticalAlignment="Center"/>
+                <TextBlock x:Name="OfflineText" Grid.Column="2" Classes="caption" Foreground="{DynamicResource WarningBrush}"
+                           VerticalAlignment="Center" IsVisible="False" Text="Offline"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

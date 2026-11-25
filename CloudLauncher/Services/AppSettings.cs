@@ -946,7 +946,20 @@ public sealed partial class AppSettings
     {
         if (_installedRamMb >= 0) return _installedRamMb;
         long mb = 0;
-        try { if (GetPhysicallyInstalledSystemMemory(out var kb) && kb > 0) mb = kb / 1024; }
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                if (GetPhysicallyInstalledSystemMemory(out var kb) && kb > 0) mb = kb / 1024;
+            }
+            else if (File.Exists("/proc/meminfo"))
+            {
+                // "MemTotal:       32622208 kB": what the kernel has, a little under what is installed.
+                var line = File.ReadLines("/proc/meminfo").FirstOrDefault(l => l.StartsWith("MemTotal:", StringComparison.Ordinal));
+                var digits = new string(line?.Where(char.IsDigit).ToArray() ?? []);
+                if (long.TryParse(digits, out var kb) && kb > 0) mb = kb / 1024;
+            }
+        }
         catch { /* not available: callers fall back */ }
         _installedRamMb = mb;
         return mb;
@@ -1044,21 +1057,35 @@ public sealed partial class AppSettings
         else PackServerAutoRestart.Remove(packId);
     }
 
+    /// <summary>The folder the launcher's own folder goes in: Windows' roaming AppData, or on Linux the
+    /// user's data folder (<c>$XDG_DATA_HOME</c>, else <c>~/.local/share</c>), where launchers keep game
+    /// data rather than in <c>~/.config</c>.</summary>
+    public static string AppDataBasePath => AppDataBase();
+
+    private static string AppDataBase()
+    {
+        if (OperatingSystem.IsWindows()) return Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var data = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        return !string.IsNullOrWhiteSpace(data) && Path.IsPathRooted(data)
+            ? data
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
+    }
+
     /// <summary>Shared Minecraft runtime (libraries, assets, version JARs), stored once globally and
     /// reused by all packs.</summary>
     public static string RuntimeRoot { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppDataBase(),
         "CloudLauncher", "runtime");
 
     /// <summary>Managed Java runtimes downloaded by the launcher when the system Java is incompatible.</summary>
     public static string JavaRoot { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppDataBase(),
         "CloudLauncher", "java");
 
     // CL_PROFILE lets a second instance run with a completely separate data folder.
     // e.g.  set CL_PROFILE=user2  then launch the exe
     private static readonly string DataRoot = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppDataBase(),
         "CloudLauncher",
         Environment.GetEnvironmentVariable("CL_PROFILE") is { Length: > 0 } p ? p : "default");
 

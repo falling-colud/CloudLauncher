@@ -600,6 +600,7 @@ public partial class ModCategoriesView : UserControl
             }
             else Status.Text = "That version has no downloadable file.";
         }
+        catch (ManualDownloadQueuedException ex) { Status.Text = ex.Message; }
         catch (Exception ex) { Status.Text = "Install failed: " + ex.Message; }
     }
 

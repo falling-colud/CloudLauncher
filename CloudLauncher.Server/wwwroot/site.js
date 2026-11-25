@@ -65,6 +65,12 @@
         show("[data-date-line]");
       }
     });
+    getJson("/launcher/linux/latest").then(function (info) {
+      if (!info || !info.version) return;
+      setAll("[data-linux-version]", info.version);
+      setAll("[data-linux-size]", info.size > 0 ? fmtSize(info.size) : "");
+      show("[data-linux-line]");
+    });
   }
 
   // ------------------------------------------------ what's new

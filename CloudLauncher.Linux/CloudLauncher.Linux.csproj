@@ -1,0 +1,82 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- CloudLauncher for Linux: an Avalonia front end over the same services as the Windows launcher.
+       The service files are compiled from ../CloudLauncher/Services (not copied), so sync, launching,
+       mods and downloads behave the same on both; code that only works on Windows sits behind
+       #if WINDOWS in those files, and the WINDOWS symbol is never defined here. -->
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CloudLauncher</RootNamespace>
+    <AssemblyName>cloudlauncher</AssemblyName>
+    <Description>CloudLauncher, a cloud-synced Minecraft launcher</Description>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <!-- The Linux launcher's own version; it follows the Windows launcher's release numbers. -->
+    <Version>0.9.19</Version>
+    <DefineConstants>$(DefineConstants);CL_LINUX</DefineConstants>
+    <ApplicationIcon>..\CloudLauncher\Assets\appicon.ico</ApplicationIcon>
+    <!-- Code shared with the Windows launcher carries its own analysers' expectations. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <!-- A release is one self-contained file per architecture (tools/release/build-linux.ps1). -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CloudLauncher.Shared\CloudLauncher.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.23" />
+    <PackageReference Include="CmlLib.Core" Version="4.0.6" />
+    <PackageReference Include="CmlLib.Core.Auth.Microsoft" Version="3.3.1" />
+    <PackageReference Include="CmlLib.Core.Installer.Forge" Version="1.1.1" />
+    <PackageReference Include="CmlLib.Core.Installer.NeoForge" Version="4.0.1" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Microsoft.Extensions.FileSystemGlobbing" Version="10.0.8" />
+    <PackageReference Include="XboxAuthNet.Game" Version="1.4.1" />
+  </ItemGroup>
+
+  <!-- The Windows launcher's services, as they are. Left out: the ones that are WPF through and through
+       (theme, sounds, window placement, clipboard, keybinds, the background picture). Shims/ stands in
+       for the little of them the rest refers to. -->
+  <ItemGroup>
+    <Compile Include="..\CloudLauncher\Services\*.cs" Link="Shared\Services\%(Filename)%(Extension)" />
+    <Compile Remove="..\CloudLauncher\Services\ThemeService.cs" />
+    <Compile Remove="..\CloudLauncher\Services\UiSounds.cs" />
+    <Compile Remove="..\CloudLauncher\Services\LookState.cs" />
+    <Compile Remove="..\CloudLauncher\Services\BackgroundImageService.cs" />
+    <Compile Remove="..\CloudLauncher\Services\ClipboardHelper.cs" />
+    <Compile Remove="..\CloudLauncher\Services\LauncherKeybinds.cs" />
+    <Compile Remove="..\CloudLauncher\Services\WindowWorkArea.cs" />
+    <Compile Include="..\CloudLauncher\AppState.cs" Link="Shared\AppState.cs" />
+    <Compile Include="..\CloudLauncher\Views\ModUpdater.cs" Link="Shared\Views\ModUpdater.cs" />
+    <Compile Include="..\CloudLauncher\Views\AccentPalette.cs" Link="Shared\Views\AccentPalette.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+    <AvaloniaResource Include="..\CloudLauncher\Assets\Fonts\PixeloidSans*.ttf" Link="Assets\Fonts\%(Filename)%(Extension)" />
+    <AvaloniaResource Include="..\CloudLauncher\Assets\Fonts\SlateIcons.ttf" Link="Assets\Fonts\SlateIcons.ttf" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\LICENSE" Link="LICENSE.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\THIRD-PARTY-NOTICES.txt" Link="THIRD-PARTY-NOTICES.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

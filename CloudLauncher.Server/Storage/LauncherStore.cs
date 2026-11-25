@@ -224,3 +224,16 @@ public class LauncherStore(LauncherStoreOptions opts)
         return Convert.ToHexString(sha.Hash!).ToLowerInvariant();
     }
 }
+
+/// <summary>The Linux launcher's releases: the same store in the <c>linux</c> folder under the launcher
+/// root (latest.json, releases.json, package.bin, packages/{sha256}.bin), so a Linux publish never
+/// touches the Windows feed.</summary>
+public sealed class LinuxLauncherStore(LauncherStoreOptions opts) : LauncherStore(ForLinux(opts))
+{
+    private static LauncherStoreOptions ForLinux(LauncherStoreOptions opts) => new()
+    {
+        RootPath = Path.Combine(opts.RootPath, "linux"),
+        // Published over SSH like the Windows packages; there is no upload route for it.
+        AllowUpload = false
+    };
+}

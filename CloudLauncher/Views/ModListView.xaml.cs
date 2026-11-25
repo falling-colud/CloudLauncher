@@ -418,6 +418,7 @@ public partial class ModListView : UserControl
             }
             else StatusLabel.Text = "No downloadable file.";
         }
+        catch (ManualDownloadQueuedException ex) { StatusLabel.Text = ex.Message; }
         catch (Exception ex) { StatusLabel.Text = "Update failed: " + ex.Message; }
     }
 
@@ -471,6 +472,7 @@ public partial class ModListView : UserControl
             }
             else StatusLabel.Text = "That version has no downloadable file.";
         }
+        catch (ManualDownloadQueuedException ex) { StatusLabel.Text = ex.Message; }
         catch (Exception ex) { StatusLabel.Text = "Install failed: " + ex.Message; }
     }
 

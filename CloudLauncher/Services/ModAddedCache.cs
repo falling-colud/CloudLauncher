@@ -119,7 +119,7 @@ public sealed class ModAddedCache
     }
 
     private static string GetDataRoot() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppSettings.AppDataBasePath,
         "CloudLauncher",
         Environment.GetEnvironmentVariable("CL_PROFILE") is { Length: > 0 } profile ? profile : "default");
 }

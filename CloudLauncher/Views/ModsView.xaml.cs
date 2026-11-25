@@ -218,6 +218,8 @@ public partial class ModsView : Page, IReusablePage, IRefreshablePage
             }
             ThemeService.Changed -= OnThemeChanged;
             ThemeService.Changed += OnThemeChanged;
+            App.State.ManualDownloads.Changed -= OnManualDownloadsChanged;
+            App.State.ManualDownloads.Changed += OnManualDownloadsChanged;
 
             // Reopening refreshes the scan (which also feeds the Categories and Graph tabs) over the cached
             // rows. The store browser is left as it was, keeping the user's search and scroll position.
@@ -228,6 +230,7 @@ public partial class ModsView : Page, IReusablePage, IRefreshablePage
             if (Window.GetWindow(this) is Window w)
                 w.PreviewKeyDown -= OnShellKeyDown;
             ThemeService.Changed -= OnThemeChanged;
+            App.State.ManualDownloads.Changed -= OnManualDownloadsChanged;
             _cts.Cancel();
             _scanCts?.Cancel();
         };
@@ -3178,6 +3181,13 @@ public partial class ModsView : Page, IReusablePage, IRefreshablePage
                 .ToList();
             var skipped = downloads.Count - pending.Count;
 
+            // Files CurseForge only hands to its own website and app: listed for the user to fetch with
+            // the browser (the card pops up now) and moved in once they land in Downloads. The rest
+            // downloads meanwhile.
+            var byHand = pending.Where(item => item.ByHand).ToList();
+            pending = pending.Where(item => !item.ByHand).ToList();
+            var byHandNote = byHand.Count == 0 ? "" : await QueueByHandAsync(pack, byHand);
+
             // Names are settled before anything is fetched, because the downloads below overlap and
             // UniqueFilePath only knows about files already on disk. A store file name that cannot be
             // made into a plain name in the folder is not written at all.
@@ -3255,9 +3265,13 @@ public partial class ModsView : Page, IReusablePage, IRefreshablePage
             var extras = new List<string>(2);
             if (dependencies > 0) extras.Add($"{dependencies} dependenc{(dependencies == 1 ? "y" : "ies")}");
             if (skipped > 0) extras.Add($"{skipped} already present");
-            SetDownloadSuccess(
-                $"Installed {(string.IsNullOrEmpty(rootFileName) ? mod.Name : rootFileName)} to {pack.Name}"
-                + (extras.Count == 0 ? "." : $" ({string.Join(", ", extras)})."));
+            if (byHand.Any(item => !item.IsDependency))
+                SetDownloadSuccess(byHandNote.Trim()
+                    + (extras.Count == 0 ? "" : $" Installed meanwhile: {string.Join(", ", extras)}."));
+            else
+                SetDownloadSuccess(
+                    $"Installed {(string.IsNullOrEmpty(rootFileName) ? mod.Name : rootFileName)} to {pack.Name}"
+                    + (extras.Count == 0 ? "." : $" ({string.Join(", ", extras)}).") + byHandNote);
             // The management list is now out of date by this one jar.
             _modSet.Invalidate();
         }
@@ -3267,6 +3281,47 @@ public partial class ModsView : Page, IReusablePage, IRefreshablePage
             DownloadProgress.IsIndeterminate = false;
             DownloadProgress.Value = 0;
         }
+    }
+
+    /// <summary>Instances this page handed files to the download-by-hand card for, so the management
+    /// list is re-read once those files land.</summary>
+    private readonly HashSet<Guid> _byHandPacks = new();
+
+    /// <summary>
+    /// Lists files the store will not hand over for the user to download with the browser, and brings up
+    /// the card for them, which opens each download page and moves the file in as it arrives. Returns the
+    /// sentence for the status line, starting with a space.
+    /// </summary>
+    private async Task<string> QueueByHandAsync(PackSummary pack, List<ModDownloadItem> items)
+    {
+        // The store a mod came from, recorded now so it is in place when the file lands.
+        foreach (var item in items.Where(i => !i.IsDependency)) RememberInstallSource(pack.Id, item);
+
+        IReadOnlyList<ManualDownloadEntry> queued;
+        try
+        {
+            queued = await App.State.ManualDownloads.QueueAsync(pack.Id, pack.Name, App.State.CurseForge,
+                items.Select(i => new ManualDownloadWant(i.Mod, i.Version, i.File)).ToList());
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ModsView), ex);
+            return $" {items.Count} file(s) could not be listed for a download by hand: {ex.Message}";
+        }
+        if (queued.Count == 0)
+            return $" {items[0].Mod.Name} can't be downloaded by the launcher, and CurseForge gave no file to list.";
+        _byHandPacks.Add(pack.Id);
+        var names = string.Join(", ", queued.Select(e => e.Name).Distinct());
+        return queued.Count == 1
+            ? $" {names} has to come from CurseForge's website: click Download in the window that opened."
+            : $" {names} have to come from CurseForge's website: click Download in the window that opened.";
+    }
+
+    /// <summary>A file handed to the card landed in an instance: the management list is out of date by
+    /// that jar.</summary>
+    private void OnManualDownloadsChanged(Guid packId)
+    {
+        if (_byHandPacks.Contains(packId)) _modSet.Invalidate();
     }
 
     /// <summary>Records which store a just-installed jar came from, keyed by project id with a

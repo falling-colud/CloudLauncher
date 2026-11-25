@@ -301,6 +301,7 @@ public partial class ModExplorerWindow : Window
             var saved = 0;
             var skipped = 0;
             var refused = new List<string>();
+            var byHand = new List<ModDownloadItem>();
             foreach (var item in downloads)
             {
                 // The file name comes from the store; anything but a plain name could land outside the folder.
@@ -315,6 +316,9 @@ public partial class ModExplorerWindow : Window
                     skipped++;
                     continue;
                 }
+                // CurseForge only hands these to its own website and app: the user fetches them with
+                // the browser, from the card this brings up in the main window.
+                if (item.ByHand) { byHand.Add(item); continue; }
 
                 DownloadProgress.IsIndeterminate = true;
                 DownloadProgress.Value = 0;
@@ -324,13 +328,25 @@ public partial class ModExplorerWindow : Window
                 await App.State.Modrinth.DownloadFileAsync(item.File.DownloadUrl, dest, progress);
                 saved++;
             }
+
+            var byHandNote = "";
+            if (byHand.Count > 0)
+            {
+                var queued = await App.State.ManualDownloads.QueueAsync(_pack.Id, _pack.Name, App.State.CurseForge,
+                    byHand.Select(i => new ManualDownloadWant(i.Mod, i.Version, i.File, "mods", Local: target == "local/mods/")).ToList());
+                byHandNote = queued.Count == 0
+                    ? " CurseForge will not hand over the rest, and gave no file to list."
+                    : $" {queued.Count} file(s) have to come from CurseForge's website: click Download in the launcher's window.";
+            }
             if (refused.Count > 0) throw new InvalidOperationException(string.Join("; ", refused));
 
             DownloadProgress.Value = 100;
             var skippedText = skipped > 0 ? $" ({skipped} already present)" : "";
-            DownloadStatus.Text = saved == 1 && downloads.Count == 1
-                ? $"Saved to {target}{downloads[0].File.Filename}"
-                : $"Saved {saved} file(s) to {target}{skippedText}";
+            DownloadStatus.Text = saved == 0 && byHand.Count > 0
+                ? byHandNote.Trim()
+                : (saved == 1 && downloads.Count == 1
+                    ? $"Saved to {target}{downloads[0].File.Filename}"
+                    : $"Saved {saved} file(s) to {target}{skippedText}") + byHandNote;
         }
         catch (Exception ex)
         {

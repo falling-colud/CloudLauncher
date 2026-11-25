@@ -1,0 +1,189 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="using:CloudLauncher.Views"
+             xmlns:svc="using:CloudLauncher.Services"
+             x:Class="CloudLauncher.Views.InstanceModsView">
+    <UserControl.Resources>
+        <!-- A bare switch: no On/Off words beside it. -->
+        <x:Double x:Key="ToggleSwitchThemeMinWidth">0</x:Double>
+        <GridLength x:Key="ToggleSwitchPreContentMargin">0</GridLength>
+        <GridLength x:Key="ToggleSwitchPostContentMargin">0</GridLength>
+    </UserControl.Resources>
+    <UserControl.Styles>
+        <Style Selector="ListBox#ModList ListBoxItem">
+            <Setter Property="Padding" Value="10,7"/>
+            <Setter Property="Margin" Value="0,0,0,1"/>
+        </Style>
+        <Style Selector="Border.tile">
+            <Setter Property="Width" Value="34"/>
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="CornerRadius" Value="3"/>
+            <Setter Property="ClipToBounds" Value="True"/>
+            <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style Selector="TextBlock.initial">
+            <Setter Property="FontFamily" Value="{DynamicResource PixelFont}"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <!-- A switched-off mod reads as off at a glance. -->
+        <Style Selector="Panel.modOff :is(Control).dims">
+            <Setter Property="Opacity" Value="0.5"/>
+        </Style>
+        <Style Selector="TextBlock.external">
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+        </Style>
+        <!-- The row's quieter actions show on hover (and stay put, so nothing jumps). -->
+        <Style Selector="ListBox#ModList ListBoxItem Button.hover">
+            <Setter Property="Opacity" Value="0"/>
+        </Style>
+        <Style Selector="ListBox#ModList ListBoxItem:pointerover Button.hover">
+            <Setter Property="Opacity" Value="1"/>
+        </Style>
+        <Style Selector="ListBox#ModList ListBoxItem:selected Button.hover">
+            <Setter Property="Opacity" Value="1"/>
+        </Style>
+        <!-- The switch is on in the user's accent, like the one accent button, not Fluent's light tint. -->
+        <Style Selector="ToggleSwitch:checked /template/ Border#SwitchKnobBounds">
+            <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentHoverBrush}"/>
+        </Style>
+        <Style Selector="ToggleSwitch:checked:pointerover /template/ Border#SwitchKnobBounds">
+            <Setter Property="Background" Value="{DynamicResource AccentHoverBrush}"/>
+        </Style>
+        <Style Selector="Button.chip">
+            <Setter Property="Padding" Value="10,5"/>
+        </Style>
+        <Style Selector="Button.update">
+            <Setter Property="Padding" Value="10,3"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <DockPanel>
+        <!-- Toolbar: filter on the left, actions on the right (they wrap under a narrow tab). -->
+        <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,*" Margin="0,0,0,8">
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8" VerticalAlignment="Top" Margin="0,0,8,6">
+                <TextBox x:Name="SearchBox" Width="240" Watermark="Filter Mods">
+                    <TextBox.InnerLeftContent>
+                        <TextBlock Classes="icon" Text="&#xE721;" FontSize="13" Margin="10,0,2,0"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"/>
+                    </TextBox.InnerLeftContent>
+                </TextBox>
+                <ComboBox x:Name="SourceFilterBox" Width="140" SelectedIndex="0"
+                          ToolTip.Tip="Show only mods from one store">
+                    <ComboBoxItem Content="All Sources"/>
+                    <ComboBoxItem Content="CurseForge"/>
+                    <ComboBoxItem Content="Modrinth"/>
+                    <ComboBoxItem Content="External"/>
+                </ComboBox>
+            </StackPanel>
+            <WrapPanel Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Top">
+                <!-- Only for the one pack the low-mode profile was made for (LowModeService.AppliesTo). -->
+                <StackPanel x:Name="LowModePanel" Orientation="Horizontal" Spacing="2" Margin="0,0,10,6"
+                            VerticalAlignment="Center" IsVisible="False">
+                    <CheckBox x:Name="LowModeBox" Content="Low Mode" IsCheckedChanged="OnLowModeToggled"
+                              ToolTip.Tip="Turns the pack's heaviest visual settings down before each launch, and a few purely decorative client-side mods off, so it runs on a modest machine. Your own values come back when you turn it off."/>
+                    <Button Classes="icon" Content="&#xE897;" Width="28" Height="28" Click="OnExplainLowMode"
+                            ToolTip.Tip="What Low Mode Does"/>
+                </StackPanel>
+                <Button x:Name="ByHandChip" Classes="chip" IsVisible="False" Margin="0,0,8,6"
+                        Click="OnOpenManualDownloads"
+                        ToolTip.Tip="Files this instance needs that only CurseForge's website can download. Click to get them.">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Classes="icon" Text="&#xE7BA;" FontSize="13" Foreground="{DynamicResource WarningBrush}"/>
+                        <TextBlock x:Name="ByHandText" Text="Files to download by hand" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="UpdateAllButton" IsVisible="False" Margin="0,0,8,6" Click="OnUpdateAll">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Classes="icon" Text="&#xE896;" FontSize="13" Foreground="{DynamicResource AccentTextBrush}"/>
+                        <TextBlock x:Name="UpdateAllText" Text="Update All" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="CheckButton" Classes="icon" Content="&#xE72C;" Margin="0,0,2,6"
+                        Click="OnCheckUpdates" ToolTip.Tip="Check for Updates (re-reads the folder and asks the stores again)"/>
+                <Button Classes="icon" Content="&#xE838;" Margin="0,0,8,6" Click="OnOpenFolder"
+                        ToolTip.Tip="Open Folder"/>
+                <!-- Not the accent: the instance page's Play is the one accent on screen. -->
+                <Button x:Name="AddModsButton" Margin="0,0,0,6" Click="OnAddMods">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Classes="icon" Text="&#xE710;" FontSize="12" Foreground="{DynamicResource AccentTextBrush}"/>
+                        <TextBlock Text="Add Mods" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Button>
+            </WrapPanel>
+        </Grid>
+
+        <!-- What the list holds, and what the last action did. -->
+        <TextBlock x:Name="SummaryLabel" DockPanel.Dock="Top" Classes="caption" Margin="2,0,0,8"
+                   TextTrimming="CharacterEllipsis"/>
+        <TextBlock x:Name="StatusLabel" DockPanel.Dock="Bottom" Classes="caption" Margin="2,8,0,0"
+                   TextWrapping="Wrap" IsVisible="False"/>
+
+        <Border Classes="well" Padding="4">
+            <Panel>
+                <ListBox x:Name="ModList" SelectionMode="Single"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate x:DataType="svc:PackMod">
+                            <Panel Classes.modOff="{Binding !Enabled}" Background="Transparent"
+                                   ToolTip.Tip="{Binding TooltipText}" ToolTip.ShowDelay="700">
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                    <Border Grid.Column="0" Classes="tile dims" Margin="0,0,12,0" VerticalAlignment="Center">
+                                        <Panel>
+                                            <TextBlock Classes="initial" Text="{Binding Initial}"/>
+                                            <Image views:ModIconLoader.Url="{Binding IconUrl}"
+                                                   views:ModIconLoader.DecodeWidth="34" Stretch="UniformToFill"/>
+                                        </Panel>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Classes="dims" VerticalAlignment="Center" Margin="0,0,10,0">
+                                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                        <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,2,0,0">
+                                            <TextBlock Classes="caption" Text="{Binding VersionLabel}" MaxWidth="220"
+                                                       TextTrimming="CharacterEllipsis" IsVisible="{Binding !IsExternal}"/>
+                                            <TextBlock Classes="caption" Text="·" IsVisible="{Binding !IsExternal}"/>
+                                            <TextBlock Classes="caption" Classes.external="{Binding IsExternal}"
+                                                       Text="{Binding SourceLabel}"/>
+                                            <Border Classes="pill" IsVisible="{Binding IsLocal}" Margin="4,0,0,0"
+                                                    ToolTip.Tip="This PC's own mods folder (local/mods), which is not synced">
+                                                <TextBlock Text="Local"/>
+                                            </Border>
+                                            <Border Classes="pill" IsVisible="{Binding !Enabled}" Margin="4,0,0,0">
+                                                <TextBlock Text="Off"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                        <Button Classes="update" IsVisible="{Binding HasUpdate}" Click="OnUpdateMod"
+                                                ToolTip.Tip="{Binding LatestVersion.VersionNumber, StringFormat='Update to {0}'}"
+                                                Margin="0,0,8,0">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <TextBlock Classes="icon" Text="&#xE896;" FontSize="11"/>
+                                                <TextBlock Text="Update" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <ToggleSwitch IsChecked="{Binding Enabled, Mode=OneWay}" OnContent="" OffContent=""
+                                                      IsCheckedChanged="OnToggleMod" Margin="0,0,6,0"
+                                                      ToolTip.Tip="Turn this mod on or off"/>
+                                        <Button Classes="icon hover" Content="&#xE74D;" Click="OnDeleteMod"
+                                                ToolTip.Tip="Delete"/>
+                                        <Button Classes="icon" Content="&#xE712;" Click="OnModMenu" ToolTip.Tip="More"/>
+                                    </StackPanel>
+                                </Grid>
+                            </Panel>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+                <views:ModStatePanel x:Name="StatePanel"/>
+            </Panel>
+        </Border>
+    </DockPanel>
+</UserControl>

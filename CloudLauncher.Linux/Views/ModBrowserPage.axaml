@@ -1,0 +1,246 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="using:CloudLauncher.Views"
+             x:Class="CloudLauncher.Views.ModBrowserPage">
+    <UserControl.Styles>
+        <Style Selector="Button.chip">
+            <Setter Property="Padding" Value="13,5"/>
+            <Setter Property="Background" Value="{DynamicResource Surface2Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+        </Style>
+        <Style Selector="Button.chip.active">
+            <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        </Style>
+        <Style Selector="Button.chip.active:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentHoverBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}"/>
+        </Style>
+        <Style Selector="ListBox.rows ListBoxItem">
+            <Setter Property="Padding" Value="10,9"/>
+            <Setter Property="Margin" Value="0,0,0,1"/>
+        </Style>
+        <Style Selector="Border.tile">
+            <Setter Property="CornerRadius" Value="3"/>
+            <Setter Property="ClipToBounds" Value="True"/>
+            <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="VerticalAlignment" Value="Top"/>
+        </Style>
+        <Style Selector="TextBlock.initial">
+            <Setter Property="FontFamily" Value="{DynamicResource PixelFont}"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style Selector="Button.quick">
+            <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}"/>
+        </Style>
+        <Style Selector="Button.small">
+            <Setter Property="Padding" Value="10,3"/>
+            <Setter Property="FontSize" Value="12"/>
+        </Style>
+        <Style Selector="TabControl#DetailTabs">
+            <Setter Property="Padding" Value="0"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Grid RowDefinitions="Auto,Auto,*" Margin="28,22,28,18">
+        <!-- Which instance the mods go into -->
+        <DockPanel Grid.Row="0">
+            <Button DockPanel.Dock="Left" Classes="icon" Content="&#xE72B;" Margin="-8,2,6,0"
+                    VerticalAlignment="Top" Click="OnBack" ToolTip.Tip="Back"/>
+            <Button DockPanel.Dock="Right" Classes="icon" Content="&#xE838;" VerticalAlignment="Center"
+                    Click="OnOpenModsFolder" ToolTip.Tip="Open Folder"/>
+            <StackPanel VerticalAlignment="Center">
+                <TextBlock Classes="h1" Text="Add Mods"/>
+                <TextBlock x:Name="PackLabel" Classes="muted" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+            </StackPanel>
+        </DockPanel>
+
+        <!-- Search, stores and order -->
+        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto" Margin="0,18,0,12">
+            <TextBox x:Name="SearchBox" Grid.Column="0" Watermark="Search Mods">
+                <TextBox.InnerLeftContent>
+                    <TextBlock Classes="icon" Text="&#xE721;" FontSize="13" Margin="10,0,2,0"
+                               Foreground="{DynamicResource TextTertiaryBrush}"/>
+                </TextBox.InnerLeftContent>
+            </TextBox>
+            <StackPanel x:Name="ToolbarRight" Grid.Column="1" Orientation="Horizontal" Spacing="6" Margin="16,0,0,0">
+                <Button x:Name="AllChip" Classes="chip active" Content="All" Click="OnStoreChip"/>
+                <Button x:Name="CurseForgeChip" Classes="chip" Content="CurseForge" Click="OnStoreChip"/>
+                <Button x:Name="ModrinthChip" Classes="chip" Content="Modrinth" Click="OnStoreChip"/>
+                <ComboBox x:Name="SortBox" Width="140" SelectedIndex="0" Margin="10,0,0,0"
+                          ToolTip.Tip="Sort Results">
+                    <ComboBoxItem Content="Relevance"/>
+                    <ComboBoxItem Content="Latest"/>
+                    <ComboBoxItem Content="Downloads"/>
+                </ComboBox>
+            </StackPanel>
+        </Grid>
+
+        <!-- Results on the left, the picked mod on the right -->
+        <Grid x:Name="BodyGrid" Grid.Row="2" ColumnDefinitions="5*,16,4*" RowDefinitions="*,0">
+            <Grid Grid.Column="0" RowDefinitions="*,Auto">
+                <Border Classes="well" Padding="4">
+                    <Panel>
+                        <ListBox x:Name="ResultsList" Classes="rows" SelectionMode="Single"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate x:DataType="views:ModBrowseRow">
+                                    <Grid ColumnDefinitions="Auto,*,Auto">
+                                        <Border Grid.Column="0" Classes="tile" Width="42" Height="42" Margin="0,0,12,0">
+                                            <Panel>
+                                                <TextBlock Classes="initial" Text="{Binding Initial}"/>
+                                                <Image views:ModIconLoader.Url="{Binding IconUrl}"
+                                                       views:ModIconLoader.DecodeWidth="42" Stretch="UniformToFill"/>
+                                            </Panel>
+                                        </Border>
+                                        <StackPanel Grid.Column="1" Margin="0,0,10,0">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                <Border Classes="pill success" IsVisible="{Binding IsInstalled}">
+                                                    <TextBlock Text="Installed"/>
+                                                </Border>
+                                            </StackPanel>
+                                            <TextBlock Text="{Binding MetaLabel}" Classes="caption" Margin="0,2,0,0"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding Summary}" Classes="muted" Margin="0,4,0,0" FontSize="12"
+                                                       TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                        <Panel Grid.Column="2" Width="32" VerticalAlignment="Center">
+                                            <Button Classes="icon quick" Content="&#xE896;" IsVisible="{Binding CanInstall}"
+                                                    Click="OnQuickInstall" ToolTip.Tip="{Binding InstallTip}"/>
+                                            <TextBlock Classes="icon" Text="&#xE73E;" FontSize="14" HorizontalAlignment="Center"
+                                                       Foreground="{DynamicResource SuccessBrush}" IsVisible="{Binding IsInstalled}"
+                                                       ToolTip.Tip="Already in this instance"/>
+                                        </Panel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <views:ModStatePanel x:Name="ResultsState"/>
+                    </Panel>
+                </Border>
+                <DockPanel Grid.Row="1" Margin="2,8,0,0">
+                    <TextBlock x:Name="CountLabel" DockPanel.Dock="Right" Classes="caption" Margin="10,0,0,0"/>
+                    <TextBlock x:Name="ListStatus" Classes="caption" TextTrimming="CharacterEllipsis"/>
+                </DockPanel>
+            </Grid>
+
+            <!-- The picked mod -->
+            <Border x:Name="DetailPane" Grid.Column="2" Classes="card" Padding="18">
+                <!-- Scrolls only when the window is narrow and the picked item sits under the results. -->
+                <ScrollViewer x:Name="DetailScroll" VerticalScrollBarVisibility="Disabled"
+                              HorizontalScrollBarVisibility="Disabled">
+                <Panel>
+                    <StackPanel x:Name="DetailPlaceholder" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                Spacing="10" MaxWidth="300">
+                        <TextBlock Classes="icon" Text="&#xEC4A;" FontSize="30" HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource TextTertiaryBrush}"/>
+                        <TextBlock Classes="muted" TextWrapping="Wrap" TextAlignment="Center"
+                                   Text="Pick a mod to see its versions and what it does."/>
+                    </StackPanel>
+
+                    <DockPanel x:Name="DetailContent" IsVisible="False">
+                        <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,*">
+                            <Border Grid.Column="0" Classes="tile" Width="56" Height="56" Margin="0,0,14,0">
+                                <Panel>
+                                    <TextBlock x:Name="DetailInitial" Classes="initial" FontSize="22"/>
+                                    <Image x:Name="DetailIcon" views:ModIconLoader.DecodeWidth="56" Stretch="UniformToFill"/>
+                                </Panel>
+                            </Border>
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                <TextBlock x:Name="DetailName" Classes="h2" TextWrapping="Wrap"/>
+                                <TextBlock x:Name="DetailMeta" Classes="caption" Margin="0,5,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Shown when the mod is on both stores, to pick which one it comes from -->
+                        <StackPanel x:Name="SourceToggle" DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6"
+                                    Margin="0,12,0,0" IsVisible="False">
+                            <TextBlock Classes="caption" Text="From" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                            <Button x:Name="SourceModrinth" Classes="chip" Content="Modrinth" Padding="11,3" Click="OnPickSource"/>
+                            <Button x:Name="SourceCurseForge" Classes="chip" Content="CurseForge" Padding="11,3" Click="OnPickSource"/>
+                        </StackPanel>
+
+                        <TextBlock x:Name="DetailSummary" DockPanel.Dock="Top" Classes="muted" TextWrapping="Wrap"
+                                   Margin="0,12,0,0" MaxLines="4" TextTrimming="CharacterEllipsis"/>
+
+                        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,14,0,0">
+                            <Button x:Name="InstallButton" Classes="primary" Click="OnInstallBest">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Classes="icon" Text="&#xE896;" FontSize="13"/>
+                                    <TextBlock x:Name="InstallText" Text="Install" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                            <ComboBox x:Name="TargetBox" Width="150" SelectedIndex="0"
+                                      ToolTip.Tip="Where the mod goes: the instance's synced mods, or this PC's own">
+                                <ComboBoxItem Content="game/mods/"/>
+                                <ComboBoxItem Content="local/mods/"/>
+                            </ComboBox>
+                        </StackPanel>
+
+                        <StackPanel DockPanel.Dock="Bottom" Margin="0,10,0,0">
+                            <ProgressBar x:Name="DownloadProgress" IsVisible="False" Margin="0,0,0,6"/>
+                            <TextBlock x:Name="DownloadStatus" Classes="caption" TextWrapping="Wrap"/>
+                        </StackPanel>
+
+                        <TabControl x:Name="DetailTabs" Margin="0,12,0,0">
+                            <TabItem Header="Versions">
+                                <DockPanel Margin="0,8,0,0">
+                                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                                        <CheckBox x:Name="ShowAllBox" DockPanel.Dock="Right" Content="Show All"
+                                                  IsCheckedChanged="OnShowAllChanged"
+                                                  ToolTip.Tip="Also list versions for other Minecraft versions and loaders"/>
+                                        <TextBlock x:Name="VersionNote" Classes="caption" VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis"/>
+                                    </DockPanel>
+                                    <Border Classes="well" Padding="2">
+                                        <ListBox x:Name="VersionsList" Classes="rows"
+                                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                            <ListBox.ItemTemplate>
+                                                <DataTemplate x:DataType="views:ModBrowseVersionRow">
+                                                    <Grid ColumnDefinitions="*,Auto">
+                                                        <StackPanel Grid.Column="0" Margin="0,0,10,0">
+                                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                                <TextBlock Text="{Binding VersionNumber}" FontWeight="SemiBold"
+                                                                           TextTrimming="CharacterEllipsis"/>
+                                                                <Border Classes="pill" Classes.warning="{Binding IsPreview}">
+                                                                    <TextBlock Text="{Binding Channel}"/>
+                                                                </Border>
+                                                            </StackPanel>
+                                                            <TextBlock Text="{Binding MetaLabel}" Classes="caption" Margin="0,2,0,0"
+                                                                       TextTrimming="CharacterEllipsis"/>
+                                                        </StackPanel>
+                                                        <Button Grid.Column="1" Classes="small" Content="Install" VerticalAlignment="Center"
+                                                                IsEnabled="{Binding CanInstall}" Click="OnInstallVersion"
+                                                                ToolTip.Tip="{Binding InstallTip}" ToolTip.ShowOnDisabled="True"/>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ListBox.ItemTemplate>
+                                        </ListBox>
+                                    </Border>
+                                </DockPanel>
+                            </TabItem>
+                            <TabItem Header="Overview">
+                                <ScrollViewer Margin="0,8,0,0" HorizontalScrollBarVisibility="Disabled">
+                                    <SelectableTextBlock x:Name="OverviewText" TextWrapping="Wrap"
+                                                         Foreground="{DynamicResource TextSecondaryBrush}" LineHeight="20"/>
+                                </ScrollViewer>
+                            </TabItem>
+                        </TabControl>
+                    </DockPanel>
+                </Panel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

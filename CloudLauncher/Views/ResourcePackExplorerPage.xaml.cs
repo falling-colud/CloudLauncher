@@ -679,9 +679,15 @@ public partial class ResourcePackExplorerPage : Page
             return;
         }
 
-        // A CurseForge file the store will not hand out throws with its own sentence (the author's
-        // opt-out, naming the project page), which is the whole answer here.
+        // A CurseForge file the store will not hand out (the author's opt-out) goes to the download-by-hand
+        // card, which opens its page in the browser and moves the file in once it is downloaded.
         try { file = await ResolveDownloadFileAsync(mod, version, file) ?? file; }
+        catch (StoreRequestException ex) when (ex.Failure == StoreFailure.NotDistributable
+                                               && version.Source == ModSource.CurseForge)
+        {
+            DownloadStatus.Text = await QueueByHandAsync(mod, version, file);
+            return;
+        }
         catch (Exception ex) { DownloadStatus.Text = StoreRequestException.PlainFor(ex) ?? "Download failed: " + ex.Message; return; }
         if (string.IsNullOrWhiteSpace(file.DownloadUrl))
         {
@@ -767,6 +773,34 @@ public partial class ResourcePackExplorerPage : Page
     /// <summary>Which of the instance's two resourcepacks/ folders the download target points at.
     /// The settings key differs between them, so a pack in local/ isn't confused with a same-named
     /// one in game/.</summary>
+    /// <summary>Lists a pack CurseForge will not hand over for the user to download with the browser,
+    /// and brings up the card for it. Returns the status line.</summary>
+    private async Task<string> QueueByHandAsync(ModSummary mod, ModVersion version, ModVersionFile file)
+    {
+        var origin = OriginOfTarget();
+        try
+        {
+            var queued = await App.State.ManualDownloads.QueueAsync(_pack.Id, _pack.Name, App.State.CurseForge,
+                [new ManualDownloadWant(mod, version, file with { DownloadUrl = "" }, "resourcepacks",
+                    Local: origin == ResourcePackOrigin.Local)]);
+            if (queued.Count == 0)
+                return $"{mod.Name} can't be downloaded by the launcher, and CurseForge gave no file to list.";
+
+            // Recorded now, so the pack is matched to its listing (name, updates) once the file lands.
+            var key = ResourcePackService.Key(_pack.Id, queued[0].FileName, origin);
+            App.State.ResourcePacks.SetProvenance(key, mod.Source, mod.Id, version.Id, version.VersionNumber);
+            App.State.ResourcePacks.Rename(key, mod.Name);
+            return queued[0].State == ManualDownloadState.Added
+                ? $"{queued[0].FileName} is already in the instance."
+                : $"{mod.Name} has to come from CurseForge's website: click Download in the window that opened.";
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ResourcePackExplorerPage), ex);
+            return $"{mod.Name} could not be listed for a download by hand: {ex.Message}";
+        }
+    }
+
     private ResourcePackOrigin OriginOfTarget() =>
         (DownloadTargetBox.SelectedItem as ComboBoxItem)?.Content as string == "local/resourcepacks/"
             ? ResourcePackOrigin.Local

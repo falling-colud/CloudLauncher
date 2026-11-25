@@ -26,9 +26,9 @@ namespace CloudLauncher.Views;
 /// </remarks>
 public partial class ManualDownloadsCard : UserControl
 {
-    /// <summary>Instances with a card on screen, so the import finishing and a Play click don't stack
-    /// two over each other.</summary>
-    private static readonly HashSet<Guid> Open = [];
+    /// <summary>The card on screen per instance, so the import finishing, a Play click and a mod picked
+    /// in the browser don't stack two over each other: a later request adds its files to the open one.</summary>
+    private static readonly Dictionary<Guid, ManualDownloadsCard> Open = [];
 
     private readonly Guid _packId;
     private readonly string _packName;
@@ -37,26 +37,38 @@ public partial class ManualDownloadsCard : UserControl
     private readonly ObservableCollection<ManualDownloadRow> _rows = [];
     private readonly TaskCompletionSource<bool> _result = new();
     private readonly HashSet<int> _placing = [];
+
+    /// <summary>The files this card is about, when a page asked for some (the mod browser, an update);
+    /// null shows every file the instance is missing, as after an import.</summary>
+    private readonly HashSet<int>? _focus;
+
+    /// <summary>An import finished while this card showed only some files: from then on it shows every
+    /// file the instance is missing.</summary>
+    private bool _showAll;
     private ManualDownloadWatcher? _watcher;
     private bool _suppressEvents;
 
-    private ManualDownloadsCard(Guid packId, string packName, ManualDownloadList list, bool forLaunch)
+    private ManualDownloadsCard(Guid packId, string packName, ManualDownloadList list, bool forLaunch, HashSet<int>? focus)
     {
         InitializeComponent();
         _packId = packId;
         _packName = packName;
         _forLaunch = forLaunch;
+        _focus = focus;
 
-        foreach (var file in list.Files)
+        foreach (var file in list.Files.Where(Shows))
             _rows.Add(new ManualDownloadRow(file));
         FileList.ItemsSource = _rows;
 
-        PackLabel.Text = string.IsNullOrWhiteSpace(list.Source) ? packName : $"{packName}  ·  from {list.Source}";
+        PackLabel.Text = string.IsNullOrWhiteSpace(list.Source) || focus is not null
+            ? packName
+            : $"{packName}  ·  from {list.Source}";
         if (forLaunch)
         {
             PlayButton.Visibility = Visibility.Visible;
             CloseButton.Content = "Cancel";
         }
+        if (focus is not null) IntroText.Text = PickedIntro(_rows.Count);
 
         _suppressEvents = true;
         RemoveBox.IsChecked = _service.RemoveAfterAdding;
@@ -66,30 +78,120 @@ public partial class ManualDownloadsCard : UserControl
         {
             Animate.SlideFadeIn(this, 0, 14, 200);
             StartWatching(_service.WatchFolder);
+            _service.Changed -= OnListChanged;
+            _service.Changed += OnListChanged;
         };
-        Unloaded += (_, _) => StopWatching();
+        Unloaded += (_, _) =>
+        {
+            _service.Changed -= OnListChanged;
+            StopWatching();
+        };
         UpdateChrome();
     }
+
+    /// <summary>The intro for files picked in the browser or an update, rather than a pack's.</summary>
+    private static string PickedIntro(int count) => count == 1
+        ? "Its author only lets CurseForge's own website and app download it. Click Download: the page opens "
+          + "in your browser and starts the download by itself, and the launcher moves the file into the "
+          + "instance as soon as it lands in your Downloads folder."
+        : "Their authors only let CurseForge's own website and app download these. Click Download on each one: "
+          + "the page opens in your browser and starts the download by itself, and the launcher moves each "
+          + "file into the instance as soon as it lands in your Downloads folder.";
+
+    private bool Shows(ManualDownloadEntry file) => _focus is null || _showAll || _focus.Contains(file.FileId);
 
     /// <summary>
     /// Shows the card for <paramref name="packId"/> if it has files still waiting, and returns when it
     /// closes. True only when the user chose to play (<paramref name="forLaunch"/>); false when closed
-    /// another way, when there was nothing to show, or when a card for this instance is already open.
+    /// another way, when there was nothing to show, or when a card for this instance is already open
+    /// (which then takes on <paramref name="focus"/>'s files as well).
     /// </summary>
-    public static async Task<bool> ShowAsync(MainWindow shell, Guid packId, string packName, bool forLaunch = false)
+    /// <param name="focus">Only these files (a page's request); null for every file the instance is
+    /// missing.</param>
+    public static async Task<bool> ShowAsync(MainWindow shell, Guid packId, string packName, bool forLaunch = false,
+        IReadOnlyCollection<int>? focus = null)
     {
+        if (Open.TryGetValue(packId, out var open))
+        {
+            open.Include(focus);
+            return false;
+        }
+
+        // Files the launcher was still looking for after an earlier card closed come back onto this one.
+        var carried = App.State.ManualDownloads.StopBackgroundWatch(packId);
+        HashSet<int>? shown = focus is null ? null : [.. focus, .. carried];
         var list = await Task.Run(() => App.State.ManualDownloads.Reconcile(packId));
-        if (list is null || list.Files.Count == 0) return false;
+        if (list is null || !list.Files.Any(f => shown is null || shown.Contains(f.FileId)))
+        {
+            // Nothing to show after all; anything still looked for keeps being looked for.
+            if (carried.Count > 0) App.State.ManualDownloads.WatchInBackground(packId, carried);
+            return false;
+        }
         if (forLaunch && list.Files.All(f => f.State != ManualDownloadState.Waiting)) return true;
-        if (!Open.Add(packId)) return false;
+        if (Open.TryGetValue(packId, out open))
+        {
+            open.Include(shown);
+            return false;
+        }
+
+        var card = new ManualDownloadsCard(packId, packName, list, forLaunch, shown);
+        Open[packId] = card;
         try
         {
-            var card = new ManualDownloadsCard(packId, packName, list, forLaunch);
             await shell.ShowCardAsync(card, card._result.Task, card.Cancel,
                 new ResizableCardSpec("manual-downloads", 700, 600, MinWidth: 520, MinHeight: 400));
             return card._result.Task.Result;
         }
         finally { Open.Remove(packId); }
+    }
+
+    /// <summary>Takes on more files while open: a second mod picked in the browser, or an import's whole
+    /// list (null).</summary>
+    private void Include(IReadOnlyCollection<int>? fileIds)
+    {
+        if (_focus is not null)
+        {
+            if (fileIds is null) _showAll = true; // an import's files join this card
+            else foreach (var id in fileIds) _focus.Add(id);
+        }
+        _ = RefreshRowsAsync();
+    }
+
+    private void OnListChanged(Guid packId)
+    {
+        if (packId == _packId) _ = RefreshRowsAsync();
+    }
+
+    /// <summary>Adds rows for files that joined the list (and the card's files) since it opened, and
+    /// picks up the states of the rest: a file dropped into its folder by hand counts as added.</summary>
+    private async Task RefreshRowsAsync()
+    {
+        ManualDownloadList? list;
+        try { list = await Task.Run(() => _service.Load(_packId)); }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ManualDownloadsCard), ex);
+            return;
+        }
+        if (list is null || _result.Task.IsCompleted) return;
+
+        var added = false;
+        foreach (var file in list.Files.Where(Shows))
+        {
+            var row = _rows.FirstOrDefault(r => r.Entry.FileId == file.FileId);
+            if (row is null)
+            {
+                _rows.Add(new ManualDownloadRow(file));
+                added = true;
+            }
+            else if (!row.Busy && row.State != file.State)
+            {
+                row.State = file.State;
+            }
+        }
+        if (_focus is not null) IntroText.Text = PickedIntro(_rows.Count);
+        if (added && _watcher is null) StartWatching(_service.WatchFolder);
+        UpdateChrome();
     }
 
     /// <summary>
@@ -116,7 +218,14 @@ public partial class ManualDownloadsCard : UserControl
 
     private void Finish(bool play)
     {
+        if (_result.Task.IsCompleted) return;
         StopWatching();
+        _service.Changed -= OnListChanged;
+        // A download page opened from here may still be counting down or downloading: closing the card
+        // right after clicking Download is natural, so the launcher keeps looking for those files a while.
+        var opened = _rows.Where(r => r.IsWaiting && r.Opened && !_placing.Contains(r.Entry.FileId))
+            .Select(r => r.Entry.FileId).ToList();
+        if (opened.Count > 0) _service.WatchInBackground(_packId, opened);
         _result.TrySetResult(play);
     }
 

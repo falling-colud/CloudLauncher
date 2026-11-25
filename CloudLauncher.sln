@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CloudLauncher.Server", "Clo
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CloudLauncher.Shared", "CloudLauncher.Shared\CloudLauncher.Shared.csproj", "{A1034E1B-FD1C-4623-B93D-2C73865D6FEC}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CloudLauncher.Linux", "CloudLauncher.Linux\CloudLauncher.Linux.csproj", "{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -52,6 +54,18 @@ Global
 		{A1034E1B-FD1C-4623-B93D-2C73865D6FEC}.Release|x64.Build.0 = Release|Any CPU
 		{A1034E1B-FD1C-4623-B93D-2C73865D6FEC}.Release|x86.ActiveCfg = Release|Any CPU
 		{A1034E1B-FD1C-4623-B93D-2C73865D6FEC}.Release|x86.Build.0 = Release|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Debug|x64.Build.0 = Debug|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Debug|x86.Build.0 = Debug|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Release|x64.ActiveCfg = Release|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Release|x64.Build.0 = Release|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Release|x86.ActiveCfg = Release|Any CPU
+		{00FD2FDA-D52E-40D1-AE53-38D32E7ED3FD}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

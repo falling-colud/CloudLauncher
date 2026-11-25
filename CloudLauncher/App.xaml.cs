@@ -7,6 +7,13 @@ using System.Windows.Threading;
 using CloudLauncher.Services;
 using Microsoft.Win32;
 
+// The services shared with the Linux launcher pick their WPF code paths with this symbol, which the
+// SDK defines for a -windows target framework. Without it they would raise their events off the UI
+// thread, so a build that lost it must not compile.
+#if !WINDOWS
+#error The WINDOWS symbol is not defined for the Windows launcher.
+#endif
+
 namespace CloudLauncher;
 
 public partial class App : Application

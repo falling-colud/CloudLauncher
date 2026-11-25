@@ -1,7 +1,7 @@
 # CloudLauncher
 
-A Minecraft launcher for Windows that keeps your modded instances on a server. Set a pack up
-once, download it on any PC, or share it with friends with a link.
+A Minecraft launcher for Windows and Linux that keeps your modded instances on a server. Set a
+pack up once, download it on any PC, or share it with friends with a link.
 
 ![The Instances page](CloudLauncher.Server/wwwroot/img/instances.png)
 
@@ -25,6 +25,7 @@ Settings > About > Report a problem inside the launcher.
 | Folder | What's in it |
 | --- | --- |
 | `CloudLauncher/` | The Windows app (WPF, .NET 10) |
+| `CloudLauncher.Linux/` | The Linux app (Avalonia, .NET 10), on the Windows app's services |
 | `CloudLauncher.Server/` | The API and website (ASP.NET Core, PostgreSQL) |
 | `CloudLauncher.Shared/` | Types and helpers used by both |
 | `installer/` | Inno Setup script for the installer |
@@ -33,10 +34,16 @@ Settings > About > Report a problem inside the launcher.
 
 ## Building
 
-You need the .NET 10 SDK. The app builds on Windows 10 or 11.
+You need the .NET 10 SDK. The Windows app builds on Windows 10 or 11.
 
 ```
 dotnet build CloudLauncher/CloudLauncher.csproj
+```
+
+The Linux app builds anywhere the SDK runs (see `CloudLauncher.Linux/README.md`):
+
+```
+dotnet build CloudLauncher.Linux/CloudLauncher.Linux.csproj
 ```
 
 Set `CL_PROFILE` to keep a development build's data apart from an installed launcher:

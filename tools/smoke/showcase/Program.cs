@@ -19,8 +19,13 @@ namespace Showcase;
 /// and never activated, and the real profile, server and stores are never touched.</summary>
 public static class Program
 {
-    public const string ProfileName = "showcase";
-    public const int Port = 5088;
+    /// <summary>"showcase", or CL_SHOWCASE_PROFILE so several harnesses can run side by side.</summary>
+    public static readonly string ProfileName =
+        Environment.GetEnvironmentVariable("CL_SHOWCASE_PROFILE") is { Length: > 0 } p ? p : "showcase";
+
+    /// <summary>5088, or CL_SHOWCASE_PORT.</summary>
+    public static readonly int Port =
+        int.TryParse(Environment.GetEnvironmentVariable("CL_SHOWCASE_PORT"), out var port) && port > 0 ? port : 5088;
     private static string _out = "";
     private static StreamWriter? _log;
     private static readonly Stopwatch Clock = Stopwatch.StartNew();

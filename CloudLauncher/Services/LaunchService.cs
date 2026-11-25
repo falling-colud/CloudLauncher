@@ -1398,6 +1398,23 @@ public sealed class LaunchService(
             }
         }
 
+        if (OperatingSystem.IsLinux())
+        {
+            // Where distributions put their Java packages: /usr/lib/jvm/<name>/bin/java.
+            foreach (var root in new[] { "/usr/lib/jvm", "/usr/lib64/jvm", "/usr/java", "/opt/java" })
+            {
+                if (!Directory.Exists(root)) continue;
+                IEnumerable<string> homes;
+                try { homes = Directory.EnumerateDirectories(root).ToList(); }
+                catch { continue; }
+                foreach (var home in homes)
+                {
+                    var java = Path.Combine(home, "bin", "java");
+                    if (File.Exists(java)) yield return java;
+                }
+            }
+        }
+
         yield return "java" + ext;
         if (OperatingSystem.IsWindows()) yield return "javaw.exe";
     }
@@ -1415,17 +1432,23 @@ public sealed class LaunchService(
         Action<string> report,
         CancellationToken ct)
     {
-        if (!OperatingSystem.IsWindows())
-            throw new InvalidOperationException("Automatic Java download is currently only configured for Windows.");
+        var linux = OperatingSystem.IsLinux();
+        if (!OperatingSystem.IsWindows() && !linux)
+            throw new InvalidOperationException("Automatic Java download is only set up for Windows and Linux.");
 
         var installDir = Path.Combine(AppSettings.JavaRoot, major.ToString());
         if (Directory.Exists(installDir)) Directory.Delete(installDir, recursive: true);
         Directory.CreateDirectory(installDir);
 
-        var tempZip = Path.Combine(Path.GetTempPath(), $"cloudlauncher-java-{major}-{Guid.NewGuid():N}.zip");
+        // Adoptium ships Linux runtimes as .tar.gz, which keeps the files' executable bits.
+        var tempZip = Path.Combine(Path.GetTempPath(), $"cloudlauncher-java-{major}-{Guid.NewGuid():N}" + (linux ? ".tar.gz" : ".zip"));
         try
         {
-            var url = $"https://api.adoptium.net/v3/binary/latest/{major}/ga/windows/x64/jre/hotspot/normal/eclipse?project=jdk";
+            var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture
+                == System.Runtime.InteropServices.Architecture.Arm64 ? "aarch64" : "x64";
+            var url = linux
+                ? $"https://api.adoptium.net/v3/binary/latest/{major}/ga/linux/{arch}/jre/hotspot/normal/eclipse?project=jdk"
+                : $"https://api.adoptium.net/v3/binary/latest/{major}/ga/windows/x64/jre/hotspot/normal/eclipse?project=jdk";
             report($"Downloading Java {major} from Adoptium...");
             using var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
             response.EnsureSuccessStatusCode();
@@ -1462,6 +1485,14 @@ public sealed class LaunchService(
             ProgressHub.Report(packId, 0.95, $"Extracting Java {major}...", -1, $"Extracting Java {major}");
             // Extract like any other download: every entry must stay inside the install folder and
             // within its declared size. The -version check below catches an incomplete runtime.
+            if (linux)
+            {
+                // TarFile refuses any entry that would land outside installDir.
+                await using var file = File.OpenRead(tempZip);
+                await using var gz = new GZipStream(file, CompressionMode.Decompress);
+                await System.Formats.Tar.TarFile.ExtractToDirectoryAsync(gz, installDir, overwriteFiles: true, ct);
+            }
+            else
             using (var archive = ZipFile.OpenRead(tempZip))
             {
                 var unpacked = SafeZip.ExtractToDirectory(archive, installDir, overwrite: true, ct: ct);

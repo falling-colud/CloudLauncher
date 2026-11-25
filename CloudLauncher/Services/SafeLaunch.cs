@@ -50,7 +50,8 @@ public static class SafeLaunch
         return Start(new ProcessStartInfo(link) { UseShellExecute = true });
     }
 
-    /// <summary>Opens a folder in Explorer. The folder has to exist.</summary>
+    /// <summary>Opens a folder in Explorer (the desktop's file manager on Linux). The folder has to
+    /// exist.</summary>
     public static bool OpenFolder(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return false;
@@ -58,7 +59,7 @@ public static class SafeLaunch
         try { full = Path.GetFullPath(path); }
         catch { return false; }
         if (!Directory.Exists(full)) return false;
-        var psi = new ProcessStartInfo("explorer.exe") { UseShellExecute = false };
+        var psi = new ProcessStartInfo(OperatingSystem.IsWindows() ? "explorer.exe" : "xdg-open") { UseShellExecute = false };
         psi.ArgumentList.Add(full);
         return Start(psi);
     }
@@ -72,6 +73,8 @@ public static class SafeLaunch
         catch { return false; }
         if (Directory.Exists(full)) full = Path.TrimEndingDirectorySeparator(full);
         else if (!File.Exists(full)) return OpenFolder(Path.GetDirectoryName(full));
+        // Linux has no one way to select a file in the file manager: its folder opens instead.
+        if (!OperatingSystem.IsWindows()) return OpenFolder(Path.GetDirectoryName(full));
         // explorer.exe parses its own command line, so the path is quoted by hand here.
         var psi = new ProcessStartInfo("explorer.exe", $"/select,\"{full}\"") { UseShellExecute = false };
         return Start(psi);

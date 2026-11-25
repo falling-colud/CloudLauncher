@@ -115,7 +115,7 @@ public sealed class PackRuleService
 
     private static string GlobalDefaultsPath =>
         Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            AppSettings.AppDataBasePath,
             "CloudLauncher",
             Environment.GetEnvironmentVariable("CL_PROFILE") is { Length: > 0 } p ? p : "default",
             "global-default-rules.json");

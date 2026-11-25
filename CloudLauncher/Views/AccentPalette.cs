@@ -1,4 +1,6 @@
+#if WINDOWS
 using System.Windows.Media;
+#endif
 
 namespace CloudLauncher.Views;
 
@@ -20,6 +22,7 @@ public static class AccentPalette
         ("Slate",  "#6B7688")
     ];
 
+#if WINDOWS
     /// <summary>Parses a <c>#RRGGBB</c> into a frozen brush, falling back when it's null or malformed.</summary>
     public static Brush Brush(string? hex, Brush fallback)
     {
@@ -32,4 +35,5 @@ public static class AccentPalette
         }
         catch { return fallback; }
     }
+#endif
 }

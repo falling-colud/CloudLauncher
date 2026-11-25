@@ -327,7 +327,7 @@ public sealed class ModFingerprintCache
     private static string NormalizePath(string path) => Path.GetFullPath(path);
 
     private static string GetDataRoot() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppSettings.AppDataBasePath,
         "CloudLauncher",
         Environment.GetEnvironmentVariable("CL_PROFILE") is { Length: > 0 } profile ? profile : "default");
 }

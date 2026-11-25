@@ -198,11 +198,12 @@ public partial class MainWindow : Window, IDialogHost
 
     /// <summary>Raised on the UI thread by <see cref="AppState"/> whenever the server's
     /// reachability flips, in either direction.</summary>
-    /// <summary>Brings up the card for the files an import could not download. Raised on the UI
-    /// thread when the import finishes, wherever the user is by then.</summary>
-    private async void OnManualDownloadsNeeded(Guid packId, string packName)
+    /// <summary>Brings up the card for files to download by hand: the ones an import could not
+    /// download (<paramref name="fileIds"/> null), or the ones a page picked that CurseForge will not
+    /// hand over (the mod browser, an update). Raised on the UI thread, wherever the user is by then.</summary>
+    private async void OnManualDownloadsNeeded(Guid packId, string packName, IReadOnlyList<int>? fileIds)
     {
-        try { await ManualDownloadsCard.ShowAsync(this, packId, packName); }
+        try { await ManualDownloadsCard.ShowAsync(this, packId, packName, focus: fileIds); }
         catch (Exception ex) { AppLog.LogError("manual-downloads", ex); }
     }
 

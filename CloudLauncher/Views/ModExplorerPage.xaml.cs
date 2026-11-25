@@ -116,6 +116,8 @@ public partial class ModExplorerPage : Page
             ApplyModScale();
             ThemeService.Changed -= RepaintThemedChips;
             ThemeService.Changed += RepaintThemedChips;
+            App.State.ManualDownloads.Changed -= OnManualDownloadsChanged;
+            App.State.ManualDownloads.Changed += OnManualDownloadsChanged;
             UpdateSortMenuState();
 
             // Fast cache-only pass first so already-known mods are badged immediately,
@@ -130,6 +132,7 @@ public partial class ModExplorerPage : Page
         {
             UiScale.Changed -= ApplyModScale;
             ThemeService.Changed -= RepaintThemedChips;
+            App.State.ManualDownloads.Changed -= OnManualDownloadsChanged;
             _cts.Cancel();
         };
     }
@@ -1179,6 +1182,7 @@ public partial class ModExplorerPage : Page
 
             // Work out what needs fetching first, so the progress count covers real downloads only.
             var pending = new List<ModDownloadItem>();
+            var byHand = new List<ModDownloadItem>();
             var refused = new List<string>();
             var skipped = 0;
             foreach (var item in downloads)
@@ -1196,8 +1200,14 @@ public partial class ModExplorerPage : Page
                     skipped++;
                     continue;
                 }
+                if (item.ByHand) { byHand.Add(item); continue; }
                 pending.Add(item);
             }
+
+            // Files CurseForge only hands to its own website and app: listed for the user to fetch with
+            // the browser (the card pops up now) and moved in once they land in Downloads. The rest
+            // downloads meanwhile.
+            var byHandNote = byHand.Count == 0 ? "" : await QueueByHandAsync(byHand, target, applyToRoot);
 
             // A mod plus its dependencies is a handful of small files, each mostly latency. Fetch
             // them together, up to the user's download concurrency (Settings -> Downloads).
@@ -1275,9 +1285,11 @@ public partial class ModExplorerPage : Page
 
             DownloadProgress.Value = 100;
             var skippedText = skipped > 0 ? $" ({skipped} already present)" : "";
-            DownloadStatus.Text = saved == 1 && downloads.Count == 1
-                ? $"Saved to {target}{downloads[0].File.Filename}"
-                : $"Saved {saved} file(s) to {target}{skippedText}";
+            DownloadStatus.Text = pending.Count == 0 && byHand.Count > 0
+                ? byHandNote.Trim()
+                : (saved == 1 && downloads.Count == 1
+                    ? $"Saved to {target}{downloads[0].File.Filename}"
+                    : $"Saved {saved} file(s) to {target}{skippedText}") + byHandNote;
             App.State.ModFingerprints.Flush();
             RefreshDownloadedState();
             // Resolve the new jars on the other store too, so they stop showing as downloadable there.
@@ -1307,6 +1319,112 @@ public partial class ModExplorerPage : Page
         }
         catch { return false; }
     }
+
+    // ── files CurseForge only hands to its own site and app ─────────────────────
+
+    /// <summary>Files handed to the download-by-hand card from this page, by CurseForge file id, so
+    /// the badges and the status line follow them once they land.</summary>
+    private readonly Dictionary<int, ModDownloadItem> _byHand = new();
+
+    /// <summary>
+    /// Lists files the store will not hand over for the user to download with the browser, and brings up
+    /// the card for them (the card opens the download page and moves each file in as it arrives).
+    /// Returns the sentence for the status line, starting with a space.
+    /// </summary>
+    private async Task<string> QueueByHandAsync(List<ModDownloadItem> items, string target, Action<ModMeta>? applyToRoot)
+    {
+        // The flags a downloaded jar gets, set now so they are in place when the file lands: the store
+        // the mod came from and any download-mode flag for the mod itself, the library flag for a
+        // dependency. Keyed by project, so they hold whatever the file ends up being called.
+        foreach (var item in items)
+        {
+            SetDownloadedMetaFlag(item.Mod, item.File.Filename, m =>
+            {
+                if (item.IsDependency)
+                {
+                    if (m.IsDefault) m.IsLibrary = true;
+                    return;
+                }
+                m.PreferredSource = ModSource.CurseForge;
+                applyToRoot?.Invoke(m);
+            }, save: false);
+        }
+        App.State.ModMetadata.Save(_pack.Id);
+
+        IReadOnlyList<ManualDownloadEntry> queued;
+        try
+        {
+            queued = await App.State.ManualDownloads.QueueAsync(_pack.Id, _pack.Name, App.State.CurseForge,
+                items.Select(i => new ManualDownloadWant(i.Mod, i.Version, i.File, "mods", Local: target == "local/mods/")).ToList());
+        }
+        catch (Exception ex)
+        {
+            AppLog.LogError(nameof(ModExplorerPage), ex);
+            return $" {NameList(items.Select(i => i.Mod.Name))} could not be listed for a download by hand: {ex.Message}";
+        }
+
+        foreach (var entry in queued)
+        {
+            var item = items.FirstOrDefault(i =>
+                CurseForgeService.TryParseFileIds(i.Mod, i.Version, out _, out var fileId) && fileId == entry.FileId);
+            if (item is not null) _byHand[entry.FileId] = item;
+        }
+        if (queued.Count == 0)
+            return $" {NameList(items.Select(i => i.Mod.Name))} can't be downloaded by the launcher, and CurseForge gave no file to list.";
+        var names = NameList(queued.Select(e => e.Name));
+        return queued.Count == 1
+            ? $" {names} has to come from CurseForge's website: click Download in the window that opened."
+            : $" {names} have to come from CurseForge's website: click Download in the window that opened.";
+    }
+
+    /// <summary>"A", "A and B", "A, B and C".</summary>
+    private static string NameList(IEnumerable<string> names)
+    {
+        var list = names.Distinct().ToList();
+        return list.Count switch
+        {
+            0 => "",
+            1 => list[0],
+            _ => string.Join(", ", list.Take(list.Count - 1)) + " and " + list[^1]
+        };
+    }
+
+    /// <summary>A file handed to the card landed (the card or the background watch put it in, or the user
+    /// dropped it in the folder): badge its mod, and resolve the jar like any other download.</summary>
+    private async void OnManualDownloadsChanged(Guid packId)
+    {
+        if (packId != _pack.Id || _byHand.Count == 0) return;
+        try
+        {
+            var list = await Task.Run(() => App.State.ManualDownloads.Load(_pack.Id));
+            var landed = list?.Files
+                .Where(f => f.State == ManualDownloadState.Added && _byHand.ContainsKey(f.FileId))
+                .ToList() ?? [];
+            if (landed.Count == 0) return;
+
+            var paths = new List<string>();
+            foreach (var entry in landed)
+            {
+                var item = _byHand[entry.FileId];
+                _byHand.Remove(entry.FileId);
+                _installedModKeys.Add(ModKey(item.Mod));
+                var path = Path.Combine(App.State.ManualDownloads.FolderOf(_pack.Id, entry), entry.TargetFileName);
+                if (File.Exists(path))
+                {
+                    await RememberInstalledModAsync(item, path);
+                    paths.Add(path);
+                }
+            }
+            DownloadStatus.Text = landed.Count == 1
+                ? $"Added {landed[0].FileName} to {(landed[0].Local ? "local" : "game")}/{landed[0].Folder}/"
+                : $"Added {landed.Count} files from CurseForge's website.";
+            App.State.ModFingerprints.Flush();
+            RefreshDownloadedState();
+            _ = RefreshInstalledModIndexAsync(paths);
+        }
+        catch (Exception ex) { AppLog.LogError(nameof(ModExplorerPage), ex); }
+    }
+
 
     // ── colored download modes (grey = testing, orange = custom) ────────────────
 

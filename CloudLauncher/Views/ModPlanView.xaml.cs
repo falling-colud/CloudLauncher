@@ -4129,6 +4129,7 @@ public partial class ModPlanView : UserControl
             }
             else PlanStatus.Text = "That version has no downloadable file.";
         }
+        catch (ManualDownloadQueuedException ex) { PlanStatus.Text = ex.Message; }
         catch (Exception ex) { PlanStatus.Text = "Install failed: " + ex.Message; }
     }
 

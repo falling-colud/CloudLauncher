@@ -768,6 +768,7 @@ kbd {
 .band h2 { font-size: 36px; line-height: 45px; }
 .band .body { margin-top: 14px; max-width: 38em; }
 .band .dl-meta { margin-top: 16px; }
+.band .band-sub { font-size: 18px; line-height: 27px; margin-top: 22px; }
 .band .logo-big { width: 128px; height: 128px; }
 
 /* -------------------------------------------------------------- footer */

@@ -61,7 +61,17 @@ public sealed class ManualDownloadEntry
     /// <summary>Why the launcher could not fetch it, for a failure other than the opt-out.</summary>
     public string? Reason { get; set; }
 
+    /// <summary>The file in the same folder that this one takes over from, for an update: removed
+    /// once this one is in place, so two versions of a mod never load together.</summary>
+    public string? Replaces { get; set; }
+
     public ManualDownloadState State { get; set; }
+
+    /// <summary>The file belongs in the instance's <c>local</c> folder (this PC's own mods) rather than
+    /// in <c>game</c>. Not stored: such entries are kept in the local folder's own list, which never
+    /// syncs, so a friend's launcher is never asked for a file that is only this PC's.</summary>
+    [JsonIgnore]
+    public bool Local { get; set; }
 
     /// <summary>The folders a modpack can route a file to.</summary>
     public static readonly string[] Folders = ["mods", "resourcepacks", "shaderpacks"];
@@ -74,7 +84,8 @@ public sealed class ManualDownloadEntry
     /// every list rather than acted on.</summary>
     [JsonIgnore]
     public bool IsUsable =>
-        FileId > 0 && Folders.Contains(Folder) && PathSafety.IsSafeFileName(FileName);
+        FileId > 0 && Folders.Contains(Folder) && PathSafety.IsSafeFileName(FileName)
+        && (Replaces is null || PathSafety.IsSafeFileName(Replaces));
 
     /// <summary>The project page, when it is a curseforge.com address; CurseForge's id redirect
     /// otherwise.</summary>
@@ -110,22 +121,52 @@ public sealed class ManualDownloadList
     public List<ManualDownloadEntry> Files { get; set; } = new();
 }
 
+/// <summary>One file a page wants fetched by hand, as the store listed it, and where it goes.</summary>
+/// <param name="Folder"><c>mods</c>, <c>resourcepacks</c> or <c>shaderpacks</c>.</param>
+/// <param name="Local">Into the instance's <c>local</c> folder (this PC's own mods).</param>
+/// <param name="Disabled">Goes in switched off (<c>.jar.disabled</c>).</param>
+/// <param name="Replaces">The file it takes over from, for an update.</param>
+public sealed record ManualDownloadWant(
+    ModSummary Mod,
+    ModVersion Version,
+    ModVersionFile File,
+    string Folder = "mods",
+    bool Local = false,
+    bool Disabled = false,
+    string? Replaces = null);
+
+/// <summary>The store would not hand over a file, so it went to the download-by-hand card instead,
+/// which is up now. The message says so in a sentence a status line can show as it is.</summary>
+public sealed class ManualDownloadQueuedException(ManualDownloadEntry entry, string message)
+    : InvalidOperationException(message)
+{
+    public ManualDownloadEntry Entry { get; } = entry;
+}
+
 /// <summary>
-/// Files a CurseForge modpack lists that the launcher may not download (authors can turn off downloads
-/// outside CurseForge's own site and app), kept per instance until they are in place.
+/// Files the launcher may not download (CurseForge authors can turn off downloads outside CurseForge's
+/// own site and app), kept per instance until they are in place: what a modpack import could not fetch,
+/// and what the mod browser, the Mods page and mod updates hand over.
 /// </summary>
 /// <remarks>
-/// <para>The import records them (<see cref="Record"/>) and raises <see cref="Needed"/>; the card that
-/// answers it sends the user to each file's download page and puts the downloaded files in place
-/// (<see cref="Place"/>), recognising them by size and fingerprint so a browser's renamed copy still
-/// counts.</para>
+/// <para>The import records them (<see cref="Record"/>), a page adds to them (<see cref="QueueAsync"/>),
+/// and both raise <see cref="Needed"/>; the card that answers it sends the user to each file's download
+/// page and puts the downloaded files in place (<see cref="Place"/>), recognising them by size and
+/// fingerprint so a browser's renamed copy still counts.</para>
 /// <para>A file counts as added once it is in its folder under its own name, however it got there
 /// (<see cref="Reconcile"/>), so the list never nags about a file the user dropped in themselves.</para>
+/// <para>Two lists per instance: <c>game/.cloudlauncher</c> (synced with a shared instance, so a friend
+/// is asked for the same files) and <c>local/.cloudlauncher</c> for this PC's own mods.</para>
 /// </remarks>
 public sealed class ManualDownloadService(PackFolderService packs, AppSettings settings)
 {
     /// <summary>The list's file, in the instance's <c>game/.cloudlauncher</c> folder.</summary>
     public const string ListFileName = "manual-downloads.json";
+
+    /// <summary>How long the launcher keeps looking for a file after its card closed, once the user
+    /// opened its download page: closing the card right after clicking Download is natural, and the
+    /// file should still land in the instance.</summary>
+    public static readonly TimeSpan WatchAfterCardFor = TimeSpan.FromMinutes(15);
 
     private static readonly JsonSerializerOptions Json = new()
     {
@@ -135,29 +176,57 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
 
     private readonly object _gate = new();
 
-    /// <summary>An import finished with files left to download by hand: the instance and its name.
+    /// <summary>Files are waiting to be downloaded by hand: the instance, its name, and the files
+    /// the card should show (null: every file the instance is still missing, as after an import).
     /// Raised on the UI thread.</summary>
-    public event Action<Guid, string>? Needed;
+    public event Action<Guid, string, IReadOnlyList<int>?>? Needed;
 
     /// <summary>An instance's list changed (a file added or skipped). Raised on the UI thread.</summary>
     public event Action<Guid>? Changed;
 
+    /// <summary>The launcher found and placed a file after its card had closed: the instance, the
+    /// entry and where the file now is. Raised on the UI thread.</summary>
+    public event Action<Guid, ManualDownloadEntry, string>? PlacedInBackground;
+
     private string ListPath(Guid packId) => Path.Combine(packs.GameDir(packId), ".cloudlauncher", ListFileName);
 
-    /// <summary>The instance's list as stored, or null when it has none.</summary>
+    private string LocalListPath(Guid packId) => Path.Combine(packs.LocalDir(packId), ".cloudlauncher", ListFileName);
+
+    /// <summary>The instance folder an entry's <see cref="ManualDownloadEntry.Folder"/> sits in.</summary>
+    private string RootOf(Guid packId, ManualDownloadEntry file) =>
+        file.Local ? packs.LocalDir(packId) : packs.GameDir(packId);
+
+    /// <summary>The folder a file goes into: <c>game/mods</c>, <c>local/mods</c>, ...</summary>
+    public string FolderOf(Guid packId, ManualDownloadEntry file) => Path.Combine(RootOf(packId, file), file.Folder);
+
+    /// <summary>The instance's list as stored (both of its files), or null when it has none.</summary>
     public ManualDownloadList? Load(Guid packId)
+    {
+        lock (_gate)
+        {
+            var game = ReadList(packId, ListPath(packId));
+            var local = ReadList(packId, LocalListPath(packId));
+            if (game is null && local is null) return null;
+            var list = game ?? new ManualDownloadList();
+            if (local is not null)
+            {
+                foreach (var file in local.Files) file.Local = true;
+                list.Files.AddRange(local.Files);
+            }
+            return list;
+        }
+    }
+
+    private static ManualDownloadList? ReadList(Guid packId, string path)
     {
         try
         {
-            var path = ListPath(packId);
             if (!File.Exists(path)) return null;
-            lock (_gate)
-            {
-                var list = JsonSerializer.Deserialize<ManualDownloadList>(File.ReadAllText(path), Json);
-                if (list is null) return null;
-                list.Files.RemoveAll(f => f is null || !f.IsUsable);
-                return list;
-            }
+            var list = JsonSerializer.Deserialize<ManualDownloadList>(File.ReadAllText(path), Json);
+            if (list is null) return null;
+            list.Files ??= new();
+            list.Files.RemoveAll(f => f is null || !f.IsUsable);
+            return list;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -166,35 +235,48 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
         }
     }
 
+    /// <summary>Writes the list back, each entry into the file it belongs in. A part left empty has
+    /// its file removed, except the synced list of an import, which keeps where it came from.</summary>
     private void Save(Guid packId, ManualDownloadList list)
     {
-        var path = ListPath(packId);
         lock (_gate)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var temp = path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(list, Json));
-            File.Move(temp, path, overwrite: true);
+            var game = list.Files.Where(f => !f.Local).ToList();
+            var local = list.Files.Where(f => f.Local).ToList();
+            WriteList(ListPath(packId), game.Count == 0 && list.Source is null ? null
+                : new ManualDownloadList { Version = list.Version, Source = list.Source, CreatedAt = list.CreatedAt, Files = game });
+            WriteList(LocalListPath(packId), local.Count == 0 ? null
+                : new ManualDownloadList { Version = list.Version, CreatedAt = list.CreatedAt, Files = local });
         }
     }
 
-    /// <summary>Starts the instance's list over with what an import could not download. An import
-    /// with nothing left over removes the list, so a re-import that got everything clears it.</summary>
+    private static void WriteList(string path, ManualDownloadList? list)
+    {
+        if (list is null)
+        {
+            if (File.Exists(path)) File.Delete(path);
+            return;
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temp = path + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(list, Json));
+        File.Move(temp, path, overwrite: true);
+    }
+
+    /// <summary>Starts the instance's synced list over with what an import could not download. An
+    /// import with nothing left over removes it, so a re-import that got everything clears it. This
+    /// PC's own list is left as it is.</summary>
     public void Record(Guid packId, string? source, IReadOnlyCollection<ManualDownloadEntry> files)
     {
         try
         {
-            if (files.Count == 0)
+            lock (_gate)
             {
-                var path = ListPath(packId);
-                lock (_gate) { if (File.Exists(path)) File.Delete(path); }
-            }
-            else
-            {
-                Save(packId, new ManualDownloadList
+                WriteList(ListPath(packId), files.Count == 0 ? null : new ManualDownloadList
                 {
                     Source = source,
-                    Files = files.Where(f => f.IsUsable).OrderBy(f => f.Name, StringComparer.CurrentCultureIgnoreCase).ToList()
+                    Files = files.Where(f => f.IsUsable && !f.Local)
+                        .OrderBy(f => f.Name, StringComparer.CurrentCultureIgnoreCase).ToList()
                 });
             }
         }
@@ -205,28 +287,154 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
         RaiseChanged(packId);
     }
 
+    /// <summary>
+    /// Adds files to the instance's list, keeping what is already on it (an import's leftovers stay).
+    /// A file already listed is listed again as new; a file of a project that still has another file
+    /// waiting in the same folder takes that one's place, since the user picked this one now.
+    /// </summary>
+    /// <returns>The entries as stored, with their state: <see cref="ManualDownloadState.Added"/> for a
+    /// file that is already in place (which then also removes the file it replaces).</returns>
+    public IReadOnlyList<ManualDownloadEntry> Add(Guid packId, IReadOnlyCollection<ManualDownloadEntry> files)
+    {
+        var usable = files.Where(f => f.IsUsable).ToList();
+        if (usable.Count == 0) return [];
+        try
+        {
+            lock (_gate)
+            {
+                var list = Load(packId) ?? new ManualDownloadList();
+                foreach (var file in usable)
+                {
+                    list.Files.RemoveAll(f => f.Local == file.Local
+                        && (f.FileId == file.FileId
+                            || f.ProjectId == file.ProjectId && f.Folder == file.Folder && f.State == ManualDownloadState.Waiting));
+                    file.State = IsInPlace(packId, file) ? ManualDownloadState.Added : ManualDownloadState.Waiting;
+                    // Already there (an update to a file the folder holds): it takes over at once.
+                    if (file.State == ManualDownloadState.Added) RemoveReplaced(packId, file);
+                    list.Files.Add(file);
+                }
+                list.Files.Sort((a, b) => StringComparer.CurrentCultureIgnoreCase.Compare(a.Name, b.Name));
+                Save(packId, list);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Log("manual-downloads", $"Could not save the list for {packId}: {ex.Message}");
+        }
+        RaiseChanged(packId);
+        return usable;
+    }
+
+    /// <summary>
+    /// What a page does with files the store would not hand over: describes them (one CurseForge lookup
+    /// for their size, hashes and pages), adds them to the instance's list and raises
+    /// <see cref="Needed"/> for exactly those files, so the card pops up with them. A file that is
+    /// already in its folder is listed as added and brings up no card.
+    /// </summary>
+    /// <returns>The entries added; empty when none could be listed (the reason is in the log).</returns>
+    public async Task<IReadOnlyList<ManualDownloadEntry>> QueueAsync(Guid packId, string packName,
+        CurseForgeService curseForge, IReadOnlyList<ManualDownloadWant> wants, CancellationToken ct = default)
+    {
+        var entries = await DescribeAsync(curseForge, wants, ct);
+        var stored = Add(packId, entries);
+        var waiting = stored.Where(e => e.State == ManualDownloadState.Waiting).ToList();
+        if (waiting.Count > 0)
+        {
+            AppLog.Log("manual-downloads",
+                $"{waiting.Count} file(s) for {packName} to download by hand: {string.Join(", ", waiting.Select(e => e.FileName))}");
+            RaiseNeeded(packId, packName, waiting.Select(e => e.FileId).ToList());
+        }
+        return stored;
+    }
+
+    /// <summary>
+    /// Turns store files into entries the card can act on: the project's name and download page, and the
+    /// size and hashes that recognise the file once it is downloaded. One lookup for all of them; what it
+    /// cannot answer comes from the store's own listing (then only the name and size recognise it).
+    /// </summary>
+    public static async Task<List<ManualDownloadEntry>> DescribeAsync(CurseForgeService curseForge,
+        IReadOnlyList<ManualDownloadWant> wants, CancellationToken ct = default)
+    {
+        var ids = new List<(ManualDownloadWant Want, int ModId, int FileId)>();
+        foreach (var want in wants)
+        {
+            if (want.Version.Source != ModSource.CurseForge) continue;
+            if (CurseForgeService.TryParseFileIds(want.Mod, want.Version, out var modId, out var fileId))
+                ids.Add((want, modId, fileId));
+            else
+                AppLog.Log("manual-downloads", $"{want.Mod.Name}: its CurseForge file could not be identified, so it cannot be listed.");
+        }
+        if (ids.Count == 0) return [];
+
+        Dictionary<int, CurseForgeFileDetails> details;
+        try { details = await curseForge.GetFileDetailsAsync(ids.Select(i => i.FileId), ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            AppLog.Log("manual-downloads", $"Could not look up the files to download by hand ({ex.Message}); listing what the store showed.");
+            details = new();
+        }
+
+        var entries = new List<ManualDownloadEntry>();
+        foreach (var (want, modId, fileId) in ids)
+        {
+            details.TryGetValue(fileId, out var d);
+            var entry = new ManualDownloadEntry
+            {
+                ProjectId = modId,
+                FileId = fileId,
+                Name = d?.ProjectName ?? want.Mod.Name,
+                FileName = d?.FileName ?? want.File.Filename,
+                Size = d?.Length is > 0 ? d.Length : want.File.Size,
+                Fingerprint = d?.Fingerprint ?? 0,
+                Sha1 = d?.Sha1,
+                Folder = ManualDownloadEntry.Folders.Contains(want.Folder) ? want.Folder : "mods",
+                Disabled = want.Disabled,
+                ProjectUrl = d?.WebsiteUrl,
+                IconUrl = d?.IconUrl ?? want.Mod.IconUrl,
+                OptedOut = d is null || !d.AllowsDistribution,
+                Replaces = want.Replaces,
+                Local = want.Local
+            };
+            if (!entry.IsUsable)
+            {
+                AppLog.Log("manual-downloads", $"{entry.Name} ({modId}:{fileId}) can't be listed for a manual download: CurseForge gave no usable file name.");
+                continue;
+            }
+            entries.Add(entry);
+        }
+        return entries;
+    }
+
     /// <summary>Marks every waiting file that is already in place as added, saves when that changed
     /// anything, and returns the list (null when the instance has none).</summary>
+    /// <remarks>A file that takes over from another (an update) also removes that one here, when the
+    /// user put the new file in by hand: both in the folder would load two versions of the mod.</remarks>
     public ManualDownloadList? Reconcile(Guid packId)
     {
-        var list = Load(packId);
-        if (list is null) return null;
+        ManualDownloadList? list;
         var changed = false;
-        foreach (var file in list.Files.Where(f => f.State == ManualDownloadState.Waiting))
+        lock (_gate)
         {
-            if (!IsInPlace(packId, file)) continue;
-            file.State = ManualDownloadState.Added;
-            changed = true;
-        }
-        if (changed)
-        {
-            try { Save(packId, list); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            list = Load(packId);
+            if (list is null) return null;
+            foreach (var file in list.Files.Where(f => f.State == ManualDownloadState.Waiting))
             {
-                AppLog.Log("manual-downloads", $"Could not save the list for {packId}: {ex.Message}");
+                if (!IsInPlace(packId, file)) continue;
+                file.State = ManualDownloadState.Added;
+                RemoveReplaced(packId, file);
+                changed = true;
             }
-            RaiseChanged(packId);
+            if (changed)
+            {
+                try { Save(packId, list); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    AppLog.Log("manual-downloads", $"Could not save the list for {packId}: {ex.Message}");
+                }
+            }
         }
+        if (changed) RaiseChanged(packId);
         return list;
     }
 
@@ -241,7 +449,7 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
         if (!file.IsUsable) return false;
         try
         {
-            var dir = Path.Combine(packs.GameDir(packId), file.Folder);
+            var dir = FolderOf(packId, file);
             return File.Exists(Path.Combine(dir, file.FileName))
                    || File.Exists(Path.Combine(dir, file.FileName + ".disabled"));
         }
@@ -254,14 +462,17 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
     /// <summary>Sets one file's state (skip it, or want it again) and saves.</summary>
     public void SetState(Guid packId, int fileId, ManualDownloadState state)
     {
-        var list = Load(packId);
-        var file = list?.Files.FirstOrDefault(f => f.FileId == fileId);
-        if (list is null || file is null || file.State == state) return;
-        file.State = state;
-        try { Save(packId, list); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        lock (_gate)
         {
-            AppLog.Log("manual-downloads", $"Could not save the list for {packId}: {ex.Message}");
+            var list = Load(packId);
+            var file = list?.Files.FirstOrDefault(f => f.FileId == fileId);
+            if (list is null || file is null || file.State == state) return;
+            file.State = state;
+            try { Save(packId, list); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                AppLog.Log("manual-downloads", $"Could not save the list for {packId}: {ex.Message}");
+            }
         }
         RaiseChanged(packId);
     }
@@ -274,7 +485,7 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
     public string Place(Guid packId, ManualDownloadEntry file, string source, bool removeSource)
     {
         if (!file.IsUsable) throw new InvalidOperationException("That entry does not name a usable file.");
-        var dir = Path.Combine(packs.GameDir(packId), file.Folder);
+        var dir = FolderOf(packId, file);
         var dest = PathSafety.ResolveFileName(dir, file.TargetFileName)
                    ?? throw new InvalidOperationException($"{file.FileName} is not a usable file name.");
         Directory.CreateDirectory(dir);
@@ -296,17 +507,121 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
         }
 
         AppLog.Log("manual-downloads", $"Added {file.FileName} to {packId} from {source}.");
+        RemoveReplaced(packId, file);
         SetState(packId, file.FileId, ManualDownloadState.Added);
         return dest;
     }
 
-    private static bool SamePath(string a, string b) =>
-        string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+    /// <summary>Removes the file an update takes over from, once the new one is in place.</summary>
+    private void RemoveReplaced(Guid packId, ManualDownloadEntry file)
+    {
+        if (string.IsNullOrEmpty(file.Replaces)
+            || string.Equals(file.Replaces, file.TargetFileName, PathComparison)
+            || string.Equals(file.Replaces, file.FileName, PathComparison)) return;
+        try
+        {
+            if (PathSafety.ResolveFileName(FolderOf(packId, file), file.Replaces) is { } old && File.Exists(old))
+            {
+                File.Delete(old);
+                AppLog.Log("manual-downloads", $"Removed {file.Replaces}: {file.FileName} takes over from it.");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Log("manual-downloads", $"Added {file.FileName} but could not remove the old {file.Replaces}: {ex.Message}");
+        }
+    }
 
-    /// <summary>Tells whoever shows the card that an import left files to download by hand.</summary>
-    public void RaiseNeeded(Guid packId, string packName) => OnUi(() => Needed?.Invoke(packId, packName));
+    /// <summary>File names compare without case on Windows and with it elsewhere.</summary>
+    private static StringComparison PathComparison =>
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+    private static bool SamePath(string a, string b) =>
+        string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), PathComparison);
+
+    /// <summary>Tells whoever shows the card that there are files to download by hand: an import's
+    /// (<paramref name="fileIds"/> null, every waiting file) or a page's (those files).</summary>
+    public void RaiseNeeded(Guid packId, string packName, IReadOnlyList<int>? fileIds = null) =>
+        OnUi(() => Needed?.Invoke(packId, packName, fileIds));
 
     private void RaiseChanged(Guid packId) => OnUi(() => Changed?.Invoke(packId));
+
+    // ── watching after the card closed ────────────────────────────────────────
+
+    private readonly Dictionary<Guid, BackgroundWatch> _background = new();
+
+    private sealed class BackgroundWatch(HashSet<int> fileIds) : IDisposable
+    {
+        public HashSet<int> FileIds { get; } = fileIds;
+        public ManualDownloadWatcher? Watcher { get; set; }
+        public System.Threading.Timer? Expiry { get; set; }
+
+        public void Dispose()
+        {
+            Watcher?.Dispose();
+            Expiry?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Keeps looking for these files in the Downloads folder for <see cref="WatchAfterCardFor"/> after
+    /// their card closed, and puts each in place as it arrives (<see cref="PlacedInBackground"/>).
+    /// Replaces any earlier watch for the instance.
+    /// </summary>
+    public void WatchInBackground(Guid packId, IReadOnlyCollection<int> fileIds)
+    {
+        StopBackgroundWatch(packId);
+        if (fileIds.Count == 0) return;
+        var folder = WatchFolder;
+        if (!Directory.Exists(folder)) return;
+
+        var watch = new BackgroundWatch(fileIds.ToHashSet());
+        lock (_background) _background[packId] = watch;
+        watch.Watcher = new ManualDownloadWatcher(folder,
+            () =>
+            {
+                int[] ids;
+                lock (_background) ids = watch.FileIds.ToArray();
+                return ids.Length == 0 ? [] : Waiting(packId).Where(f => ids.Contains(f.FileId)).ToList();
+            },
+            (entry, path) =>
+            {
+                try
+                {
+                    var dest = Place(packId, entry, path, RemoveAfterAdding);
+                    bool done;
+                    lock (_background) { watch.FileIds.Remove(entry.FileId); done = watch.FileIds.Count == 0; }
+                    OnUi(() => PlacedInBackground?.Invoke(packId, entry, dest));
+                    if (done) StopBackgroundWatch(packId, watch);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+                {
+                    AppLog.Log("manual-downloads", $"Found {path} for {entry.FileName} but could not add it: {ex.Message}");
+                }
+            });
+        watch.Expiry = new System.Threading.Timer(_ => StopBackgroundWatch(packId, watch), null, WatchAfterCardFor, Timeout.InfiniteTimeSpan);
+        AppLog.Log("manual-downloads", $"Still looking in {folder} for {fileIds.Count} file(s) of {packId}.");
+        _ = watch.Watcher.ScanAsync();
+    }
+
+    /// <summary>Stops looking after a closed card (its card is open again, say) and hands back the
+    /// files it was still looking for, so the new card can show them.</summary>
+    public IReadOnlyList<int> StopBackgroundWatch(Guid packId) => StopBackgroundWatch(packId, null);
+
+    private IReadOnlyList<int> StopBackgroundWatch(Guid packId, BackgroundWatch? only)
+    {
+        BackgroundWatch? watch;
+        lock (_background)
+        {
+            if (!_background.TryGetValue(packId, out watch) || only is not null && !ReferenceEquals(watch, only))
+                return [];
+            _background.Remove(packId);
+        }
+        int[] left;
+        lock (_background) left = watch.FileIds.ToArray();
+        watch.Dispose();
+        return left;
+    }
 
     // ── recognising a downloaded file ─────────────────────────────────────────
 
@@ -348,7 +663,7 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
 
     // ── where downloads land ──────────────────────────────────────────────────
 
-    /// <summary>The folder the card watches: the user's choice, else the Windows Downloads folder.</summary>
+    /// <summary>The folder the card watches: the user's choice, else the system's Downloads folder.</summary>
     public string WatchFolder =>
         settings.ManualDownloadFolder is { Length: > 0 } chosen && Directory.Exists(chosen)
             ? chosen
@@ -380,35 +695,80 @@ public sealed class ManualDownloadService(PackFolderService packs, AppSettings s
     private static extern int SHGetKnownFolderPath(
         [MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
 
-    /// <summary>The Downloads folder as Windows has it, which a user may have moved off the profile
-    /// folder; <c>%USERPROFILE%\Downloads</c> when Windows will not say.</summary>
+    /// <summary>The Downloads folder as the system has it, which a user may have moved off the home
+    /// folder: Windows' known folder, or <c>XDG_DOWNLOAD_DIR</c> on Linux; <c>~/Downloads</c> when the
+    /// system will not say.</summary>
     public static string DownloadsFolder()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                if (SHGetKnownFolderPath(DownloadsFolderId, 0, IntPtr.Zero, out var ptr) == 0)
+                {
+                    try
+                    {
+                        var path = Marshal.PtrToStringUni(ptr);
+                        if (!string.IsNullOrEmpty(path)) return path;
+                    }
+                    finally { Marshal.FreeCoTaskMem(ptr); }
+                }
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            {
+                /* fall through */
+            }
+        }
+        else if (XdgDownloadDir(home) is { } xdg)
+        {
+            return xdg;
+        }
+        return Path.Combine(home, "Downloads");
+    }
+
+    /// <summary><c>XDG_DOWNLOAD_DIR</c> from the environment or <c>~/.config/user-dirs.dirs</c>
+    /// (<c>XDG_DOWNLOAD_DIR="$HOME/Downloads"</c>), when it names a folder that exists.</summary>
+    private static string? XdgDownloadDir(string home)
     {
         try
         {
-            if (SHGetKnownFolderPath(DownloadsFolderId, 0, IntPtr.Zero, out var ptr) == 0)
+            var value = Environment.GetEnvironmentVariable("XDG_DOWNLOAD_DIR");
+            if (string.IsNullOrWhiteSpace(value))
             {
-                try
+                var config = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
+                if (string.IsNullOrWhiteSpace(config)) config = Path.Combine(home, ".config");
+                var dirs = Path.Combine(config, "user-dirs.dirs");
+                if (!File.Exists(dirs)) return null;
+                foreach (var raw in File.ReadLines(dirs))
                 {
-                    var path = Marshal.PtrToStringUni(ptr);
-                    if (!string.IsNullOrEmpty(path)) return path;
+                    var line = raw.Trim();
+                    if (!line.StartsWith("XDG_DOWNLOAD_DIR=", StringComparison.Ordinal)) continue;
+                    value = line["XDG_DOWNLOAD_DIR=".Length..].Trim().Trim('"');
+                    break;
                 }
-                finally { Marshal.FreeCoTaskMem(ptr); }
             }
+            if (string.IsNullOrWhiteSpace(value)) return null;
+            value = value.Replace("$HOME", home, StringComparison.Ordinal);
+            if (value.StartsWith("~/", StringComparison.Ordinal)) value = Path.Combine(home, value[2..]);
+            return Path.IsPathRooted(value) && Directory.Exists(value) ? value : null;
         }
-        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            /* not Windows: fall through */
+            return null;
         }
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
     }
 
     private static void OnUi(Action raise)
     {
+#if WINDOWS
         var app = System.Windows.Application.Current;
         if (app is null) { raise(); return; }
         if (app.Dispatcher.CheckAccess()) raise();
         else app.Dispatcher.BeginInvoke(raise);
+#else
+        UiThread.Run(raise);
+#endif
     }
 }
 

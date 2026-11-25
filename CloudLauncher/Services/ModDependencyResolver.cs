@@ -4,12 +4,19 @@ public sealed record ModDownloadItem(
     ModSummary Mod,
     ModVersion Version,
     ModVersionFile File,
-    bool IsDependency);
+    bool IsDependency)
+{
+    /// <summary>CurseForge will not hand this file to other launchers (its author turned that off, or
+    /// it has no link at all): <see cref="ModVersionFile.DownloadUrl"/> is empty, and the user downloads
+    /// it from curseforge.com instead (<see cref="ManualDownloadService.QueueAsync"/>).</summary>
+    public bool ByHand { get; init; }
+}
 
 public static class ModDependencyResolver
 {
     /// <summary>Everything one version needs downloaded: itself plus every required dependency,
-    /// transitively, dependencies first.</summary>
+    /// transitively, dependencies first. A CurseForge file the launcher may not download comes back
+    /// <see cref="ModDownloadItem.ByHand"/>, without a link, instead of failing the whole set.</summary>
     /// <param name="versionCatalog">The shared version catalog. With it, a dependency's version list is
     /// fetched filtered to <paramref name="minecraftVersion"/> and <paramref name="loader"/> and shared
     /// with other callers; without it a CurseForge dependency costs its whole file history (dozens of
@@ -54,7 +61,18 @@ public static class ModDependencyResolver
                 await VisitAsync(resolved.Value.Mod, resolved.Value.Version, isDependency: true, result, visited, minecraftVersion, loader, modrinth, curseForge, channel, versionCatalog, ct);
         }
 
-        var file = await ResolveDownloadFileAsync(mod, version, curseForge, ct);
+        ModVersionFile? file;
+        try { file = await ResolveDownloadFileAsync(mod, version, curseForge, ct); }
+        catch (StoreRequestException ex) when (ex.Failure == StoreFailure.NotDistributable
+                                               && version.Source == ModSource.CurseForge)
+        {
+            // Not a dead end: the file is listed for the user to fetch from CurseForge's website, and
+            // the rest of the set still downloads.
+            var listed = version.Files.FirstOrDefault(f => f.IsPrimary) ?? version.Files.FirstOrDefault();
+            if (listed is not null)
+                result.Add(new ModDownloadItem(mod, version, listed with { DownloadUrl = "" }, isDependency) { ByHand = true });
+            return;
+        }
         if (file is not null && !string.IsNullOrWhiteSpace(file.DownloadUrl))
             result.Add(new ModDownloadItem(mod, version, file, isDependency));
     }

@@ -58,6 +58,7 @@ builder.Services.AddSingleton(blobOptions);
 builder.Services.AddSingleton<BlobStore>();
 builder.Services.AddSingleton(launcherOptions);
 builder.Services.AddSingleton<LauncherStore>();
+builder.Services.AddSingleton<LinuxLauncherStore>();
 builder.Services.AddHttpClient();
 // Outbound routing for the mod-platform proxy. Registers one HttpClient per configured route so a
 // CDN block on this server address can be retried through a relay or outbound proxy. Throws on

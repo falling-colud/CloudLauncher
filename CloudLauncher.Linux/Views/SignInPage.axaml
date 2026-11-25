@@ -1,0 +1,42 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="CloudLauncher.Views.SignInPage">
+    <ScrollViewer>
+        <Border Classes="card" Width="420" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="24,48">
+            <StackPanel Spacing="10">
+                <TextBlock x:Name="TitleText" Classes="h1" Text="Sign In"/>
+                <TextBlock Classes="muted" TextWrapping="Wrap"
+                           Text="Your CloudLauncher account keeps your instances in sync between computers and lets you share them with friends."/>
+
+                <TextBlock Text="Username" Margin="0,8,0,0"/>
+                <TextBox x:Name="UsernameBox" Watermark="Username"/>
+                <StackPanel x:Name="EmailRow" Spacing="10" IsVisible="False">
+                    <TextBlock Text="Email"/>
+                    <TextBox x:Name="EmailBox" Watermark="you@example.com"/>
+                </StackPanel>
+                <TextBlock Text="Password"/>
+                <TextBox x:Name="PasswordBox" PasswordChar="•" Watermark="Password"/>
+                <StackPanel x:Name="TermsRow" IsVisible="False" Spacing="4">
+                    <CheckBox x:Name="TermsBox" Content="I agree to the Terms and the Privacy Policy"/>
+                    <StackPanel Orientation="Horizontal" Spacing="14" Margin="28,0,0,0">
+                        <Button Classes="link" Content="Terms" Click="OnOpenTerms"/>
+                        <Button Classes="link" Content="Privacy Policy" Click="OnOpenPrivacy"/>
+                    </StackPanel>
+                </StackPanel>
+
+                <TextBlock x:Name="ErrorText" Classes="danger" TextWrapping="Wrap" IsVisible="False"/>
+                <TextBlock x:Name="InfoText" Classes="caption" TextWrapping="Wrap" IsVisible="False"/>
+
+                <Button x:Name="SubmitButton" Classes="primary" Content="Sign In" HorizontalAlignment="Stretch"
+                        HorizontalContentAlignment="Center" Margin="0,6,0,0" Click="OnSubmit" IsDefault="True"/>
+                <Button x:Name="ModeButton" Classes="link" Content="New here? Create an account" HorizontalAlignment="Center"
+                        Click="OnToggleMode"/>
+                <Rectangle Classes="divider" Margin="0,6"/>
+                <Button Content="Continue Without Signing In" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center"
+                        Click="OnContinueOffline"/>
+                <TextBlock Classes="caption" TextWrapping="Wrap" HorizontalAlignment="Center" TextAlignment="Center"
+                           Text="Instances you make without an account stay on this computer."/>
+            </StackPanel>
+        </Border>
+    </ScrollViewer>
+</UserControl>

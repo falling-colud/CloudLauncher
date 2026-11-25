@@ -1,0 +1,128 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="CloudLauncher.Views.AccountPage">
+    <UserControl.Styles>
+        <!-- The square tile with a person's initial or an icon, left of a name. -->
+        <Style Selector="Border.avatar">
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Background" Value="{DynamicResource AccentSoftBrush}"/>
+        </Style>
+        <Style Selector="Border.avatar > TextBlock">
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}"/>
+        </Style>
+        <Style Selector="TextBlock.section">
+            <Setter Property="Margin" Value="0,28,0,4"/>
+        </Style>
+    </UserControl.Styles>
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="28,24,28,32">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="820"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Classes="h1" Text="Account"/>
+
+                <!-- ── CloudLauncher account: signed in ── -->
+                <Border x:Name="SignedInCard" Classes="card" Margin="0,18,0,0" Padding="20,18">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                        <Border Classes="avatar" Width="60" Height="60" VerticalAlignment="Center">
+                            <TextBlock x:Name="InitialText" FontFamily="{DynamicResource PixelFont}" FontSize="28" Text="?"/>
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="16,0,16,0" VerticalAlignment="Center" Spacing="3">
+                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                <TextBlock x:Name="UsernameText" Classes="h2" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                <Border x:Name="VerifiedPill" Classes="pill" IsVisible="False">
+                                    <TextBlock x:Name="VerifiedText"/>
+                                </Border>
+                            </StackPanel>
+                            <TextBlock x:Name="EmailText" Classes="muted" TextTrimming="CharacterEllipsis" IsVisible="False"/>
+                            <TextBlock x:Name="ServerText" Classes="caption" TextTrimming="CharacterEllipsis"
+                                       ToolTip.Tip="The CloudLauncher server this launcher talks to"/>
+                        </StackPanel>
+                        <Button x:Name="SignOutButton" Grid.Column="2" Classes="danger" Content="Sign Out"
+                                VerticalAlignment="Center" Click="OnSignOut"
+                                ToolTip.Tip="Ends this session on the server and forgets it on this computer"/>
+                    </Grid>
+                </Border>
+
+                <!-- ── CloudLauncher account: signed out ── -->
+                <Border x:Name="SignedOutCard" Classes="card" Margin="0,18,0,0" Padding="20,18" IsVisible="False">
+                    <Grid ColumnDefinitions="Auto,*,Auto">
+                        <Border Classes="avatar" Width="60" Height="60" VerticalAlignment="Center"
+                                Background="{DynamicResource Surface4Brush}">
+                            <TextBlock Classes="icon" FontSize="24" Text="&#xE77B;" Foreground="{DynamicResource TextSecondaryBrush}"/>
+                        </Border>
+                        <StackPanel Grid.Column="1" Margin="16,0,16,0" VerticalAlignment="Center" Spacing="4">
+                            <TextBlock Classes="h2" Text="Not Signed In"/>
+                            <TextBlock Classes="muted" TextWrapping="Wrap"
+                                       Text="Sign in to keep your instances in sync between computers and share them with friends."/>
+                        </StackPanel>
+                        <Button x:Name="SignInButton" Grid.Column="2" Classes="primary" Content="Sign In"
+                                VerticalAlignment="Center" MinWidth="96" HorizontalContentAlignment="Center" Click="OnSignIn"/>
+                    </Grid>
+                </Border>
+                <TextBlock x:Name="AccountStatus" TextWrapping="Wrap" Margin="2,10,0,0" IsVisible="False"/>
+
+                <!-- ── Minecraft accounts ── -->
+                <TextBlock Classes="h2 section" Text="Minecraft Accounts"/>
+                <TextBlock Classes="muted" TextWrapping="Wrap" Margin="0,0,0,12"
+                           Text="The game plays as the one in use. A Microsoft account joins any server; an offline account only joins servers in offline mode."/>
+
+                <Border Classes="card" Padding="16">
+                    <StackPanel>
+                        <Border Classes="well" Padding="6" MinHeight="64">
+                            <Panel>
+                                <StackPanel x:Name="AccountsList" Spacing="4"/>
+                                <Grid x:Name="EmptyState" ColumnDefinitions="Auto,*" Margin="10,10" IsVisible="False">
+                                    <Border Width="36" Height="36" CornerRadius="3" VerticalAlignment="Center"
+                                            Background="{DynamicResource Surface4Brush}">
+                                        <TextBlock Classes="icon" FontSize="15" Text="&#xE77B;" HorizontalAlignment="Center"
+                                                   Foreground="{DynamicResource TextTertiaryBrush}"/>
+                                    </Border>
+                                    <StackPanel Grid.Column="1" Margin="12,0,0,0" Spacing="2" VerticalAlignment="Center">
+                                        <TextBlock Text="No Minecraft Accounts" FontWeight="SemiBold"/>
+                                        <TextBlock Classes="caption" TextWrapping="Wrap"
+                                                   Text="Add the Microsoft account that owns Minecraft: Java Edition to play."/>
+                                    </StackPanel>
+                                </Grid>
+                            </Panel>
+                        </Border>
+
+                        <Grid ColumnDefinitions="Auto,*" Margin="0,16,0,0">
+                            <Button x:Name="AddMicrosoftButton" Click="OnAddMicrosoft"
+                                    ToolTip.Tip="Shows a code to enter at microsoft.com/link, in any browser">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock Classes="icon" FontSize="13" Text="&#xE710;"/>
+                                    <TextBlock Text="Add Microsoft Account" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Grid.Column="1" Classes="caption" VerticalAlignment="Center" Margin="14,0,0,0"
+                                       TextWrapping="Wrap" Text="You sign in on Microsoft's page, here or on your phone."/>
+                        </Grid>
+
+                        <Rectangle Classes="divider" Margin="0,16"/>
+
+                        <Grid ColumnDefinitions="130,*,Auto">
+                            <TextBlock Text="Offline Account" Foreground="{DynamicResource TextSecondaryBrush}"
+                                       VerticalAlignment="Center"/>
+                            <TextBox x:Name="OfflineNameBox" Grid.Column="1" Watermark="Username" MaxLength="16"
+                                     KeyDown="OnOfflineNameKeyDown" TextChanged="OnOfflineNameChanged"
+                                     ToolTip.Tip="3 to 16 characters, the same rules Minecraft uses"/>
+                            <Button x:Name="AddOfflineButton" Grid.Column="2" Content="Add Offline" Margin="8,0,0,0"
+                                    Click="OnAddOffline"/>
+                            <!-- Instead of the box while no Microsoft account here owns the game. -->
+                            <TextBlock x:Name="OfflineGate" Grid.Column="1" Grid.ColumnSpan="2" Classes="caption"
+                                       TextWrapping="Wrap" VerticalAlignment="Center" IsVisible="False"/>
+                        </Grid>
+                        <TextBlock x:Name="OfflineHint" Classes="caption" TextWrapping="Wrap" Margin="130,8,0,0"/>
+                    </StackPanel>
+                </Border>
+                <TextBlock x:Name="McStatus" TextWrapping="Wrap" Margin="2,10,0,0" IsVisible="False"/>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

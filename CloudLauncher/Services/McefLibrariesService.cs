@@ -20,13 +20,23 @@ namespace CloudLauncher.Services;
 public static class McefLibrariesService
 {
     /// <summary>Files CEF loads at startup, with the smallest size a real copy could plausibly be.</summary>
-    private static readonly (string Name, long MinBytes)[] RequiredNatives =
+    private static readonly (string Name, long MinBytes)[] WindowsNatives =
     [
         ("libcef.dll",     64L * 1024 * 1024),   // ~200 MB in practice
         ("libGLESv2.dll",   1L * 1024 * 1024),   // ~7 MB, the one named in the crash
         ("chrome_elf.dll",       256L * 1024),
         ("jcef.dll",             256L * 1024),
     ];
+
+    /// <summary>On Linux the bundle is .so files; libcef.so is the one that is always there and
+    /// always large, so it alone tells a complete download from a cut-off one.</summary>
+    private static readonly (string Name, long MinBytes)[] LinuxNatives =
+    [
+        ("libcef.so",      64L * 1024 * 1024),
+    ];
+
+    private static (string Name, long MinBytes)[] RequiredNatives =>
+        OperatingSystem.IsWindows() ? WindowsNatives : LinuxNatives;
 
     /// <summary>Verifies the pack's MCEF bundle and clears it when it is unusable. Returns a line for
     /// the launch log, or an empty string when there is nothing to say.</summary>
@@ -55,8 +65,13 @@ public static class McefLibrariesService
     /// reason can be logged.</summary>
     private static string? Diagnose(string root)
     {
-        var platform = Directory.EnumerateDirectories(root)
-            .FirstOrDefault(d => Path.GetFileName(d).Contains('_'));   // windows_amd64, linux_amd64, macos_arm64, ...
+        var folders = Directory.EnumerateDirectories(root).ToList();
+        // windows_amd64, linux_amd64, macos_arm64, ...: off Windows, this system's own folder first.
+        var platform = (OperatingSystem.IsWindows()
+                           ? null
+                           : folders.FirstOrDefault(d => Path.GetFileName(d).StartsWith(
+                               OperatingSystem.IsLinux() ? "linux_" : "macos_", StringComparison.OrdinalIgnoreCase)))
+                       ?? folders.FirstOrDefault(d => Path.GetFileName(d).Contains('_'));
         if (platform is null)
             return "native folder is missing";
 

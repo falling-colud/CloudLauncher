@@ -1,8 +1,15 @@
 using System.IO;
 using System.Net;
 using System.Net.Http;
+#if WINDOWS
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+#else
+// The Linux launcher decodes with Skia through Avalonia; its bitmaps stand where WPF's do.
+using BitmapImage = Avalonia.Media.Imaging.Bitmap;
+using ImageSource = Avalonia.Media.IImage;
+using CloudLauncher.Platform;
+#endif
 using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;
@@ -278,6 +285,7 @@ public sealed class PackAssetService(PackFolderService folders, ModrinthService 
         if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
             throw new FileNotFoundException("Image file not found.", sourcePath);
 
+#if WINDOWS
         // OnLoad reads the whole file up front, so no lock is left on the source, which may even be the
         // destination icon.png.
         var decoder = BitmapDecoder.Create(
@@ -299,6 +307,29 @@ public sealed class PackAssetService(PackFolderService folders, ModrinthService 
         encoder.Frames.Add(BitmapFrame.Create(frame));
         using (var fs = File.Create(IconPathFor(packId)))
             encoder.Save(fs);
+#else
+        // Read whole first, so no handle is left on the source, which may even be the destination icon.png.
+        var bytes = File.ReadAllBytes(sourcePath);
+        using var source = SkiaSharp.SKBitmap.Decode(bytes)
+                           ?? throw new InvalidDataException("That file is not a picture the launcher can read.");
+        var longestEdge = Math.Max(source.Width, source.Height);
+        SkiaSharp.SKBitmap? scaled = null;
+        if (longestEdge > MaxIconDimension)
+        {
+            var scale = (double)MaxIconDimension / longestEdge;
+            scaled = source.Resize(new SkiaSharp.SKImageInfo(
+                Math.Max(1, (int)Math.Round(source.Width * scale)),
+                Math.Max(1, (int)Math.Round(source.Height * scale))), SkiaSharp.SKFilterQuality.High);
+        }
+
+        var dir = AssetsDirFor(packId);
+        Directory.CreateDirectory(dir);
+        using (var image = SkiaSharp.SKImage.FromBitmap(scaled ?? source))
+        using (var png = image.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100))
+        using (var fs = File.Create(IconPathFor(packId)))
+            png.SaveTo(fs);
+        scaled?.Dispose();
+#endif
 
         MirrorToSharedFolder(packId);
     }
@@ -392,6 +423,34 @@ public static class SafeImage
     public static BitmapImage? Decode(byte[] bytes, int maxSide,
                                        BitmapCreateOptions options = BitmapCreateOptions.None, bool scaleUp = false)
     {
+#if !WINDOWS
+        try
+        {
+            // Only the header: a codec reads the dimensions without decoding any pixels.
+            int width, height;
+            using (var codec = SkiaSharp.SKCodec.Create(new MemoryStream(bytes, writable: false)))
+            {
+                if (codec is null) return null;
+                (width, height) = (codec.Info.Width, codec.Info.Height);
+            }
+            if (width <= 0 || height <= 0 || width > MaxSourcePixels || height > MaxSourcePixels) return null;
+
+            using var stream = new MemoryStream(bytes, writable: false);
+            if (!scaleUp && Math.Max(width, height) <= maxSide) return new BitmapImage(stream);
+            // Pack art is mostly pixel art: grown with hard edges, shrunk smoothly.
+            var mode = Math.Max(width, height) < maxSide
+                ? Avalonia.Media.Imaging.BitmapInterpolationMode.None
+                : Avalonia.Media.Imaging.BitmapInterpolationMode.HighQuality;
+            // Bounded on the longer side: a width alone would let a tall, narrow image get any height.
+            return height > width
+                ? BitmapImage.DecodeToHeight(stream, maxSide, mode)
+                : BitmapImage.DecodeToWidth(stream, maxSide, mode);
+        }
+        catch
+        {
+            return null;
+        }
+#else
         try
         {
             // Only the header: with delayed creation and no caching, no pixels are decoded here.
@@ -420,5 +479,6 @@ public static class SafeImage
             // Codecs report a bad image as many different exception types; each means "no image".
             return null;
         }
+#endif
     }
 }

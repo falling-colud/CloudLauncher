@@ -1441,6 +1441,7 @@ public partial class ModGraphView : UserControl
             }
             else GraphStatus.Text = "That version has no downloadable file.";
         }
+        catch (ManualDownloadQueuedException ex) { GraphStatus.Text = ex.Message; }
         catch (Exception ex) { GraphStatus.Text = ex.Message; }
     }
 

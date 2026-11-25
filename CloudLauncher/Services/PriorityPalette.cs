@@ -1,4 +1,6 @@
+#if WINDOWS
 using System.Windows.Media;
+#endif
 
 namespace CloudLauncher.Services;
 
@@ -7,6 +9,7 @@ namespace CloudLauncher.Services;
 /// frozen and cached for reuse across many item containers.</summary>
 public static class PriorityPalette
 {
+#if WINDOWS
     private static readonly Color[] Positives =
     [
         Color.FromRgb(0x5B, 0x9D, 0xF9), // 1 - blue   (info)
@@ -40,6 +43,7 @@ public static class PriorityPalette
             return brush;
         }
     }
+#endif
 
     /// <summary>True when a priority warrants a visible (non-neutral) border.</summary>
     public static bool IsEmphasized(int priority) => priority != 0;

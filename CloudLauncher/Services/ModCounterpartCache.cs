@@ -95,7 +95,7 @@ public sealed class ModCounterpartCache
     }
 
     private static string DataRoot() => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        AppSettings.AppDataBasePath,
         "CloudLauncher",
         Environment.GetEnvironmentVariable("CL_PROFILE") is { Length: > 0 } profile ? profile : "default");
 

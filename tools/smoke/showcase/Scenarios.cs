@@ -13,6 +13,7 @@ public static class Scenarios
             case "sharing": Sharing(); break;
             case "logs": Logs(); break;
             case "manual-downloads": ManualDownloads(); break;
+            case "manual-downloads-picked": ManualDownloadsPicked(); break;
             case "open": Open(); break;
             case "planning-ink": InkScenario.Run(); break;
             case "planning-discord": DiscordScenario.Run(); break;
@@ -444,6 +445,81 @@ public static class Scenarios
         Program.Shoot((FrameworkElement)shell.Content, "manual-downloads-launch", 1);
         shell.Hide();
         Program.Pump(300);
+    }
+
+    /// <summary>The card as the mod browser brings it up for a mod CurseForge will not hand over: one file,
+    /// then a second picked while it is open, then closed after Download (the launcher keeps looking).</summary>
+    private static void ManualDownloadsPicked()
+    {
+        var shell = Program.MakeShell(1280, 820);
+        System.Threading.SynchronizationContext.SetSynchronizationContext(
+            new System.Windows.Threading.DispatcherSynchronizationContext(shell.Dispatcher));
+        var id = FakeWorld.Hearthstone;
+        var md = CloudLauncher.App.State.ManualDownloads;
+        // Never the real Downloads folder: the watch would take files out of it.
+        var watchDir = System.IO.Path.Combine(Program.Out, "watched-downloads");
+        System.IO.Directory.CreateDirectory(watchDir);
+        md.SetWatchFolder(watchDir);
+        md.RemoveAfterAdding = false;
+        // An import's leftover that the picked card must not show.
+        md.Record(id, "Hearthstone Valley 2.4.zip",
+        [
+            new CloudLauncher.Services.ManualDownloadEntry
+            {
+                ProjectId = 238222, FileId = 9254760, Name = "Just Enough Items (JEI)", OptedOut = false,
+                FileName = "jei-1.21.1-neoforge-19.69.0.456.jar", Size = 7350892, Fingerprint = 1,
+                Folder = "mods", ProjectUrl = "https://www.curseforge.com/minecraft/mc-mods/jei"
+            },
+        ]);
+        md.Add(id,
+        [
+            new CloudLauncher.Services.ManualDownloadEntry
+            {
+                ProjectId = 521480, FileId = 9243656, Name = "Skin Layers 3D", OptedOut = true,
+                FileName = "skinlayers3d-neoforge-1.11.4-mc1.21.1.jar", Size = 1905514, Fingerprint = 3196735172,
+                Folder = "mods", ProjectUrl = "https://www.curseforge.com/minecraft/mc-mods/skin-layers-3d"
+            },
+            new CloudLauncher.Services.ManualDownloadEntry
+            {
+                ProjectId = 448233, FileId = 9752280, Name = "Entity Culling Fabric/Forge", OptedOut = true,
+                FileName = "entityculling-neoforge-1.11.4-mc1.21.1.jar", Size = 1510075, Fingerprint = 737333498,
+                Folder = "mods", ProjectUrl = "https://www.curseforge.com/minecraft/mc-mods/entityculling"
+            },
+        ]);
+
+        shell.Show();
+        Program.Pump(2500);
+        _ = CloudLauncher.Views.ManualDownloadsCard.ShowAsync(shell, id, "Hearthstone Valley", focus: [9243656]);
+        Program.Pump(2500);
+        Program.Shoot((FrameworkElement)shell.Content, "manual-picked-one", 1);
+        var card = Program.Find<CloudLauncher.Views.ManualDownloadsCard>((DependencyObject)shell.Content).FirstOrDefault();
+        if (card is null) { Program.Log("FAIL no card"); return; }
+        Program.Shoot(card, "manual-picked-one-2x", 2);
+        Program.Log("CHECK rows=" + Rows(card).Count + " (want 1)");
+
+        // A second mod picked while the card is up joins it rather than stacking another card.
+        _ = CloudLauncher.Views.ManualDownloadsCard.ShowAsync(shell, id, "Hearthstone Valley", focus: [9752280]);
+        Program.Pump(2000);
+        Program.Log("CHECK rows=" + Rows(card).Count + " (want 2) cards=" +
+                    Program.Find<CloudLauncher.Views.ManualDownloadsCard>((DependencyObject)shell.Content).Count() + " (want 1)");
+        Program.Shoot(card, "manual-picked-two-2x", 2);
+
+        // Download clicked (the row says so) and the card closed at once: the launcher keeps looking.
+        var first = Rows(card).First(r => r.Entry.FileId == 9243656);
+        first.Opened = true;
+        Program.Pump(300);
+        card.RaiseEvent(new System.Windows.Input.KeyEventArgs(System.Windows.Input.Keyboard.PrimaryDevice,
+            PresentationSource.FromVisual(card)!, 0, System.Windows.Input.Key.Escape)
+        { RoutedEvent = UIElement.PreviewKeyDownEvent });
+        Program.Pump(1200);
+        var watched = md.StopBackgroundWatch(id);
+        Program.Log("CHECK background=" + string.Join(",", watched) + " (want 9243656)");
+        shell.Hide();
+        Program.Pump(300);
+
+        static System.Collections.ObjectModel.ObservableCollection<CloudLauncher.Views.ManualDownloadRow> Rows(object c) =>
+            (System.Collections.ObjectModel.ObservableCollection<CloudLauncher.Views.ManualDownloadRow>)c.GetType()
+                .GetField("_rows", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(c)!;
     }
 
     private static void Logs()

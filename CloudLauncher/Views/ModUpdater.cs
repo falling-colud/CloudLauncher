@@ -203,7 +203,13 @@ public static class ModUpdater
         var file = version.Files.FirstOrDefault(f => f.IsPrimary) ?? version.Files.FirstOrDefault();
         if (file is null) return false;
 
-        file = await EnsureDownloadableAsync(version, file, ct);
+        try { file = await EnsureDownloadableAsync(version, file, ct); }
+        catch (StoreRequestException ex) when (ex.Failure == StoreFailure.NotDistributable
+                                               && version.Source == ModSource.CurseForge)
+        {
+            if (await QueueByHandAsync(mod, version, file, ex, ct)) return true;
+            throw;
+        }
         if (string.IsNullOrWhiteSpace(file.DownloadUrl)) return false;
 
         // Keep the mod's enabled state: a disabled mod lives as "<name>.jar.disabled", and writing the
@@ -221,6 +227,56 @@ public static class ModUpdater
         if (!string.Equals(mod.FilePath, dest, StringComparison.OrdinalIgnoreCase) && File.Exists(mod.FilePath))
             File.Delete(mod.FilePath);
         return true;
+    }
+
+    /// <summary>
+    /// Hands an update CurseForge will not give out (its author turned off downloads in other launchers)
+    /// to the download-by-hand card, which comes up with it: the user downloads the new file with the
+    /// browser, and the old jar goes once the new one is in. Throws
+    /// <see cref="ManualDownloadQueuedException"/> to say so. Returns true when the new file was already
+    /// in the folder (the update is done: the old jar is gone), false when the card cannot be used (the
+    /// jar is not in an instance's mods folder, say) so the caller rethrows the store's refusal.
+    /// </summary>
+    private static async Task<bool> QueueByHandAsync(PackMod mod, ModVersion version, ModVersionFile file,
+        StoreRequestException refusal, CancellationToken ct)
+    {
+        // The jar's instance: <root>/game/mods/x.jar or <root>/local/mods/x.jar, and <root>/.packid.
+        var modsDir = Path.GetDirectoryName(mod.FilePath);
+        var folderDir = modsDir is null ? null : Path.GetDirectoryName(modsDir);
+        var root = folderDir is null ? null : Path.GetDirectoryName(folderDir);
+        if (root is null
+            || !string.Equals(Path.GetFileName(modsDir), "mods", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(Path.GetFileName(folderDir), mod.Folder, StringComparison.OrdinalIgnoreCase)
+            || ReadPackId(root) is not { } packId)
+        {
+            AppLog.Log("updates", $"{mod.DisplayName}: {refusal.Message} (not listed for a download by hand: its instance could not be told from {mod.FilePath})");
+            return false;
+        }
+
+        var packName = App.State.Api.PeekPackDetail(packId)?.Name ?? Path.GetFileName(root);
+        var want = new ManualDownloadWant(mod.CurseForge ?? mod.PrimaryMod ?? new ModSummary(
+                version.Id.Split(':')[0], "", mod.DisplayName, null, null, 0, null, ModSource.CurseForge, []),
+            version, file with { DownloadUrl = "" }, "mods",
+            Local: string.Equals(mod.Folder, "local", StringComparison.OrdinalIgnoreCase),
+            Disabled: !mod.Enabled,
+            Replaces: Path.GetFileName(mod.FilePath));
+        var queued = await App.State.ManualDownloads.QueueAsync(packId, packName, App.State.CurseForge, [want], ct);
+        if (queued.Count == 0) return false;
+        if (queued[0].State == ManualDownloadState.Added) return true;
+        throw new ManualDownloadQueuedException(queued[0],
+            $"{queued[0].Name} has to come from CurseForge's website: click Download in the window that opened. "
+            + "The old version goes once the new one is in.");
+    }
+
+    /// <summary>The instance id in a pack root's <c>.packid</c> file, or null.</summary>
+    private static Guid? ReadPackId(string root)
+    {
+        try
+        {
+            var path = Path.Combine(root, ".packid");
+            return File.Exists(path) && Guid.TryParse(File.ReadAllText(path).Trim(), out var id) ? id : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
     }
 
     private static async Task<ModVersionFile> EnsureDownloadableAsync(ModVersion version, ModVersionFile file,

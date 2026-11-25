@@ -1,0 +1,252 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="CloudLauncher.Views.SettingsPage">
+    <UserControl.Styles>
+        <!-- A section heading over its card. -->
+        <Style Selector="TextBlock.section">
+            <Setter Property="Margin" Value="0,30,0,10"/>
+        </Style>
+        <!-- The label column of a settings row. -->
+        <Style Selector="TextBlock.label">
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <!-- A slider's value, right of it. -->
+        <Style Selector="TextBlock.value">
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="TextAlignment" Value="Right"/>
+            <Setter Property="MinWidth" Value="70"/>
+            <Setter Property="Margin" Value="14,0,0,0"/>
+        </Style>
+        <!-- A folder or file path. -->
+        <Style Selector="TextBlock.path">
+            <Setter Property="FontFamily" Value="Consolas, DejaVu Sans Mono, Liberation Mono, monospace"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="TextTrimming" Value="{x:Static TextTrimming.PathSegmentEllipsis}"/>
+        </Style>
+        <!-- Explanations under a row, lined up with its control. -->
+        <Style Selector="TextBlock.hint">
+            <Setter Property="Foreground" Value="{DynamicResource TextTertiaryBrush}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="150,0,0,0"/>
+        </Style>
+        <Style Selector="Border.card">
+            <Setter Property="Padding" Value="20,18"/>
+        </Style>
+        <Style Selector="Slider">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,-6"/>
+        </Style>
+    </UserControl.Styles>
+
+    <ScrollViewer x:Name="Scroller" HorizontalScrollBarVisibility="Disabled">
+        <Grid Margin="28,24,28,36">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" MaxWidth="820"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Classes="h1" Text="Settings"/>
+
+                <!-- ── Java ── -->
+                <TextBlock Classes="h2 section" Text="Java"/>
+                <Border Classes="card">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="150,*,Auto">
+                            <TextBlock Classes="label" Text="Default Java"/>
+                            <ComboBox x:Name="JavaBox" Grid.Column="1" HorizontalAlignment="Stretch"
+                                      SelectionChanged="OnJavaChanged"/>
+                            <Button Grid.Column="2" Content="Browse" Margin="8,0,0,0" Click="OnBrowseJava"
+                                    ToolTip.Tip="Pick a java program yourself"/>
+                        </Grid>
+                        <TextBlock x:Name="JavaHint" Classes="hint"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Memory ── -->
+                <TextBlock Classes="h2 section" Text="Memory"/>
+                <Border Classes="card">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="150,*,Auto">
+                            <TextBlock Classes="label" Text="Default Memory"/>
+                            <Slider x:Name="RamSlider" Grid.Column="1" Minimum="1024" Maximum="32768"
+                                    TickFrequency="512" IsSnapToTickEnabled="True" SmallChange="512" LargeChange="1024"
+                                    ValueChanged="OnRamChanged"/>
+                            <TextBlock x:Name="RamLabel" Grid.Column="2" Classes="value"/>
+                        </Grid>
+                        <Grid ColumnDefinitions="*,Auto" Margin="150,0,0,0">
+                            <TextBlock x:Name="RamHint" Classes="hint" Margin="0" VerticalAlignment="Center"/>
+                            <Button x:Name="RamRecommendedButton" Grid.Column="1" Classes="link" Content="Use Recommended"
+                                    Margin="12,0,0,0" VerticalAlignment="Center" Click="OnRamRecommended"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Downloads ── -->
+                <TextBlock Classes="h2 section" Text="Downloads"/>
+                <Border Classes="card">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="150,*,Auto">
+                            <TextBlock Classes="label" Text="At Once"/>
+                            <Slider x:Name="ConcurrencySlider" Grid.Column="1" Minimum="1" Maximum="9"
+                                    TickFrequency="1" IsSnapToTickEnabled="True" TickPlacement="BottomRight"
+                                    ValueChanged="OnConcurrencyChanged"/>
+                            <TextBlock x:Name="ConcurrencyLabel" Grid.Column="2" Classes="value"/>
+                        </Grid>
+                        <TextBlock Classes="hint"
+                                   Text="Mod files downloaded at the same time. Three is a good default: the stores refuse big bursts from one address."/>
+
+                        <Rectangle Classes="divider" Margin="0,8"/>
+
+                        <Grid ColumnDefinitions="150,*,Auto">
+                            <TextBlock Classes="label" Text="Watch Folder"/>
+                            <TextBlock x:Name="WatchFolderText" Grid.Column="1" Classes="path"/>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" Margin="12,0,0,0">
+                                <Button Content="Change" Click="OnChangeWatchFolder"
+                                        ToolTip.Tip="Look in another folder, if your browser saves downloads somewhere else"/>
+                                <Button Content="Open" Click="OnOpenWatchFolder"/>
+                            </StackPanel>
+                        </Grid>
+                        <Grid ColumnDefinitions="*,Auto" Margin="150,0,0,0">
+                            <TextBlock Classes="hint" Margin="0" VerticalAlignment="Center"
+                                       Text="Files you download by hand are picked up from here."/>
+                            <Button x:Name="WatchDefaultButton" Grid.Column="1" Classes="link" Content="Use Downloads"
+                                    Margin="12,0,0,0" VerticalAlignment="Center" Click="OnWatchFolderDefault"/>
+                        </Grid>
+                        <CheckBox x:Name="RemoveAfterBox" Content="Remove After Adding" Margin="150,0,0,0"
+                                  IsCheckedChanged="OnRemoveAfterChanged"
+                                  ToolTip.Tip="Takes each file out of the watch folder once it is in the instance"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Storage ── -->
+                <TextBlock Classes="h2 section" Text="Storage"/>
+                <Border Classes="card">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="150,*,Auto">
+                            <TextBlock Classes="label" Text="Instances"/>
+                            <TextBlock x:Name="PacksFolderText" Grid.Column="1" Classes="path"/>
+                            <Button Grid.Column="2" Content="Open Folder" Margin="12,0,0,0" Click="OnOpenPacksFolder"/>
+                        </Grid>
+                        <TextBlock x:Name="PacksFolderHint" Classes="hint"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Mod stores ── -->
+                <TextBlock Classes="h2 section" Text="Mod Stores"/>
+                <Border Classes="card">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="150,*,Auto">
+                            <TextBlock Classes="label" Text="CurseForge Key"/>
+                            <TextBox x:Name="CurseForgeKeyBox" Grid.Column="1" PasswordChar="•"
+                                     Watermark="The launcher's shared key" TextChanged="OnCurseForgeKeyChanged"/>
+                            <!-- Margins on the buttons, not the panel: with no key of your own both are
+                                 hidden and the box runs to the edge. -->
+                            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                <Button x:Name="RevealKeyButton" Content="Show" MinWidth="64" Margin="8,0,0,0"
+                                        HorizontalContentAlignment="Center" Click="OnRevealKey"/>
+                                <Button x:Name="TestKeyButton" Content="Test Key" Margin="8,0,0,0" Click="OnTestKey"
+                                        ToolTip.Tip="Ask CurseForge whether it accepts this key"/>
+                            </StackPanel>
+                        </Grid>
+                        <Grid ColumnDefinitions="*,Auto" Margin="150,0,0,0">
+                            <TextBlock x:Name="CurseForgeHint" Classes="hint" Margin="0"/>
+                            <Button Grid.Column="1" Classes="link" Content="Get a Key" Margin="12,0,0,0"
+                                    VerticalAlignment="Top" Click="OnGetKey"
+                                    ToolTip.Tip="console.curseforge.com, where a free key can be made"/>
+                        </Grid>
+                        <StackPanel x:Name="DirectPanel" Spacing="4">
+                            <CheckBox x:Name="DirectBox" Content="Direct Connection" Margin="150,4,0,0"
+                                      IsCheckedChanged="OnDirectChanged"/>
+                            <TextBlock Classes="hint" Margin="178,0,0,0"
+                                       Text="Sends CurseForge requests straight there instead of through the launcher server's queue. Your key has its own quota."/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── Advanced ── -->
+                <TextBlock Classes="h2 section" Text="Advanced"/>
+                <Border Classes="card">
+                    <StackPanel Spacing="10">
+                        <Grid ColumnDefinitions="150,*,Auto">
+                            <TextBlock Classes="label" Text="Server Address"/>
+                            <TextBox x:Name="ServerBox" Grid.Column="1" TextChanged="OnServerTextChanged"
+                                     KeyDown="OnServerKeyDown"/>
+                            <Button x:Name="ServerApplyButton" Grid.Column="2" Content="Apply" Margin="8,0,0,0"
+                                    MinWidth="72" HorizontalContentAlignment="Center" IsEnabled="False"
+                                    Click="OnApplyServer"/>
+                        </Grid>
+                        <Grid ColumnDefinitions="*,Auto" Margin="150,0,0,0">
+                            <TextBlock x:Name="ServerHint" Classes="hint" Margin="0"/>
+                            <Button x:Name="ServerDefaultButton" Grid.Column="1" Classes="link" Content="Use Default"
+                                    Margin="12,0,0,0" VerticalAlignment="Top" Click="OnServerDefault"/>
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <!-- ── About ── -->
+                <TextBlock Classes="h2 section" Text="About"/>
+                <Border Classes="card">
+                    <StackPanel Spacing="14">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <Image Source="avares://cloudlauncher/Assets/cloudlauncher.png" Width="52" Height="52"
+                                   RenderOptions.BitmapInterpolationMode="HighQuality" VerticalAlignment="Center"/>
+                            <StackPanel Grid.Column="1" Margin="16,0,16,0" VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Classes="h3" Text="CloudLauncher"/>
+                                <TextBlock x:Name="VersionText" Classes="muted"/>
+                                <TextBlock Classes="caption" TextWrapping="Wrap"
+                                           Text="© 2026 falling_colud. Source available. All rights reserved."/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                                <Button Content="What's New" Click="OnWhatsNew"
+                                        ToolTip.Tip="The release notes of this and every earlier version"/>
+                                <Button x:Name="CheckUpdatesButton" Classes="primary" Content="Check for Updates"
+                                        Click="OnCheckUpdates"/>
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock x:Name="UpdateStatus" TextWrapping="Wrap" IsVisible="False"/>
+
+                        <Rectangle Classes="divider"/>
+
+                        <Grid ColumnDefinitions="150,*">
+                            <TextBlock Classes="label" Text="App Menu"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12">
+                                <Button x:Name="AppMenuButton" Content="Add to App Menu" Click="OnAppMenu"/>
+                                <TextBlock x:Name="AppMenuHint" Classes="caption" VerticalAlignment="Center"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+                        <Grid ColumnDefinitions="150,*">
+                            <TextBlock Classes="label" Text="Logs"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="12">
+                                <Button Content="Open Log Folder" Click="OnOpenLogs"
+                                        ToolTip.Tip="The launcher's own log files, useful when reporting a problem"/>
+                                <TextBlock x:Name="AboutStatus" Classes="caption" VerticalAlignment="Center"
+                                           TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <Rectangle Classes="divider"/>
+
+                        <WrapPanel>
+                            <Button Classes="link" Content="Website" Margin="0,0,18,6" Click="OnWebsite"/>
+                            <Button Classes="link" Content="Discord" Margin="0,0,18,6" Click="OnDiscord"
+                                    ToolTip.Tip="Help, news and feedback"/>
+                            <Button x:Name="TermsButton" Classes="link" Content="Terms" Margin="0,0,18,6" Click="OnTerms"/>
+                            <Button x:Name="PrivacyButton" Classes="link" Content="Privacy" Margin="0,0,18,6" Click="OnPrivacy"/>
+                            <Button Classes="link" Content="Licence" Margin="0,0,18,6" Click="OnLicence"/>
+                            <Button Classes="link" Content="Third-Party Notices" Margin="0,0,18,6" Click="OnNotices"
+                                    ToolTip.Tip="Licences of the libraries CloudLauncher is built with"/>
+                        </WrapPanel>
+                        <TextBlock Classes="caption" TextWrapping="Wrap" Margin="0,-6,0,0"
+                                   Text="Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft."/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</UserControl>

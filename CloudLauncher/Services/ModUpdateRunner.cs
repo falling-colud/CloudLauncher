@@ -102,12 +102,14 @@ public static class ModUpdateRunner
         }
     }
 
-    public sealed record Summary(int Updated, IReadOnlyList<string> Failed, bool Cancelled)
+    /// <param name="ByHand">Updates CurseForge would not hand over, now on the download-by-hand card.</param>
+    public sealed record Summary(int Updated, IReadOnlyList<string> Failed, bool Cancelled, int ByHand = 0)
     {
         public string Describe() =>
-            Failed.Count == 0
+            (Failed.Count == 0
                 ? (Cancelled ? $"Stopped after updating {Updated} mod(s)." : $"Updated {Updated} mod(s).")
-                : $"Updated {Updated} mod(s); failed: {string.Join(", ", Failed)}";
+                : $"Updated {Updated} mod(s); failed: {string.Join(", ", Failed)}")
+            + (ByHand == 0 ? "" : $" {ByHand} to download by hand from CurseForge's website: see the launcher's window.");
     }
 
     /// <summary>
@@ -121,6 +123,7 @@ public static class ModUpdateRunner
         using var gate = new SemaphoreSlim(concurrency, concurrency);
         var failed = new List<string>();
         var updated = 0;
+        var byHand = 0;
 
         await Task.WhenAll(jobs.Select(async job =>
         {
@@ -147,6 +150,13 @@ public static class ModUpdateRunner
             {
                 job.Finish(JobState.Skipped, "Cancelled");
             }
+            catch (ManualDownloadQueuedException)
+            {
+                // Not a failure: the file is on the download-by-hand card, which replaces the old jar
+                // once the user has downloaded the new one.
+                job.Finish(JobState.Skipped, "Download by hand");
+                Interlocked.Increment(ref byHand);
+            }
             catch (Exception ex)
             {
                 job.Finish(JobState.Failed, ex.Message);
@@ -155,6 +165,6 @@ public static class ModUpdateRunner
             finally { gate.Release(); }
         }));
 
-        return new Summary(updated, failed, ct.IsCancellationRequested);
+        return new Summary(updated, failed, ct.IsCancellationRequested, byHand);
     }
 }

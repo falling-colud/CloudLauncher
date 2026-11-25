@@ -1,0 +1,139 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="using:CloudLauncher.Views"
+             x:Class="CloudLauncher.Views.ManualDownloadsCard"
+             MinWidth="460" MaxWidth="700" MaxHeight="660">
+    <UserControl.Styles>
+        <Style Selector="Border.fileRow">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="CornerRadius" Value="3"/>
+            <Setter Property="Padding" Value="10,9"/>
+        </Style>
+        <Style Selector="Border.fileRow:pointerover">
+            <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+        </Style>
+        <Style Selector="Border.tile">
+            <Setter Property="Width" Value="36"/>
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="CornerRadius" Value="3"/>
+            <Setter Property="ClipToBounds" Value="True"/>
+            <Setter Property="Background" Value="{DynamicResource Surface3Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="VerticalAlignment" Value="Top"/>
+        </Style>
+        <Style Selector="TextBlock.initial">
+            <Setter Property="FontFamily" Value="{DynamicResource PixelFont}"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondaryBrush}"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style Selector="Border.dropTarget">
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentTextBrush}"/>
+        </Style>
+    </UserControl.Styles>
+
+    <Border x:Name="CardBorder" Classes="dialog">
+        <DockPanel>
+            <!-- What this is about -->
+            <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                <DockPanel>
+                    <TextBlock x:Name="CountLabel" DockPanel.Dock="Right" Classes="caption"
+                               VerticalAlignment="Center" Margin="12,0,0,0"/>
+                    <TextBlock x:Name="TitleText" Classes="h2" TextWrapping="Wrap" Text="Download by hand"/>
+                </DockPanel>
+                <TextBlock x:Name="PackLabel" Classes="caption" Margin="0,4,0,0" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="IntroText" Classes="muted" TextWrapping="Wrap" Margin="0,12,0,0"
+                           Text="CurseForge only lets its own website and app download these: their authors switched off downloads in other launchers. Click Download on each one. The page starts the download by itself, and the launcher picks the file up from your Downloads folder and puts it in the instance."/>
+            </StackPanel>
+
+            <!-- The watched folder, then the buttons -->
+            <StackPanel DockPanel.Dock="Bottom" Margin="0,14,0,0">
+                <Border Classes="well" Padding="12,9">
+                    <StackPanel Spacing="8">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="14"
+                                        VerticalAlignment="Center" Margin="12,0,0,0">
+                                <Button Classes="link" Content="Open" Click="OnOpenWatchFolder"
+                                        ToolTip.Tip="Open this folder"/>
+                                <Button Classes="link" Content="Change" Click="OnChangeWatchFolder"
+                                        ToolTip.Tip="Look in another folder, if your browser saves downloads somewhere else"/>
+                            </StackPanel>
+                            <TextBlock Classes="icon" Text="&#xE8B7;" FontSize="13" Margin="0,0,8,0"
+                                       Foreground="{DynamicResource AccentTextBrush}"/>
+                            <TextBlock x:Name="WatchLabel" Classes="caption" VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </DockPanel>
+                        <CheckBox x:Name="RemoveBox" Content="Remove After Adding"
+                                  ToolTip.Tip="Each file is deleted from that folder once it is in the instance"
+                                  IsCheckedChanged="OnRemoveChanged"/>
+                    </StackPanel>
+                </Border>
+
+                <Grid ColumnDefinitions="*,Auto" Margin="0,14,0,0">
+                    <TextBlock x:Name="StatusLabel" Grid.Column="0" Classes="caption" VerticalAlignment="Center"
+                               TextWrapping="Wrap" Margin="0,0,12,0"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Button x:Name="AddFilesButton" Content="Add Files" Click="OnAddFiles"
+                                ToolTip.Tip="Pick files you already downloaded. You can also drop them on this card."/>
+                        <Button x:Name="OpenAllButton" Content="Download All" Click="OnOpenAll"
+                                ToolTip.Tip="Open every waiting file's download page in your browser"/>
+                        <Button x:Name="CloseButton" Content="Close" Click="OnClose"/>
+                        <Button x:Name="PlayButton" Classes="primary" Content="Play Anyway" Click="OnPlay" IsVisible="False"/>
+                    </StackPanel>
+                </Grid>
+            </StackPanel>
+
+            <!-- The files -->
+            <Border x:Name="ListWell" Classes="well" Padding="4">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <ItemsControl x:Name="FileList">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="views:ManualDownloadRow">
+                                <Border Classes="fileRow">
+                                    <DockPanel>
+                                        <Border DockPanel.Dock="Left" Classes="tile" Margin="0,0,12,0">
+                                            <Panel>
+                                                <TextBlock Classes="initial" Text="{Binding Initial}"/>
+                                                <Image views:ModIconLoader.Url="{Binding IconUrl}"
+                                                       views:ModIconLoader.DecodeWidth="36" Stretch="UniformToFill"/>
+                                            </Panel>
+                                        </Border>
+
+                                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="6"
+                                                    VerticalAlignment="Center" Margin="10,0,0,0">
+                                            <Border Classes="pill" Classes.warning="{Binding PillWarning}"
+                                                    Classes.success="{Binding PillSuccess}" Margin="0,0,4,0">
+                                                <TextBlock Text="{Binding StatusText}"/>
+                                            </Border>
+                                            <Button Classes.primary="{Binding DownloadAccent}" Padding="12,5"
+                                                    IsVisible="{Binding DownloadVisible}" Click="OnDownloadRow"
+                                                    ToolTip.Tip="{Binding DownloadTip}">
+                                                <StackPanel Orientation="Horizontal" Spacing="7">
+                                                    <TextBlock Classes="icon" Text="&#xE896;" FontSize="12"/>
+                                                    <TextBlock Text="Download" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Button>
+                                            <Button Classes="icon" Content="&#xE712;" Width="30" Height="30"
+                                                    Click="OnRowMenu" ToolTip.Tip="More"/>
+                                        </StackPanel>
+
+                                        <StackPanel VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding Meta}" Classes="caption" Margin="0,3,0,0"
+                                                       TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Meta}"/>
+                                            <TextBlock Text="{Binding Note}" Classes="caption" Margin="0,3,0,0"
+                                                       TextWrapping="Wrap" Foreground="{DynamicResource WarningBrush}"
+                                                       IsVisible="{Binding HasNote}"/>
+                                        </StackPanel>
+                                    </DockPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Border>
+        </DockPanel>
+    </Border>
+</UserControl>

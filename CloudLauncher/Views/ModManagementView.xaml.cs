@@ -1926,13 +1926,16 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         }
 
         var done = 0;
+        var byHand = 0;
         foreach (var m in run)
         {
             ListStatus.Text = $"Updating {m.DisplayName}...";
             try { if (await ModUpdater.InstallVersionAsync(m, m.LatestVersion!)) done++; }
+            catch (ManualDownloadQueuedException) { byHand++; }
             catch (Exception ex) { ListStatus.Text = "Update failed: " + ex.Message; }
         }
-        ListStatus.Text = $"Updated {done} mod(s)" + (held.Count > 0 ? $", skipped {held.Count} locked." : ".");
+        ListStatus.Text = $"Updated {done} mod(s)" + (held.Count > 0 ? $", skipped {held.Count} locked." : ".")
+            + (byHand == 0 ? "" : $" {byHand} to download by hand from CurseForge's website: see the window that opened.");
         await ReloadAsync();
     }
 
@@ -2083,37 +2086,14 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
         ListStatus.Text = $"Updating {mod.DisplayName}...";
         try
         {
-            var file = mod.LatestVersion.Files.FirstOrDefault(f => f.IsPrimary) ?? mod.LatestVersion.Files.FirstOrDefault();
-            if (file is null) { ListStatus.Text = "No downloadable file."; return; }
-            file = await EnsureDownloadableAsync(mod.LatestVersion, file);
-            if (string.IsNullOrWhiteSpace(file.DownloadUrl)) { ListStatus.Text = "No downloadable file."; return; }
-
-            // Keep a disabled mod disabled after update. The file name comes from the store, so only
-            // a plain name is written (see ModUpdater.InstallVersionAsync).
-            var fileName = mod.Enabled ? file.Filename : file.Filename + ".disabled";
-            if (!PathSafety.IsSafeFileName(file.Filename)
-                || PathSafety.ResolveFileName(Path.GetDirectoryName(mod.FilePath)!, fileName) is not { } dest)
-            {
-                AppLog.Log(nameof(ModManagementView), $"Did not update {mod.DisplayName}: the store's file name is not a plain file name: {file.Filename}");
-                ListStatus.Text = "Update failed: the store gave a file name that cannot be used.";
-                return;
-            }
-            await App.State.Modrinth.DownloadFileAsync(file.DownloadUrl, dest);
-            if (!string.Equals(mod.FilePath, dest, StringComparison.OrdinalIgnoreCase) && File.Exists(mod.FilePath))
-                File.Delete(mod.FilePath);
+            // Keeps a disabled mod disabled, writes only a plain file name, and hands a file CurseForge
+            // will not give out to the download-by-hand card.
+            if (!await ModUpdater.InstallVersionAsync(mod, mod.LatestVersion)) { ListStatus.Text = "No downloadable file."; return; }
             ListStatus.Text = $"Updated {mod.DisplayName}.";
             await ReloadAsync();
         }
+        catch (ManualDownloadQueuedException ex) { ListStatus.Text = ex.Message; }
         catch (Exception ex) { ListStatus.Text = "Update failed: " + ex.Message; }
-    }
-
-    private static async Task<ModVersionFile> EnsureDownloadableAsync(ModVersion version, ModVersionFile file)
-    {
-        if (version.Source != ModSource.CurseForge || !string.IsNullOrWhiteSpace(file.DownloadUrl)) return file;
-        var ids = version.Id.Split(':');
-        if (ids.Length != 2 || !int.TryParse(ids[0], out var modId) || !int.TryParse(ids[1], out var fileId)) return file;
-        var url = await App.State.CurseForge.GetDownloadUrlAsync(modId, fileId);
-        return string.IsNullOrWhiteSpace(url) ? file : file with { DownloadUrl = url };
     }
 
     /// <summary>Pick a specific version (any channel incl. beta/alpha) and install it.</summary>
@@ -2158,6 +2138,7 @@ public partial class ModManagementView : Page, ISidePanelBackHandler
             }
             else ListStatus.Text = "That version has no downloadable file.";
         }
+        catch (ManualDownloadQueuedException ex) { ListStatus.Text = ex.Message; }
         catch (Exception ex) { ListStatus.Text = "Install failed: " + ex.Message; }
     }
 

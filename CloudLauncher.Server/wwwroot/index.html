@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CloudLauncher - a Minecraft launcher that keeps your packs on a server</title>
-<meta name="description" content="A free Windows launcher for modded Minecraft, made by one person. Your instances live on a server: set a pack up once, download it on any PC, or give it to a friend with a link.">
+<meta name="description" content="A free launcher for modded Minecraft on Windows and Linux, made by one person. Your instances live on a server: set a pack up once, download it on any PC, or give it to a friend with a link.">
 <meta name="theme-color" content="#141413">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="CloudLauncher">
 <meta property="og:title" content="CloudLauncher">
-<meta property="og:description" content="Your packs, on every PC you play on. A free Windows launcher for modded Minecraft, made by one person.">
+<meta property="og:description" content="Your packs, on every PC you play on. A free launcher for modded Minecraft on Windows and Linux, made by one person.">
 <meta property="og:url" content="https://cloudlauncher.co/">
 <meta property="og:image" content="https://cloudlauncher.co/img/og.png">
 <meta property="og:image:width" content="1200">
@@ -20,8 +20,8 @@
 <link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <link rel="preload" href="/fonts/pixeloid-sans-400.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="/fonts/slate-icons.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/site.css?v=0.9.2">
-<script src="/site.js?v=0.9.2" defer></script>
+<link rel="stylesheet" href="/site.css?v=0.9.19">
+<script src="/site.js?v=0.9.19" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -64,7 +64,7 @@
             <path class="m-eyes" d="M11 16h2v2h-2zM18 16h2v2h-2z"/>
             <path class="m-lids" d="M11 17h2v1h-2zM18 17h2v1h-2z"/>
           </svg>
-          <span>A Minecraft launcher for Windows</span>
+          <span>A Minecraft launcher for Windows and Linux</span>
         </p>
         <h1 id="hero-title">Your packs live on a server.<br> Any PC you sit at can have them.</h1>
         <p class="lead">I built CloudLauncher because I was tired of setting up the same modpack three times: on my desktop, on my laptop, and on a friend's laptop over Discord at 2 a.m. Now I set it up once and press Upload. Everyone else presses Download.</p>
@@ -79,6 +79,7 @@
           <span data-size-line hidden>2 MB setup, downloads <b data-size></b></span>
           <span>Windows 10 and 11, 64-bit</span>
           <span>No admin prompt</span>
+          <span>On Linux? <a href="#download">There is a Linux version</a></span>
         </p>
       </div>
 
@@ -697,7 +698,7 @@
         <div class="yn no px">
           <h3>It does not</h3>
           <ul>
-            <li>Run on macOS or Linux. It is a WPF app: Windows 10 and 11, 64-bit.</li>
+            <li>Run on macOS. On Linux there is a lighter version with the essentials: your instances, sync, Play, mods and modpacks. The rest (planning boards, sharing, servers, worlds and packs pages) is Windows only for now.</li>
             <li>Replace your Microsoft account. You need to own Minecraft: Java Edition.</li>
             <li>Sync your worlds behind your back. <code>saves/</code> never travels with an instance. A world goes to the server only when you upload that world, on purpose.</li>
             <li>Give you unlimited space. Each account starts with 1 GB on the server, because the server is one small box in Frankfurt. Ask on Discord if you need more.</li>
@@ -748,15 +749,20 @@
             <p class="muted">You need Minecraft: Java Edition on a Microsoft account, and a CloudLauncher account, which you make in the launcher with a username and a password.</p>
             <p class="muted">The installer is not code-signed yet, so Windows SmartScreen will say it protected your PC the first time. Click More info, then Run anyway. A signing certificate costs a few hundred euro a year and is on the list.</p>
             <p class="muted">Prefer the full offline installer? <a href="/download/full">Get the <span data-size>full-size</span> version</a>.</p>
+            <h3 class="band-sub">On Linux</h3>
+            <p>A 64-bit (x86-64) build for any desktop distribution. Unpack it and run <code>./cloudlauncher</code>, or <code>./install.sh</code> to add it to your applications menu. It has the essentials: your instances and their sync, Play, mods (with the download-by-hand window for CurseForge files) and modpacks. Microsoft sign-in works with a code you enter at microsoft.com/link, and it updates itself, checking the signature first like the Windows one.</p>
+            <p class="muted">Bugs on Linux are likely: tell me on Discord or GitHub.</p>
           </div>
           <div class="cta">
             <a class="btn btn-accent btn-lg px sh" href="/download"><span class="i" aria-hidden="true">&#xE896;</span>Download for Windows</a>
+            <a class="btn btn-lg px sh" href="/download/linux"><span class="i" aria-hidden="true">&#xE896;</span>Download for Linux</a>
             <a class="gh" href="https://github.com/falling-colud/CloudLauncher" target="_blank" rel="noopener noreferrer"><svg class="gh-i" shape-rendering="crispEdges" aria-hidden="true"><use href="#gh-cat"/></svg>Source on GitHub</a>
           </div>
           <p class="dl-meta">
             <span data-version-line hidden>Version <b data-version></b></span>
             <span data-size-line hidden>2 MB setup, downloads <b data-size></b></span>
             <span data-date-line hidden>Released <b data-date></b></span>
+            <span data-linux-line hidden>Linux <b data-linux-version></b>, <b data-linux-size></b> .tar.gz</span>
           </p>
         </div>
         <svg class="logo-big" viewBox="0 0 32 32" shape-rendering="crispEdges" aria-hidden="true"><path class="logo-tile" fill="#601B00" d="M3 0h26v1h-26zM2 1h28v1h-28zM1 2h30v1h-30zM0 3h32v1h-32zM0 4h32v1h-32zM0 5h32v1h-32zM0 6h32v1h-32zM0 7h32v1h-32zM0 8h32v1h-32zM0 9h32v1h-32zM0 10h32v1h-32zM0 11h32v1h-32zM0 12h32v1h-32zM0 13h32v1h-32zM0 14h32v1h-32zM0 15h32v1h-32zM0 16h32v1h-32zM0 17h32v1h-32zM0 18h32v1h-32zM0 19h32v1h-32zM0 20h32v1h-32zM0 21h32v1h-32zM0 22h32v1h-32zM0 23h32v1h-32zM0 24h32v1h-32zM0 25h32v1h-32zM0 26h32v1h-32zM0 27h32v1h-32zM0 28h32v1h-32zM1 29h30v1h-30zM2 30h28v1h-28zM3 31h26v1h-26z"/><path fill="#FFF" fill-opacity=".1" d="M3 0h26v1h-26zM2 1h1v1h-1zM29 1h1v1h-1zM1 2h1v1h-1zM30 2h1v1h-1zM0 3h1v1h-1zM31 3h1v1h-1z"/><path fill="#000" fill-opacity=".22" d="M0 28h1v1h-1zM31 28h1v1h-1zM1 29h1v1h-1zM30 29h1v1h-1zM2 30h1v1h-1zM29 30h1v1h-1zM3 31h26v1h-26z"/><path fill="#000" fill-opacity=".45" d="M26 15h1v1h-1zM27 16h1v1h-1zM26 17h2v1h-2zM26 18h3v1h-3zM27 19h1v1h-1zM27 20h1v1h-1zM27 21h2v1h-2zM26 22h3v1h-3zM7 23h1v1h-1zM24 23h5v1h-5zM8 24h20v1h-20zM10 25h16v1h-16z"/><path class="logo-cloud" fill="#F5F4EF" d="M14 9h3v1h-3zM12 10h7v1h-7zM11 11h9v1h-9zM10 12h14v1h-14zM10 13h15v1h-15zM10 14h16v1h-16zM7 15h19v1h-19zM6 16h21v1h-21zM6 17h20v1h-20zM5 18h21v1h-21zM5 19h22v1h-22zM5 20h22v1h-22zM5 21h22v1h-22zM6 22h20v1h-20zM8 23h16v1h-16z"/><path fill="#000" fill-opacity=".12" d="M26 16h1v1h-1zM5 20h1v1h-1zM26 20h1v1h-1zM5 21h3v1h-3zM24 21h3v1h-3zM6 22h20v1h-20zM8 23h16v1h-16z"/></svg>

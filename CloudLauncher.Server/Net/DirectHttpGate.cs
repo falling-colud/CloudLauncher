@@ -20,6 +20,7 @@ public sealed class DirectHttpGate(RequestDelegate next, AppOptions options)
     private static readonly string[] AllowedPaths =
     {
         "/launcher/latest", "/launcher/releases", "/launcher/download", "/download", "/download/full", "/health",
+        "/launcher/linux/latest", "/launcher/linux/releases", "/launcher/linux/download", "/download/linux",
         "/", "/index.html", "/site.css", "/site.js", "/favicon.ico", "/robots.txt",
         "/privacy", "/terms", "/privacy.html", "/terms.html",
     };

@@ -375,13 +375,25 @@ public sealed class LocalPackStore(AppSettings settings, PackFolderService folde
             catch (Exception ex) { done.SetException(ex); }
         })
         { IsBackground = true, Name = "Recycle instance folder" };
-        thread.SetApartmentState(ApartmentState.STA);
+        // The shell call wants a single-threaded apartment; Linux has no apartments.
+        if (OperatingSystem.IsWindows()) thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         return done.Task;
     }
 
     private static void SendToRecycleBin(string path)
     {
+        if (!OperatingSystem.IsWindows())
+        {
+            // The desktop's trash on Linux; a folder on another drive than the trash is deleted.
+            try { XdgTrash.Move(path); }
+            catch (IOException ex)
+            {
+                AppLog.Log("local-packs", $"Could not move {path} to the trash ({ex.Message}); deleting it.");
+                Directory.Delete(path, recursive: true);
+            }
+            return;
+        }
         var op = new ShFileOpStruct
         {
             wFunc = FoDelete,

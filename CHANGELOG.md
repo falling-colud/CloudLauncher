@@ -3,6 +3,23 @@
 Version numbers went from 1.8.3 back to 0.8.4. Launchers on 1.x are offered the 0.x releases
 as 1.x so they keep updating; after 0.x the next major version is 2.0.
 
+## 0.9.19 - 2026-11-25
+
+- Mods whose authors only allow CurseForge's own website and app to download them can be added from
+  the mod browser too, not only from a modpack import. The launcher fetches everything else (the
+  mod's dependencies included) and brings up the download-by-hand window for the rest: its Download
+  button opens the file's page on curseforge.com, which starts the download by itself, and the
+  launcher moves the file into the instance as soon as it lands in the Downloads folder. Closing the
+  window right after clicking Download is fine: the launcher keeps looking for the file for a while.
+- The same for the Mods page's Install, for mod updates (the old version is removed once the new one
+  is in, and an update whose file is already in the folder completes at once), and for resource
+  packs added from an instance's browser.
+- Files picked for this PC's own folder (local/mods) are listed on this PC only; a shared
+  instance's list still travels with it, so a friend is asked for the same files.
+- CloudLauncher for Linux: the same launcher on the same services, for 64-bit Linux desktops. It has
+  the instances, sync, Play, mods (with the download-by-hand window), modpacks, Microsoft sign-in by
+  code at microsoft.com/link, and signed self-updates. Data lives in ~/.local/share/CloudLauncher.
+
 ## 0.9.16 - 2026-11-22
 
 - A background picture of your own: Settings > Appearance > Background image. Pick a screenshot or

@@ -1,7 +1,12 @@
 using System.IO;
 using System.IO.Compression;
 using System.Text.Json;
+#if WINDOWS
 using System.Windows.Media.Imaging;
+#else
+using BitmapImage = Avalonia.Media.Imaging.Bitmap;
+using CloudLauncher.Platform;
+#endif
 using CloudLauncher.Shared;
 
 namespace CloudLauncher.Services;

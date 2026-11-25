@@ -60,7 +60,7 @@ public sealed class MinecraftAccountService
     {
         _settings = settings;
         var profileDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            AppSettings.AppDataBasePath,
             "CloudLauncher",
             Environment.GetEnvironmentVariable("CL_PROFILE") is { Length: > 0 } p ? p : "default");
         Directory.CreateDirectory(profileDir);
@@ -79,6 +79,10 @@ public sealed class MinecraftAccountService
 
     private JELoginHandler GetLoginHandler() => _loginHandler ??= BuildLoginHandler(_microsoftAccountPath);
 
+    /// <summary>The Microsoft sign-in a front end without CmlLib's browser window uses instead (the Linux
+    /// launcher's device code). Set once at startup, before any sign-in; null keeps CmlLib's own.</summary>
+    public static IAuthenticationProvider? OAuthProviderOverride { get; set; }
+
     /// <summary>CmlLib's login handler, signing in through the launcher's own Azure application when
     /// <see cref="MicrosoftAuthConfig.ClientId"/> is set and through CmlLib's default client
     /// when not.</summary>
@@ -91,6 +95,10 @@ public sealed class MinecraftAccountService
                 .WithOAuthProvider(new MicrosoftOAuthCodeFlowProvider(
                     new MicrosoftOAuthClientInfo(clientId.Trim(), MicrosoftAuthConfig.Scopes)))
                 .WithXboxAuthProvider(new AzureAppXboxProvider(JELoginHandler.RelyingParty));
+        }
+        else if (OAuthProviderOverride is { } provider)
+        {
+            builder.WithOAuthProvider(provider);
         }
         return builder.Build();
     }
